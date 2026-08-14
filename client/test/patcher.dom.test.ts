@@ -29,6 +29,28 @@ function snapshot(): Snapshot {
   };
 }
 
+/**
+ * The document fingerprint the way the landside agent computes it, over the
+ * wire rows rather than over any DOM. This is a transcription of
+ * `__skyhook.docHash` in internal/mirror/agent.js, and of `Model.Hash` in
+ * internal/mirror/model.go; the integrity check is only worth anything if all
+ * three agree.
+ */
+function agentHash(snap: Snapshot): number {
+  let h = 0x811c9dc5;
+  const rows = [...snap.nodes].sort((a, b) => a.id - b.id);
+  for (const n of rows) {
+    const v = n.kind === NodeKind.Text ? snap.strings[n.ref] ?? '' : snap.strings[n.ref] ?? '';
+    h ^= n.id & 0xff;
+    h = Math.imul(h, 16777619) >>> 0;
+    for (let i = 0; i < v.length && i < 32; i++) {
+      h ^= v.charCodeAt(i) & 0xff;
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+  }
+  return h >>> 0;
+}
+
 function mutation(ops: Partial<Mutation['ops'][number]>[], strings: string[] = []): Mutation {
   return {
     strings,
@@ -114,6 +136,50 @@ describe('Patcher', () => {
     const anchor = document.querySelector('a');
     expect(anchor?.getAttribute('onclick')).toBeNull();
     expect(anchor?.getAttribute('href')).toBeNull();
+  });
+
+  it('renders an inlined iframe document without materialising an iframe', () => {
+    // The agent inlines a same-origin iframe's document as children of the
+    // iframe element. Dropping the element used to take the whole document with
+    // it, so the page simply had a hole where the frame was.
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('iframe', 'inside the frame', 'data-sky-box', '300x150');
+    snap.nodes.push(
+      {
+        id: 30, parent: 1, kind: NodeKind.Element, ref: base,
+        attrs: [base + 2, base + 3], flags: 0,
+      },
+      { id: 31, parent: 30, kind: NodeKind.Element, ref: 0, attrs: [], flags: 0 },
+      { id: 32, parent: 31, kind: NodeKind.Text, ref: base + 1, attrs: [], flags: 0 },
+    );
+    patcher.applySnapshot(snap);
+
+    expect(document.querySelector('iframe')).toBeNull();
+    const stand = document.querySelector('[data-skyhook-tag="iframe"]') as HTMLElement | null;
+    expect(stand).not.toBeNull();
+    expect(stand!.textContent).toBe('inside the frame');
+    // Sized explicitly, because the CSS that sized the real iframe selects on a
+    // tag name this element does not have.
+    expect(stand!.style.width).toBe('300px');
+    expect(stand!.style.height).toBe('150px');
+  });
+
+  it('hashes what the server sent, so a substitution is not a divergence', () => {
+    // The server compares this hash against the agent's every thirty seconds
+    // and re-snapshots the whole document when they differ. A patcher that
+    // hashed the elements it happened to build would report a divergence on
+    // every page with an iframe, forever.
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('iframe', 'script', 'inside');
+    snap.nodes.push(
+      { id: 30, parent: 1, kind: NodeKind.Element, ref: base, attrs: [], flags: 0 },
+      { id: 31, parent: 30, kind: NodeKind.Text, ref: base + 2, attrs: [], flags: 0 },
+      { id: 32, parent: 1, kind: NodeKind.Element, ref: base + 1, attrs: [], flags: 0 },
+    );
+    patcher.applySnapshot(snap);
+    expect(patcher.docHash()).toBe(agentHash(snap));
   });
 
   it('reflects live form values so a resync restores what was typed', () => {

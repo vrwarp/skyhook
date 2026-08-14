@@ -165,6 +165,26 @@ describe('MirrorHost', () => {
     expect((submit!.fields as Record<string, string>).q).toBe('hello');
   });
 
+  it('refuses to follow a link even when it cannot place it', async () => {
+    // A link the patcher has no id for used to fall through the click handler
+    // untouched, and the frame followed it: the plane side fetches a URL, which
+    // this client must never do, and the frame lands on a cross-origin document
+    // the patcher can never touch again.
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    const doc = host.frame.contentDocument!;
+    const orphan = doc.createElement('a');
+    orphan.setAttribute('href', 'https://example.test/somewhere');
+    orphan.textContent = 'not in the patcher';
+    doc.body.appendChild(orphan);
+
+    const delivered = orphan.dispatchEvent(
+      new doc.defaultView!.MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(delivered).toBe(false); // false means the default was prevented
+    // And nothing is sent for a node the server could not act on anyway.
+    expect(ev.input).not.toHaveBeenCalled();
+  });
+
   it('reserves an image its box before the bytes exist', async () => {
     // Until the bitmap arrives the frame holds a 1x1 placeholder. Without a
     // reserved box every image that lands pushes the page down under whoever

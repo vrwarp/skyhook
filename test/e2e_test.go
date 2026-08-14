@@ -9,6 +9,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -204,6 +205,56 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 	mux.HandleFunc("/tall", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, tallPage())
+	})
+	// A three-page site with the shape of a link aggregator: an index of stories,
+	// a comments page per story, and the story itself somewhere else entirely.
+	mux.HandleFunc("/index", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Stories</title></head>
+			<body><h1>the stories</h1>
+			<table><tr><td><span class="titleline"><a href="/story">a story worth reading</a></span>
+			<div class="subtext"><a href="/comments?id=1">396&nbsp;comments</a></div></td></tr></table>
+			</body></html>`)
+	})
+	mux.HandleFunc("/comments", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		var b strings.Builder
+		b.WriteString(`<!DOCTYPE html><html><head><title>a story worth reading | Stories</title>
+			</head><body><span class="titleline"><a href="/story">a story worth reading</a></span>
+			<table>`)
+		for i := 0; i < 200; i++ {
+			fmt.Fprintf(&b, `<tr class="comtr"><td><div class="comment">comment %d</div></td></tr>`, i)
+		}
+		b.WriteString(`</table><p id="last">end of the thread</p></body></html>`)
+		_, _ = io.WriteString(w, b.String())
+	})
+	mux.HandleFunc("/story", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>A Story</title></head>
+			<body><h1>the story itself</h1><p>what everyone came to argue about</p></body></html>`)
+	})
+	mux.HandleFunc("/framed", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Framed</title></head>
+			<body><h1>outside the frame</h1>
+			<iframe id="kid" src="/framed-inner" width="320" height="180" style="border:0"></iframe>
+			<button id="reframe">reframe</button>
+			<script>
+			  document.getElementById('reframe').addEventListener('click', () => {
+			    document.getElementById('kid').src = '/framed-inner?take=2';
+			  });
+			</script>
+			</body></html>`)
+	})
+	mux.HandleFunc("/framed-inner", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		body := "inside the frame"
+		if r.URL.Query().Get("take") != "" {
+			body = "the frame moved on"
+		}
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head>
+			<style>.framed { color: rgb(7, 8, 9); }</style></head>
+			<body><p class="framed">`+body+`</p></body></html>`)
 	})
 	site := httptest.NewServer(mux)
 	t.Cleanup(site.Close)

@@ -388,6 +388,18 @@ func (s *Session) Tab(id uint32) *mirror.Tab {
 	return nil
 }
 
+// ClientHash is the document fingerprint the client last acknowledged, which is
+// the value the integrity check compares against the agent's. Zero means the
+// client has not reported one yet.
+func (s *Session) ClientHash(tab uint32) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ts := s.tabs[tab]; ts != nil {
+		return ts.lastHash
+	}
+	return 0
+}
+
 // TabRefs summarises tabs for a resume.
 func (s *Session) TabRefs() []protocol.TabRef {
 	s.mu.Lock()

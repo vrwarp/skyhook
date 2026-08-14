@@ -18,6 +18,18 @@
   'use strict';
   if (globalThis.__skyhook && globalThis.__skyhook.version === 1) return;
 
+  // Only the top-level document is mirrored. The host installs this script into
+  // every frame's isolated world, so without this check a subframe runs its own
+  // agent and sends a snapshot of the subframe's document on the tab's stream —
+  // and the client, which has no idea a frame produced it, replaces the whole
+  // page with the contents of the frame. Same-origin frames are inlined by the
+  // top-level agent below; cross-origin frames cannot be reached at all, and a
+  // frame that mirrors itself into the wrong document is worse than an empty
+  // box.
+  var isTop = true;
+  try { isTop = globalThis.top === globalThis.self; } catch (e) { isTop = false; }
+  if (!isTop) return;
+
   var SEND = globalThis.__skyhookSend;
   if (typeof SEND !== 'function') {
     // Binding not installed yet; the host retries after Runtime.addBinding.
@@ -28,6 +40,7 @@
   var MUTATION_BATCH_MS = 100;
   var CSS_DEBOUNCE_MS = 400;
   var SCROLL_THROTTLE_MS = 250;
+  var REFRAME_DEBOUNCE_MS = 250;
 
   var KIND_ELEMENT = 1, KIND_TEXT = 3, KIND_DOCTYPE = 10;
   var FLAG_EDITABLE = 1, FLAG_IMAGE = 2, FLAG_SCROLL = 4, FLAG_SHADOW = 8, FLAG_CANVAS = 16;
@@ -61,6 +74,8 @@
 
   var observers = [];
   var observedDocs = new Set();
+  var hookedFrames = new WeakSet();
+  var reframeTimer = null;
   var pendingOps = [];
   var pendingImages = [];
   var flushTimer = null;
@@ -221,6 +236,18 @@
     if (CANVAS_TAGS[tag]) flags |= FLAG_CANVAS;
     if (isScrollable(el)) flags |= FLAG_SCROLL;
     if (el.shadowRoot) flags |= FLAG_SHADOW;
+    if (tag === 'IFRAME') {
+      // The client cannot materialise an iframe — it would be a browsing
+      // context, and the whole point is that nothing plane-side fetches
+      // anything — so it renders the inlined document into a plain box. That
+      // box has to be told how big it is, because the CSS that sized the real
+      // iframe selects on `iframe` and will not match the substitute.
+      var fr = el.getBoundingClientRect();
+      if (fr.width || fr.height) {
+        pairs.push(intern('data-sky-box'),
+          intern(Math.round(fr.width) + 'x' + Math.round(fr.height)));
+      }
+    }
     if (VOID_IMAGE_TAGS[tag]) {
       var img = describeImage(el, base);
       if (img) {
@@ -293,6 +320,7 @@
       observeDocument(node.shadowRoot);
     }
     if (tag === 'IFRAME') {
+      hookFrame(node);
       var idoc = null;
       try { idoc = node.contentDocument; } catch (e) { idoc = null; }
       if (idoc && idoc.documentElement) {
@@ -304,6 +332,28 @@
     var kids = node.childNodes;
     for (var i = 0; i < kids.length; i++) n += serializeNode(kids[i], id2, rows);
     return n;
+  }
+
+  /**
+   * Re-reads a same-origin frame when it navigates.
+   *
+   * A frame's document is replaced wholesale, and nothing about that reaches
+   * the MutationObserver watching the old one: no records, no removals, no way
+   * to notice. The mirror would go on showing the document the frame used to
+   * hold. Re-snapshotting is blunt, but frame navigation is rare and a stale
+   * frame is a lie. Cross-origin frames are skipped — there is nothing to read.
+   */
+  function hookFrame(el) {
+    if (hookedFrames.has(el)) return;
+    hookedFrames.add(el);
+    el.addEventListener('load', function () {
+      try { if (!el.contentDocument) return; } catch (e) { return; }
+      if (reframeTimer) return;
+      reframeTimer = setTimeout(function () {
+        reframeTimer = null;
+        api.snapshot();
+      }, REFRAME_DEBOUNCE_MS);
+    }, { passive: true });
   }
 
   function serializeSubtree(node) {
@@ -723,6 +773,14 @@
 
     var rows = [];
     serializeNode(document.documentElement, 0, rows);
+    // Handles to nodes this snapshot did not reach are dead. An iframe that
+    // navigated is the case that matters: its old document is discarded whole,
+    // without a mutation record, so nothing ever called forget() on its nodes.
+    // They would then be hashed on this side and be absent on the client's,
+    // which reads as a divergence that no resync can ever fix.
+    var live = new Map();
+    for (var r = 0; r < rows.length; r++) live.set(rows[r][0], byId.get(rows[r][0]));
+    byId = live;
     var css = cssDelta();
     var imgs = pendingImages; pendingImages = [];
     snapshotDone = true;
@@ -863,20 +921,35 @@
       return { nodes: byId.size, strings: strings.length, css: cssOrder.length, seq: seq };
     },
     docHash: function () {
-      // Cheap whole-document fingerprint for divergence checks.
+      // Cheap whole-document fingerprint for divergence checks. Two details
+      // decide whether this is worth anything at all, because the Go replica
+      // and the TypeScript patcher have to reproduce it exactly:
+      //
+      //   - ids are visited in order. A Map iterates by insertion, which is
+      //     document order at first and is not after the first node is removed
+      //     and another added.
+      //   - the multiply is Math.imul. `h * 16777619` is a double multiply, and
+      //     once h passes 2^29 the product needs more than 53 bits and the low
+      //     ones are silently rounded away — so this returned a number no exact
+      //     uint32 implementation could ever produce, and the integrity check
+      //     re-snapshotted every document on the planet every thirty seconds.
       var h = 0x811c9dc5;
-      byId.forEach(function (node, id) {
+      var ids = Array.from(byId.keys()).sort(function (a, b) { return a - b; });
+      for (var k = 0; k < ids.length; k++) {
+        var id = ids[k];
+        var node = byId.get(id);
+        if (!node) continue;
         // Lowercased tag names keep this identical to the Go replica and the
         // TypeScript patcher, so a hash mismatch means real divergence.
         var v = node.nodeType === KIND_TEXT ? (node.nodeValue || '')
           : (node.tagName ? node.tagName.toLowerCase() : '');
         h ^= id & 0xff;
-        h = (h * 16777619) >>> 0;
+        h = Math.imul(h, 16777619) >>> 0;
         for (var i = 0; i < v.length && i < 32; i++) {
           h ^= v.charCodeAt(i) & 0xff;
-          h = (h * 16777619) >>> 0;
+          h = Math.imul(h, 16777619) >>> 0;
         }
-      });
+      }
       return h >>> 0;
     }
   };

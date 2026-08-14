@@ -217,6 +217,46 @@ an infinite list still only fetches when the reader is genuinely at the end.
 
 `test/stability_test.go` pins all of this in the real client.
 
+### 11. A same-origin iframe is rendered into a substitute element
+
+The design has the agent inline same-origin frames, and it does. The client
+cannot materialise the `<iframe>` that held them: an iframe is a browsing
+context, and a browsing context fetches things, which is the one thing the
+plane side never does. So the patcher builds an inert element carrying the
+original name in `data-skyhook-tag`, and the frame's inlined document renders
+inside it.
+
+Substituting rather than dropping matters for three separate reasons, all of
+which were live bugs:
+
+- a dropped element takes its subtree with it, so the frame's whole document
+  was missing from the mirror;
+- a dropped element leaves the client's node ids out of step with the agent's,
+  which the integrity check reads as divergence;
+- the CSS that sized the real frame selects on `iframe` and cannot match the
+  substitute, so the agent sends the frame's rendered box as `data-sky-box` and
+  the client applies it directly.
+
+Two things about frames are still not what a browser does. A cross-origin frame
+cannot be read at all and renders as an empty box of the right size. And a frame
+that navigates is picked up by a `load` hook that re-snapshots the document,
+which is blunt: nothing about a document being replaced reaches the
+MutationObserver watching the old one, so there is no diff to send.
+
+### 12. The document hash is a three-way contract, and was wrong
+
+`__skyhook.docHash`, `Model.Hash` and `Patcher.docHash` are three
+implementations of one function, and the server treats any disagreement as
+proof the mirror has diverged — then re-snapshots the whole document. The agent's
+copy multiplied with `*` rather than `Math.imul`, so above 2^29 the FNV product
+needed more than a double's 53 bits and the low bits were rounded away, and it
+walked a `Map` in insertion order where the others sort by id. It therefore
+disagreed with both on essentially every page, and every session re-sent every
+document every thirty seconds for as long as it was open.
+
+`test/integrity_test.go` now pins agent against replica, and the real client's
+reported hash against the agent, on a plain page and on one with a frame.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

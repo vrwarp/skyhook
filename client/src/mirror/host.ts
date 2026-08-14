@@ -21,6 +21,9 @@ const MIRROR_CSS = `
 html, body { margin: 0; padding: 0; background: #fff; color: #111; }
 .skyhook-ghost { opacity: .55; font-style: italic; }
 img { background-repeat: no-repeat; background-size: cover; }
+/* An iframe's inlined document, rendered into the box that stands in for it. */
+[data-skyhook-tag="iframe"] { display: block; overflow: hidden; }
+[data-skyhook-tag="iframe"] html, [data-skyhook-tag="iframe"] body { display: block; }
 [data-skyhook-static] {
   background: repeating-linear-gradient(45deg, #eee, #eee 8px, #e5e5e5 8px, #e5e5e5 16px);
 }
@@ -182,12 +185,18 @@ export class MirrorHost {
     doc.addEventListener('click', (ev) => {
       const target = ev.target as HTMLElement | null;
       if (!target) return;
-      const anchor = target.closest?.('a[href]') as HTMLAnchorElement | null;
+      const anchor = target.closest?.('a[href], area[href]') as HTMLAnchorElement | null;
+      // The mirror never navigates itself: a click is a semantic event the
+      // server replays into the real page. This has to happen before anything
+      // that can bail out. A link the patcher cannot place — one under local
+      // echo, one left over from a batch that did not apply — would otherwise
+      // follow itself, and the consequences are not cosmetic: the frame fetches
+      // the URL from the plane side, which is the one thing this client must
+      // never do, and lands on a cross-origin document that the patcher can no
+      // longer touch, which kills the tab for the rest of the session.
+      if (anchor) ev.preventDefault();
       const node = this.patcher?.idOf(anchor ?? target) ?? 0;
       if (!node) return;
-      // The mirror never navigates itself: a click is a semantic event the
-      // server replays into the real page.
-      ev.preventDefault();
       this.send({
         kind: InputKind.Click,
         node,
