@@ -47,9 +47,11 @@ func newTestSession(t *testing.T, opts CaptureOptions) *Session {
 // exists so a session can be Online without a link: whether the server asks the
 // plane side for its half, and whether it then waits for it, both turn on that.
 type fakeConn struct {
-	mu   sync.Mutex
-	sent [][]byte
-	done chan struct{}
+	mu          sync.Mutex
+	sent        [][]byte
+	done        chan struct{}
+	closeCode   uint32
+	closeReason string
 }
 
 func newFakeConn() *fakeConn { return &fakeConn{done: make(chan struct{})} }
@@ -74,13 +76,32 @@ func (c *fakeConn) Kind() string           { return "websocket" }
 func (c *fakeConn) RemoteAddr() string     { return "test" }
 func (c *fakeConn) Done() <-chan struct{}  { return c.done }
 
-func (c *fakeConn) Close(uint32, string) error {
+func (c *fakeConn) Close(code uint32, reason string) error {
+	c.mu.Lock()
+	c.closeCode, c.closeReason = code, reason
+	c.mu.Unlock()
 	select {
 	case <-c.done:
 	default:
 		close(c.done)
 	}
 	return nil
+}
+
+// closedWith reports how this connection was hung up on.
+func (c *fakeConn) closedWith() (uint32, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeCode, c.closeReason
+}
+
+func (c *fakeConn) isClosed() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // frames returns every frame the server sent, decoded.

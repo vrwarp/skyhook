@@ -107,14 +107,28 @@ type wsConn struct {
 	done    chan struct{}
 	once    sync.Once
 
+	// readDone is closed when readLoop has returned, which is the point at
+	// which nothing else will arrive and the socket can go away.
+	readDone  chan struct{}
+	closeOnce sync.Once
+
 	rttMu sync.Mutex
 	rtt   time.Duration
 	ping  time.Time
 }
 
+// closeGrace bounds how long a closing socket is kept alive after its close
+// frame has been written, waiting for the peer to acknowledge it.
+const closeGrace = 500 * time.Millisecond
+
 func newWSConn(c *websocket.Conn, log *slog.Logger) *wsConn {
 	c.SetReadLimit(maxRecord)
-	w := &wsConn{c: c, log: log, inbox: make(chan Message, 256), done: make(chan struct{})}
+	w := &wsConn{
+		c: c, log: log,
+		inbox:    make(chan Message, 256),
+		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
+	}
 	c.SetPongHandler(func(string) error {
 		w.rttMu.Lock()
 		if !w.ping.IsZero() {
@@ -152,6 +166,10 @@ func (c *wsConn) Send(_ protocol.Channel, msg []byte) error {
 }
 
 func (c *wsConn) readLoop() {
+	// Nothing else releases the socket: a connection the peer hung up on ends
+	// here, and Serve returns without touching it.
+	defer c.teardown()
+	defer close(c.readDone)
 	defer c.shutdown()
 	for {
 		typ, b, err := c.c.ReadMessage()
@@ -210,14 +228,42 @@ func (c *wsConn) Stats() Stats {
 	return Stats{RTT: rtt, BytesSent: c.sent.Load(), BytesRecv: c.recv.Load()}
 }
 
+// Close hangs up, telling the peer why.
+//
+// The close frame is the only place the reason is carried, and it is worth
+// more than it looks: a browser hands script the close *code* unconditionally,
+// so it is what tells a reconnect loop that reconnecting is pointless. Tearing
+// the TCP connection down in the same breath as writing that frame is what
+// loses it — the peer, an intermediary or both report an anonymous 1006 and the
+// client retries a refusal it was told not to retry. So the socket is left up
+// until the peer acknowledges the close or the grace expires.
+//
+// The wait happens off the caller's goroutine on purpose. The caller here is
+// usually a session evicting a stale connection, and the client that replaced
+// it is blocked on that same goroutine waiting for its Welcome.
 func (c *wsConn) Close(code uint32, reason string) error {
 	c.writeMu.Lock()
-	_ = c.c.WriteControl(websocket.CloseMessage,
+	err := c.c.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(wsCloseCode(code), reason),
 		time.Now().Add(time.Second))
 	c.writeMu.Unlock()
 	c.shutdown()
-	return c.c.Close()
+	go func() {
+		// The deadline is what ends readLoop if the peer never answers.
+		_ = c.c.SetReadDeadline(time.Now().Add(closeGrace))
+		select {
+		case <-c.readDone:
+		case <-time.After(closeGrace):
+		}
+		c.teardown()
+	}()
+	return err
+}
+
+// teardown releases the socket itself. Idempotent: both readLoop and Close
+// reach it, in either order.
+func (c *wsConn) teardown() {
+	c.closeOnce.Do(func() { _ = c.c.Close() })
 }
 
 // wsCloseCode carries a Skyhook close code over a WebSocket.
