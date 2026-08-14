@@ -91,7 +91,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		Headless:    cfg.Headless,
 		Display:     cfg.Display,
 		Logger:      log,
-		Lang:        "en-US",
+		Lang:        cfg.Lang,
 		ExtraArgs:   cfg.ChromeArgs,
 		Attach:      cfg.ChromeAttach,
 	})
@@ -102,6 +102,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 	if v, err := br.Version(ctx); err == nil {
 		log.Info("browser ready", "product", v)
 	}
+	userAgent := effectiveUserAgent(ctx, br, cfg.UserAgent, log)
 
 	factories, err := adapterFactories(cfg)
 	if err != nil {
@@ -109,16 +110,17 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 	}
 
 	mgrOpts := session.ManagerOptions{
-		Logger:      log,
-		Token:       cfg.Token,
-		TTL:         cfg.SessionTTL.Get(),
-		RingBytes:   cfg.RingBytes,
-		Compression: cfg.Compression,
-		ProfileDir:  cfg.ProfileDir(),
-		UserAgent:   cfg.UserAgent,
-		MaxTabs:     cfg.MaxTabs,
-		Adapters:    factories,
-		HomeURL:     cfg.HomeURL,
+		Logger:         log,
+		Token:          cfg.Token,
+		TTL:            cfg.SessionTTL.Get(),
+		RingBytes:      cfg.RingBytes,
+		Compression:    cfg.Compression,
+		ProfileDir:     cfg.ProfileDir(),
+		UserAgent:      userAgent,
+		AcceptLanguage: cfg.Lang,
+		MaxTabs:        cfg.MaxTabs,
+		Adapters:       factories,
+		HomeURL:        cfg.HomeURL,
 	}
 	// The pipeline needs the manager to route deliveries, and the manager needs
 	// the pipeline to submit work, so the pipeline is created with a router that
@@ -130,7 +132,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		CacheSize: cfg.ImageCacheBytes,
 		Logger:    log,
 		Fetcher:   router,
-		UserAgent: cfg.UserAgent,
+		UserAgent: userAgent,
 		Transcode: imgproc.Options{
 			Encoder:      imgproc.EncoderAuto,
 			PhotoQuality: cfg.ImageQuality,
@@ -146,6 +148,30 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 	router.mgr = s.mgr
 
 	return s, nil
+}
+
+// effectiveUserAgent decides what the browser should claim to be.
+//
+// An operator override wins. Otherwise the browser's own user agent is the
+// most consistent thing it could send, and is left alone — with one exception:
+// headless Chromium puts "HeadlessChrome" in it, which is the browser
+// volunteering the single fact we would most like it not to. That token is
+// corrected and nothing else is touched.
+func effectiveUserAgent(ctx context.Context, br *cdp.Browser, override string, log *slog.Logger) string {
+	if override != "" {
+		return override
+	}
+	real, err := br.DefaultUserAgent(ctx)
+	if err != nil || real == "" {
+		return ""
+	}
+	stripped := cdp.StripHeadless(real)
+	if stripped == real {
+		return ""
+	}
+	log.Info("correcting the headless token in the browser's user agent",
+		"userAgent", stripped)
+	return stripped
 }
 
 // deliveryRouter sends transcoded images to whichever session asked for them.

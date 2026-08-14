@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"image"
 	"image/color"
 	"image/png"
@@ -186,10 +187,20 @@ func newHarness(t *testing.T) *harness {
 	return newHarnessOn(t, shapedAddr())
 }
 
+// newHarnessWith builds the standard harness with the manager options adjusted,
+// for tests about what the landside browser claims to be.
+func newHarnessWith(t *testing.T, tweak func(*session.ManagerOptions)) *harness {
+	return newHarnessTweaked(t, shapedAddr(), tweak)
+}
+
 // newHarnessOn builds the landside half with its client listener on a given
 // address. The PWA tests take the shaped address for their own app listener
 // instead, so the browser client is what crosses the emulated link.
 func newHarnessOn(t *testing.T, listenAddr string) *harness {
+	return newHarnessTweaked(t, listenAddr, nil)
+}
+
+func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.ManagerOptions)) *harness {
 	t.Helper()
 	if _, err := cdp.FindChromium(""); err != nil {
 		if os.Getenv("SKYHOOK_E2E") == "1" {
@@ -228,6 +239,21 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 		}
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
+	})
+	// Echoes what the browser claimed on the wire, so a test can compare the
+	// headers against what the page's own JavaScript reports.
+	mux.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><title>Who</title></head><body>
+			<p id="ua">%s</p>
+			<p id="ch">%s</p>
+			<p id="platform">%s</p>
+			<p id="lang">%s</p>
+			</body></html>`,
+			html.EscapeString(r.Header.Get("User-Agent")),
+			html.EscapeString(r.Header.Get("Sec-CH-UA")),
+			html.EscapeString(r.Header.Get("Sec-CH-UA-Platform")),
+			html.EscapeString(r.Header.Get("Accept-Language")))
 	})
 	mux.HandleFunc("/tall", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -317,10 +343,14 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 	t.Cleanup(pipe.Close)
 	h.images = pipe
 
-	h.mgr = session.NewManager(br, pipe, session.ManagerOptions{
+	mgrOpts := session.ManagerOptions{
 		Logger: log, Token: h.token, TTL: time.Hour, RingBytes: 1 << 20,
 		Compression: true, ProfileDir: t.TempDir(), MaxTabs: 8,
-	})
+	}
+	if tweak != nil {
+		tweak(&mgrOpts)
+	}
+	h.mgr = session.NewManager(br, pipe, mgrOpts)
 	r.mgr = h.mgr
 	t.Cleanup(func() {
 		c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -799,6 +829,65 @@ func TestAuthenticatedImagesAreFetchedByTheBrowser(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("the cookie-protected image never arrived; the fetch did not go through the browser")
+}
+
+// Overriding the user agent string alone leaves Sec-CH-UA describing the
+// browser that is really running, which is a louder signal than the default
+// user agent would have been. Whatever we claim, the headers have to agree.
+func TestUserAgentOverrideCarriesMatchingClientHints(t *testing.T) {
+	// A version and a platform the test browser is not, so an assertion cannot
+	// pass by accident on a machine whose Chromium happens to match.
+	const claimed = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+		"(KHTML, like Gecko) Chrome/128.0.6613.120 Safari/537.36"
+	h := newHarnessWith(t, func(o *session.ManagerOptions) {
+		o.UserAgent = claimed
+		o.AcceptLanguage = "en-GB,en;q=0.9"
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/whoami"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "Chrome/128", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	text := func(id string) string {
+		m := cl.Model(tab)
+		n := m.Find("p", "id", id)
+		if n == nil {
+			t.Fatalf("no #%s in the mirrored page", id)
+		}
+		var b strings.Builder
+		for _, c := range n.Children {
+			if child := m.Nodes[c]; child != nil {
+				b.WriteString(child.Text)
+			}
+		}
+		return strings.TrimSpace(b.String())
+	}
+
+	if got := text("ua"); got != claimed {
+		t.Errorf("User-Agent header:\n got %q\nwant %q", got, claimed)
+	}
+	// The brand list must name the version the string claims, not the one the
+	// binary actually is.
+	if got := text("ch"); !strings.Contains(got, `"128"`) {
+		t.Errorf("Sec-CH-UA = %q, want it to claim version 128", got)
+	}
+	if got := text("platform"); got != `"Windows"` {
+		t.Errorf("Sec-CH-UA-Platform = %q, want \"Windows\"", got)
+	}
+	if got := text("lang"); !strings.HasPrefix(got, "en-GB") {
+		t.Errorf("Accept-Language = %q, want it to start with en-GB", got)
+	}
 }
 
 func TestReconnectResumesSessionAndPage(t *testing.T) {

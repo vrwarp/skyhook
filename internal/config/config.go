@@ -45,13 +45,22 @@ type Config struct {
 	// leaves Chromium unable to start at all, and `--no-sandbox` is the
 	// operator's decision to make, not ours.
 	ChromeArgs []string `json:"chromeArgs"`
-	// Headless runs Chromium headless. Sites with aggressive bot detection want
-	// this false plus an Xvfb display.
+	// Headless runs Chromium headless. It defaults to false: headless Chromium
+	// says so in its own user agent, reports navigator.webdriver, and differs
+	// from a real browser in a dozen small ways that sites do check. Headful
+	// under a virtual display costs a little memory and none of that. On Linux
+	// it needs a DISPLAY (Xvfb); with no display available the server says so
+	// and starts headless rather than refusing to boot.
 	Headless bool `json:"headless"`
 	// Display sets DISPLAY for headful-under-Xvfb operation.
 	Display string `json:"display"`
-	// UserAgent overrides the browser default.
+	// UserAgent overrides the browser default. Client-hint metadata is derived
+	// from whatever is set here, so Sec-CH-UA and navigator.userAgentData agree
+	// with it. Empty means "whatever the browser says", which is the most
+	// consistent answer available and usually the right one.
 	UserAgent string `json:"userAgent"`
+	// Lang sets Chromium's --lang and the Accept-Language it sends.
+	Lang string `json:"lang"`
 	// SessionTTL is how long a session lives without a client.
 	SessionTTL Duration `json:"sessionTtl"`
 	// RingBytes bounds the per-tab replay buffer.
@@ -144,7 +153,8 @@ func Default() Config {
 		Path:              "/skyhook",
 		DataDir:           filepath.Join(home, ".skyhook"),
 		Hosts:             []string{"localhost"},
-		Headless:          true,
+		Headless:          false,
+		Lang:              "en-US",
 		SessionTTL:        Duration(12 * time.Hour),
 		RingBytes:         4 << 20,
 		Compression:       true,
@@ -354,6 +364,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SKYHOOK_HEADLESS"); v != "" {
 		cfg.Headless = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("SKYHOOK_LANG"); v != "" {
+		cfg.Lang = v
 	}
 	if v := os.Getenv("DISPLAY"); v != "" && cfg.Display == "" {
 		cfg.Display = v

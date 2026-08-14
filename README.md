@@ -22,7 +22,7 @@ knew that this did not, and which of their lessons changed the code.
 PLANE SIDE (a browser)                    LANDSIDE (VPS)
 ┌────────────────────────┐                ┌──────────────────────────────┐
 │ Skyhook PWA            │                │ skyhookd (Go)                │
-│  ├ chrome UI + HUD     │   one QUIC /   │  ├ headless Chromium via CDP │
+│  ├ chrome UI + HUD     │   one QUIC /   │  ├ real Chromium via CDP     │
 │  ├ sandboxed mirror    │◄──WebTransport─┤  ├ injected mirror agent     │
 │  │   frames (no JS)    │   connection   │  ├ used-CSS extraction       │
 │  ├ network worker      │                │  ├ image transcoder          │

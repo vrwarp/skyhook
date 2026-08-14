@@ -10,7 +10,11 @@ User=skyhook
 Group=skyhook
 Environment=SKYHOOK_CONFIG=/var/lib/skyhook/config.json
 Environment=SKYHOOK_DATA_DIR=/var/lib/skyhook
-ExecStart=/usr/local/bin/skyhookd
+# Headful Chromium needs a display, and a VPS has none: xvfb-run supplies a
+# virtual one and sets DISPLAY. Install the `xvfb` package. Without it the
+# server still starts, says why, and runs headless — which works, and is what
+# sites notice. Drop the xvfb-run prefix if you want that deliberately.
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1600x1200x24 -nolisten tcp" /usr/local/bin/skyhookd
 Restart=always
 RestartSec=2
 # Sessions are rebuilt from the profile on disk, so a restart costs a resnapshot

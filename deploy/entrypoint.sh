@@ -1,9 +1,11 @@
 #!/bin/sh
-# Runs the server, optionally under Xvfb for headful operation. Sites with
-# aggressive bot detection do better headful; everything else is fine headless.
+# Runs the server under Xvfb, which is how Chromium runs headful in a container.
+# That is the default: headless Chromium says so in its own user agent and in
+# navigator.webdriver, and a browser being used as a browser has no reason to.
+# SKYHOOK_HEADFUL=0 opts out.
 set -eu
 
-if [ "${SKYHOOK_HEADFUL:-0}" = "1" ]; then
+if [ "${SKYHOOK_HEADFUL:-1}" = "1" ]; then
   echo "starting Xvfb for headful Chromium"
   Xvfb :99 -screen 0 1600x1200x24 -nolisten tcp &
   export DISPLAY=:99

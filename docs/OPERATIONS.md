@@ -24,9 +24,9 @@ docker compose -f deploy/docker-compose.yml exec skyhook \
   skyhookctl pairing -file /data/pairing.json
 ```
 
-The image ships Chromium, `avifenc`, `cwebp` and Xvfb. Set `SKYHOOK_HEADFUL=1`
-to run Chromium headful under Xvfb, which is the mitigation for sites with
-aggressive bot detection.
+The image ships Chromium, `avifenc`, `cwebp` and Xvfb, and runs Chromium
+headful under Xvfb by default, because headless Chromium announces itself to
+every site it visits. `SKYHOOK_HEADFUL=0` opts out: lighter, and conspicuous.
 
 It runs as uid **10001**, and `/data` in the image is owned by it. A named
 volume inherits that; a **bind mount does not**, so a host directory needs
@@ -60,7 +60,8 @@ default; this is the whole surface:
   "dataDir": "/var/lib/skyhook",
   "hosts": ["vps.example.com"],
   "token": "",
-  "headless": true,
+  "headless": false,
+  "lang": "en-US",
   "sessionTtl": "12h",
   "compression": true,
   "maxTabs": 8,
@@ -75,7 +76,8 @@ default; this is the whole surface:
 
 Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_DATA_DIR`, `SKYHOOK_TOKEN`, `SKYHOOK_CHROME`, `SKYHOOK_CHROME_ATTACH`,
-`SKYHOOK_HOSTS`, `SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`,
+`SKYHOOK_HOSTS`, `SKYHOOK_HEADLESS`, `SKYHOOK_LANG`, `SKYHOOK_ADAPTERS`,
+`SKYHOOK_WEB_ROOT`,
 `SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`,
 `SKYHOOK_PUBLIC_URL`, `SKYHOOK_BEHIND_PROXY`.
 

@@ -37,6 +37,8 @@ type ManagerOptions struct {
 	ProfileDir string
 	// UserAgent overrides the browser default.
 	UserAgent string
+	// AcceptLanguage rides with the user agent override.
+	AcceptLanguage string
 	// MaxTabs caps concurrent tabs.
 	MaxTabs int
 	// Adapters builds the adapters started for each session.

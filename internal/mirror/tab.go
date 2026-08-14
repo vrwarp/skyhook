@@ -69,7 +69,12 @@ type Options struct {
 	// BlockURLs overrides the landside request denylist.
 	BlockURLs []string
 	// UserAgent overrides the browser default (kept realistic on purpose).
+	// Client-hint metadata is derived from it, so the two agree.
 	UserAgent string
+	// AcceptLanguage is sent with the override, because a browser whose UA was
+	// replaced but whose language header was not is a browser with a story that
+	// does not add up.
+	AcceptLanguage string
 	// IdleSnapshotAfter re-snapshots if the page has been silent this long and
 	// the client asked for a resync. Zero disables.
 	IdleSnapshotAfter time.Duration
@@ -137,8 +142,8 @@ func (t *Tab) install(ctx context.Context) error {
 	if err := s.Do(ctx, "Network.setBlockedURLs", map[string]any{"urls": blocked}, nil); err != nil {
 		t.log.Debug("blocked urls unsupported", "err", err)
 	}
-	if t.opts.UserAgent != "" {
-		_ = s.Do(ctx, "Network.setUserAgentOverride", map[string]any{"userAgent": t.opts.UserAgent}, nil)
+	if err := t.overrideUserAgent(ctx); err != nil {
+		t.log.Debug("user agent override failed", "err", err)
 	}
 	if err := t.SetViewport(ctx, t.opts.Viewport); err != nil {
 		t.log.Debug("viewport override failed", "err", err)
@@ -824,4 +829,36 @@ func decodeOpRow(row []json.RawMessage) (protocol.Op, bool) {
 		return op, false
 	}
 	return op, true
+}
+
+// overrideUserAgent applies the configured identity to this tab.
+//
+// Emulation.setUserAgentOverride rather than Network's: the Network call moves
+// the `User-Agent` header and `navigator.userAgent` and nothing else, leaving
+// `Sec-CH-UA`, `Sec-CH-UA-Platform` and `navigator.userAgentData` describing
+// the browser that is really running. A site that reads both then sees a
+// browser disagreeing with itself, which is a far louder signal than the
+// default user agent it would otherwise have seen. The Emulation call takes
+// the metadata too, so there is one story.
+func (t *Tab) overrideUserAgent(ctx context.Context) error {
+	ua, lang := t.opts.UserAgent, t.opts.AcceptLanguage
+	if ua == "" {
+		// Nothing to correct. The browser's own identity is already consistent
+		// with itself, which is the state every override is trying to imitate,
+		// and --lang has already set the language it reports.
+		return nil
+	}
+	meta, ok := cdp.MetadataForUA(ua)
+	if !ok {
+		t.log.Warn("user agent is not recognisably Chromium; "+
+			"client hints will claim no brands", "userAgent", ua)
+	}
+	params := map[string]any{
+		"userAgent":         ua,
+		"userAgentMetadata": meta,
+	}
+	if lang != "" {
+		params["acceptLanguage"] = lang
+	}
+	return t.sess.Do(ctx, "Emulation.setUserAgentOverride", params, nil)
 }

@@ -22,7 +22,8 @@ RUN CGO_ENABLED=0 go build -trimpath \
 
 FROM debian:bookworm-slim
 # chromium is the whole point of the landside half; libavif/webp give the
-# transcoder its good codecs, and xvfb covers sites that fight headless.
+# transcoder its good codecs, and xvfb is how it runs headful — which is the
+# default, because headless Chromium tells every site that it is one.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       chromium \
       ca-certificates \
