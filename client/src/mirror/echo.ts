@@ -162,6 +162,16 @@ export class EchoEngine {
     owned.local = serverValue;
   }
 
+  /**
+   * Records an edit the shell applied to the owned field's DOM itself — a
+   * clipboard paste or cut from the context menu. Without this the next input
+   * event would diff against a value that is two edits old and send the server
+   * a bogus insertion.
+   */
+  noteValue(nodeId: number, value: string): void {
+    if (this.owned?.id === nodeId) this.owned.local = value;
+  }
+
   /** Removes an optimistic ghost once the real message arrives. */
   retireGhost(text: string): void {
     const ghost = this.ghosts.get(text);
@@ -186,7 +196,7 @@ export function modifierMask(ev: KeyboardEvent | MouseEvent): number {
   return (ev.altKey ? 1 : 0) | (ev.ctrlKey ? 2 : 0) | (ev.metaKey ? 4 : 0) | (ev.shiftKey ? 8 : 0);
 }
 
-function asEditable(target: EventTarget | null): HTMLElement | null {
+export function asEditable(target: EventTarget | null): HTMLElement | null {
   if (!target || !(target as HTMLElement).tagName) return null;
   const el = target as HTMLElement;
   const tag = el.tagName.toUpperCase();
@@ -203,7 +213,7 @@ export function valueOf(el: HTMLElement): string {
   return el.textContent ?? '';
 }
 
-function setValue(el: HTMLElement, value: string): void {
+export function setValue(el: HTMLElement, value: string): void {
   if ('value' in el && typeof (el as HTMLInputElement).value === 'string') {
     (el as HTMLInputElement).value = value;
     return;
@@ -211,7 +221,7 @@ function setValue(el: HTMLElement, value: string): void {
   el.textContent = value;
 }
 
-function caretOf(el: HTMLElement): { start: number; end: number } {
+export function caretOf(el: HTMLElement): { start: number; end: number } {
   const input = el as HTMLInputElement;
   if (typeof input.selectionStart === 'number') {
     return { start: input.selectionStart, end: input.selectionEnd ?? input.selectionStart };
@@ -224,7 +234,7 @@ function caretOf(el: HTMLElement): { start: number; end: number } {
   return { start: 0, end: 0 };
 }
 
-function setCaret(el: HTMLElement, pos: number): void {
+export function setCaret(el: HTMLElement, pos: number): void {
   const input = el as HTMLInputElement;
   if (typeof input.setSelectionRange === 'function' && typeof input.selectionStart === 'number') {
     try {

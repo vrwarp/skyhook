@@ -13,7 +13,9 @@
  * so the frame has no way to reach the network or leave the page on its own.
  */
 import { ImageMeta, InputKind, Mutation, MutationOp, OpCode, Snapshot } from '../shared/protocol.js';
-import { EchoEngine, modifierMask, valueOf } from './echo.js';
+import {
+  EchoEngine, asEditable, caretOf, modifierMask, setCaret, setValue, valueOf,
+} from './echo.js';
 import { Patcher } from './patcher.js';
 
 /** Base styles for a mirrored document, injected into each frame. */
@@ -29,17 +31,55 @@ img { background-repeat: no-repeat; background-size: cover; }
 }
 `;
 
+/** What the shell needs to know to draw a context menu for a right click. */
+export interface MenuTarget {
+  /** Mirror id of the node under the pointer, 0 if it has none. */
+  node: number;
+  /** Mirror id of the editable field under the pointer, 0 if it is not one. */
+  field: number;
+  /** Pointer position in the shell's coordinate space, not the frame's. */
+  x: number;
+  y: number;
+  /** Absolute http(s) URL of the enclosing link, if the pointer is on one. */
+  link?: string;
+  /** The link's own text, for a bookmark title. */
+  linkText?: string;
+  /** Content hash of the image under the pointer. */
+  image?: string;
+  imageAlt?: string;
+  /** Text selected in the field, or in the document if there is no field. */
+  selection: string;
+}
+
 /** Emitted by the host, forwarded to the server by the app shell. */
 export interface HostEvents {
   input(tab: number, ev: Record<string, unknown>): void;
   scroll(tab: number, ev: Record<string, unknown>): void;
   applied(tab: number, seq: number, hash: number): void;
   wantImages(tab: number, hashes: string[]): void;
+  /** A link the user asked to open in a new tab (middle or ctrl/⌘ click). */
+  openLink(tab: number, url: string): void;
+  /** A right click, for the shell to answer with Skyhook's own menu. */
+  menu(tab: number, target: MenuTarget): void;
+  /**
+   * The user is doing something else now — a click, a scroll, Escape — inside
+   * the frame. Events there never reach the shell's own document, so anything
+   * the shell has floating over the mirror has to be told. Returns true if
+   * something was dismissed, which makes the gesture that dismissed it stop
+   * there rather than also reaching the page.
+   */
+  dismiss(tab: number): boolean;
 }
 
 /** Resolves a content hash to the URL the service worker serves it from. */
 export function imageURL(hash: string): string {
   return `/img/${hash}`;
+}
+
+/** The inverse: the content hash behind an image the frame is showing. */
+export function hashFromImageURL(src: string | null | undefined): string | undefined {
+  const match = /^\/img\/([^?#]+)/.exec(src ?? '');
+  return match ? match[1] : undefined;
 }
 
 /**
@@ -84,7 +124,9 @@ export class MirrorHost {
   private ready: Promise<void>;
   private scrollTimer: ReturnType<typeof setTimeout> | null = null;
   /** URL of the document currently rendered, so a resync is distinguishable
-   *  from a navigation. */
+   *  from a navigation. Deliberately not the same field as `pageUrl` below:
+   *  this one may only ever move when a snapshot lands, or a navigation the
+   *  server reported without one would read as a resync. */
   private url = '';
   /** Scrollers the reader has moved themselves. The server never moves these
    *  again unless they are pinned to the bottom. */
@@ -95,6 +137,9 @@ export class MirrorHost {
    *  event is asynchronous, so a flag would be cleared before it arrives. */
   private adoptedDoc: { x: number; y: number } = { x: -1, y: -1 };
   private adopted = new WeakMap<Node, { x: number; y: number }>();
+  /** The mirrored page's own URL, which relative links resolve against. It
+   *  follows the tab wherever it goes, snapshot or not. */
+  private pageUrl = '';
 
   constructor(tab: number, events: HostEvents) {
     this.tab = tab;
@@ -195,6 +240,16 @@ export class MirrorHost {
       // never do, and lands on a cross-origin document that the patcher can no
       // longer touch, which kills the tab for the rest of the session.
       if (anchor) ev.preventDefault();
+      // Ctrl/⌘-click is the keyboard half of "open in a new tab", and it means
+      // the same thing here. Sending it landside instead would open a tab on
+      // the VPS that this side has no handle on. It goes before the bail below
+      // because opening a tab needs the URL and not the node: a link the
+      // patcher cannot place is still a link the reader can follow.
+      const newTab = this.linkAt(anchor);
+      if (newTab && (ev.ctrlKey || ev.metaKey)) {
+        this.events.openLink(this.tab, newTab.url);
+        return;
+      }
       const node = this.patcher?.idOf(anchor ?? target) ?? 0;
       if (!node) return;
       this.send({
@@ -209,14 +264,41 @@ export class MirrorHost {
       this.maybeSubmit(target);
     }, true);
 
+    // Middle click means "open in a new tab" in every browser, and a mirrored
+    // page is not exempt. The frame withholds allow-popups, so left to itself
+    // the gesture does nothing at all; claiming mousedown as well suppresses
+    // Chrome's autoscroll, which would otherwise scroll a document the server
+    // knows nothing about.
+    doc.addEventListener('mousedown', (ev) => {
+      const mouse = ev as MouseEvent;
+      this.events.dismiss(this.tab);
+      // Inside a text field the gesture is X11's primary-selection paste, which
+      // the browser performs natively and the echo engine picks up as an input
+      // event. Leave it alone.
+      if (mouse.button === 1 && !asEditable(mouse.target)) ev.preventDefault();
+    }, true);
+
+    doc.addEventListener('auxclick', (ev) => {
+      const mouse = ev as MouseEvent;
+      if (mouse.button !== 1 || asEditable(mouse.target)) return;
+      ev.preventDefault();
+      const link = this.linkAt(mouse.target);
+      if (link) this.events.openLink(this.tab, link.url);
+    }, true);
+
     doc.addEventListener('dblclick', (ev) => {
       const node = this.patcher?.idOf(ev.target as Node) ?? 0;
       if (node) this.send({ kind: InputKind.DblClick, node, modifiers: modifierMask(ev) });
     }, true);
 
     doc.addEventListener('contextmenu', (ev) => {
-      const node = this.patcher?.idOf(ev.target as Node) ?? 0;
-      if (node) this.send({ kind: InputKind.Context, node, modifiers: modifierMask(ev) });
+      // The native menu is worse than useless over a mirror: its entries act on
+      // the sandboxed frame, so "Open link in new tab" opens about:blank,
+      // "Reload" reloads a document with no origin, and "Save image" saves a
+      // hash. The shell answers with Skyhook's own menu instead; forwarding the
+      // right click to the landside page is one of the entries on it.
+      ev.preventDefault();
+      this.events.menu(this.tab, this.menuTarget(ev as MouseEvent));
     }, true);
 
     doc.addEventListener('focusin', (ev) => this.echo?.focus(ev.target), true);
@@ -226,6 +308,11 @@ export class MirrorHost {
     doc.addEventListener('input', (ev) => this.echo?.input(ev as InputEvent), true);
     doc.addEventListener('keydown', (ev) => {
       const key = ev as KeyboardEvent;
+      // Escape shuts the shell's menu before it means anything to the page.
+      if (key.key === 'Escape' && this.events.dismiss(this.tab)) {
+        key.preventDefault();
+        return;
+      }
       if (key.key === 'Enter' && this.submitOnEnter(key.target as HTMLElement | null)) {
         key.preventDefault();
         return;
@@ -235,6 +322,9 @@ export class MirrorHost {
 
     const win = this.frame.contentWindow;
     win?.addEventListener('scroll', () => {
+      // A menu anchored to a node that has just moved is pointing at the wrong
+      // thing; the scroll telemetry below is throttled, but this cannot be.
+      this.events.dismiss(this.tab);
       if (win.scrollX !== this.adoptedDoc.x || win.scrollY !== this.adoptedDoc.y) {
         this.readerMovedDoc = true;
       }
@@ -260,6 +350,9 @@ export class MirrorHost {
       if (!target || target.nodeType !== Node.ELEMENT_NODE) return;
       const el = target as HTMLElement;
       if (el === doc.documentElement) return;
+      // Same reason as the window listener: a scrolled container leaves an open
+      // menu pointing somewhere the node no longer is.
+      this.events.dismiss(this.tab);
       const mine = this.adopted.get(el);
       if (!mine || mine.x !== el.scrollLeft || mine.y !== el.scrollTop) this.readerMoved.add(el);
     }, { capture: true, passive: true });
@@ -309,6 +402,118 @@ export class MirrorHost {
     this.adoptedDoc = { x: win.scrollX, y: win.scrollY };
   }
 
+  // ------------------------------------------------------------------- links
+
+  /**
+   * The link a node sits inside, resolved and filtered down to what the shell
+   * can actually act on. The agent absolutises URL attributes landside, but a
+   * speculative snapshot or a `<base>`-less fragment can still arrive relative,
+   * so the page's own URL is the fallback base.
+   */
+  private linkAt(target: EventTarget | Node | null): { url: string; text: string } | undefined {
+    const el = target as HTMLElement | null;
+    const anchor = el?.closest?.('a[href], area[href]') as HTMLAnchorElement | null;
+    if (!anchor) return undefined;
+    const url = this.resolve(anchor.getAttribute('href'));
+    if (!url) return undefined;
+    return { url, text: (anchor.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 120) };
+  }
+
+  /** Absolutises a mirrored href, refusing anything that is not a web link. */
+  private resolve(href: string | null): string | undefined {
+    if (!href) return undefined;
+    try {
+      const url = new URL(href, this.pageUrl || undefined);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+      return url.href;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Tells the host which URL the tab is showing, so relative links resolve. */
+  setPageUrl(url: string): void {
+    if (url) this.pageUrl = url;
+  }
+
+  // -------------------------------------------------------------- context menu
+
+  private menuTarget(ev: MouseEvent): MenuTarget {
+    const target = ev.target as HTMLElement | null;
+    const link = this.linkAt(target);
+    const img = target?.closest?.('img') as HTMLImageElement | null;
+    const field = asEditable(target);
+    // The frame is positioned inside the shell, and the menu is drawn by the
+    // shell: translate out of the frame's coordinate space once, here, where
+    // both are in reach.
+    const rect = this.frame.getBoundingClientRect();
+    return {
+      node: this.patcher?.idOf(target) ?? 0,
+      field: field ? this.patcher?.idOf(field) ?? 0 : 0,
+      x: rect.left + ev.clientX,
+      y: rect.top + ev.clientY,
+      link: link?.url,
+      linkText: link?.text,
+      image: hashFromImageURL(img?.getAttribute('src')),
+      imageAlt: img?.getAttribute('alt') ?? undefined,
+      selection: this.selectionIn(field),
+    };
+  }
+
+  /** The selected text, taken from the field if the pointer is in one: a text
+   *  field's own selection is invisible to the document's. */
+  private selectionIn(field: HTMLElement | null): string {
+    const input = field as HTMLInputElement | null;
+    if (input && typeof input.selectionStart === 'number') {
+      return String(input.value ?? '')
+        .slice(input.selectionStart, input.selectionEnd ?? input.selectionStart);
+    }
+    return this.doc?.getSelection?.()?.toString() ?? '';
+  }
+
+  /** Forwards a right click landside, for pages that answer it with a menu of
+   *  their own. It arrives in the mirror as ordinary DOM. */
+  sendContextMenu(node: number): void {
+    if (!node) return;
+    this.send({ kind: InputKind.Context, node, modifiers: 0 });
+  }
+
+  /**
+   * Replaces the selection in an editable field, for the menu's cut and paste.
+   * The edit is applied locally first — the whole point of the echo engine is
+   * that an edit is not worth a round trip of waiting — and sent as a whole
+   * value, which is the server's existing path for anything that is not typing.
+   */
+  replaceSelection(field: number, text: string): void {
+    const el = this.patcher?.nodeFor(field) as HTMLElement | undefined;
+    if (!el) return;
+    el.focus?.();
+    const before = valueOf(el);
+    const { start, end } = caretOf(el);
+    const next = before.slice(0, start) + text + before.slice(end);
+    const caret = start + text.length;
+    setValue(el, next);
+    setCaret(el, caret);
+    this.echo?.noteValue(field, next);
+    this.send({ kind: InputKind.SetValue, node: field, text: next, start: caret, end: caret });
+  }
+
+  /** Selects everything in an editable field. Selection is local: the server
+   *  has nothing to replay. */
+  selectAll(field: number): void {
+    const el = this.patcher?.nodeFor(field) as HTMLElement | undefined;
+    if (!el) return;
+    const input = el as HTMLInputElement;
+    if (typeof input.select === 'function') {
+      el.focus?.();
+      input.select();
+      return;
+    }
+    const sel = this.doc?.getSelection?.();
+    sel?.removeAllRanges();
+    sel?.selectAllChildren?.(el);
+  }
+
   /** Sends a form submission for a clicked submit control. */
   private maybeSubmit(target: HTMLElement): boolean {
     const control = target.closest?.('button, input[type=submit], input[type=image]') as
@@ -352,6 +557,7 @@ export class MirrorHost {
 
   applySnapshot(snap: Snapshot): void {
     if (!this.patcher) return;
+    this.setPageUrl(snap.url);
     this.echo?.release();
     // A snapshot for the document already on screen is a resync — the server
     // closing a gap it could not close with diffs — and the reader should not

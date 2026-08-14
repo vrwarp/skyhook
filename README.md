@@ -45,7 +45,9 @@ scripts/demo.sh          # builds the client, runs both halves, stops after 10 m
 
 It prints a link to open in Chrome. Press **+** for a tab, type a URL, and watch
 a page arrive that your browser never fetched; the HUD shows the transport, the
-queue depth and the bytes actually spent.
+queue depth and the bytes actually spent. Middle-click a link for a background
+tab, and right-click anywhere for Skyhook's own menu — the browser's would act
+on the sandboxed frame rather than on the page it is showing.
 
 The demo runs in loopback mode — plain HTTP on `127.0.0.1`, no TLS, no QUIC.
 That is deliberate rather than lazy: Chrome will not register a service worker

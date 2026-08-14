@@ -5,7 +5,8 @@
  * No framework. The whole client is a patcher and an input serialiser; a
  * runtime would be more bytes than the mirror protocol it exists to carry.
  */
-import { MirrorHost } from '../mirror/host.js';
+import { MirrorHost, imageURL, type MenuTarget } from '../mirror/host.js';
+import { closeMenu, menuIsOpen, showMenu, type MenuGroups } from './menu.js';
 import { pairingFromFragment, transportUrls } from './pairing.js';
 import { Store, type Pairing } from '../store/store.js';
 import type {
@@ -190,6 +191,9 @@ function handle(kind: string, args: Record<string, unknown>): void {
       if (!known) void hostFor(id);
       tab.url = st.url || tab.url;
       tab.title = st.title || tab.title;
+      // Relative links in the mirror resolve against this; a tab that navigates
+      // without a fresh snapshot would otherwise keep the old base.
+      hosts.get(id)?.setPageUrl(tab.url);
       tab.loading = st.loading;
       tab.canBack = st.canBack;
       tab.canForward = st.canForward;
@@ -233,6 +237,9 @@ function handle(kind: string, args: Record<string, unknown>): void {
 
 async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
   const host = await hostFor(tab);
+  // A whole new document arrived: whatever the open menu was pointing at is
+  // gone, and half its entries would act on a node that no longer exists.
+  if (tab === active) closeMenu();
   host.applySnapshot(snap);
 }
 
@@ -252,6 +259,13 @@ async function hostFor(tab: number): Promise<MirrorHost> {
     scroll: (t, ev) => send('scroll', { ...ev, tab: t }),
     applied: (t, seq, hash) => send('ack', { tab: t, seq, hash }),
     wantImages: (t, hashes) => send('wantImage', { tab: t, hashes }),
+    openLink: (_t, url) => openInNewTab(url),
+    menu: (t, target) => showMenu(target.x, target.y, mirrorMenu(t, target)),
+    dismiss: () => {
+      const was = menuIsOpen();
+      closeMenu();
+      return was;
+    },
   });
   hosts.set(tab, host);
   el.frames.appendChild(host.frame);
@@ -284,8 +298,7 @@ function renderTabs(): void {
     close.textContent = '×';
     close.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      send('closeTab', { tab: tab.id });
-      closeTabLocally(tab.id);
+      closeTab(tab.id);
     });
     node.appendChild(close);
 
@@ -294,6 +307,13 @@ function renderTabs(): void {
       renderTabs();
       layout();
       syncToolbar();
+    });
+    node.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      // The shell's own menu below would offer page actions; on a tab the
+      // useful actions are about the tab.
+      ev.stopPropagation();
+      showMenu(ev.clientX, ev.clientY, tabMenu(tab.id));
     });
     el.strip.appendChild(node);
   }
@@ -307,6 +327,11 @@ function renderTabs(): void {
   add.addEventListener('click', () => send('openTab', { url: '' }));
   el.strip.appendChild(add);
   syncToolbar();
+}
+
+function closeTab(id: number): void {
+  send('closeTab', { tab: id });
+  closeTabLocally(id);
 }
 
 function closeTabLocally(id: number): void {
@@ -342,13 +367,24 @@ function hostOf(url: string): string {
   }
 }
 
-// -------------------------------------------------------------------- toolbar
+// -------------------------------------------------------------------- actions
 
-el.urlbar.addEventListener('keydown', (ev) => {
-  if (ev.key !== 'Enter') return;
-  const url = el.urlbar.value.trim();
-  if (!url) return;
-  if (!active) {
+/**
+ * Opens a URL in a new tab. Both halves of the "open in a new tab" gesture end
+ * up here: the middle click and the menu entry. The tab opens in the background,
+ * which is what the gesture means everywhere else — and matters more here, where
+ * the page behind it is the one already paid for.
+ */
+function openInNewTab(url: string): void {
+  if (!connected) {
+    log('offline: a new tab needs the link');
+    return;
+  }
+  send('openTab', { url });
+}
+
+function navigateTo(tab: number, url: string): void {
+  if (!tab) {
     send('openTab', { url });
     return;
   }
@@ -357,9 +393,225 @@ el.urlbar.addEventListener('keydown', (ev) => {
     // The speculation is already here: paint it now and let the real
     // navigation reconcile. This is the zero-round-trip link follow.
     speculations.delete(url);
-    void applySnapshot(active, spec);
+    void applySnapshot(tab, spec);
   }
-  send('navigate', { tab: active, url });
+  send('navigate', { tab, url });
+}
+
+function addBookmark(title: string, url: string): void {
+  if (!url) return;
+  void store.readBookmarks().then((marks) => {
+    marks.push({ title: title || url, url });
+    return store.writeBookmarks(marks);
+  });
+}
+
+function copyText(text: string): void {
+  if (!text) return;
+  void navigator.clipboard?.writeText(text)
+    .catch((err: unknown) => log(`clipboard write failed: ${String(err)}`));
+}
+
+async function pasteInto(tab: number, field: number): Promise<void> {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) hosts.get(tab)?.replaceSelection(field, text);
+  } catch (err) {
+    log(`clipboard read failed: ${String(err)}`);
+  }
+}
+
+/**
+ * Saves an image out of the mirror. The bytes are already plane-side — the
+ * network worker wrote them into Cache Storage and the service worker serves
+ * them — so this costs nothing over the link and works during an outage. The
+ * real remote URL is not knowable here, which is why the file is named after
+ * the alt text.
+ */
+async function saveImage(hash: string, alt: string): Promise<void> {
+  try {
+    const res = await fetch(imageURL(hash));
+    if (!res.ok) throw new Error(`image ${hash} is not cached`);
+    const blob = await res.blob();
+    const ext = (blob.type.split('/')[1] ?? 'bin').replace(/[^a-z0-9]/gi, '');
+    const stem = alt.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = `${stem || `skyhook-${hash}`}.${ext}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(href), 10000);
+  } catch (err) {
+    log(`save image failed: ${String(err)}`);
+  }
+}
+
+// -------------------------------------------------------------- context menus
+
+/** The entries that act on the tab itself, shared by every menu. */
+function pageGroups(tab: number): MenuGroups {
+  const view = tabs.get(tab);
+  const url = view?.url ?? '';
+  return [
+    [
+      // Navigation is a request to the server, so offline it would do nothing
+      // at all. Better to look unavailable than to look broken — the same rule
+      // the new-tab button follows.
+      {
+        label: 'Back',
+        disabled: !connected || !view?.canBack,
+        run: () => send('navigate', { tab, action: 'back' }),
+      },
+      {
+        label: 'Forward',
+        disabled: !connected || !view?.canForward,
+        run: () => send('navigate', { tab, action: 'forward' }),
+      },
+      {
+        label: 'Reload',
+        disabled: !connected || !tab,
+        run: () => send('navigate', { tab, action: 'reload' }),
+      },
+    ],
+    [
+      { label: 'Copy page address', disabled: !url, run: () => copyText(url) },
+      {
+        label: 'Bookmark page',
+        disabled: !url,
+        run: () => addBookmark(view?.title ?? '', url),
+      },
+      {
+        label: 'Duplicate tab',
+        disabled: !url || !connected,
+        run: () => openInNewTab(url),
+      },
+    ],
+  ];
+}
+
+/** The menu for a right click inside a mirrored page. */
+function mirrorMenu(tab: number, target: MenuTarget): MenuGroups {
+  const host = hosts.get(tab);
+  const groups: MenuGroups = [];
+  const link = target.link;
+  if (link) {
+    groups.push([
+      {
+        label: 'Open link in new tab',
+        hint: 'Middle click',
+        disabled: !connected,
+        run: () => openInNewTab(link),
+      },
+      { label: 'Open link', disabled: !connected, run: () => navigateTo(tab, link) },
+      { label: 'Copy link address', run: () => copyText(link) },
+      { label: 'Bookmark link', run: () => addBookmark(target.linkText ?? '', link) },
+    ]);
+  }
+
+  const image = target.image;
+  if (image) {
+    groups.push([
+      { label: 'Save image', run: () => void saveImage(image, target.imageAlt ?? '') },
+      {
+        label: 'Copy image description',
+        disabled: !target.imageAlt,
+        run: () => copyText(target.imageAlt ?? ''),
+      },
+    ]);
+  }
+
+  const field = target.field;
+  if (field) {
+    groups.push([
+      {
+        label: 'Cut',
+        disabled: !target.selection,
+        run: () => {
+          copyText(target.selection);
+          host?.replaceSelection(field, '');
+        },
+      },
+      { label: 'Copy', disabled: !target.selection, run: () => copyText(target.selection) },
+      { label: 'Paste', run: () => void pasteInto(tab, field) },
+      { label: 'Select all', run: () => host?.selectAll(field) },
+    ]);
+  } else if (target.selection) {
+    groups.push([{ label: 'Copy', run: () => copyText(target.selection) }]);
+  }
+
+  groups.push(...pageGroups(tab));
+  groups.push([
+    {
+      // Some pages answer a right click with a menu of their own, which arrives
+      // in the mirror as ordinary DOM. That is a round trip, so it is a choice
+      // rather than the default.
+      label: 'Send right-click to the page',
+      hint: 'one round trip',
+      disabled: !target.node || !connected,
+      run: () => host?.sendContextMenu(target.node),
+    },
+  ]);
+  return groups;
+}
+
+/** The menu for a right click on a tab in the strip. */
+function tabMenu(id: number): MenuGroups {
+  const view = tabs.get(id);
+  return [
+    [
+      { label: 'New tab', disabled: !connected, run: () => send('openTab', { url: '' }) },
+      {
+        label: 'Duplicate tab',
+        disabled: !view?.url || !connected,
+        run: () => openInNewTab(view?.url ?? ''),
+      },
+      {
+        label: 'Reload',
+        disabled: !connected,
+        run: () => send('navigate', { tab: id, action: 'reload' }),
+      },
+    ],
+    [
+      { label: 'Close tab', run: () => closeTab(id) },
+      {
+        label: 'Close other tabs',
+        disabled: tabs.size < 2,
+        run: () => {
+          for (const other of Array.from(tabs.keys())) {
+            if (other !== id) closeTab(other);
+          }
+        },
+      },
+    ],
+  ];
+}
+
+/** The menu for a right click on the chrome itself. */
+function shellMenu(): MenuGroups {
+  const groups: MenuGroups = [
+    [{ label: 'New tab', disabled: !connected, run: () => send('openTab', { url: '' }) }],
+  ];
+  if (active) groups.push(...pageGroups(active));
+  return groups;
+}
+
+document.addEventListener('contextmenu', (ev) => {
+  const target = ev.target as HTMLElement | null;
+  // Text fields and the chat panel keep the native menu. Those are real local
+  // documents, so the browser's own clipboard entries do exactly the right
+  // thing — and the URL bar is where people paste.
+  if (target?.closest?.('input, textarea, #panel')) return;
+  ev.preventDefault();
+  showMenu(ev.clientX, ev.clientY, shellMenu());
+});
+
+// -------------------------------------------------------------------- toolbar
+
+el.urlbar.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Enter') return;
+  const url = el.urlbar.value.trim();
+  if (!url) return;
+  navigateTo(active, url);
 });
 
 el.back.addEventListener('click', () => send('navigate', { tab: active, action: 'back' }));
@@ -367,11 +619,7 @@ el.forward.addEventListener('click', () => send('navigate', { tab: active, actio
 el.reload.addEventListener('click', () => send('navigate', { tab: active, action: 'reload' }));
 el.bookmark.addEventListener('click', () => {
   const tab = tabs.get(active);
-  if (!tab) return;
-  void store.readBookmarks().then((marks) => {
-    marks.push({ title: tab.title || tab.url, url: tab.url });
-    return store.writeBookmarks(marks);
-  });
+  if (tab) addBookmark(tab.title, tab.url);
 });
 
 // ------------------------------------------------------------------- the HUD
