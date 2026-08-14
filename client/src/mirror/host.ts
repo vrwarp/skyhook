@@ -21,6 +21,9 @@ const MIRROR_CSS = `
 html, body { margin: 0; padding: 0; background: #fff; color: #111; }
 .skyhook-ghost { opacity: .55; font-style: italic; }
 img { background-repeat: no-repeat; background-size: cover; }
+/* An iframe's inlined document, rendered into the box that stands in for it. */
+[data-skyhook-tag="iframe"] { display: block; overflow: hidden; }
+[data-skyhook-tag="iframe"] html, [data-skyhook-tag="iframe"] body { display: block; }
 [data-skyhook-static] {
   background: repeating-linear-gradient(45deg, #eee, #eee 8px, #e5e5e5 8px, #e5e5e5 16px);
 }
@@ -39,6 +42,35 @@ export function imageURL(hash: string): string {
   return `/img/${hash}`;
 }
 
+/**
+ * Gives an image its box before its bytes exist.
+ *
+ * Until the bitmap arrives the frame holds a 1x1 transparent placeholder, and
+ * an <img> with no dimensions is one line tall. Every image that lands then
+ * pushes the text below it down the page — the reader loses their place once
+ * per image. The agent sets width and height from the rendered layout box when
+ * it has one; this covers the images it did not, using the size the transcoder
+ * reports, and states the aspect ratio so a CSS-sized image reserves the right
+ * height instead of the right pixels.
+ */
+function reserveSpace(el: HTMLImageElement, meta: ImageMeta | undefined): void {
+  if (!meta?.w || !meta.h) return;
+  if (!el.hasAttribute('width') && !el.hasAttribute('height')) {
+    el.setAttribute('width', String(meta.w));
+    el.setAttribute('height', String(meta.h));
+  }
+  if (!el.style.aspectRatio) el.style.aspectRatio = `${meta.w} / ${meta.h}`;
+}
+
+/** How close to the end still counts as "following along". */
+const BOTTOM_SLACK = 64;
+
+/** True when a scroller is parked at its end, where new content should follow. */
+function atBottom(top: number, view: number, total: number): boolean {
+  if (!total || !view) return false;
+  return top + view >= total - BOTTOM_SLACK;
+}
+
 export class MirrorHost {
   readonly tab: number;
   readonly frame: HTMLIFrameElement;
@@ -51,6 +83,18 @@ export class MirrorHost {
   private pendingImages = new Map<string, HTMLImageElement[]>();
   private ready: Promise<void>;
   private scrollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** URL of the document currently rendered, so a resync is distinguishable
+   *  from a navigation. */
+  private url = '';
+  /** Scrollers the reader has moved themselves. The server never moves these
+   *  again unless they are pinned to the bottom. */
+  private readerMoved = new WeakSet<Node>();
+  private readerMovedDoc = false;
+  /** The last position this host set programmatically, per scroller. A scroll
+   *  event landing on exactly this position is ours, not the reader's; the
+   *  event is asynchronous, so a flag would be cleared before it arrives. */
+  private adoptedDoc: { x: number; y: number } = { x: -1, y: -1 };
+  private adopted = new WeakMap<Node, { x: number; y: number }>();
 
   constructor(tab: number, events: HostEvents) {
     this.tab = tab;
@@ -93,17 +137,13 @@ export class MirrorHost {
       onImage: (el, meta, hash) => this.applyImage(el, meta, hash),
       onFocus: (node) => {
         if (this.echo?.ownedId) return;
-        (node as HTMLElement | null)?.focus?.();
+        // preventScroll matters more here than it looks: focusing an element
+        // scrolls it into view by default, so a landside focus change — a click
+        // landing on a control, page script focusing a search box — would throw
+        // the reader to wherever that element happens to be.
+        (node as HTMLElement | null)?.focus?.({ preventScroll: true });
       },
-      onScroll: (node, x, y) => {
-        if (!node) {
-          this.frame.contentWindow?.scrollTo(x, y);
-          return;
-        }
-        const el = node as HTMLElement;
-        el.scrollLeft = x;
-        el.scrollTop = y;
-      },
+      onScroll: (node, x, y) => this.followScroll(node, x, y),
       onApplied: (seq) => {
         this.lastSeq = seq;
         this.events.applied(this.tab, seq, this.patcher?.docHash() ?? 0);
@@ -145,12 +185,18 @@ export class MirrorHost {
     doc.addEventListener('click', (ev) => {
       const target = ev.target as HTMLElement | null;
       if (!target) return;
-      const anchor = target.closest?.('a[href]') as HTMLAnchorElement | null;
+      const anchor = target.closest?.('a[href], area[href]') as HTMLAnchorElement | null;
+      // The mirror never navigates itself: a click is a semantic event the
+      // server replays into the real page. This has to happen before anything
+      // that can bail out. A link the patcher cannot place — one under local
+      // echo, one left over from a batch that did not apply — would otherwise
+      // follow itself, and the consequences are not cosmetic: the frame fetches
+      // the URL from the plane side, which is the one thing this client must
+      // never do, and lands on a cross-origin document that the patcher can no
+      // longer touch, which kills the tab for the rest of the session.
+      if (anchor) ev.preventDefault();
       const node = this.patcher?.idOf(anchor ?? target) ?? 0;
       if (!node) return;
-      // The mirror never navigates itself: a click is a semantic event the
-      // server replays into the real page.
-      ev.preventDefault();
       this.send({
         kind: InputKind.Click,
         node,
@@ -189,6 +235,9 @@ export class MirrorHost {
 
     const win = this.frame.contentWindow;
     win?.addEventListener('scroll', () => {
+      if (win.scrollX !== this.adoptedDoc.x || win.scrollY !== this.adoptedDoc.y) {
+        this.readerMovedDoc = true;
+      }
       if (this.scrollTimer) return;
       this.scrollTimer = setTimeout(() => {
         this.scrollTimer = null;
@@ -201,6 +250,63 @@ export class MirrorHost {
         });
       }, 250);
     }, { passive: true });
+
+    // Scroll events do not bubble, but they do reach a capturing listener on
+    // the document, which is how a scrolled container is noticed at all.
+    doc.addEventListener('scroll', (ev) => {
+      const target = ev.target as Node | null;
+      // The document's own scroll arrives here too; the window listener above
+      // owns that one.
+      if (!target || target.nodeType !== Node.ELEMENT_NODE) return;
+      const el = target as HTMLElement;
+      if (el === doc.documentElement) return;
+      const mine = this.adopted.get(el);
+      if (!mine || mine.x !== el.scrollLeft || mine.y !== el.scrollTop) this.readerMoved.add(el);
+    }, { capture: true, passive: true });
+  }
+
+  // ------------------------------------------------------------------ scroll
+
+  /**
+   * Applies a scroll position the server reported.
+   *
+   * The reader owns the viewport. Landside scrolling happens for reasons that
+   * have nothing to do with them — the server nudges the real page to keep lazy
+   * loading working, and page script scrolls itself — and none of that is a
+   * reason to move someone who is reading. So a server scroll is applied only
+   * when the reader has not taken this scroller over, or when they are sitting
+   * at the bottom of it, which is the one place following along is the point
+   * (a chat log, a live feed).
+   */
+  private followScroll(node: Node | null, x: number, y: number): void {
+    if (!node) {
+      const win = this.frame.contentWindow;
+      if (!win) return;
+      if (this.readerMovedDoc && !atBottom(
+        win.scrollY, win.innerHeight, this.doc?.documentElement.scrollHeight ?? 0)) {
+        return;
+      }
+      this.scrollDocTo(x, y);
+      return;
+    }
+    const el = node as HTMLElement;
+    if (typeof el.scrollTop !== 'number') return;
+    if (this.readerMoved.has(el) && !atBottom(el.scrollTop, el.clientHeight, el.scrollHeight)) {
+      return;
+    }
+    el.scrollLeft = x;
+    el.scrollTop = y;
+    this.adopted.set(el, { x: el.scrollLeft, y: el.scrollTop });
+  }
+
+  /** Scrolls the mirrored document, recording the position as ours. */
+  private scrollDocTo(x: number, y: number): void {
+    const win = this.frame.contentWindow;
+    if (!win) return;
+    win.scrollTo(x, y);
+    // Read back rather than trusting the request: the position is clamped to
+    // the document, and the clamped value is what the scroll event will carry.
+    this.adoptedDoc = { x: win.scrollX, y: win.scrollY };
   }
 
   /** Sends a form submission for a clicked submit control. */
@@ -247,8 +353,25 @@ export class MirrorHost {
   applySnapshot(snap: Snapshot): void {
     if (!this.patcher) return;
     this.echo?.release();
+    // A snapshot for the document already on screen is a resync — the server
+    // closing a gap it could not close with diffs — and the reader should not
+    // be able to tell it happened. Only a genuine navigation adopts the
+    // landside scroll position, which is what carries a #fragment target.
+    const win = this.frame.contentWindow;
+    const resync = !!snap.url && snap.url === this.url;
+    const keep = { x: win?.scrollX ?? 0, y: win?.scrollY ?? 0 };
+    this.url = snap.url ?? '';
+
     this.patcher.applySnapshot(snap);
-    this.frame.contentWindow?.scrollTo(snap.scrollX, snap.scrollY);
+
+    if (resync) {
+      this.scrollDocTo(keep.x, keep.y);
+    } else {
+      this.readerMovedDoc = false;
+      this.readerMoved = new WeakSet();
+      this.adopted = new WeakMap();
+      this.scrollDocTo(snap.scrollX, snap.scrollY);
+    }
     this.requestPendingImages();
   }
 
@@ -278,7 +401,9 @@ export class MirrorHost {
     this.pendingImages.delete(hash);
     const url = imageURL(hash);
     for (const el of waiting) {
-      el.removeAttribute('src');
+      // Straight to the busted URL: clearing src first would leave the element
+      // with no image for a frame, and an image with no image is a hole the
+      // page closes up and then reopens.
       el.setAttribute('src', `${url}?v=1`);
       el.style.backgroundImage = '';
     }
@@ -286,6 +411,7 @@ export class MirrorHost {
 
   private applyImage(el: HTMLImageElement, meta: ImageMeta | undefined, hash: string): void {
     if (!hash) return;
+    reserveSpace(el, meta);
     if (meta?.blur && !el.dataset.skyhookBlur) {
       el.dataset.skyhookBlur = '1';
       // A page of grey boxes is what a mirror feels like without this, and the
@@ -332,8 +458,12 @@ export class MirrorHost {
 
   private retireGhosts(): void {
     if (!this.doc) return;
+    const ghosts = Array.from(this.doc.querySelectorAll('[data-skyhook-ghost]'));
+    // Serialising the whole document costs half a megabyte on a big page, and
+    // this runs after every batch. There is almost never a ghost to retire.
+    if (!ghosts.length) return;
     const body = this.doc.body.textContent ?? '';
-    for (const el of Array.from(this.doc.querySelectorAll('[data-skyhook-ghost]'))) {
+    for (const el of ghosts) {
       const text = el.getAttribute('data-skyhook-ghost') ?? '';
       // Once the authoritative copy arrives the text appears twice; the ghost
       // has done its job.

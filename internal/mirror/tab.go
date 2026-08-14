@@ -93,8 +93,14 @@ type Tab struct {
 	title   string
 	loading bool
 	closed  bool
-	chunks  map[int][]string
-	chunkN  map[int]int
+	// canBack and canForward are held here for the same reason url and title
+	// are: most state frames are partial, and a partial frame that left these
+	// out would read on the client as "there is no history", disabling the back
+	// button for the rest of the session.
+	canBack    bool
+	canForward bool
+	chunks     map[int][]string
+	chunkN     map[int]int
 	// cookies is the Cookie header the image fetcher reuses, so authenticated
 	// avatars and attachments resolve the way they do for the page.
 	cookies string
@@ -242,8 +248,33 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		if err := t.ensureWorld(ctx); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
 		}
+		if _, err := t.eval(ctx, resnapshotIfSettled); err != nil {
+			t.log.Debug("post-navigation snapshot check failed", "tab", t.ID, "err", err)
+		}
+		// History moves at navigation time, not at load time; refreshing here
+		// means the back button is right while the page is still arriving.
+		t.refreshState(ctx)
 	}()
 }
+
+// resnapshotIfSettled re-mirrors a document that navigation delivered already
+// finished.
+//
+// Going back to a page Chromium kept in its back/forward cache does not create
+// a document: nothing re-runs, no DOMContentLoaded fires, and the agent that
+// came back with the page still believes it has mirrored what is on screen. It
+// has — but the client was shown a different page in between, and without this
+// nothing ever tells it otherwise. The reader is left looking at the page they
+// navigated away from, and since no diff can express "you have the wrong
+// document", not even the integrity check can talk them out of it.
+//
+// A navigation to a document that is still parsing is the ordinary case and is
+// left alone: the agent snapshots itself when the parse finishes.
+const resnapshotIfSettled = `(function () {
+  if (!globalThis.__skyhook) return false;
+  if (document.readyState === 'loading') return false;
+  return __skyhook.snapshot();
+})()`
 
 func (t *Tab) onLoad() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -593,6 +624,8 @@ func (t *Tab) emitState(st protocol.TabState) {
 		st.Title = t.title
 	}
 	st.Loading = t.loading || st.Loading
+	st.CanBack = t.canBack
+	st.CanForward = t.canForward
 	t.mu.Unlock()
 	f, err := protocol.NewFrame(protocol.TypeTabState, t.ID, st)
 	if err != nil {
@@ -612,10 +645,11 @@ func (t *Tab) refreshState(ctx context.Context) {
 	if err := t.sess.Do(ctx, "Page.getNavigationHistory", nil, &hist); err != nil {
 		return
 	}
-	st := protocol.TabState{
-		CanBack:    hist.CurrentIndex > 0,
-		CanForward: hist.CurrentIndex < len(hist.Entries)-1,
-	}
+	t.mu.Lock()
+	t.canBack = hist.CurrentIndex > 0
+	t.canForward = hist.CurrentIndex < len(hist.Entries)-1
+	t.mu.Unlock()
+	var st protocol.TabState
 	if hist.CurrentIndex >= 0 && hist.CurrentIndex < len(hist.Entries) {
 		st.URL = hist.Entries[hist.CurrentIndex].URL
 		st.Title = hist.Entries[hist.CurrentIndex].Title

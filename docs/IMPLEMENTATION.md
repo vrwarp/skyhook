@@ -184,6 +184,79 @@ writer implements strict priority across four queues instead (ctrl/input, dom,
 media, bulk), which gives the same ordering guarantee at the point where it
 matters: nothing gets written to the socket ahead of a DOM diff.
 
+### 10. The reader owns the viewport; landside scroll is never adopted
+
+The design has `scroll` telemetry flowing plane-side → landside to drive lazy
+loading and infinite scroll, and the agent reporting landside scroll positions
+back as ops. Wiring both directions up as described produces a feedback loop:
+the client reports where the reader is, the server scrolls the real page there,
+the agent reports the real page's new position, and the client applies it. The
+landside position is never exactly the reader's — different document height,
+different image sizes — so every round trip displaced the reader by the error,
+and a page that was merely being read scrolled itself to the bottom at roughly
+a viewport every second.
+
+Telemetry still flows landside, because lazy loading genuinely needs it. What
+changed is that the return path is no longer authoritative:
+
+- the agent does not report scroll positions it produced itself (`ownScroll`),
+  which is also a small saving on the wire;
+- the client applies a server scroll only to a scroller the reader has not
+  moved, or one they are parked at the bottom of — following a chat log to its
+  tail is the one case where being moved is the point;
+- landside focus is applied with `preventScroll`, since focusing an element
+  scrolls it into view and a landside focus change is not a request to move the
+  reader;
+- a snapshot for the URL already on screen is treated as a resync and keeps the
+  reader's scroll position, rather than adopting the landside one. Only a real
+  navigation adopts it, which is what carries a `#fragment` target.
+
+The mapping the server sends is a fraction of the *scrollable range* rather than
+of document height, so the top stays the top and the bottom stays the bottom —
+an infinite list still only fetches when the reader is genuinely at the end.
+
+`test/stability_test.go` pins all of this in the real client.
+
+### 11. A same-origin iframe is rendered into a substitute element
+
+The design has the agent inline same-origin frames, and it does. The client
+cannot materialise the `<iframe>` that held them: an iframe is a browsing
+context, and a browsing context fetches things, which is the one thing the
+plane side never does. So the patcher builds an inert element carrying the
+original name in `data-skyhook-tag`, and the frame's inlined document renders
+inside it.
+
+Substituting rather than dropping matters for three separate reasons, all of
+which were live bugs:
+
+- a dropped element takes its subtree with it, so the frame's whole document
+  was missing from the mirror;
+- a dropped element leaves the client's node ids out of step with the agent's,
+  which the integrity check reads as divergence;
+- the CSS that sized the real frame selects on `iframe` and cannot match the
+  substitute, so the agent sends the frame's rendered box as `data-sky-box` and
+  the client applies it directly.
+
+Two things about frames are still not what a browser does. A cross-origin frame
+cannot be read at all and renders as an empty box of the right size. And a frame
+that navigates is picked up by a `load` hook that re-snapshots the document,
+which is blunt: nothing about a document being replaced reaches the
+MutationObserver watching the old one, so there is no diff to send.
+
+### 12. The document hash is a three-way contract, and was wrong
+
+`__skyhook.docHash`, `Model.Hash` and `Patcher.docHash` are three
+implementations of one function, and the server treats any disagreement as
+proof the mirror has diverged — then re-snapshots the whole document. The agent's
+copy multiplied with `*` rather than `Math.imul`, so above 2^29 the FNV product
+needed more than a double's 53 bits and the low bits were rounded away, and it
+walked a `Map` in insertion order where the others sort by id. It therefore
+disagreed with both on essentially every page, and every session re-sent every
+document every thirty seconds for as long as it was open.
+
+`test/integrity_test.go` now pins agent against replica, and the real client's
+reported hash against the agent, on a plain page and on one with a frame.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

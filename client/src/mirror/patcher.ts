@@ -8,18 +8,32 @@
  *
  * Nothing here parses HTML. Nodes are constructed one at a time, so a <script>
  * element that somehow reached us would be created detached from any parser and
- * never run — and the sanitiser below drops it anyway. That is defence in
- * depth: the document this patches lives in a sandboxed frame with script
- * execution disabled by the browser (see mirror/host.ts).
+ * never run — and the sanitiser below never constructs one in the first place,
+ * substituting an inert element instead. That is defence in depth: the document
+ * this patches lives in a sandboxed frame with script execution disabled by the
+ * browser (see mirror/host.ts).
  */
 import {
   ImageMeta, MirrorNode, Mutation, NodeFlags, NodeKind, OpCode, Snapshot,
 } from '../shared/protocol.js';
 
-/** Tags that are never materialised, whatever the server says. */
+/**
+ * Tags that are never materialised, whatever the server says.
+ *
+ * They are substituted, not dropped. A dropped node takes its whole subtree
+ * with it — which is how same-origin iframes, whose documents the agent inlines
+ * as children, used to lose all their content — and leaves the client's node
+ * ids out of step with the server's, so the integrity check reports a
+ * divergence that is not one and resyncs forever. The substitute is an inert
+ * element carrying the original name in `data-skyhook-tag`, so the subtree
+ * renders, the ids line up, and nothing that could execute is ever constructed.
+ */
 const FORBIDDEN_TAGS = new Set([
   'script', 'noscript', 'iframe', 'object', 'embed', 'applet', 'link', 'meta', 'base',
 ]);
+
+/** What a forbidden tag is materialised as instead. */
+const SUBSTITUTE_TAG = 'div';
 
 /** Attributes dropped on arrival: nothing in a mirror needs to run code. */
 const FORBIDDEN_ATTR_PREFIX = 'on';
@@ -49,6 +63,9 @@ export class Patcher {
   private strings: string[] = [];
   private nodes = new Map<number, Node>();
   private ids = new WeakMap<Node, number>();
+  /** Element names as the server sent them, which is what the document hash is
+   *  computed over — see createNode. */
+  private names = new Map<number, string>();
   private styleEl: HTMLStyleElement | null = null;
   private cssRules: string[] = [];
   private hooks: PatcherHooks;
@@ -89,21 +106,22 @@ export class Patcher {
     this.strings = snap.strings.slice();
     this.nodes = new Map();
     this.ids = new WeakMap();
+    this.names = new Map();
     this.images = new Map();
     this.seq = 0;
     for (const im of snap.images) this.images.set(im.hash, im);
 
     const body = this.doc.body;
     if (!body) return;
-    body.textContent = '';
     this.ensureStyleElement();
     this.cssRules = [];
     this.setCSS(snap.css);
 
+    // Built detached and swapped in whole. Appending thousands of nodes into
+    // the live document lays out the page again after every one of them, and
+    // on a resync the reader watches their page empty itself and refill.
     const container = this.doc.createElement('div');
     container.setAttribute('data-skyhook-root', '1');
-    this.root = container;
-    body.appendChild(container);
 
     for (const n of snap.nodes) {
       const el = this.createNode(n);
@@ -112,6 +130,8 @@ export class Patcher {
       if (!parent) continue;
       parent.appendChild(el);
     }
+    this.root = container;
+    body.replaceChildren(container);
     this.doc.title = snap.title || this.doc.title;
     this.hooks.onApplied?.(0);
   }
@@ -231,16 +251,22 @@ export class Patcher {
         node = this.doc.createTextNode(this.str(n.ref));
         break;
       case NodeKind.Doctype:
-        return null; // a doctype inside a container would be invalid anyway
+        // A doctype inside a container would be invalid, so it becomes a
+        // comment: renders as nothing, but still holds its id, which is what
+        // keeps this document's fingerprint equal to the agent's.
+        node = this.doc.createComment('');
+        this.names.set(n.id, '');
+        break;
       case NodeKind.Element: {
         const tag = (this.str(n.ref) || 'div').toLowerCase();
-        if (FORBIDDEN_TAGS.has(tag)) return null;
+        const forbidden = FORBIDDEN_TAGS.has(tag);
         let el: Element;
         try {
-          el = this.doc.createElement(tag);
+          el = this.doc.createElement(forbidden ? SUBSTITUTE_TAG : tag);
         } catch {
-          el = this.doc.createElement('div');
+          el = this.doc.createElement(SUBSTITUTE_TAG);
         }
+        if (forbidden) el.setAttribute('data-skyhook-tag', tag);
         for (let i = 0; i + 1 < n.attrs.length; i += 2) {
           this.setAttr(el, this.str(n.attrs[i]), this.str(n.attrs[i + 1]));
         }
@@ -250,6 +276,10 @@ export class Patcher {
         if (n.flags & NodeFlags.Editable) {
           el.setAttribute('data-skyhook-editable', '1');
         }
+        // Hashing has to use the name the server sent, not the name of what was
+        // built: the server compares this document's fingerprint against the
+        // agent's, and a substitution is not a divergence.
+        this.names.set(n.id, tag);
         node = el;
         break;
       }
@@ -289,6 +319,16 @@ export class Patcher {
     } catch {
       return;
     }
+    // The rendered box of something that had to be substituted — an iframe —
+    // stated in pixels, because the CSS that sized the original selects on a
+    // tag name this element no longer has.
+    if (lower === 'data-sky-box') {
+      const [w, h] = value.split('x');
+      const style = (el as HTMLElement).style;
+      if (w) style.width = `${Number(w)}px`;
+      if (h) style.height = `${Number(h)}px`;
+      return;
+    }
     // Live form state arrives as a data attribute so a resync restores what was
     // typed; reflect it onto the property the browser actually renders.
     if (lower === 'data-sky-value') {
@@ -306,6 +346,7 @@ export class Patcher {
     if (id !== undefined) {
       this.nodes.delete(id);
       this.ids.delete(node);
+      this.names.delete(id);
     }
     for (let c = node.firstChild; c; c = c.nextSibling) this.forget(c);
   }
@@ -352,7 +393,7 @@ export class Patcher {
       if (!node) continue;
       const v = node.nodeType === Node.TEXT_NODE
         ? node.nodeValue ?? ''
-        : (node as Element).tagName?.toLowerCase() ?? '';
+        : this.names.get(id) ?? (node as Element).tagName?.toLowerCase() ?? '';
       h ^= id & 0xff;
       h = Math.imul(h, 16777619) >>> 0;
       for (let i = 0; i < v.length && i < 32; i++) {
