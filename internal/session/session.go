@@ -127,6 +127,9 @@ func (s *Session) Online() bool {
 	return c != nil && c.conn != nil
 }
 
+// Created reports when the session was opened.
+func (s *Session) Created() time.Time { return s.created }
+
 // LastSeen reports when the client last spoke to us.
 func (s *Session) LastSeen() time.Time {
 	s.mu.Lock()
@@ -141,21 +144,27 @@ func (s *Session) touch() {
 }
 
 // drainOffline discards queued traffic that is not worth delivering late.
+// Media is expendable across an outage — by the time the link returns, the page
+// has usually moved on — while ctrl and dom traffic is small and still wanted.
 func (s *Session) drainOffline() {
 	for _, q := range s.sendQ {
+		keep := make([]outbound, 0, len(q))
+	drain:
 		for {
 			select {
 			case m := <-q:
 				if !m.dropIfOffline {
-					// Put ctrl-class traffic back; it is small and matters.
-					select {
-					case q <- m:
-					default:
-					}
+					keep = append(keep, m)
 				}
 			default:
+				break drain
 			}
-			break
+		}
+		for _, m := range keep {
+			select {
+			case q <- m:
+			default:
+			}
 		}
 	}
 }

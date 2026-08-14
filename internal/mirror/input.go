@@ -428,7 +428,7 @@ func urlQueryEscape(s string) string {
 		case r == ' ':
 			b.WriteByte('+')
 		default:
-			b.WriteString(fmt.Sprintf("%%%02X", r))
+			fmt.Fprintf(&b, "%%%02X", r)
 		}
 	}
 	return b.String()

@@ -345,7 +345,8 @@ func (m *Manager) janitor() {
 		}
 		m.mu.Unlock()
 		for _, s := range expired {
-			m.log.Info("session expired", "session", s.ID)
+			m.log.Info("session expired",
+				"session", s.ID, "age", time.Since(s.Created()).Round(time.Second))
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			s.Close(ctx)
 			cancel()

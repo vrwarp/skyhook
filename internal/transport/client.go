@@ -26,7 +26,10 @@ func DialWS(ctx context.Context, url string, insecure bool) (Conn, error) {
 	if insecure {
 		d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // pinned personal server
 	}
-	c, _, err := d.DialContext(ctx, url, nil)
+	c, resp, err := d.DialContext(ctx, url, nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		return nil, err
 	}

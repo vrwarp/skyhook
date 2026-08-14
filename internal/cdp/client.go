@@ -88,7 +88,11 @@ func Dial(ctx context.Context, wsURL string, log *slog.Logger) (*Client, error) 
 	// Runtime.evaluate results are not).
 	d.ReadBufferSize = 1 << 20
 	d.WriteBufferSize = 1 << 20
-	conn, _, err := d.DialContext(ctx, wsURL, nil)
+	conn, resp, err := d.DialContext(ctx, wsURL, nil)
+	if resp != nil && resp.Body != nil {
+		// The handshake response body is empty but still a live connection.
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -286,10 +290,10 @@ func (c *Client) Session(sessionID, targetID string) *Session {
 
 // Do calls a method on this session.
 func (s *Session) Do(ctx context.Context, method string, params, out any) error {
-	return s.Client.Call(ctx, s.ID, method, params, out)
+	return s.Call(ctx, s.ID, method, params, out)
 }
 
 // Subscribe registers a handler scoped to this session.
 func (s *Session) Subscribe(method string, h EventHandler) {
-	s.Client.On(s.ID, method, h)
+	s.On(s.ID, method, h)
 }

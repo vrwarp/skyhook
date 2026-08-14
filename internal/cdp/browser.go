@@ -233,7 +233,7 @@ func (b *Browser) Close() error {
 			// Ask politely first so the profile is flushed cleanly; cookies we
 			// lose here are logins we have to redo on the ground.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = b.Client.Call(ctx, "", "Browser.close", nil, nil)
+			_ = b.Call(ctx, "", "Browser.close", nil, nil)
 			cancel()
 			_ = b.Client.Close()
 		}

@@ -23,7 +23,8 @@ linters:
         - name: exported
           disabled: true
     misspell:
-      locale: UK
+      # No locale is set on purpose: catching real typos is useful, forcing one
+      # side of colour/color across CSS strings and identifiers is not.
   exclusions:
     rules:
       # Tests exercise error paths deliberately and read fixtures by path.
