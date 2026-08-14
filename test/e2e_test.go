@@ -358,6 +358,10 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		UserDataDir: t.TempDir(),
 		Headless:    true,
 		Logger:      log,
+		// The same variable the server reads, for the same reason: a landside
+		// browser behind a proxy has to be told about it, and these tests drive
+		// a landside browser.
+		ExtraArgs: strings.Fields(os.Getenv("SKYHOOK_CHROME_ARGS")),
 	})
 	if err != nil {
 		t.Fatalf("launch chromium: %v", err)

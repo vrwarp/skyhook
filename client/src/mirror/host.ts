@@ -138,6 +138,9 @@ export class MirrorHost {
   private pendingImages = new Map<string, HTMLImageElement[]>();
   /** Object URLs handed to the frame, by content hash. Revoked with the tab. */
   private blobs = new Map<string, string>();
+  /** Hashes already looked for in the local cache, so a redraw does not ask
+   *  again for bytes that have not crossed the link yet. */
+  private probed = new Set<string>();
   private ready: Promise<void>;
   private scrollTimer: ReturnType<typeof setTimeout> | null = null;
   /** URL of the document currently rendered, so a resync is distinguishable
@@ -775,8 +778,13 @@ export class MirrorHost {
     if (!list.includes(el)) list.push(el);
     this.pendingImages.set(hash, list);
     // The bytes may already be in the cache from an earlier flight, in which
-    // case nothing will ever announce them.
-    this.imageArrived(hash);
+    // case nothing will ever announce them. Once per hash: a page of 125
+    // images redrawn on every mutation batch would otherwise ask 125 times a
+    // second for bytes that are not there yet.
+    if (!this.probed.has(hash)) {
+      this.probed.add(hash);
+      this.imageArrived(hash);
+    }
   }
 
   private requestPendingImages(): void {
@@ -835,6 +843,7 @@ export class MirrorHost {
   private releaseBlobs(): void {
     for (const url of this.blobs.values()) URL.revokeObjectURL(url);
     this.blobs.clear();
+    this.probed.clear();
   }
 
   destroy(): void {
