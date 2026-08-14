@@ -41,6 +41,9 @@ const progress = new Map<number, TabProgress>();
 const outbox: Map<number, unknown>[] = [];
 let online = false;
 let keepalive: ReturnType<typeof setInterval> | null = null;
+let statsTick: ReturnType<typeof setInterval> | null = null;
+/** The last stats the server sent; queue depth and loss are only knowable there. */
+let serverStats: Record<string, unknown> = {};
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = 500;
 
@@ -60,6 +63,10 @@ async function connect(): Promise<void> {
     onClose: (reason) => {
       if (!online) return;
       online = false;
+      if (statsTick) {
+        clearInterval(statsTick);
+        statsTick = null;
+      }
       post('status', { online: false, kind: 'none', reason });
       scheduleReconnect();
     },
@@ -101,6 +108,16 @@ function sendHello(): void {
   })));
 }
 
+/**
+ * Publishes the HUD's numbers. Bytes come from this side, because they are the
+ * bytes that actually crossed the link and because the server only speaks on
+ * its keepalive — a byte counter that moves once every fifteen seconds reads as
+ * broken, which is the opposite of what the HUD is for.
+ */
+function publishStats(): void {
+  post('stats', { ...serverStats, ...transport?.stats() });
+}
+
 async function send(channel: Channel, payload: Uint8Array): Promise<void> {
   if (!transport || !online) return;
   try {
@@ -133,9 +150,16 @@ function handleMessage(msg: Uint8Array): void {
         }
       }
       if (keepalive) clearInterval(keepalive);
-      keepalive = setInterval(() => {
+      const ping = (): void => {
         void send(Channel.Ctrl, encodeFrame(FrameType.Ping, 0));
-      }, w.keepaliveMs || 15000);
+      };
+      // The server answers a ping with stats, so without this first one the HUD
+      // shows no round trip and no bytes for a full keepalive interval — while
+      // someone is staring at it to find out whether the link is working.
+      ping();
+      keepalive = setInterval(ping, w.keepaliveMs || 15000);
+      if (statsTick) clearInterval(statsTick);
+      statsTick = setInterval(publishStats, 2000);
       break;
     }
     case FrameType.Snapshot:
@@ -183,7 +207,8 @@ function handleMessage(msg: Uint8Array): void {
       break;
     }
     case FrameType.Stats:
-      post('stats', { ...decodeStats(frame.body), ...transport?.stats() });
+      serverStats = decodeStats(frame.body) as unknown as Record<string, unknown>;
+      publishStats();
       break;
     case FrameType.Error:
       post('log', { message: `server error: ${JSON.stringify(decodeError(frame.body))}` });

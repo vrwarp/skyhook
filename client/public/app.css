@@ -107,6 +107,10 @@ body {
   flex-direction: column;
 }
 
+/* An id selector outranks the user agent's [hidden] rule, so the panel needs to
+   be told to stay shut; without this it opens on load and never closes. */
+#panel[hidden] { display: none; }
+
 #panel-header {
   display: flex;
   justify-content: space-between;
