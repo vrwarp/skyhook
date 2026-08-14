@@ -158,9 +158,9 @@ func (s *Session) freezeTabs() []frozenTab {
 		page := ts.tab
 		f.url = ts.openURL
 		s.mu.Unlock()
-		// A tab announced but not yet built has no page to ask. Say where it
-		// was headed and leave the rest empty rather than leaving it out: "a
-		// tab was still opening" is exactly what a capture is taken to find.
+		// A tab announced but not yet built has no page to ask. Say where it was
+		// headed and leave the rest empty rather than leaving it out: "a tab was
+		// still opening" is exactly the sort of thing a capture is taken to find.
 		if page != nil {
 			f.seq, f.url, f.title = page.Seq(), page.URL(), page.Title()
 		}
@@ -394,8 +394,8 @@ func (c *capture) gatherTab(f *frozenTab) {
 	s := c.sess
 	s.mu.Lock()
 	ts := s.tabs[f.id]
-	// The page, not just the tab: one that has been announced but whose page is
-	// still being built has nothing to answer questions with yet.
+	// The page, not just the tab: a tab that has been announced but whose page
+	// is still being built has nothing to answer questions with yet.
 	var page *mirror.Tab
 	if ts != nil {
 		page = ts.tab
