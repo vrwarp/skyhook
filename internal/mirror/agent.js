@@ -1,0 +1,771 @@
+/* Skyhook mirror agent.
+ *
+ * Runs landside, inside an isolated world of every mirrored page. Page
+ * JavaScript can neither see nor break it, and it in turn never touches page
+ * globals. Responsibilities:
+ *
+ *   - serialise the document into an interned snapshot,
+ *   - observe mutations and emit compact ops (including moves and text splices,
+ *     which is what keeps React reorders and chat-log appends cheap),
+ *   - extract only the CSS rules that actually match something,
+ *   - report images at their rendered layout size,
+ *   - resolve node ids back to elements for input replay.
+ *
+ * Output goes through a CDP binding as chunked JSON. The host process converts
+ * it to CBOR; JSON never reaches the wire.
+ */
+(function () {
+  'use strict';
+  if (globalThis.__skyhook && globalThis.__skyhook.version === 1) return;
+
+  var SEND = globalThis.__skyhookSend;
+  if (typeof SEND !== 'function') {
+    // Binding not installed yet; the host retries after Runtime.addBinding.
+    return;
+  }
+
+  var CHUNK = 256 * 1024;
+  var MUTATION_BATCH_MS = 100;
+  var CSS_DEBOUNCE_MS = 400;
+  var SCROLL_THROTTLE_MS = 250;
+
+  var KIND_ELEMENT = 1, KIND_TEXT = 3, KIND_DOCTYPE = 10;
+  var FLAG_EDITABLE = 1, FLAG_IMAGE = 2, FLAG_SCROLL = 4, FLAG_SHADOW = 8, FLAG_CANVAS = 16;
+
+  // Tags never mirrored: they either carry code, or carry styling we ship
+  // separately as used-CSS.
+  var SKIP_TAGS = {
+    SCRIPT: 1, NOSCRIPT: 1, STYLE: 1, LINK: 1, META: 1, BASE: 1, TEMPLATE: 1,
+    OBJECT: 1, EMBED: 1, APPLET: 1
+  };
+  var CANVAS_TAGS = { CANVAS: 1, VIDEO: 1, AUDIO: 1 };
+  var VOID_IMAGE_TAGS = { IMG: 1, IMAGE: 1 };
+  // Attributes dropped: event handlers, integrity/nonce metadata, and the
+  // responsive-image machinery we replace with one server-chosen rendition.
+  var SKIP_ATTRS = {
+    srcset: 1, sizes: 1, integrity: 1, nonce: 1, crossorigin: 1, ping: 1,
+    'http-equiv': 1, manifest: 1
+  };
+  var URL_ATTRS = { href: 1, src: 1, action: 1, poster: 1, formaction: 1, cite: 1, data: 1 };
+
+  var nextId = 1;
+  var idOf = new WeakMap();     // node -> id
+  var byId = new Map();         // id -> node
+  var strings = [];             // intern table
+  var stringIndex = new Map();
+  var pendingStrings = [];      // interned since the last flush
+  var seq = 0;
+
+  var observers = [];
+  var observedDocs = new Set();
+  var pendingOps = [];
+  var pendingImages = [];
+  var flushTimer = null;
+  var cssTimer = null;
+  var emittedCSS = new Map();   // rule text -> index
+  var cssOrder = [];
+  var lastText = new Map();     // id -> last text we reported
+  var lastScroll = new Map();
+  var scrollTimer = null;
+  var focusedId = 0;
+  var started = false;
+  var snapshotDone = false;
+  var msgSeq = 0;
+
+  // ---------------------------------------------------------------- utilities
+
+  function intern(s) {
+    if (s === null || s === undefined) return -1;
+    if (typeof s !== 'string') s = String(s);
+    var i = stringIndex.get(s);
+    if (i !== undefined) return i;
+    i = strings.length;
+    strings.push(s);
+    stringIndex.set(s, i);
+    pendingStrings.push(s);
+    return i;
+  }
+
+  function idFor(node) {
+    var id = idOf.get(node);
+    if (id === undefined) {
+      id = nextId++;
+      idOf.set(node, id);
+      byId.set(id, node);
+    }
+    return id;
+  }
+
+  function forget(node) {
+    var id = idOf.get(node);
+    if (id !== undefined) {
+      byId.delete(id);
+      idOf.delete(node);
+      lastText.delete(id);
+      lastScroll.delete(id);
+    }
+    var kids = node.childNodes;
+    if (kids) for (var i = 0; i < kids.length; i++) forget(kids[i]);
+    if (node.shadowRoot) forget(node.shadowRoot);
+  }
+
+  function absolute(base, url) {
+    if (!url) return url;
+    try { return new URL(url, base).href; } catch (e) { return url; }
+  }
+
+  // fnv1a32 gives a stable image key the host can recompute in Go without a
+  // round trip, and without paying for SubtleCrypto's async API here.
+  function fnv1a(str) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i) & 0xff;
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+      if (str.charCodeAt(i) > 0xff) {
+        h ^= (str.charCodeAt(i) >> 8) & 0xff;
+        h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+      }
+    }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+
+  function imageKey(url, w, h) {
+    return fnv1a(url + '|' + w + 'x' + h);
+  }
+
+  function isEditable(el) {
+    var t = el.tagName;
+    if (t === 'INPUT') {
+      var ty = (el.getAttribute('type') || 'text').toLowerCase();
+      return ty !== 'hidden' && ty !== 'submit' && ty !== 'button' && ty !== 'image';
+    }
+    if (t === 'TEXTAREA' || t === 'SELECT') return true;
+    return el.isContentEditable === true;
+  }
+
+  function isScrollable(el) {
+    if (!el.scrollHeight) return false;
+    if (el.scrollHeight <= el.clientHeight + 2 && el.scrollWidth <= el.clientWidth + 2) return false;
+    // A cheap proxy for overflow:auto|scroll that avoids getComputedStyle on
+    // every node in the document.
+    return el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 8;
+  }
+
+  function ownerDoc(node) {
+    return node.ownerDocument || document;
+  }
+
+  function docBase(node) {
+    var d = ownerDoc(node);
+    try { return d.baseURI || location.href; } catch (e) { return location.href; }
+  }
+
+  // ------------------------------------------------------------ serialisation
+
+  function serializeAttrs(el, out) {
+    var attrs = el.attributes;
+    var base = docBase(el);
+    var flags = 0;
+    var pairs = [];
+    for (var i = 0; i < attrs.length; i++) {
+      var a = attrs[i];
+      var name = a.name;
+      if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+        if (/^on[a-z]/.test(name)) continue; // inline handlers never cross
+      }
+      if (SKIP_ATTRS[name]) continue;
+      var value = a.value;
+      if (URL_ATTRS[name]) {
+        value = absolute(base, value);
+        if (/^javascript:/i.test(value)) continue;
+      }
+      pairs.push(intern(name), intern(value));
+    }
+    // Live form state is a property, not an attribute; without this a mirrored
+    // form loses everything the user (or the page) already typed.
+    var tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+      pairs.push(intern('data-sky-value'), intern(el.value == null ? '' : el.value));
+      if (el.checked) pairs.push(intern('data-sky-checked'), intern('1'));
+    } else if (tag === 'OPTION' && el.selected) {
+      pairs.push(intern('data-sky-selected'), intern('1'));
+    }
+    if (isEditable(el)) flags |= FLAG_EDITABLE;
+    if (CANVAS_TAGS[tag]) flags |= FLAG_CANVAS;
+    if (isScrollable(el)) flags |= FLAG_SCROLL;
+    if (el.shadowRoot) flags |= FLAG_SHADOW;
+    if (VOID_IMAGE_TAGS[tag]) {
+      var img = describeImage(el, base);
+      if (img) {
+        flags |= FLAG_IMAGE;
+        pairs.push(intern('src'), intern('skyhook://img/' + img.key));
+        if (img.w) pairs.push(intern('width'), intern(String(img.w)));
+        if (img.h) pairs.push(intern('height'), intern(String(img.h)));
+        pendingImages.push(img);
+      }
+    }
+    out.flags = flags;
+    return pairs;
+  }
+
+  function describeImage(el, base) {
+    var src = el.currentSrc || el.getAttribute('src') || '';
+    if (!src) return null;
+    src = absolute(base, src);
+    if (/^data:/i.test(src)) {
+      // Small inline images are cheaper left alone than round-tripped.
+      if (src.length < 4096) return null;
+    }
+    if (/^blob:/i.test(src)) return null;
+    var r = el.getBoundingClientRect();
+    var w = Math.round(r.width) || el.naturalWidth || 0;
+    var h = Math.round(r.height) || el.naturalHeight || 0;
+    if (w > 4096) w = 4096;
+    if (h > 4096) h = 4096;
+    var key = imageKey(src, w, h);
+    return {
+      n: idFor(el), url: src, w: w, h: h, key: key,
+      alt: el.getAttribute('alt') || '',
+      pri: r.top < (globalThis.innerHeight || 900) * 1.5 && r.bottom > -200 ? 0 : 1
+    };
+  }
+
+  // serializeNode appends [id, parent, kind, ref, flags, attrs] rows in document
+  // order. Returns the number of rows appended.
+  function serializeNode(node, parentId, rows) {
+    var kind = node.nodeType;
+    if (kind === KIND_TEXT) {
+      var text = node.nodeValue;
+      if (!text) return 0;
+      var id = idFor(node);
+      lastText.set(id, text);
+      rows.push([id, parentId, KIND_TEXT, intern(text), 0, null]);
+      return 1;
+    }
+    if (kind === KIND_DOCTYPE) {
+      rows.push([idFor(node), parentId, KIND_DOCTYPE, intern(node.name || 'html'), 0, null]);
+      return 1;
+    }
+    if (kind !== KIND_ELEMENT) return 0;
+    var tag = node.tagName;
+    if (SKIP_TAGS[tag]) return 0;
+
+    var id2 = idFor(node);
+    var out = { flags: 0 };
+    var pairs = serializeAttrs(node, out);
+    rows.push([id2, parentId, KIND_ELEMENT, intern(tag.toLowerCase()), out.flags, pairs]);
+    var n = 1;
+
+    if (tag === 'HEAD') return n; // head content is replaced by used-CSS
+    if (CANVAS_TAGS[tag]) return n;
+
+    if (node.shadowRoot) {
+      // Flattening the shadow tree in place keeps the client a plain patcher.
+      var sk = node.shadowRoot.childNodes;
+      for (var s = 0; s < sk.length; s++) n += serializeNode(sk[s], id2, rows);
+      observeDocument(node.shadowRoot);
+    }
+    if (tag === 'IFRAME') {
+      var idoc = null;
+      try { idoc = node.contentDocument; } catch (e) { idoc = null; }
+      if (idoc && idoc.documentElement) {
+        n += serializeNode(idoc.documentElement, id2, rows);
+        observeDocument(idoc);
+      }
+      return n;
+    }
+    var kids = node.childNodes;
+    for (var i = 0; i < kids.length; i++) n += serializeNode(kids[i], id2, rows);
+    return n;
+  }
+
+  function serializeSubtree(node) {
+    var rows = [];
+    var parent = node.parentNode ? (idOf.get(node.parentNode) || 0) : 0;
+    serializeNode(node, parent, rows);
+    return rows;
+  }
+
+  // ------------------------------------------------------------------ used CSS
+
+  var PSEUDO_RE = /::?(?:hover|active|focus(?:-visible|-within)?|visited|link|target|checked|disabled|enabled|placeholder|before|after|first-line|first-letter|selection|marker|backdrop|-webkit-[a-z-]+|-moz-[a-z-]+)(?:\([^)]*\))?/gi;
+
+  function testableSelector(sel) {
+    var s = sel.replace(PSEUDO_RE, '');
+    s = s.replace(/\s*,\s*/g, ',');
+    // A selector that was nothing but a pseudo (":root::before") degrades to
+    // an empty part; keep such rules rather than risk dropping layout.
+    var parts = s.split(',').filter(function (p) { return p.trim().length > 0; });
+    if (!parts.length) return null;
+    return parts.join(',');
+  }
+
+  function selectorMatches(doc, sel) {
+    var test = testableSelector(sel);
+    if (test === null) return true;
+    try { return doc.querySelector(test) !== null; } catch (e) { return true; }
+  }
+
+  function collectRules(doc, list, out, depth) {
+    if (!list || depth > 8) return;
+    for (var i = 0; i < list.length; i++) {
+      var rule = list[i];
+      try {
+        switch (rule.type) {
+          case 1: // style rule
+            if (selectorMatches(doc, rule.selectorText)) out.push(rule.cssText);
+            break;
+          case 4: // media
+          case 12: // supports
+            var inner = [];
+            collectRules(doc, rule.cssRules, inner, depth + 1);
+            if (inner.length) {
+              var cond = rule.type === 4 ? '@media ' + rule.conditionText
+                : '@supports ' + rule.conditionText;
+              out.push(cond + '{' + inner.join('') + '}');
+            }
+            break;
+          case 7: // keyframes: small, and cheap insurance for CSS animations
+            out.push(rule.cssText);
+            break;
+          case 5: // font-face: fonts are blocked landside; system substitution
+            break;
+          default:
+            if (rule.cssText && rule.cssText.charAt(0) === '@' &&
+                rule.cssText.indexOf('@import') !== 0) {
+              out.push(rule.cssText);
+            }
+        }
+      } catch (e) { /* cross-origin sheet, skip */ }
+    }
+  }
+
+  function collectUsedCSS(doc) {
+    var out = [];
+    var sheets;
+    try { sheets = doc.styleSheets; } catch (e) { return out; }
+    for (var i = 0; i < sheets.length; i++) {
+      var rules = null;
+      try { rules = sheets[i].cssRules; } catch (e) { rules = null; }
+      if (!rules) continue;
+      collectRules(doc, rules, out, 0);
+    }
+    return out;
+  }
+
+  function cssDelta() {
+    var docs = [document];
+    observedDocs.forEach(function (d) { if (d !== document && d.styleSheets) docs.push(d); });
+    var adds = [];
+    for (var d = 0; d < docs.length; d++) {
+      var rules = collectUsedCSS(docs[d]);
+      for (var i = 0; i < rules.length; i++) {
+        var text = rules[i];
+        if (emittedCSS.has(text)) continue;
+        emittedCSS.set(text, cssOrder.length);
+        cssOrder.push(text);
+        adds.push(text);
+      }
+    }
+    return adds;
+  }
+
+  function scheduleCSS() {
+    if (cssTimer) return;
+    cssTimer = setTimeout(function () {
+      cssTimer = null;
+      var adds = cssDelta();
+      if (adds.length) {
+        pendingOps.push([7, adds]);
+        scheduleFlush(false);
+      }
+    }, CSS_DEBOUNCE_MS);
+  }
+
+  // ------------------------------------------------------------------ mutations
+
+  function isMirrored(node) {
+    if (!node) return false;
+    if (node.nodeType === KIND_ELEMENT && SKIP_TAGS[node.tagName]) return false;
+    return true;
+  }
+
+  function knownParentId(node) {
+    var p = node.parentNode;
+    if (!p) return 0;
+    if (p.nodeType === 11 && p.host) return idOf.get(p.host) || 0; // shadow root
+    return idOf.get(p) || 0;
+  }
+
+  function handleMutations(records) {
+    for (var i = 0; i < records.length; i++) {
+      var m = records[i];
+      if (m.type === 'attributes') {
+        var id = idOf.get(m.target);
+        if (id === undefined) continue;
+        if (/^on[a-z]/.test(m.attributeName) || SKIP_ATTRS[m.attributeName]) continue;
+        var el = m.target;
+        var val = el.getAttribute(m.attributeName);
+        if (val === null) {
+          pendingOps.push([3, id, intern(m.attributeName), -1]);
+        } else {
+          if (URL_ATTRS[m.attributeName]) val = absolute(docBase(el), val);
+          if (m.attributeName === 'src' && VOID_IMAGE_TAGS[el.tagName]) {
+            var img = describeImage(el, docBase(el));
+            if (img) {
+              pendingImages.push(img);
+              val = 'skyhook://img/' + img.key;
+            }
+          }
+          pendingOps.push([3, id, intern(m.attributeName), intern(val)]);
+        }
+        continue;
+      }
+      if (m.type === 'characterData') {
+        var tid = idOf.get(m.target);
+        if (tid === undefined) continue;
+        var next = m.target.nodeValue || '';
+        var prev = lastText.get(tid);
+        lastText.set(tid, next);
+        if (prev === undefined || prev === next) {
+          if (prev === undefined) pendingOps.push([4, tid, intern(next)]);
+          continue;
+        }
+        var sp = spliceOf(prev, next);
+        if (sp && sp.ins.length + 8 < next.length) {
+          pendingOps.push([6, tid, sp.off, sp.del, intern(sp.ins)]);
+        } else {
+          pendingOps.push([4, tid, intern(next)]);
+        }
+        continue;
+      }
+      // childList
+      var removed = m.removedNodes;
+      for (var r = 0; r < removed.length; r++) {
+        var rid = idOf.get(removed[r]);
+        if (rid === undefined) continue;
+        pendingOps.push([2, rid]);
+        forget(removed[r]);
+      }
+      var added = m.addedNodes;
+      for (var a = 0; a < added.length; a++) {
+        var node = added[a];
+        if (!isMirrored(node)) continue;
+        if (!node.parentNode) continue;
+        var pid = knownParentId(node);
+        if (!pid) continue; // parent not mirrored (or itself just added)
+        var existing = idOf.get(node);
+        var beforeId = 0;
+        var sib = node.nextSibling;
+        while (sib && idOf.get(sib) === undefined) sib = sib.nextSibling;
+        if (sib) beforeId = idOf.get(sib);
+        if (existing !== undefined && byId.has(existing)) {
+          // Keyed-list reorders arrive as remove+insert of the same node;
+          // emitting a move keeps React-driven lists from re-sending subtrees.
+          pendingOps.push([5, existing, pid, beforeId]);
+          continue;
+        }
+        var rows = [];
+        serializeNode(node, pid, rows);
+        if (rows.length) pendingOps.push([1, pid, beforeId, rows]);
+      }
+    }
+    if (pendingOps.length) {
+      scheduleFlush(false);
+      scheduleCSS();
+    }
+  }
+
+  // spliceOf finds the minimal middle edit between two strings. Chat logs and
+  // typing both produce single-region edits, so this collapses a 40 KB text
+  // node update into a few bytes.
+  function spliceOf(prev, next) {
+    var p = 0;
+    var maxP = Math.min(prev.length, next.length);
+    while (p < maxP && prev.charCodeAt(p) === next.charCodeAt(p)) p++;
+    var s = 0;
+    while (s < maxP - p && prev.charCodeAt(prev.length - 1 - s) === next.charCodeAt(next.length - 1 - s)) s++;
+    var del = prev.length - p - s;
+    var ins = next.slice(p, next.length - s);
+    if (del < 0 || p + s > prev.length) return null;
+    return { off: p, del: del, ins: ins };
+  }
+
+  function observeDocument(root) {
+    if (observedDocs.has(root)) return;
+    observedDocs.add(root);
+    var obs = new MutationObserver(handleMutations);
+    obs.observe(root, {
+      subtree: true, childList: true, attributes: true,
+      characterData: true, characterDataOldValue: false, attributeOldValue: false
+    });
+    observers.push(obs);
+    if (root.addEventListener) {
+      root.addEventListener('scroll', onScroll, { capture: true, passive: true });
+      root.addEventListener('focusin', onFocus, { capture: true, passive: true });
+      root.addEventListener('input', onInput, { capture: true, passive: true });
+    }
+  }
+
+  function onInput(ev) {
+    var el = ev.target;
+    if (!el || !el.tagName) return;
+    var id = idOf.get(el);
+    if (id === undefined) return;
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      pendingOps.push([3, id, intern('data-sky-value'), intern(el.value == null ? '' : el.value)]);
+      scheduleFlush(false);
+    }
+  }
+
+  function onFocus() {
+    var el = document.activeElement;
+    var id = el ? (idOf.get(el) || 0) : 0;
+    if (id !== focusedId) {
+      focusedId = id;
+      pendingOps.push([9, id]);
+      scheduleFlush(false);
+    }
+  }
+
+  function onScroll(ev) {
+    var t = ev.target;
+    var id = 0;
+    var x = 0, y = 0;
+    if (t === document || t === document.documentElement || t === document.body || !t.tagName) {
+      x = globalThis.scrollX | 0; y = globalThis.scrollY | 0;
+    } else {
+      id = idOf.get(t) || 0;
+      if (!id) return;
+      x = t.scrollLeft | 0; y = t.scrollTop | 0;
+    }
+    var key = id;
+    var prev = lastScroll.get(key);
+    if (prev && prev.x === x && prev.y === y) return;
+    lastScroll.set(key, { x: x, y: y });
+    if (scrollTimer) return;
+    scrollTimer = setTimeout(function () {
+      scrollTimer = null;
+      lastScroll.forEach(function (pos, nid) {
+        pendingOps.push([10, nid, pos.x, pos.y]);
+      });
+      scheduleFlush(false);
+    }, SCROLL_THROTTLE_MS);
+  }
+
+  // -------------------------------------------------------------------- output
+
+  function send(obj) {
+    var json = JSON.stringify(obj);
+    if (json.length <= CHUNK) { SEND(json); return; }
+    var id = ++msgSeq;
+    var total = Math.ceil(json.length / CHUNK);
+    for (var i = 0; i < total; i++) {
+      SEND(JSON.stringify({
+        t: 'chunk', id: id, i: i, n: total,
+        d: json.slice(i * CHUNK, (i + 1) * CHUNK)
+      }));
+    }
+  }
+
+  function takeStrings() {
+    var s = pendingStrings;
+    pendingStrings = [];
+    return s;
+  }
+
+  function scheduleFlush(immediate) {
+    if (immediate) {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      flush(true);
+      return;
+    }
+    if (flushTimer) return;
+    flushTimer = setTimeout(function () { flushTimer = null; flush(false); }, MUTATION_BATCH_MS);
+  }
+
+  function flush(isFlush) {
+    if (!snapshotDone) return;
+    if (!pendingOps.length && !pendingImages.length) return;
+    var ops = pendingOps; pendingOps = [];
+    var imgs = pendingImages; pendingImages = [];
+    send({
+      t: 'mut', seq: ++seq, strings: takeStrings(), ops: ops,
+      images: imgs, flush: !!isFlush,
+      url: location.href, title: document.title
+    });
+  }
+
+  function snapshot() {
+    // A snapshot resets both sides: intern table, ids stay (they are stable
+    // handles for input replay), CSS set is rebuilt.
+    strings = []; stringIndex = new Map(); pendingStrings = [];
+    emittedCSS = new Map(); cssOrder = [];
+    pendingOps = []; pendingImages = [];
+    lastText = new Map();
+
+    var rows = [];
+    serializeNode(document.documentElement, 0, rows);
+    var css = cssDelta();
+    var imgs = pendingImages; pendingImages = [];
+    snapshotDone = true;
+    seq = 0;
+    send({
+      t: 'snap', seq: 0, strings: strings.slice(), nodes: rows, css: css,
+      url: location.href, title: document.title,
+      scrollX: globalThis.scrollX | 0, scrollY: globalThis.scrollY | 0,
+      vw: globalThis.innerWidth | 0, vh: globalThis.innerHeight | 0,
+      dpr: globalThis.devicePixelRatio || 1,
+      images: imgs,
+      docHeight: Math.max(
+        document.documentElement ? document.documentElement.scrollHeight : 0,
+        document.body ? document.body.scrollHeight : 0)
+    });
+    pendingStrings = [];
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    observeDocument(document);
+    snapshot();
+    // Late-loading webfont/CSS work and lazily-attached shadow roots settle
+    // within a second or two; a follow-up CSS pass is cheaper than a resnapshot.
+    setTimeout(scheduleCSS, 800);
+    setTimeout(scheduleCSS, 2500);
+  }
+
+  // --------------------------------------------------------------- host API
+
+  var api = {
+    version: 1,
+    start: start,
+    snapshot: function () { snapshotDone = false; started = false; start(); return true; },
+    flush: function () { scheduleFlush(true); return true; },
+    node: function (id) { return byId.get(id) || null; },
+    rect: function (id) {
+      var n = byId.get(id);
+      if (!n) return null;
+      var el = n.nodeType === KIND_TEXT ? n.parentElement : n;
+      if (!el || !el.getBoundingClientRect) return null;
+      var r = el.getBoundingClientRect();
+      // Scroll a target into view before reporting: the host clicks by
+      // coordinate, and an offscreen element would land on the wrong node.
+      if (r.bottom < 0 || r.top > (globalThis.innerHeight || 0) ||
+          r.right < 0 || r.left > (globalThis.innerWidth || 0)) {
+        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* older engines */ }
+        r = el.getBoundingClientRect();
+      }
+      return {
+        x: r.left, y: r.top, w: r.width, h: r.height,
+        cx: r.left + r.width / 2, cy: r.top + r.height / 2,
+        tag: el.tagName, editable: isEditable(el),
+        href: el.tagName === 'A' ? (el.href || '') : ''
+      };
+    },
+    focus: function (id) {
+      var n = byId.get(id);
+      if (!n) return false;
+      var el = n.nodeType === KIND_TEXT ? n.parentElement : n;
+      try { el.focus({ preventScroll: false }); } catch (e) { return false; }
+      return document.activeElement === el;
+    },
+    setValue: function (id, value, start, end) {
+      var el = byId.get(id);
+      if (!el) return false;
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        var proto = el.tagName === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(el, value);
+        if (typeof start === 'number') {
+          try { el.setSelectionRange(start, typeof end === 'number' ? end : start); } catch (e) { /* number inputs */ }
+        }
+        // Frameworks listen for input/change, not for value assignment.
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        return true;
+      }
+      if (el.isContentEditable) {
+        el.textContent = value;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+        return true;
+      }
+      return false;
+    },
+    submit: function (id, fields) {
+      var form = byId.get(id);
+      if (!form || form.tagName !== 'FORM') return false;
+      if (fields) {
+        Object.keys(fields).forEach(function (name) {
+          var el = form.elements[name];
+          if (el && 'value' in el) el.value = fields[name];
+        });
+      }
+      if (typeof form.requestSubmit === 'function') form.requestSubmit();
+      else form.submit();
+      return true;
+    },
+    scrollTo: function (id, x, y) {
+      if (!id) { globalThis.scrollTo(x, y); return true; }
+      var el = byId.get(id);
+      if (!el) return false;
+      el.scrollLeft = x; el.scrollTop = y;
+      return true;
+    },
+    // scrollProbe drives infinite-scroll landside: the client only reports how
+    // far down the mirrored document it is, and the host nudges the real page.
+    scrollProbe: function (ratio) {
+      var h = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
+      var target = Math.max(0, Math.floor(h * ratio) - (globalThis.innerHeight || 800) / 2);
+      globalThis.scrollTo({ top: target, behavior: 'instant' });
+      return { height: h, top: globalThis.scrollY | 0 };
+    },
+    links: function (limit) {
+      var out = [];
+      var as = document.querySelectorAll('a[href]');
+      var vh = globalThis.innerHeight || 900;
+      for (var i = 0; i < as.length && out.length < (limit || 10); i++) {
+        var a = as[i];
+        var r = a.getBoundingClientRect();
+        if (r.bottom < 0 || r.top > vh * 1.2 || r.width === 0) continue;
+        if (a.origin && a.origin !== location.origin) continue;
+        if (/^javascript:|^#/.test(a.getAttribute('href') || '')) continue;
+        out.push({ id: idFor(a), href: a.href, y: r.top });
+      }
+      out.sort(function (p, q) { return p.y - q.y; });
+      return out;
+    },
+    stats: function () {
+      return { nodes: byId.size, strings: strings.length, css: cssOrder.length, seq: seq };
+    },
+    docHash: function () {
+      // Cheap whole-document fingerprint for divergence checks.
+      var h = 0x811c9dc5;
+      byId.forEach(function (node, id) {
+        // Lowercased tag names keep this identical to the Go replica and the
+        // TypeScript patcher, so a hash mismatch means real divergence.
+        var v = node.nodeType === KIND_TEXT ? (node.nodeValue || '')
+          : (node.tagName ? node.tagName.toLowerCase() : '');
+        h ^= id & 0xff;
+        h = (h * 16777619) >>> 0;
+        for (var i = 0; i < v.length && i < 32; i++) {
+          h ^= v.charCodeAt(i) & 0xff;
+          h = (h * 16777619) >>> 0;
+        }
+      });
+      return h >>> 0;
+    }
+  };
+
+  Object.defineProperty(globalThis, '__skyhook', { value: api, configurable: true });
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
+  globalThis.addEventListener('load', function () {
+    scheduleCSS();
+    scheduleFlush(false);
+  }, { once: true });
+})();

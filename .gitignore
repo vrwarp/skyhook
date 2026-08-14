@@ -1,0 +1,22 @@
+# Go
+/skyhookd
+/skyhookctl
+/dist/
+*.test
+*.out
+
+# Client
+client/node_modules/
+client/dist/
+client/release/
+
+# Local development
+.devdata/
+*.log
+.DS_Store
+
+# Never commit anything that looks like a real credential or a live profile:
+# the pairing file carries the server token, and the profile carries cookies.
+pairing.json
+config.local.json
+profile/

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Skyhook</title>
+    <link rel="stylesheet" href="skyhook://ui/ui.css" />
+  </head>
+  <body>
+    <header id="chrome">
+      <div id="tabstrip" role="tablist"></div>
+      <div id="toolbar">
+        <button id="back" title="Back">&#8592;</button>
+        <button id="forward" title="Forward">&#8594;</button>
+        <button id="reload" title="Reload">&#8635;</button>
+        <input id="urlbar" type="text" spellcheck="false"
+               placeholder="Address, or search" autocomplete="off" />
+        <button id="bookmark" title="Bookmark this page">&#9733;</button>
+        <button id="chat" title="Chat">Chat</button>
+        <div id="hud" title="Link health">
+          <span id="hud-state" class="offline">offline</span>
+          <span id="hud-rtt">--</span>
+          <span id="hud-queue">q0</span>
+          <span id="hud-bytes">0 KB</span>
+        </div>
+      </div>
+    </header>
+    <aside id="panel" hidden>
+      <div id="panel-header">
+        <strong id="panel-title">Chat</strong>
+        <button id="panel-close">&times;</button>
+      </div>
+      <div id="panel-body"></div>
+    </aside>
+    <script type="module" src="skyhook://ui/ui.js"></script>
+  </body>
+</html>

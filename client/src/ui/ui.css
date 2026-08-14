@@ -1,0 +1,127 @@
+/* The chrome UI is deliberately plain: it is the only thing on screen that is
+   not the mirrored page, and every pixel it takes is a pixel of page lost. */
+:root {
+  --bg: #111827;
+  --fg: #e5e7eb;
+  --muted: #9ca3af;
+  --accent: #38bdf8;
+  --warn: #f59e0b;
+  --bad: #ef4444;
+  --good: #22c55e;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+}
+
+#chrome { height: 88px; display: flex; flex-direction: column; }
+
+#tabstrip {
+  display: flex;
+  gap: 2px;
+  padding: 6px 6px 0;
+  height: 40px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  min-width: 90px;
+  padding: 6px 10px;
+  border-radius: 8px 8px 0 0;
+  background: #1f2937;
+  color: var(--muted);
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.tab.active { background: #374151; color: var(--fg); }
+.tab .title { overflow: hidden; text-overflow: ellipsis; }
+.tab .close { color: var(--muted); padding: 0 2px; }
+.tab.loading .title::before { content: "· "; color: var(--accent); }
+
+#newtab { padding: 6px 12px; background: transparent; color: var(--muted); border: 0; }
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  height: 48px;
+}
+
+#toolbar button {
+  background: #1f2937;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 5px 9px;
+}
+
+#toolbar button:disabled { color: #4b5563; }
+
+#urlbar {
+  flex: 1;
+  background: #0b1220;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+}
+
+#hud {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  padding-left: 6px;
+}
+
+#hud-state { padding: 2px 6px; border-radius: 4px; }
+#hud-state.online { background: rgba(34, 197, 94, .15); color: var(--good); }
+#hud-state.offline { background: rgba(239, 68, 68, .15); color: var(--bad); }
+#hud-state.degraded { background: rgba(245, 158, 11, .15); color: var(--warn); }
+
+#panel {
+  position: fixed;
+  top: 88px;
+  right: 0;
+  bottom: 0;
+  width: 380px;
+  background: #0b1220;
+  border-left: 1px solid #374151;
+  display: flex;
+  flex-direction: column;
+}
+
+#panel-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid #374151;
+}
+
+#panel-body { flex: 1; overflow-y: auto; padding: 8px 10px; }
+
+.space { padding: 6px 4px; border-bottom: 1px solid #1f2937; }
+.space .name { font-weight: 600; }
+.space .unread { color: var(--accent); }
+.msg { padding: 4px 0; }
+.msg .author { color: var(--muted); margin-right: 6px; }
+.msg.pending { opacity: .55; font-style: italic; }
+
+#composer { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #374151; }
+#composer input { flex: 1; background: #111827; color: var(--fg); border: 1px solid #374151; border-radius: 6px; padding: 6px; }

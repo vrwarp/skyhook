@@ -1,0 +1,34 @@
+# systemd unit for a bare-metal VPS install. See docs/OPERATIONS.md.
+[Unit]
+Description=Skyhook landside server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=skyhook
+Group=skyhook
+Environment=SKYHOOK_CONFIG=/var/lib/skyhook/config.json
+Environment=SKYHOOK_DATA_DIR=/var/lib/skyhook
+ExecStart=/usr/local/bin/skyhookd
+Restart=always
+RestartSec=2
+# Sessions are rebuilt from the profile on disk, so a restart costs a resnapshot
+# and nothing else.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# The profile is the crown jewels: everything else is locked down around it.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/skyhook
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target
