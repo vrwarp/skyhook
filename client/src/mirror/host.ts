@@ -76,11 +76,26 @@ export function imageURL(hash: string): string {
   return `/img/${hash}`;
 }
 
-/** The inverse: the content hash behind an image the frame is showing. */
-export function hashFromImageURL(src: string | null | undefined): string | undefined {
-  const match = /^\/img\/([^?#]+)/.exec(src ?? '');
-  return match ? match[1] : undefined;
+/**
+ * The hash behind an image the frame is showing.
+ *
+ * It is read from an attribute rather than from `src`, because what `src`
+ * holds is a blob URL that says nothing about its content — see `blobFor`.
+ */
+export function hashFromImage(img: Element | null | undefined): string | undefined {
+  const hash = (img as HTMLElement | null)?.dataset?.skyhookImg;
+  return hash || undefined;
 }
+
+/**
+ * A 1x1 transparent GIF, held by every image whose bytes have not landed.
+ *
+ * An <img> with no `src` — or one whose `src` does not load — draws its alt
+ * text and a broken-image marker, which is worse than the blurhash the element
+ * is already wearing. This loads instantly, from nothing, and shows nothing.
+ */
+const PENDING_PIXEL =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
 /**
  * Gives an image its box before its bytes exist.
@@ -121,6 +136,8 @@ export class MirrorHost {
   private inputSeq = 0;
   private lastSeq = 0;
   private pendingImages = new Map<string, HTMLImageElement[]>();
+  /** Object URLs handed to the frame, by content hash. Revoked with the tab. */
+  private blobs = new Map<string, string>();
   private ready: Promise<void>;
   private scrollTimer: ReturnType<typeof setTimeout> | null = null;
   /** URL of the document currently rendered, so a resync is distinguishable
@@ -539,7 +556,7 @@ export class MirrorHost {
       y: rect.top + ev.clientY,
       link: link?.url,
       linkText: link?.text,
-      image: hashFromImageURL(img?.getAttribute('src')),
+      image: hashFromImage(img),
       imageAlt: img?.getAttribute('alt') ?? undefined,
       selection: this.selectionIn(field),
     };
@@ -662,6 +679,11 @@ export class MirrorHost {
       this.readerMoved = new WeakSet();
       this.adopted = new WeakMap();
       this.scrollDocTo(snap.scrollX, snap.scrollY);
+      // A navigation drops every image the old document was showing. The bytes
+      // stay in Cache Storage, so re-minting a blob for one that comes back
+      // costs nothing over the link; holding them all until the tab closes is
+      // what an afternoon of reading would cost in memory.
+      this.releaseBlobs();
     }
     this.requestPendingImages();
   }
@@ -685,38 +707,76 @@ export class MirrorHost {
     this.patcher?.setImageMeta(meta);
   }
 
-  /** Called when the store has bytes for a hash: force the frame to re-fetch. */
+  /** Called when the store has bytes for a hash: show them. */
   imageArrived(hash: string): void {
-    const waiting = this.pendingImages.get(hash);
-    if (!waiting) return;
-    this.pendingImages.delete(hash);
-    const url = imageURL(hash);
-    for (const el of waiting) {
-      // Straight to the busted URL: clearing src first would leave the element
-      // with no image for a frame, and an image with no image is a hole the
-      // page closes up and then reopens.
-      el.setAttribute('src', `${url}?v=1`);
-      el.style.backgroundImage = '';
+    if (!this.pendingImages.has(hash)) return;
+    void this.blobFor(hash).then((url) => {
+      const waiting = this.pendingImages.get(hash);
+      if (!url || !waiting) return;
+      this.pendingImages.delete(hash);
+      for (const el of waiting) this.showImage(el, url);
+    });
+  }
+
+  /**
+   * Turns a hash into a URL the mirror frame can actually load.
+   *
+   * The bytes live in Cache Storage, served by the service worker from
+   * `/img/<hash>` — but a sandboxed frame is not a service worker client, so
+   * inside the frame that URL reaches the network instead, and on this link
+   * there is no network. The shell's own document *is* a client, so it fetches
+   * the bytes here and hands the frame a blob URL, which needs no fetch at all.
+   */
+  private async blobFor(hash: string): Promise<string | null> {
+    const known = this.blobs.get(hash);
+    if (known) return known;
+    try {
+      const res = await fetch(imageURL(hash));
+      // The worker answers a hash it has no bytes for with a placeholder rather
+      // than a 404; caching that as the image would freeze it there forever.
+      if (!res.ok || res.headers.get('x-skyhook-miss')) return null;
+      const blob = await res.blob();
+      if (!blob.size) return null;
+      const url = URL.createObjectURL(blob);
+      this.blobs.set(hash, url);
+      return url;
+    } catch {
+      return null;
     }
+  }
+
+  private showImage(el: HTMLImageElement, url: string): void {
+    el.setAttribute('src', url);
+    el.style.backgroundImage = '';
+    delete el.dataset.skyhookBlur;
   }
 
   private applyImage(el: HTMLImageElement, meta: ImageMeta | undefined, hash: string): void {
     if (!hash) return;
+    el.dataset.skyhookImg = hash;
     reserveSpace(el, meta);
+    const known = this.blobs.get(hash);
+    if (known) {
+      this.showImage(el, known);
+      return;
+    }
     if (meta?.blur && !el.dataset.skyhookBlur) {
       el.dataset.skyhookBlur = '1';
       // A page of grey boxes is what a mirror feels like without this, and the
       // placeholder costs about thirty bytes.
       void import('../shared/blurhash.js').then(({ decodeBlurhashToCSS }) => {
+        if (el.dataset.skyhookBlur !== '1') return; // bytes won the race
         el.style.backgroundImage = decodeBlurhashToCSS(meta.blur, 8, 8);
         el.style.backgroundSize = 'cover';
       });
     }
-    const url = imageURL(hash);
-    if (el.getAttribute('src') !== url) el.setAttribute('src', url);
+    if (el.getAttribute('src') !== PENDING_PIXEL) el.setAttribute('src', PENDING_PIXEL);
     const list = this.pendingImages.get(hash) ?? [];
     if (!list.includes(el)) list.push(el);
     this.pendingImages.set(hash, list);
+    // The bytes may already be in the cache from an earlier flight, in which
+    // case nothing will ever announce them.
+    this.imageArrived(hash);
   }
 
   private requestPendingImages(): void {
@@ -772,8 +832,15 @@ export class MirrorHost {
     return this.patcher?.size ?? 0;
   }
 
+  private releaseBlobs(): void {
+    for (const url of this.blobs.values()) URL.revokeObjectURL(url);
+    this.blobs.clear();
+  }
+
   destroy(): void {
     this.frame.remove();
+    this.releaseBlobs();
+    this.pendingImages.clear();
     this.patcher = null;
     this.echo = null;
     this.doc = null;

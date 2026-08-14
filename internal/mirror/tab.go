@@ -586,7 +586,12 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 
 	// Background images have no layout box to measure, so they are transcoded at
 	// a capped natural size and their url() references rewritten to cache keys.
-	css, cssImages := rewriteCSSImages(stripUnusedVars(minifyCSS(s.CSS)), s.URL, cssImageMaxDim)
+	// s.Strings is the snapshot's intern table, so it holds every attribute
+	// value in the document — inline styles included. A custom property read
+	// only from a style attribute is read nowhere in the bundle, and pruning it
+	// would leave that element with no value at all.
+	css, cssImages := rewriteCSSImages(
+		stripUnusedVars(minifyCSS(s.CSS), s.Strings), s.URL, cssImageMaxDim)
 
 	snap := protocol.Snapshot{
 		Strings:  s.Strings,

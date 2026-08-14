@@ -169,6 +169,20 @@
     return el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 8;
   }
 
+  // localNameOf gives the name an element must be rebuilt under. For HTML this
+  // is the lowercased tagName; for SVG and MathML, where names are
+  // case-sensitive, it is the only correct spelling.
+  function localNameOf(node) {
+    return node.localName || (node.tagName ? node.tagName.toLowerCase() : 'div');
+  }
+
+  // isSkipped tests the name rather than tagName, because inside SVG a
+  // <script> reports tagName "script" and the uppercase table misses it — the
+  // one tag whose contents must never reach the wire.
+  function isSkipped(node) {
+    return !!SKIP_TAGS[localNameOf(node).toUpperCase()];
+  }
+
   function ownerDoc(node) {
     return node.ownerDocument || document;
   }
@@ -302,12 +316,14 @@
     }
     if (kind !== KIND_ELEMENT) return 0;
     var tag = node.tagName;
-    if (SKIP_TAGS[tag]) return 0;
+    if (isSkipped(node)) return 0;
 
     var id2 = idFor(node);
     var out = { flags: 0 };
     var pairs = serializeAttrs(node, out);
-    rows.push([id2, parentId, KIND_ELEMENT, intern(tag.toLowerCase()), out.flags, pairs]);
+    // localName, not the lowercased tagName: SVG element names are
+    // case-sensitive, and `clippath` builds nothing. For HTML the two agree.
+    rows.push([id2, parentId, KIND_ELEMENT, intern(localNameOf(node)), out.flags, pairs]);
     var n = 1;
 
     if (tag === 'HEAD') return n; // head content is replaced by used-CSS
@@ -475,7 +491,7 @@
 
   function isMirrored(node) {
     if (!node) return false;
-    if (node.nodeType === KIND_ELEMENT && SKIP_TAGS[node.tagName]) return false;
+    if (node.nodeType === KIND_ELEMENT && isSkipped(node)) return false;
     return true;
   }
 

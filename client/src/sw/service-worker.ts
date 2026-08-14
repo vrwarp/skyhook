@@ -96,8 +96,15 @@ async function serveImage(url: URL): Promise<Response> {
   const key = `/img/${url.pathname.slice('/img/'.length)}`;
   const hit = await cache.match(key);
   if (hit) return hit;
+  // A miss is answered rather than 404'd, but it has to say so: the shell mints
+  // a lasting blob URL out of whatever comes back, and a placeholder minted
+  // that way would stand in for the image for good.
   return new Response(TRANSPARENT_PNG, {
-    headers: { 'content-type': 'image/png', 'cache-control': 'no-store' },
+    headers: {
+      'content-type': 'image/png',
+      'cache-control': 'no-store',
+      'x-skyhook-miss': '1',
+    },
   });
 }
 

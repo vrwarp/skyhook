@@ -39,7 +39,10 @@ function agentHash(snap: Snapshot): number {
   let h = 0x811c9dc5;
   const rows = [...snap.nodes].sort((a, b) => a.id - b.id);
   for (const n of rows) {
-    const v = n.kind === NodeKind.Text ? snap.strings[n.ref] ?? '' : snap.strings[n.ref] ?? '';
+    // The agent fingerprints `tagName.toLowerCase()`, while the name on the
+    // wire keeps the case SVG needs.
+    const raw = snap.strings[n.ref] ?? '';
+    const v = n.kind === NodeKind.Text ? raw : raw.toLowerCase();
     h ^= n.id & 0xff;
     h = Math.imul(h, 16777619) >>> 0;
     for (let i = 0; i < v.length && i < 32; i++) {
@@ -230,6 +233,50 @@ describe('Patcher', () => {
     patcher.applySnapshot(snapshot());
     const text = document.querySelector('li')?.firstChild as Node;
     expect(patcher.idOf(text)).toBe(4);
+  });
+
+  // Logos, icons and chart furniture are all SVG. Built with createElement they
+  // land in the HTML namespace, where they draw nothing at all and `viewBox`
+  // decays to `viewbox`.
+  it('builds SVG in the SVG namespace, with its names and attributes intact', () => {
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('svg', 'viewBox', '0 0 16 16', 'clipPath', 'ic', 'id', 'path');
+    snap.nodes.push(
+      { id: 10, parent: 2, kind: NodeKind.Element, ref: base, attrs: [base + 1, base + 2], flags: 0 },
+      { id: 11, parent: 10, kind: NodeKind.Element, ref: base + 3, attrs: [base + 5, base + 4], flags: 0 },
+      { id: 12, parent: 11, kind: NodeKind.Element, ref: base + 6, attrs: [], flags: 0 },
+    );
+    patcher.applySnapshot(snap);
+
+    const svg = document.querySelector('svg')!;
+    expect(svg.namespaceURI).toBe('http://www.w3.org/2000/svg');
+    // Case-folded to `viewbox` the attribute is inert, and the drawing has no
+    // coordinate system.
+    expect(svg.getAttribute('viewBox')).toBe('0 0 16 16');
+    // SVG element names are case-sensitive: `clippath` clips nothing.
+    const clip = svg.firstElementChild!;
+    expect(clip.localName).toBe('clipPath');
+    // And the namespace is inherited, or `path` is an unknown HTML element.
+    expect(clip.firstElementChild!.namespaceURI).toBe('http://www.w3.org/2000/svg');
+
+    // The fingerprint still has to match the agent's, which lowercases.
+    expect(patcher.docHash()).toBe(agentHash(snap));
+  });
+
+  it('puts HTML back into the HTML namespace inside foreignObject', () => {
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('svg', 'foreignObject', 'p');
+    snap.nodes.push(
+      { id: 10, parent: 2, kind: NodeKind.Element, ref: base, attrs: [], flags: 0 },
+      { id: 11, parent: 10, kind: NodeKind.Element, ref: base + 1, attrs: [], flags: 0 },
+      { id: 12, parent: 11, kind: NodeKind.Element, ref: base + 2, attrs: [], flags: 0 },
+    );
+    patcher.applySnapshot(snap);
+
+    const p = document.querySelector('p')!;
+    expect(p.namespaceURI).toBe('http://www.w3.org/1999/xhtml');
   });
 });
 

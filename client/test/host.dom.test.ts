@@ -146,7 +146,71 @@ describe('MirrorHost', () => {
     expect(ev.wantImages).toHaveBeenCalledWith(1, ['deadbeef']);
     // The wire form never reaches the DOM: it would be an unfetchable scheme.
     const img = host.frame.contentDocument!.querySelector('img')!;
-    expect(img.getAttribute('src')).toBe(imageURL('deadbeef'));
+    expect(img.getAttribute('src')?.startsWith('data:image/gif')).toBe(true);
+    // Nor does /img/<hash>: the frame is sandboxed, so it is not a service
+    // worker client, and that URL would go to the network — which is the one
+    // thing the frame must never do.
+    expect(img.getAttribute('src')).not.toContain('/img/');
+    // The hash rides on the element instead, so metadata and bytes arriving
+    // later can still find it.
+    expect(img.dataset.skyhookImg).toBe('deadbeef');
+  });
+
+  it('shows an image out of a blob the shell fetched for it', async () => {
+    // The bytes reach the frame as a blob URL because the shell — which is a
+    // service worker client — resolves them; the sandboxed frame cannot.
+    const { host } = await mount();
+    const snap = snapshot();
+    snap.strings.push('img', 'skyhook://img/c0ffee', 'src');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('img'),
+      attrs: [snap.strings.indexOf('src'), snap.strings.indexOf('skyhook://img/c0ffee')],
+      flags: 2,
+    });
+    host.applySnapshot(snap);
+    const img = host.frame.contentDocument!.querySelector('img')!;
+
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe(imageURL('c0ffee'));
+      return new Response(new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('URL', Object.assign(Object.create(URL), {
+      createObjectURL: () => 'blob:mirror/c0ffee',
+      revokeObjectURL: () => {},
+    }));
+
+    host.imageArrived('c0ffee');
+    await vi.waitFor(() => expect(img.getAttribute('src')).toBe('blob:mirror/c0ffee'));
+    expect(fetchMock).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('does not mistake a cache miss for the image', async () => {
+    // A hash the worker has no bytes for is answered with a placeholder, not a
+    // 404. Minting a blob out of that would freeze the element on it forever.
+    const { host } = await mount();
+    const snap = snapshot();
+    snap.strings.push('img', 'skyhook://img/c0ffee', 'src');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('img'),
+      attrs: [snap.strings.indexOf('src'), snap.strings.indexOf('skyhook://img/c0ffee')],
+      flags: 2,
+    });
+    host.applySnapshot(snap);
+    const img = host.frame.contentDocument!.querySelector('img')!;
+    const before = img.getAttribute('src');
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new Blob([new Uint8Array([0])], { type: 'image/png' }),
+      { headers: { 'x-skyhook-miss': '1' } })));
+
+    host.imageArrived('c0ffee');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(img.getAttribute('src')).toBe(before);
+    vi.unstubAllGlobals();
   });
 
   it('sends a form submission when a submit control is clicked', async () => {
