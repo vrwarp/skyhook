@@ -295,7 +295,11 @@ func TestCaptureReassemblesThePlaneSide(t *testing.T) {
 // would hide the very failure that cut it short.
 func TestCaptureKeepsAPartialArtifact(t *testing.T) {
 	opts := defaultCaptureOptions(t)
-	opts.Wait = 300 * time.Millisecond
+	// Long enough that the chunk below is certainly in hand before the deadline
+	// fires. A tighter window would be racing the capture's own goroutine, and
+	// this test is about what happens after the part arrives, not about whether
+	// it does.
+	opts.Wait = 2 * time.Second
 	s := newTestSession(t, opts)
 	s.Attach(newFakeConn())
 
@@ -307,6 +311,20 @@ func TestCaptureKeepsAPartialArtifact(t *testing.T) {
 		ID: id, Name: "tabs/1/mirror.html", Data: []byte("<div>half a doc"), More: true,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	// Stated rather than assumed: everything below is about a partial artifact
+	// the capture is holding, so a test that silently stopped holding one would
+	// pass for the wrong reason.
+	if c := s.capture.Load(); c == nil {
+		t.Fatal("the capture sealed before its first part arrived")
+	} else {
+		c.mu.Lock()
+		held := len(c.partial["tabs/1/mirror.html"])
+		c.mu.Unlock()
+		if held != len("<div>half a doc") {
+			t.Fatalf("the capture is holding %d bytes of the artifact, want %d",
+				held, len("<div>half a doc"))
+		}
 	}
 	// No further parts, and no Done: exactly what a link dying mid-upload looks
 	// like from here.
