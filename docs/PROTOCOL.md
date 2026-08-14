@@ -165,6 +165,42 @@ is what makes a chat open in milliseconds instead of seconds.
 The client → server direction is a small command set: `send`, `sync`,
 `markread`, `open`.
 
+### Captures
+
+A capture is one diagnostic bundle: both halves of a tab, frozen at the same
+instant and zipped up landside. It is the only frame family that deliberately
+spends the link — a screenshot in each direction is worth more bytes than any
+mirror update ever is — so it happens when somebody asks, or when the server has
+caught the two halves holding different documents.
+
+```
+client → Capture{reason, note}                       "something looks wrong"
+server → Capture{id, reason, note, tabs[], maxBytes, screenshots}
+client → CapturePart{id, name, data, more}           ... one per artifact/chunk
+client → CapturePart{id, done: true}
+server → CaptureDone{id, path, bytes} | {error}
+```
+
+Three details carry the weight:
+
+- **`Capture` rides `ctrl`, and the resync that follows a divergence rides
+  `dom`.** The server takes a capture *before* it repairs the tab, and ctrl
+  outranks dom in the outbound scheduler, so the client hears "capture" before
+  it hears "here is a new document". The client's handler freezes its mirrored
+  DOM synchronously for the same reason: one `await` and the diverged document
+  is gone.
+- **Parts are chunked by hand**, at 32 kB. `bulk` is a message stream; a 400 kB
+  screenshot sent whole sits in front of everything behind it for as long as the
+  link takes to clear it.
+- **A `.gz` suffix on `name` means the client gzipped the artifact**, and the
+  server stores it decompressed under the name without the suffix. This is the
+  one path where the client pays for bytes, and a mirrored document is mostly
+  repeated class names.
+
+`maxBytes` is the server telling the client how much of the link it may spend.
+The server enforces its own ceiling regardless: a bundle is written on the
+server's disk, and the server does not let a peer decide how much of it to use.
+
 ## Handshake
 
 ```

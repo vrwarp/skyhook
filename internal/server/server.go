@@ -21,6 +21,7 @@ import (
 	"github.com/vrwarp/skyhook/internal/adapter/googlechat"
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/config"
+	"github.com/vrwarp/skyhook/internal/diag"
 	"github.com/vrwarp/skyhook/internal/imgproc"
 	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/protocol"
@@ -36,6 +37,7 @@ type Server struct {
 	images  *imgproc.Pipeline
 	mgr     *session.Manager
 	cert    *transport.CertBundle
+	logs    *diag.Ring
 
 	wt *transport.WTServer
 	ws *transport.WSServer
@@ -65,7 +67,11 @@ func Prepare(cfg config.Config, log *slog.Logger) (*transport.CertBundle, error)
 }
 
 func makeDirs(cfg config.Config) error {
-	for _, dir := range []string{cfg.DataDir, cfg.ProfileDir(), cfg.CertDir(), cfg.ImageCacheDir()} {
+	dirs := []string{cfg.DataDir, cfg.ProfileDir(), cfg.CertDir(), cfg.ImageCacheDir()}
+	if cfg.CapturesEnabled() {
+		dirs = append(dirs, cfg.CaptureDir())
+	}
+	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
@@ -74,11 +80,15 @@ func makeDirs(cfg config.Config) error {
 }
 
 // New builds the server without starting listeners.
-func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, error) {
+//
+// logs is the ring the process's logger is teeing into, so a capture can carry
+// the last few thousand lines the operator would have seen on stderr. It may be
+// nil, and then bundles simply say the log was not available.
+func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ring) (*Server, error) {
 	if err := makeDirs(cfg); err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, log: log, errs: make(chan error, 4)}
+	s := &Server{cfg: cfg, log: log, logs: logs, errs: make(chan error, 4)}
 
 	cert, err := loadOrCreateCert(cfg, log)
 	if err != nil {
@@ -123,6 +133,14 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		MaxTabs:        cfg.MaxTabs,
 		Adapters:       factories,
 		HomeURL:        cfg.HomeURL,
+		Capture:        s.captureOptions(),
+	}
+	if !mgrOpts.Capture.Enabled() {
+		log.Info("diagnostic captures are off (captureKeep is 0)")
+	} else {
+		log.Info("diagnostic captures enabled",
+			"dir", mgrOpts.Capture.Dir, "keep", mgrOpts.Capture.Keep,
+			"screenshots", mgrOpts.Capture.Screenshots, "text", mgrOpts.Capture.Text)
 	}
 	// The pipeline needs the manager to route deliveries, and the manager needs
 	// the pipeline to submit work, so the pipeline is created with a router that
@@ -196,6 +214,29 @@ func effectiveUserAgent(ctx context.Context, br *cdp.Browser, override string, l
 	log.Info("correcting the headless token in the browser's user agent",
 		"userAgent", stripped)
 	return stripped
+}
+
+// captureOptions translates the configuration into what the session manager
+// needs to write a diagnostic bundle. A zero CaptureKeep leaves Dir empty,
+// which is what turns the whole feature off — including the per-tab frame
+// journals, whose memory is the only cost captures impose when nobody is
+// taking one.
+func (s *Server) captureOptions() session.CaptureOptions {
+	if !s.cfg.CapturesEnabled() {
+		return session.CaptureOptions{}
+	}
+	return session.CaptureOptions{
+		Dir:          s.cfg.CaptureDir(),
+		Keep:         s.cfg.CaptureKeep,
+		MaxBytes:     s.cfg.CaptureMaxBytes,
+		ClientBytes:  s.cfg.CaptureClientBytes,
+		Screenshots:  s.cfg.CaptureScreenshots,
+		Text:         s.cfg.CaptureText,
+		OnDivergence: s.cfg.CaptureOnDivergence,
+		Interval:     s.cfg.CaptureInterval.Get(),
+		JournalBytes: s.cfg.JournalBytes,
+		Logs:         s.logs,
+	}
 }
 
 // deliveryRouter sends transcoded images to whichever session asked for them.

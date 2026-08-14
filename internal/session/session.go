@@ -46,6 +46,13 @@ type Session struct {
 	// activeTab tracks which tab the user is looking at, so image priority
 	// spends the link on what is visible.
 	activeTab atomic.Uint32
+
+	// events is the session's own story — resyncs, divergences, navigations,
+	// what the reader did — kept so a capture can say how the mirror got into
+	// the state it is in, which no snapshot of that state can.
+	events *EventLog
+	// capture holds the one bundle in flight, if any.
+	capture captureSlot
 }
 
 type connHolder struct {
@@ -55,6 +62,7 @@ type connHolder struct {
 type tabState struct {
 	tab      *mirror.Tab
 	ring     *Ring
+	journal  *Journal
 	acked    uint64
 	lastHash uint64
 }
@@ -87,6 +95,7 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 		codec: codec, closed: make(chan struct{}),
 		lastSeen: time.Now(),
 		adapters: map[string]adapter.Adapter{},
+		events:   NewEventLog(1024),
 	}
 	for i := range s.sendQ {
 		s.sendQ[i] = make(chan outbound, 1024)
@@ -249,6 +258,10 @@ func (s *Session) EmitFrame(ch protocol.Channel, f *protocol.Frame) {
 		s.mu.Unlock()
 		if ts != nil {
 			ts.ring.Add(f, len(msg))
+			// The ring forgets a frame as soon as it is acknowledged. The
+			// journal does not, which is the only reason a capture can say
+			// what the client was actually told.
+			ts.journal.Add(f, len(msg))
 		}
 		if s.mgr != nil && s.mgr.trainer != nil {
 			s.mgr.trainer.Observe(originOf(s.tabURL(f.Tab)), f.Body)
@@ -344,9 +357,14 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 		return 0, err
 	}
 	s.mu.Lock()
-	s.tabs[id] = &tabState{tab: t, ring: NewRing(s.mgr.opts.RingBytes)}
+	s.tabs[id] = &tabState{
+		tab:     t,
+		ring:    NewRing(s.mgr.opts.RingBytes),
+		journal: NewJournal(s.mgr.opts.Capture.JournalBytes),
+	}
 	s.mu.Unlock()
 	s.activeTab.Store(id)
+	s.events.Add("tab-open", id, map[string]any{"url": url})
 
 	// Announce the tab the moment it exists. Every other TabState rides on a
 	// page lifecycle event, and a tab parked on about:blank may never produce
@@ -375,6 +393,7 @@ func (s *Session) CloseTab(ctx context.Context, id uint32) error {
 	if ts == nil {
 		return nil
 	}
+	s.events.Add("tab-close", id, nil)
 	s.Send(protocol.ChCtrl, protocol.TypeTabState, id, protocol.TabState{Closed: true})
 	return ts.tab.Close(ctx)
 }
@@ -486,12 +505,19 @@ func (s *Session) Resync(ctx context.Context, tab uint32, haveTo uint64, reason 
 	}
 	if !cold && ok && size < 256<<10 {
 		s.log.Info("resync by replay", "tab", tab, "frames", len(frames), "bytes", size, "reason", reason)
+		s.events.Add("resync", tab, map[string]any{
+			"how": "replay", "reason": reason, "haveTo": haveTo,
+			"frames": len(frames), "bytes": size,
+		})
 		for _, f := range frames {
 			s.EmitFrame(protocol.ChDom, f)
 		}
 		return
 	}
 	s.log.Info("resync by snapshot", "tab", tab, "reason", reason)
+	s.events.Add("resync", tab, map[string]any{
+		"how": "snapshot", "reason": reason, "haveTo": haveTo, "cold": cold,
+	})
 	if err := ts.tab.Snapshot(ctx); err != nil {
 		s.log.Warn("resnapshot failed", "tab", tab, "err", err)
 	}
@@ -531,6 +557,14 @@ func (s *Session) integrityLoop() {
 					continue
 				}
 				s.log.Warn("mirror divergence", "tab", id, "client", clientHash, "server", h)
+				s.events.Add("divergence", id, map[string]any{
+					"clientHash": clientHash, "serverHash": h, "acked": ts.acked,
+				})
+				// The bundle is opened before the resync, not after: a resync
+				// repairs the divergence, and a capture taken afterwards is a
+				// capture of a mirror that is working again. What both halves
+				// looked like while they disagreed is the whole evidence.
+				s.captureDivergence(id)
 				ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Second)
 				s.Resync(ctx2, id, ts.acked, "hash-mismatch")
 				cancel2()
@@ -633,6 +667,7 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return errNoTab
 		}
 		s.activeTab.Store(f.Tab)
+		s.events.Add("navigate", f.Tab, map[string]any{"url": n.URL, "action": n.Action})
 		return t.Navigate(ctx, n)
 	case protocol.TypeInput:
 		var ev protocol.InputEvent
@@ -644,6 +679,7 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return errNoTab
 		}
 		s.activeTab.Store(f.Tab)
+		s.recordInput(f.Tab, &ev)
 		return t.HandleInput(ctx, &ev)
 	case protocol.TypeScroll:
 		var ev protocol.ScrollEvent
@@ -675,6 +711,32 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return err
 		}
 		return s.adapterCommand(ctx, cmd)
+	case protocol.TypeCapture:
+		var req protocol.CaptureRequest
+		if err := f.DecodeBody(&req); err != nil {
+			return err
+		}
+		reason := req.Reason
+		if reason == "" {
+			reason = protocol.CaptureManual
+		}
+		id, err := s.StartCapture(reason, req.Note, false)
+		if err != nil {
+			// A refusal is not a dispatch failure: the client asked a
+			// reasonable question and the answer is no. Say so on the frame it
+			// is already listening on rather than as a generic error.
+			s.Send(protocol.ChCtrl, protocol.TypeCaptureDone, 0,
+				protocol.CaptureDone{Error: err.Error()})
+			return nil
+		}
+		s.log.Info("capture requested by the client", "capture", id, "reason", reason)
+		return nil
+	case protocol.TypeCapturePart:
+		var part protocol.CapturePart
+		if err := f.DecodeBody(&part); err != nil {
+			return err
+		}
+		return s.CapturePart(part)
 	case protocol.TypeKill:
 		return s.Kill(ctx)
 	case protocol.TypeError:

@@ -463,6 +463,46 @@ export class Patcher {
     return h >>> 0;
   }
 
+  /**
+   * The (id, kind, value) triples docHash is computed over, node by node.
+   *
+   * A hash mismatch says the two documents differ and nothing else. This says
+   * which nodes: put it beside the agent's list from the same instant and the
+   * diff is the bug. Values are truncated to the 32 characters the hash itself
+   * looks at, so a difference here is always a difference the hash saw.
+   */
+  fingerprint(limit = 20000): {
+    total: number; truncated: boolean; nodes: [number, number, string][];
+  } {
+    const ids = Array.from(this.nodes.keys()).sort((a, b) => a - b);
+    const out: [number, number, string][] = [];
+    for (const id of ids) {
+      if (out.length >= limit) break;
+      const node = this.nodes.get(id);
+      if (!node) continue;
+      const v = node.nodeType === Node.TEXT_NODE
+        ? node.nodeValue ?? ''
+        : this.names.get(id) ?? (node as Element).tagName?.toLowerCase() ?? '';
+      out.push([id, node.nodeType, v.slice(0, 32)]);
+    }
+    return { total: ids.length, truncated: ids.length > out.length, nodes: out };
+  }
+
+  /** What the patcher knows about itself, for a diagnostic capture. */
+  diag(): Record<string, unknown> {
+    return {
+      seq: this.seq,
+      nodes: this.nodes.size,
+      strings: this.strings.length,
+      names: this.names.size,
+      cssRules: this.cssRules.length,
+      images: this.images.size,
+      docHash: this.docHash(),
+      hasRoot: this.root !== null,
+      styleAttached: this.styleEl?.isConnected === true,
+    };
+  }
+
   /** Number of mirrored nodes, for the HUD. */
   get size(): number {
     return this.nodes.size;

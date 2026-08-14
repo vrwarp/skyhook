@@ -5,13 +5,16 @@
  * No framework. The whole client is a patcher and an input serialiser; a
  * runtime would be more bytes than the mirror protocol it exists to carry.
  */
-import { MirrorHost, type MenuTarget } from '../mirror/host.js';
+import { MirrorHost, type MenuTarget, type MirrorFreeze } from '../mirror/host.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { closeMenu, menuIsOpen, showMenu, type MenuGroups } from './menu.js';
 import { pairingFromFragment, transportUrls } from './pairing.js';
+import { gather } from './capture.js';
+import * as clientlog from './clientlog.js';
 import { Store, type Pairing } from '../store/store.js';
 import type {
-  AdapterRecord, ImageMeta, Mutation, Snapshot, Stats, TabState, Welcome,
+  AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Snapshot, Stats, TabState,
+  Welcome,
 } from '../shared/protocol.js';
 
 const store = new Store();
@@ -54,6 +57,12 @@ const el = {
   pairingForm: byId<HTMLFormElement>('pairing-form'),
   pairingJSON: byId<HTMLTextAreaElement>('pairing-json'),
   pairingError: byId<HTMLParagraphElement>('pairing-error'),
+  capture: byId<HTMLDialogElement>('capture'),
+  captureForm: byId<HTMLFormElement>('capture-form'),
+  captureNote: byId<HTMLTextAreaElement>('capture-note'),
+  captureCost: byId<HTMLParagraphElement>('capture-cost'),
+  captureCancel: byId<HTMLButtonElement>('capture-cancel'),
+  toast: byId<HTMLDivElement>('toast'),
 };
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -65,6 +74,7 @@ function byId<T extends HTMLElement>(id: string): T {
 // ------------------------------------------------------------------- startup
 
 async function main(): Promise<void> {
+  clientlog.install();
   await store.requestPersistence();
   registerServiceWorker();
   startWorker();
@@ -220,6 +230,22 @@ function handle(kind: string, args: Record<string, unknown>): void {
     case 'stats':
       renderStats(args as unknown as Stats & { rttMs?: number });
       break;
+    case 'capture':
+      // Nothing between here and the freeze inside runCapture may await. See
+      // MirrorHost.freeze for why.
+      runCapture(args.request as unknown as CaptureRequest);
+      break;
+    case 'captureDone': {
+      const done = args as unknown as CaptureDone;
+      if (done.error) {
+        log(`capture failed: ${done.error}`);
+        toast(`Capture failed: ${done.error}`);
+      } else {
+        log(`capture written landside: ${done.path} (${done.bytes} bytes)`);
+        toast(`Capture saved landside: ${basename(done.path)}`);
+      }
+      break;
+    }
     case 'log':
       log(String(args.message ?? ''));
       break;
@@ -496,6 +522,17 @@ function pageGroups(tab: number): MenuGroups {
         run: () => openInNewTab(url),
       },
     ],
+    [
+      {
+        // Deliberately the last entry everywhere it appears: it is the one
+        // that costs real bytes, and it is only ever wanted when something has
+        // already gone wrong.
+        label: 'Report a rendering problem…',
+        hint: 'sends a screenshot',
+        disabled: !connected,
+        run: () => askForCapture(),
+      },
+    ],
   ];
 }
 
@@ -748,6 +785,124 @@ function showRefusal(refused: 'unauthorized' | 'version'): void {
 
 function log(message: string): void {
   console.warn('[skyhook]', message);
+  // Also into the ring a capture carries up. The console is not somewhere
+  // anybody is looking at 35,000 feet.
+  clientlog.record('warn', message);
+}
+
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** A transient notice in the corner, for things the reader asked for. */
+function toast(message: string): void {
+  el.toast.textContent = message;
+  el.toast.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.toast.hidden = true;
+    toastTimer = null;
+  }, 8000);
+}
+
+function basename(path: string): string {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return cut >= 0 ? path.slice(cut + 1) : path;
+}
+
+// ------------------------------------------------------------------ captures
+//
+// A capture is the one thing this client does that deliberately spends the
+// link: the mirrored document and a screenshot of it go up to the server, which
+// zips them together with the landside page, the frames it actually sent, and
+// its own screenshot of the same tab. That bundle is the only artifact that can
+// settle whether a page that looks wrong is wrong landside, wrong in the frames
+// or wrong in the patcher — the three possibilities each look identical from
+// here.
+//
+// It is never automatic on this side. The server takes one by itself when it
+// catches a divergence, but a reader has to ask, because the reader is the one
+// paying for the bytes.
+
+/** Opens the "what looks wrong?" dialog. */
+function askForCapture(): void {
+  if (!connected) {
+    toast('A capture needs the link: the bundle is written on your server.');
+    return;
+  }
+  el.captureNote.value = '';
+  // The server asks for every open tab, not just this one, because a mirror
+  // bug is often visible in the tab beside the one being complained about. Say
+  // so, since the reader is paying for it.
+  const open = hosts.size;
+  el.captureCost.textContent = open > 1
+    ? `Sends all ${open} open tabs and a screenshot of each. This costs real bandwidth.`
+    : 'Sends this page and a screenshot of it. This costs real bandwidth.';
+  el.capture.showModal();
+}
+
+el.captureCancel.addEventListener('click', () => el.capture.close());
+el.captureForm.addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const note = el.captureNote.value.trim();
+  el.capture.close();
+  send('capture', { reason: 'manual', note });
+  toast('Capture requested. Gathering this side…');
+});
+
+/**
+ * Answers the server's request for this side of a capture.
+ *
+ * The freeze below happens before anything is awaited, and that ordering is the
+ * whole design. The server usually asks for a capture because it has just found
+ * the two halves holding different documents — and the next thing it does about
+ * that is send a resync, which replaces this side's document with a correct
+ * one. The request rides the ctrl channel and the resync rides dom, so this
+ * runs first; an `await` before the freeze would hand the evidence back.
+ */
+function runCapture(request: CaptureRequest): void {
+  const wanted = request.tabs?.length ? request.tabs : Array.from(hosts.keys());
+  const frozen: MirrorFreeze[] = [];
+  for (const id of wanted) {
+    const host = hosts.get(id);
+    if (!host) continue;
+    try {
+      frozen.push(host.freeze());
+    } catch (err) {
+      log(`capture: tab ${id} could not be frozen: ${String(err)}`);
+    }
+  }
+  clientlog.record('info', `capture ${request.id}: froze ${frozen.length} tab(s)`);
+
+  void (async (): Promise<void> => {
+    try {
+      const artifacts = await gather({ request, frozen, shell: shellReport() });
+      for (const artifact of artifacts) {
+        send('capturePart', { id: request.id, name: artifact.name, data: artifact.data });
+      }
+      send('capturePart', { id: request.id, done: true });
+      toast(`Capture sent: ${artifacts.length} file(s) on their way to your server.`);
+    } catch (err) {
+      log(`capture ${request.id} failed on this side: ${String(err)}`);
+      // The server is holding a bundle open waiting for us. Telling it what
+      // went wrong is better than letting it time out and record nothing.
+      send('capturePart', { id: request.id, error: String(err), done: true });
+    }
+  })();
+}
+
+/** What the shell itself knows, for the bundle's client.json. */
+function shellReport(): Record<string, unknown> {
+  return {
+    connected,
+    activeTab: active,
+    tabs: Array.from(tabs.values()).map((t) => ({
+      tab: t.id, url: t.url, title: t.title, loading: t.loading,
+      canBack: t.canBack, canForward: t.canForward,
+      hasFrame: hosts.has(t.id),
+      nodes: hosts.get(t.id)?.nodes ?? 0,
+    })),
+    chatPanelOpen: !el.panel.hidden,
+    archivedRecords: archive.length,
+  };
 }
 
 // -------------------------------------------------------------- the chat panel
@@ -888,6 +1043,17 @@ el.pairingForm.addEventListener('submit', (ev) => {
 window.addEventListener('resize', () => {
   layout();
   send('viewport', { viewport: viewport() });
+});
+
+document.addEventListener('keydown', (ev) => {
+  // Ctrl/⌘+Shift+D. The browser's own devtools chord is F12 and Ctrl+Shift+I,
+  // and this deliberately avoids both: on a mirrored page devtools show a
+  // sandboxed frame full of inert nodes, which is the wrong answer to the
+  // question somebody pressing them is asking.
+  if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && (ev.key === 'D' || ev.key === 'd')) {
+    ev.preventDefault();
+    askForCapture();
+  }
 });
 
 document.addEventListener('visibilitychange', () => {

@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/vrwarp/skyhook/internal/config"
+	"github.com/vrwarp/skyhook/internal/diag"
 	"github.com/vrwarp/skyhook/internal/server"
 	"github.com/vrwarp/skyhook/internal/session"
 )
@@ -44,7 +45,7 @@ func main() {
 	if *demo {
 		cfg = demoConfig(cfg)
 	}
-	log := newLogger(cfg.LogLevel)
+	log, logs := newLogger(cfg.LogLevel, cfg.LogLines)
 
 	ensureToken(&cfg, *configPath, log)
 
@@ -74,7 +75,7 @@ func main() {
 		return
 	}
 
-	srv, err := server.New(ctx, cfg, log)
+	srv, err := server.New(ctx, cfg, log, logs)
 	if err != nil {
 		fatal("startup", err)
 	}
@@ -158,7 +159,15 @@ func isDefaultAddr(addr string) bool {
 	return err != nil || host == "" || host == "0.0.0.0" || host == "::"
 }
 
-func newLogger(level string) *slog.Logger {
+// newLogger builds the process logger and, alongside it, the ring a diagnostic
+// capture reads from.
+//
+// The ring is fed at debug level whatever the operator chose for stderr. What a
+// capture wants is the detail — the resync that was declined, the frame that
+// would not decode — and a level that suppresses those on the terminal has no
+// business suppressing them in a bundle nobody sees unless something has
+// already gone wrong.
+func newLogger(level string, ringLines int) (*slog.Logger, *diag.Ring) {
 	var lv slog.Level
 	switch level {
 	case "debug":
@@ -170,10 +179,15 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lv = slog.LevelInfo
 	}
-	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lv})
+	h := slog.Handler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lv}))
+	var ring *diag.Ring
+	if ringLines > 0 {
+		ring = diag.NewRing(ringLines)
+		h = diag.Tee(h, slog.NewTextHandler(ring, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
 	l := slog.New(h)
 	slog.SetDefault(l)
-	return l
+	return l, ring
 }
 
 func envOr(key, def string) string {

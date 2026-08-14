@@ -519,4 +519,67 @@ describe('MirrorHost', () => {
     expect(host.frame.contentDocument!.body.textContent).toBe('first and more');
     expect(ev.applied).toHaveBeenLastCalledWith(1, 3, expect.any(Number));
   });
+
+  describe('freezing for a capture', () => {
+    it('takes the document, the patcher state and the fingerprint', async () => {
+      const { host } = await mount();
+      host.applySnapshot(snapshot());
+      host.applyMutation({
+        strings: [' more'], docHash: 0, flush: false,
+        ops: [{
+          op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 11, ref2: 0,
+          nodes: [], off: 5, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        }],
+      }, 5);
+
+      const frozen = host.freeze();
+      expect(frozen.tab).toBe(1);
+      expect(frozen.html).toContain('first more');
+      expect(frozen.error).toBeUndefined();
+      expect(frozen.state.lastAppliedSeq).toBe(5);
+      expect(frozen.state.url).toBe('https://example.test/');
+      // The fingerprint is what turns "the hashes differ" into "these nodes
+      // differ", so it has to list what the hash actually looks at.
+      expect(frozen.fingerprint.total).toBe(4);
+      expect(frozen.fingerprint.nodes.map((n) => n[0])).toEqual([1, 2, 3, 4]);
+      expect(frozen.fingerprint.nodes[3][2]).toBe('first more');
+    });
+
+    // The capture worth having is the one taken at a divergence, and the very
+    // next thing the server does about a divergence is resync the tab. If the
+    // freeze were asynchronous the evidence would be gone by the time it ran.
+    it('holds the diverged document even after a resync replaces it', async () => {
+      const { host } = await mount();
+      host.applySnapshot(snapshot());
+      const frozen = host.freeze();
+
+      const repaired = snapshot();
+      repaired.strings[3] = 'repaired';
+      host.applySnapshot(repaired);
+
+      expect(host.frame.contentDocument!.body.textContent).toBe('repaired');
+      expect(frozen.html).toContain('first');
+      expect(frozen.html).not.toContain('repaired');
+    });
+
+    it('lists the images the document references, for the screenshot', async () => {
+      const { host } = await mount();
+      const snap = snapshot();
+      const base = snap.strings.length;
+      snap.strings.push('img', 'src', 'skyhook://img/abc123');
+      snap.nodes.push({
+        id: 40, parent: 3, kind: NodeKind.Element, ref: base,
+        attrs: [base + 1, base + 2], flags: 0,
+      });
+      snap.images = [{
+        node: 40, hash: 'abc123', w: 10, h: 10, blur: '', mime: 'image/webp',
+        bytes: 1, priority: 0, alt: '',
+      }];
+      host.applySnapshot(snap);
+
+      // An SVG screenshot cannot fetch anything, so these hashes are what the
+      // rasteriser inlines from Cache Storage.
+      expect(host.freeze().images).toContain('abc123');
+    });
+  });
 });

@@ -71,7 +71,16 @@ default; this is the whole surface:
   "blockUrls": { "reddit.com": [] },
   "adapters": ["googlechat"],
   "adapterConfig": "/var/lib/skyhook/adapters.json",
-  "logLevel": "info"
+  "logLevel": "info",
+  "captureKeep": 20,
+  "captureScreenshots": true,
+  "captureText": false,
+  "captureOnDivergence": true,
+  "captureInterval": "5m",
+  "captureMaxBytes": 67108864,
+  "captureClientBytes": 4194304,
+  "journalBytes": 2097152,
+  "logLines": 2000
 }
 ```
 
@@ -80,7 +89,11 @@ Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_HOSTS`, `SKYHOOK_HEADLESS`, `SKYHOOK_LANG`, `SKYHOOK_ADAPTERS`,
 `SKYHOOK_WEB_ROOT`,
 `SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`,
-`SKYHOOK_PUBLIC_URL`, `SKYHOOK_BEHIND_PROXY`.
+`SKYHOOK_PUBLIC_URL`, `SKYHOOK_BEHIND_PROXY`, `SKYHOOK_CAPTURE_KEEP`,
+`SKYHOOK_CAPTURE_TEXT`, `SKYHOOK_CAPTURE_ON_DIVERGENCE`.
+
+The `capture*` and `journal*` settings are the diagnostic bundles — see
+[diagnosing the mirror](#diagnosing-the-mirror).
 
 `publicUrl` and `behindProxy` are for deployments where the client does not
 reach the server where the server listens — see
@@ -317,6 +330,14 @@ What the implementation does about it:
   tamper with the mirror.
 - **Kill switch**: `skyhookctl kill -yes` (or the client's kill command) tears
   down every session and wipes the browser profile. Use it if the laptop is lost.
+- **Diagnostic bundles hold page content, and are written accordingly.** A
+  capture contains whatever was on screen on both sides, so bundles are `0600`
+  files in a `0700` directory and the oldest are deleted (`captureKeep`). Typed
+  text is reduced to a length and a digest unless `captureText` is on, form
+  submissions record field names without values, and the pairing token is never
+  in one. Sharing a bundle is still a decision: see
+  [diagnosing the mirror](#diagnosing-the-mirror). `captureKeep: 0` disables the
+  feature entirely.
 
 Accepted residual risk: VPS compromise is full account compromise. Put the data
 directory on a LUKS volume, keep the firewall to QUIC + SSH, and do first logins
@@ -431,9 +452,109 @@ page state, and that should be your decision rather than a merge's.
 | Connects, then drops immediately | Pinned certificate expired or rotated. Re-pair. |
 | Blank mirror, server logs "isolated world setup failed" | The page navigated during setup; a resync fixes it. Persistent failures mean Chromium is wedged — restart the service. |
 | Images never arrive | Check `avifenc`/`cwebp` are installed, and look for "image transcode failed" in the logs. The transcoder degrades to JPEG/PNG, so persistent silence means the *fetch* failed (authenticated asset, expired cookie). |
-| Mirror looks stale | Look for "mirror divergence" in the logs: the integrity check found a hash mismatch and resynced. If it repeats on one site, that is a protocol bug worth a fixture. |
+| Mirror looks stale | Look for "mirror divergence" in the logs: the integrity check found a hash mismatch and resynced, and took a capture on its way past. Open the newest bundle in `<dataDir>/captures` — see [diagnosing the mirror](#diagnosing-the-mirror). |
 | High landside CPU | Image transcoding. Lower `imageWorkers`, or raise `imageQuality` (higher quality is *cheaper* for the fallback encoders). |
 | `no space left` in the container | The image cache. Lower `imageCacheBytes`; it evicts LRU but only up to its own limit. |
+
+## Diagnosing the mirror
+
+The split renderer has an awkward failure mode: both halves look fine on their
+own. Landside, Chromium rendered the page and the agent serialised it;
+plane-side, the patcher applied every frame it was given and reports no error.
+What went wrong is only visible in the gap between them, and by the time anybody
+looks, the tab has moved on.
+
+A **capture** freezes both halves at one instant and writes them to a zip in
+`<dataDir>/captures`. It lives landside because that is the half with a disk, a
+clock and somewhere to put things — the plane-side device may be a phone on a
+seat-back wifi, and asking it to hold a file is asking for the file to be lost.
+
+### Taking one
+
+- **The reader**, from the client: right-click → *Report a rendering problem…*,
+  or **Ctrl/⌘+Shift+D**. It asks what looked wrong; that note is the one thing
+  in a bundle no amount of instrumentation can reconstruct.
+- **The server**, by itself, the first time the integrity check finds the two
+  halves holding different documents. Rate-limited to one per `captureInterval`,
+  because a page that diverges once usually diverges every thirty seconds.
+  Set `captureOnDivergence: false` to turn it off.
+- **From a terminal**, which is also the way to reproduce one in CI:
+
+  ```sh
+  skyhookctl capture -pairing ~/.skyhook/pairing.json \
+    -url https://news.ycombinator.com/ -note "the comment tree renders empty"
+  ```
+
+  `skyhookctl` keeps the same DOM replica the real patcher builds, so a
+  divergence it can reproduce is a divergence in the *frames*, not in a browser.
+
+### What is in one
+
+```
+manifest.json                    what, when, why, and which halves are present
+NOTES.txt                        what is missing from this bundle, and why
+server.log                       the server's last few thousand lines, at debug
+session/session.json             session, viewport, link stats
+session/events.json              the timeline: navigations, input, resyncs, divergences
+landside/browser.json            the Chromium behind it
+landside/tabs/<id>/page.html     the real document, as Chromium has it
+landside/tabs/<id>/screenshot.webp
+landside/tabs/<id>/agent.json    what the injected agent believes about itself
+landside/tabs/<id>/fingerprint.json
+landside/tabs/<id>/frames/       the wire frames actually sent, plus an index
+landside/tabs/<id>/expected.html the client's document, replayed from those frames
+planeside/client.json            device, build, shell state
+planeside/worker.json            what the client acknowledged, and its link
+planeside/client.log             the client's own log, including uncaught errors
+planeside/tabs/<id>/mirror.html  the document the reader was actually looking at
+planeside/tabs/<id>/screenshot.webp
+planeside/tabs/<id>/fingerprint.json
+planeside/tabs/<id>/state.json
+```
+
+### Reading one
+
+Start with `NOTES.txt`. It lists what could not be gathered and why — a bundle
+that silently omits things is worse than one that admits it.
+
+Then the three-way split, which is what makes the bug locatable:
+
+| Compare | What a difference means |
+|---|---|
+| `landside/…/page.html` vs `landside/…/expected.html` | The **agent** dropped or mangled something on its way from the real DOM into frames. |
+| `landside/…/expected.html` vs `planeside/…/mirror.html` | The **patcher** did not apply what it was sent — or did not receive it. `frames/index.json` says which frames existed and when. |
+| the two `screenshot.webp` files | Both documents agree and they still look different: CSS. Used-CSS extraction missed a rule, or a substituted element lost the selector that sized it. |
+
+`state.json` on each side carries the document hash, and the landside one also
+carries `expectedHash` — the hash of the replay. When all three agree, the DOM
+is not the problem. When `clientHash` differs, diff the two `fingerprint.json`
+files: they list exactly the `(id, kind, value)` triples the hash is computed
+over, so a mismatch becomes a list of the specific nodes responsible.
+
+`session/events.json` is the reproduction steps: what the reader clicked and
+typed, in order, with each resync and divergence in place.
+
+### What a bundle costs, and what it will not contain
+
+Everything is bounded. `captureMaxBytes` caps a bundle; `captureKeep` bounds how
+many survive; `journalBytes` bounds the per-tab record of frames already sent.
+`captureClientBytes` is the only one the reader pays for directly — it caps what
+crosses the link upward, and the client gathers cheapest-and-most-valuable
+first, so a capture cut short by an outage is missing its screenshot rather than
+its DOM.
+
+**Typed text is redacted by default.** Input is recorded either way — the
+keystrokes are the reproduction steps — but as a length and a short digest, so a
+bundle can be handed to somebody without handing them a password. Form
+submissions record field *names* only. Set `captureText: true` to keep the
+contents, and treat the bundles accordingly.
+
+A bundle still contains the mirrored page: whatever was on screen, including
+anything you were logged into. Bundles are files on your server with `0600`
+permissions in a `0700` directory; sharing one is a decision, not a default.
+
+Turn the whole thing off with `captureKeep: 0`. That also stops the frame
+journals, which are the only cost captures impose when nobody is taking one.
 
 ## Measuring the link
 

@@ -217,3 +217,56 @@ body {
   padding: 6px 14px;
 }
 .error { color: var(--bad); min-height: 1.2em; }
+
+/* The capture dialog and the notice that follows one. Both are deliberately
+   plain: a capture is taken when something already looks wrong, and chrome that
+   draws attention to itself at that moment is chrome in the way. */
+#capture {
+  max-width: 520px;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  background: #0b1220;
+  color: var(--fg);
+}
+
+#capture::backdrop { background: rgba(0, 0, 0, .6); }
+#capture h2 { margin-top: 0; font-size: 16px; }
+#capture p { color: var(--muted); font-size: 13px; }
+#capture textarea {
+  width: 100%;
+  background: #111827;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  font: inherit;
+  padding: 8px;
+}
+
+#capture-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+#capture-buttons button {
+  background: #1f2937;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 6px 14px;
+}
+
+#capture-buttons button[type="submit"] { background: #1d4ed8; border-color: #2563eb; }
+.muted { color: var(--muted); font-size: 12px; }
+
+#toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 20;
+  max-width: 380px;
+  padding: 10px 14px;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  background: #0b1220;
+  color: var(--fg);
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+}
+
+#toast[hidden] { display: none; }

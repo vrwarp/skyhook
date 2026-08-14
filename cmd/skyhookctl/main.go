@@ -36,6 +36,8 @@ func main() {
 		kill(args)
 	case "chat":
 		chat(args)
+	case "capture":
+		capture(args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -52,6 +54,7 @@ func usage() {
   pairing  print the pairing file the client needs (-link for the pairing URL)
   kill     wipe the landside session and browser profile
   chat     drive the chat adapter (list, send)
+  capture  take a diagnostic bundle of both halves of a mirrored tab
 
 Run "skyhookctl <command> -h" for flags.
 `)
@@ -294,6 +297,55 @@ func chat(args []string) {
 			}
 		}
 	}
+}
+
+// capture takes a diagnostic bundle. Given a -url it opens that page first, so
+// one command reproduces a rendering complaint and captures it: this client
+// keeps the same DOM replica the real patcher builds, so a divergence it can
+// reproduce is a divergence in the frames rather than in a browser.
+func capture(args []string) {
+	fs := flag.NewFlagSet("capture", flag.ExitOnError)
+	var c common
+	c.flags(fs)
+	url := fs.String("url", "", "open this page first, and capture it once it has settled")
+	note := fs.String("note", "", "what looks wrong (goes into the bundle)")
+	reason := fs.String("reason", protocol.CaptureManual, "why: manual, divergence, resync")
+	settle := fs.Duration("settle", 8*time.Second, "how long to let the page settle before capturing")
+	timeout := fs.Duration("timeout", 3*time.Minute, "overall timeout")
+	_ = fs.Parse(args)
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	cl := c.dial(ctx)
+	defer func() { _ = cl.Close() }()
+
+	if *url != "" {
+		if err := cl.OpenTab(*url); err != nil {
+			log.Fatalf("open tab: %v", err)
+		}
+		tab, err := cl.WaitForTab(ctx, 30*time.Second)
+		if err != nil {
+			log.Fatalf("tab: %v", err)
+		}
+		if err := cl.Navigate(tab, *url); err != nil {
+			log.Fatalf("navigate: %v", err)
+		}
+		time.Sleep(*settle)
+	}
+
+	if err := cl.Capture(*reason, *note); err != nil {
+		log.Fatalf("capture: %v", err)
+	}
+	done, err := cl.WaitForCapture(ctx, *timeout)
+	if err != nil {
+		log.Fatalf("capture: %v", err)
+	}
+	if done.Error != "" {
+		log.Fatalf("capture: the server refused: %s", done.Error)
+	}
+	// The path is the server's, not this machine's: the bundle is landside on
+	// purpose, and saying so avoids a hunt for a file that was never here.
+	fmt.Printf("capture %s written on the server: %s (%d bytes)\n", done.ID, done.Path, done.Bytes)
 }
 
 func truncate(s string, n int) string {

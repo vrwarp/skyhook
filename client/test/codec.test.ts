@@ -8,10 +8,11 @@ import { readFileSync, existsSync } from 'node:fs';
 import { decode as cborDecode } from 'cbor-x';
 
 import {
-  ackBody, decodeFrame, decodeMutation, decodeSnapshot, decodeStats, decodeTabState,
-  decodeWelcome, encodeFrame, frameMessage, helloBody, inputBody, unframeMessage,
+  ackBody, capturePartBody, decodeCaptureDone, decodeCaptureRequest, decodeFrame, decodeMutation,
+  decodeSnapshot, decodeStats, decodeTabState, decodeWelcome, encodeFrame, frameMessage, helloBody,
+  inputBody, unframeMessage,
 } from '../src/shared/codec.js';
-import { Channel, F, FrameType, OpCode } from '../src/shared/protocol.js';
+import { CaptureReason, Channel, F, FrameType, OpCode } from '../src/shared/protocol.js';
 
 const FIXTURES = new URL('../../testdata/conformance.json', import.meta.url).pathname;
 
@@ -114,6 +115,45 @@ describe('cross-language conformance', () => {
     const stats = decodeStats(decodeFrame(unframeMessage(decodeB64(fixtures.stats)).payload).body);
     expect(stats.rttMicros).toBe(1200000);
     expect(stats.queueDepth).toBe(3);
+  });
+
+  it.runIf(available)('decodes a capture request the server sent', () => {
+    const frame = decodeFrame(unframeMessage(decodeB64(fixtures.capture)).payload);
+    expect(frame.type).toBe(FrameType.Capture);
+    const req = decodeCaptureRequest(frame.body);
+    expect(req.id).toBe('20260101-120000-abcd1234');
+    expect(req.reason).toBe(CaptureReason.Divergence);
+    expect(req.note).toBe('the article body stopped updating');
+    expect(req.tabs).toEqual([1, 2]);
+    expect(req.maxBytes).toBe(4 << 20);
+    expect(req.screenshots).toBe(true);
+  });
+
+  it.runIf(available)('decodes the capture the server says it wrote', () => {
+    const frame = decodeFrame(unframeMessage(decodeB64(fixtures.capturedone)).payload);
+    expect(frame.type).toBe(FrameType.CaptureDone);
+    const done = decodeCaptureDone(frame.body);
+    expect(done.path).toBe('/data/captures/20260101-120000-abcd1234.zip');
+    expect(done.bytes).toBe(918273);
+    expect(done.error).toBe('');
+  });
+
+  it.runIf(available)('produces a capture part the Go server decodes', () => {
+    // The bytes the Go fixture carries, rebuilt from this side: `data` has to
+    // land as a plain CBOR byte string or the server drops the whole frame,
+    // which would look like a screenshot that never arrived.
+    const bytes = encodeFrame(FrameType.CapturePart, 0, capturePartBody({
+      id: '20260101-120000-abcd1234',
+      name: 'tabs/1/mirror.html.gz',
+      data: new Uint8Array([0x1f, 0x8b, 0x08, 0x00]),
+      more: true,
+    }));
+    const decoded = cborDecode(bytes) as Record<number, unknown>;
+    const body = decoded[F.frame.body] as Record<number, unknown>;
+    expect(body[F.capturePart.name]).toBe('tabs/1/mirror.html.gz');
+    expect(body[F.capturePart.more]).toBe(true);
+    expect(body[F.capturePart.data]).toBeInstanceOf(Uint8Array);
+    expect(Array.from(body[F.capturePart.data] as Uint8Array)).toEqual([0x1f, 0x8b, 0x08, 0x00]);
   });
 
   it.runIf(available)('produces a hello the Go server accepts', () => {

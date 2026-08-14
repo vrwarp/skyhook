@@ -462,6 +462,69 @@ What is deliberately *not* here: nothing in this list lies about what the
 browser is. It is a real Chromium, driven by a real person, on a real profile;
 the work was in stopping the plumbing from contradicting that.
 
+### 16. Diagnosing the split renderer needs both halves at the same instant
+
+The integrity check tells you the two halves disagree. It never tells you why,
+and the design has no answer for that: a hash mismatch is a boolean about a page
+that has since moved on, on a device you cannot reach, in a session that expires
+in twelve hours. Every mirror bug so far has been found by reproducing it
+locally, which works for the ones that reproduce.
+
+So a **capture** freezes both halves at one instant and zips them landside:
+`<dataDir>/captures/<timestamp>-<id>.zip`. What is in it and how to read it is
+in [OPERATIONS.md](OPERATIONS.md#diagnosing-the-mirror); what is worth recording
+here is the four things that were not obvious.
+
+**The replay ring cannot serve as the frame record.** It drops a frame the
+moment the client acknowledges it — and a mirror that went wrong went wrong
+while applying frames it acknowledged. So each tab keeps a second, separate
+journal, bounded by bytes and reset at each snapshot, which the capture replays
+through `mirror.Model` to produce `expected.html`: the client's document as the
+frames actually sent specify it. That artifact is what makes the bug locatable,
+because it splits "the agent serialised it wrong" from "the patcher applied it
+wrong" — two failures that look identical from either end. A journal that had to
+drop frames says so, and the capture then declines to claim a reconstruction it
+cannot stand behind.
+
+**A capture at a divergence races the repair of that divergence.** The server's
+next act after finding a mismatch is to resync the tab, which starts a new
+snapshot, empties the journal, and replaces the client's diverged document with
+a correct one. Gathering any of that afterwards produces a beautiful bundle
+describing a mirror that is working. So the perishable state is frozen
+synchronously on both sides before the resync is allowed to happen: landside in
+`Session.freezeTabs`, and plane-side in `MirrorHost.freeze`, which serialises
+the mirrored DOM before its handler awaits anything. The request rides `ctrl`
+and the resync rides `dom`, so the client hears about the capture first; the
+ordering is load-bearing, and both halves say so where it matters.
+
+**There is no browser API that hands a page a picture of itself.**
+`getDisplayMedia` wants a permission prompt and a user gesture; a canvas cannot
+draw a live DOM. The client serialises the frozen document into an SVG
+`<foreignObject>`, loads that as an image and draws it onto a canvas — with two
+catches that each cost the whole screenshot if missed. The markup has to be
+well-formed XML, and real pages carry attribute names (`@click`, `:class`,
+`x-on:keyup.enter`) that are not, so one Vue directive anywhere on the page
+would otherwise blank the picture; those are stripped. And an SVG image may not
+load anything external, so every mirrored image is inlined as a data URI first —
+which is possible only because the bytes are already plane-side in Cache
+Storage, the same fact that lets a warm client paint a page it never downloaded.
+The rasteriser is tested against a real browser holding a real mirror, and the
+assertion is that the resulting WebP decodes and is not one flat colour: every
+way this path fails produces a plausible-looking blank rectangle.
+
+**A bundle is a thing people send to each other.** So the reader's keystrokes
+are recorded as a length and a short digest rather than verbatim — the timeline
+is the reproduction steps and is worth keeping, but it is also sometimes a
+password — and form submissions record field names without values. `captureText`
+turns that off for an operator who needs the contents. The pairing token is
+never in a bundle at all.
+
+The cost is deliberate and bounded: a capture is the one thing in Skyhook that
+spends the link on purpose. It is manual or divergence-triggered, rate-limited,
+capped in both directions, and gathered cheapest-and-most-valuable first so a
+capture cut short by an outage loses its screenshot rather than its DOM.
+`captureKeep: 0` removes the feature, and the frame journals with it.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

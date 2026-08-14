@@ -57,6 +57,30 @@
       </form>
     </dialog>
 
+    <!-- A capture is the one deliberate expense on this link: it sends a
+         screenshot and the mirrored document up to the server, which zips them
+         together with its own half. The note is the part no instrumentation can
+         reconstruct — what the reader expected to see. -->
+    <dialog id="capture">
+      <form id="capture-form" method="dialog">
+        <h2>Report a rendering problem</h2>
+        <p>
+          Skyhook will send this page as your browser drew it — the mirrored
+          document and a screenshot — up to your server, which saves it next to
+          its own copy of the same page. Nothing is uploaded anywhere else.
+        </p>
+        <textarea id="capture-note" rows="4" spellcheck="true"
+                  placeholder="What looks wrong? What did you expect to see?"></textarea>
+        <p id="capture-cost" class="muted"></p>
+        <div id="capture-buttons">
+          <button type="button" id="capture-cancel">Cancel</button>
+          <button type="submit">Capture</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" hidden></div>
+
     <script type="module" src="/app.js"></script>
   </body>
 </html>

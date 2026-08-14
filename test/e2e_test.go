@@ -28,6 +28,7 @@ import (
 
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/client"
+	"github.com/vrwarp/skyhook/internal/diag"
 	"github.com/vrwarp/skyhook/internal/imgproc"
 	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/protocol"
@@ -179,6 +180,11 @@ type harness struct {
 	token      string
 	images     *imgproc.Pipeline
 	listenAddr string
+	// captureDir is where diagnostic bundles land. Captures are on for every
+	// harness so the per-tab frame journal is exercised by the whole suite,
+	// not only by the test that opens a bundle.
+	captureDir string
+	logs       *diag.Ring
 }
 
 type router struct{ mgr *session.Manager }
@@ -362,7 +368,13 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	if testing.Verbose() {
 		logLevel = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	// Teed into a ring the way skyhookd does it, so a capture taken by these
+	// tests carries a server log — and so the tee itself is exercised.
+	logs := diag.NewRing(500)
+	log := slog.New(diag.Tee(
+		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}),
+		slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}),
+	))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -380,7 +392,10 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	}
 	t.Cleanup(func() { _ = br.Close() })
 
-	h := &harness{t: t, site: site, browser: br, token: "test-token", listenAddr: listenAddr}
+	h := &harness{
+		t: t, site: site, browser: br, token: "test-token",
+		listenAddr: listenAddr, logs: logs,
+	}
 	r := &router{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{
 		Workers: 2, CacheDir: t.TempDir(), CacheSize: 8 << 20, Logger: log,
@@ -393,9 +408,15 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	t.Cleanup(pipe.Close)
 	h.images = pipe
 
+	h.captureDir = t.TempDir()
 	mgrOpts := session.ManagerOptions{
 		Logger: log, Token: h.token, TTL: time.Hour, RingBytes: 1 << 20,
 		Compression: true, ProfileDir: t.TempDir(), MaxTabs: 8,
+		Capture: session.CaptureOptions{
+			Dir: h.captureDir, Keep: 10, MaxBytes: 32 << 20, ClientBytes: 8 << 20,
+			Screenshots: true, JournalBytes: 4 << 20, Wait: budget(30 * time.Second),
+			Interval: time.Minute, Logs: h.logs,
+		},
 	}
 	if tweak != nil {
 		tweak(&mgrOpts)

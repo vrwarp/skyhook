@@ -126,6 +126,36 @@ func buildFixtures(t *testing.T) map[string]string {
 	}
 	enc("adapter", protocol.ChBulk, f)
 
+	// A capture is the one frame family that crosses the link in both
+	// directions with the same type, so both ends have to agree about it twice.
+	f, err = protocol.NewFrame(protocol.TypeCapture, 0, protocol.CaptureRequest{
+		ID: "20260101-120000-abcd1234", Reason: protocol.CaptureDivergence,
+		Note: "the article body stopped updating", Tabs: []uint32{1, 2},
+		MaxBytes: 4 << 20, Screenshots: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc("capture", protocol.ChCtrl, f)
+
+	f, err = protocol.NewFrame(protocol.TypeCapturePart, 0, protocol.CapturePart{
+		ID: "20260101-120000-abcd1234", Name: "tabs/1/mirror.html.gz",
+		Data: []byte{0x1f, 0x8b, 0x08, 0x00}, More: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc("capturepart", protocol.ChBulk, f)
+
+	f, err = protocol.NewFrame(protocol.TypeCaptureDone, 0, protocol.CaptureDone{
+		ID:   "20260101-120000-abcd1234",
+		Path: "/data/captures/20260101-120000-abcd1234.zip", Bytes: 918_273,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc("capturedone", protocol.ChCtrl, f)
+
 	return out
 }
 
