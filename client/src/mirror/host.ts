@@ -144,6 +144,49 @@ function atBottom(top: number, view: number, total: number): boolean {
   return top + view >= total - BOTTOM_SLACK;
 }
 
+/** The gesture that follows a link in place, rather than somewhere else: the
+ *  left button, held on its own. Every modifier means another tab, another
+ *  window, or a download, and those are answered elsewhere. */
+function plainClick(ev: MouseEvent): boolean {
+  return ev.button === 0 && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && !ev.altKey;
+}
+
+/** A URL without its fragment: what two links have in common when they point
+ *  into the same document. */
+function stripFragment(url: URL): string {
+  return url.origin + url.pathname + url.search;
+}
+
+/**
+ * The element a fragment names, by the rules a browser follows: an id first,
+ * then a named anchor. A fragment that names nothing here is not a fragment
+ * this side can act on.
+ *
+ * The name is tried percent-decoded as well as written, because a link to a
+ * heading in any language that is not English arrives encoded and the id it
+ * names does not.
+ */
+function fragmentTarget(doc: Document, fragment: string): Element | null {
+  if (!fragment) return null;
+  const names = [fragment];
+  try {
+    const decoded = decodeURIComponent(fragment);
+    if (decoded !== fragment) names.push(decoded);
+  } catch {
+    // Not valid percent-encoding, so what was written is all there is to try.
+  }
+  for (const name of names) {
+    const byId = doc.getElementById(name);
+    if (byId) return byId;
+    // Only <a name> is a fragment target; a form control that happens to share
+    // the name is not, and getElementsByName answers with both.
+    const named = Array.from(doc.getElementsByName?.(name) ?? [])
+      .find((el) => el.tagName === 'A');
+    if (named) return named;
+  }
+  return null;
+}
+
 export class MirrorHost {
   readonly tab: number;
   readonly frame: HTMLIFrameElement;
@@ -366,9 +409,17 @@ export class MirrorHost {
         this.events.openLink(this.tab, newTab.url);
         return;
       }
+      const mouse = ev as MouseEvent;
+      // A link into the document already on screen — Hacker News' parent, prev
+      // and next, a footnote, a table of contents — is a scroll and not a
+      // navigation, and every line it could land on is already here. So this
+      // side does it, at no round trip. Sending it landside instead spends one
+      // to scroll a document laid out with different fonts, and all that comes
+      // back is a pixel offset from that other layout, which is both wrong here
+      // and refused outright once the reader has scrolled for themselves.
+      if (anchor && plainClick(mouse) && this.jumpToFragment(anchor)) return;
       const node = this.patcher?.idOf(anchor ?? target) ?? 0;
       if (!node) return;
-      const mouse = ev as MouseEvent;
       this.send({
         kind: InputKind.Click,
         node,
@@ -547,6 +598,45 @@ export class MirrorHost {
     const url = this.resolve(anchor.getAttribute('href'));
     if (!url) return undefined;
     return { url, text: (anchor.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 120) };
+  }
+
+  /**
+   * Scrolls to the target of a link into this same document, and says whether
+   * it did.
+   *
+   * Everything else answers false and travels landside as an ordinary click: a
+   * link to another page, a bare `#` that page script uses as a button, a
+   * fragment naming something this document does not hold. The last of those is
+   * what keeps a hash-routed app working — `#/inbox` names no element here, so
+   * the click goes landside and the router runs where the router lives.
+   */
+  private jumpToFragment(anchor: Element): boolean {
+    const doc = this.doc;
+    const win = this.frame.contentWindow;
+    if (!doc || !win || !this.pageUrl) return false;
+    let url: URL;
+    let here: URL;
+    try {
+      url = new URL(anchor.getAttribute('href') ?? '', this.pageUrl);
+      here = new URL(this.pageUrl);
+    } catch {
+      return false;
+    }
+    // Same document means everything but the fragment agreeing: the agent sends
+    // hrefs absolutised landside, so what arrives for `#comment` is the page's
+    // own URL with a hash on the end.
+    if (stripFragment(url) !== stripFragment(here)) return false;
+    const target = fragmentTarget(doc, url.hash.slice(1));
+    if (!target) return false;
+    // scrollIntoView rather than arithmetic on the document: the target may sit
+    // inside a scroller of its own, and every ancestor of it has to move for the
+    // reader to end up looking at the thing they asked for.
+    target.scrollIntoView({ block: 'start' });
+    // Where the reader asked to be, which is not where landside is sitting.
+    // Without this the next scroll the server reports would pull them off it.
+    this.adoptedDoc = { x: win.scrollX, y: win.scrollY };
+    this.readerMovedDoc = true;
+    return true;
   }
 
   /** Absolutises a mirrored href, refusing anything that is not a web link. */

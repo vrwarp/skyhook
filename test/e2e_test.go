@@ -331,15 +331,7 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	})
 	mux.HandleFunc("/comments", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		var b strings.Builder
-		b.WriteString(`<!DOCTYPE html><html><head><title>a story worth reading | Stories</title>
-			</head><body><span class="titleline"><a href="/story">a story worth reading</a></span>
-			<table>`)
-		for i := 0; i < 200; i++ {
-			fmt.Fprintf(&b, `<tr class="comtr"><td><div class="comment">comment %d</div></td></tr>`, i)
-		}
-		b.WriteString(`</table><p id="last">end of the thread</p></body></html>`)
-		_, _ = io.WriteString(w, b.String())
+		_, _ = io.WriteString(w, commentsPage())
 	})
 	mux.HandleFunc("/story", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

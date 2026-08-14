@@ -56,6 +56,17 @@ function withLink(snap: Snapshot, href = 'https://example.test/next'): Snapshot 
   return snap;
 }
 
+/** Adds an element the fixture's links can point a #fragment at. */
+function withTarget(snap: Snapshot, id = 'c2'): Snapshot {
+  const base = snap.strings.length;
+  snap.strings.push('div', 'id', id);
+  snap.nodes.push({
+    id: 40, parent: 3, kind: NodeKind.Element, ref: base,
+    attrs: [base + 1, base + 2], flags: 0,
+  });
+  return snap;
+}
+
 function events() {
   return {
     input: vi.fn(),
@@ -419,6 +430,80 @@ describe('MirrorHost', () => {
       new doc.defaultView!.MouseEvent('auxclick', { bubbles: true, button: 1 }),
     );
     expect(ev.openLink).toHaveBeenCalledWith(1, 'https://example.test/deeper/page?q=1');
+  });
+
+  /**
+   * Hacker News' parent | prev | next, and every footnote and table of
+   * contents: a link into the document the reader is already looking at.
+   *
+   * These used to travel landside as clicks, where the real page scrolled
+   * itself and reported back a pixel offset from a layout with different fonts
+   * — which the client refuses outright once the reader has scrolled, so the
+   * link did nothing at all. The whole document is already here; this side can
+   * answer without spending a round trip on it.
+   */
+  it('scrolls to a link into the same document rather than sending it landside', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withTarget(withLink(snapshot(), 'https://example.test/#c2')));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const target = doc.getElementById('c2')!;
+    const into = vi.fn();
+    target.scrollIntoView = into;
+
+    const click = new win.MouseEvent('click', { bubbles: true, cancelable: true });
+    doc.querySelector('a')!.dispatchEvent(click);
+
+    // The element the fragment names, put where a browser puts it.
+    expect(into).toHaveBeenCalledWith({ block: 'start' });
+    expect(ev.input).not.toHaveBeenCalled();
+    // And the frame still never follows a link itself.
+    expect(click.defaultPrevented).toBe(true);
+  });
+
+  it('leaves the server the fragments this document cannot answer', async () => {
+    // `#/inbox` is a hash-routed app's idea of a page, not a place in this
+    // document. Nothing here answers to it, so the click goes to the page that
+    // knows what it means.
+    const { host, ev } = await mount();
+    host.applySnapshot(withLink(snapshot(), 'https://example.test/#/inbox'));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+
+    doc.querySelector('a')!.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+
+    const payload = ev.input.mock.calls[0][1] as Record<string, unknown>;
+    expect(payload.kind).toBe('click');
+    expect(payload.node).toBe(30);
+  });
+
+  it('sends a fragment on another page landside, where it is a navigation', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withTarget(withLink(snapshot(), 'https://example.test/other#c2')));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const into = vi.fn();
+    doc.getElementById('c2')!.scrollIntoView = into;
+
+    doc.querySelector('a')!.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+
+    expect(into).not.toHaveBeenCalled();
+    expect(ev.input).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens a same-document link in a new tab on ctrl-click, fragment and all', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withTarget(withLink(snapshot(), 'https://example.test/#c2')));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const into = vi.fn();
+    doc.getElementById('c2')!.scrollIntoView = into;
+
+    doc.querySelector('a')!.dispatchEvent(
+      new win.MouseEvent('click', { bubbles: true, ctrlKey: true }));
+
+    expect(ev.openLink).toHaveBeenCalledWith(1, 'https://example.test/#c2');
+    expect(into).not.toHaveBeenCalled();
   });
 
   it('answers a right click with a menu target instead of the native menu', async () => {

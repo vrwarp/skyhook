@@ -233,7 +233,19 @@ The mapping the server sends is a fraction of the *scrollable range* rather than
 of document height, so the top stays the top and the bottom stays the bottom —
 an infinite list still only fetches when the reader is genuinely at the end.
 
-`test/stability_test.go` pins all of this in the real client.
+The corollary took a bug report to notice: a link *into the document already on
+screen* cannot be sent landside either. Hacker News' `parent | prev | next` are
+`#fragment` links, and they used to travel as clicks — so the real page scrolled
+itself and reported back a pixel offset from a layout with different fonts, to a
+reader who by then owned their scroll position and was never moved again. The
+gesture did nothing at all. The client now follows those links itself, scrolling
+to the element the fragment names, which is both correct and free: the whole
+document is already here, so it costs no round trip. A fragment that names
+nothing in this document — `#/inbox` in a hash-routed app — is not one this side
+can answer, and still goes landside to the router that knows what it means.
+
+`test/stability_test.go` and `test/comments_test.go` pin all of this in the real
+client.
 
 ### 11. A same-origin iframe is rendered into a substitute element
 
