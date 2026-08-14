@@ -398,6 +398,20 @@ type InputEvent struct {
 	End       int32             `cbor:"14,keyasint,omitempty"`
 	// 15 was URL, the anchor href a click landed on, which only speculation read.
 	Repeat int `cbor:"16,keyasint,omitempty"`
+	// Hold is how long the button was really down plane-side, in milliseconds.
+	// The landside replay of a click is otherwise instantaneous, which no hand
+	// produces; the reader's own timing is better than any number the server
+	// could invent, and it costs two bytes on a frame that is already being sent.
+	Hold int `cbor:"17,keyasint,omitempty"`
+	// Point is where in the node's box the pointer really was, in permille of
+	// its width and height — two elements, or absent. Permille rather than
+	// pixels because the landside box is laid out with different fonts and is
+	// rarely exactly the size the reader saw.
+	Point []int32 `cbor:"18,keyasint,omitempty"`
+	// Path is the pointer's approach to the click: triplets of (x, y, dt), x
+	// and y in permille of the viewport, dt in milliseconds since the previous
+	// sample. Real cursor movement, sampled plane-side, replayed landside.
+	Path []int32 `cbor:"19,keyasint,omitempty"`
 }
 
 // ScrollEvent is telemetry: it drives image prioritisation and infinite-scroll

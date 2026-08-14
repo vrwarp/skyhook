@@ -21,13 +21,89 @@ import {
 } from '../src/shared/codec.js';
 import { FrameType } from '../src/shared/protocol.js';
 
-/** CBOR major type 7 covers floats and simple values. */
+/**
+ * True if any number in the frame is float-encoded.
+ *
+ * This walks the CBOR structure rather than scanning for the float header
+ * bytes, because a payload byte collides with one sooner than you would think:
+ * the integer 250 encodes as `0x18 0xFA`, and 0xFA is the half-float marker. A
+ * byte scan called that a float and failed a frame that was perfectly good.
+ *
+ * Decoding and inspecting the values instead would not work either — JavaScript
+ * has one number type, so a float64 holding 1.7e12 is indistinguishable from an
+ * integer after decoding, and that is exactly the bug being guarded against.
+ */
 function containsFloat(bytes: Uint8Array): boolean {
-  // Valid only for frames built from ASCII strings and small integers, which is
-  // what every client -> server frame is: no payload byte can collide with a
-  // float header.
-  return bytes.includes(0xfb) || bytes.includes(0xfa) || bytes.includes(0xf9);
+  let i = 0;
+  const skip = (): boolean => {
+    if (i >= bytes.length) return false;
+    const initial = bytes[i++];
+    const major = initial >> 5;
+    const info = initial & 0x1f;
+    let length = info;
+    const view = new DataView(bytes.buffer, bytes.byteOffset);
+    if (info === 24) {
+      length = bytes[i++];
+    } else if (info === 25) {
+      length = view.getUint16(i);
+      i += 2;
+    } else if (info === 26) {
+      length = view.getUint32(i);
+      i += 4;
+    } else if (info === 27) {
+      length = Number(view.getBigUint64(i));
+      i += 8;
+    }
+    switch (major) {
+      case 0: // unsigned
+      case 1: // negative
+        return false;
+      case 2: // bytes
+      case 3: // text
+        i += length;
+        return false;
+      case 4: // array
+        for (let n = 0; n < length; n++) if (skip()) return true;
+        return false;
+      case 5: // map
+        for (let n = 0; n < length; n++) if (skip() || skip()) return true;
+        return false;
+      case 6: // tag
+        return skip();
+      default: // major 7: simple values and floats
+        return info === 25 || info === 26 || info === 27;
+    }
+  };
+  while (i < bytes.length) {
+    if (skip()) return true;
+  }
+  return false;
 }
+
+describe('containsFloat', () => {
+  it('finds a float wherever it is nested', () => {
+    // A CBOR map {1: [0.5]}: float64 header 0xfb inside an array inside a map.
+    const nested = new Uint8Array([
+      0xa1, 0x01, 0x81, 0xfb, 0x3f, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    expect(containsFloat(nested)).toBe(true);
+    // Half and single precision too.
+    expect(containsFloat(new Uint8Array([0xf9, 0x3c, 0x00]))).toBe(true);
+    expect(containsFloat(new Uint8Array([0xfa, 0x3f, 0x80, 0x00, 0x00]))).toBe(true);
+  });
+
+  it('is not fooled by an integer whose bytes look like a float header', () => {
+    // 250 encodes as 0x18 0xFA, and 0xFA is the single-precision float marker.
+    // A byte scan called this a float; a structural walk does not.
+    expect(containsFloat(new Uint8Array([0x18, 0xfa]))).toBe(false);
+    // [250, 251, 249] — every collision at once.
+    expect(containsFloat(new Uint8Array([
+      0x83, 0x18, 0xfa, 0x18, 0xfb, 0x18, 0xf9,
+    ]))).toBe(false);
+    // A text string whose characters collide is still just a string.
+    expect(containsFloat(new Uint8Array([0x42, 0xfa, 0xfb]))).toBe(false);
+  });
+});
 
 describe('safeInt', () => {
   it('keeps ordinary values untouched', () => {
@@ -56,6 +132,9 @@ describe('client frames encode integers as CBOR integers', () => {
       kind: 'click', node: 42, seq: 7, modifiers: 8, button: 0,
       // A caller passing wall-clock time must not be able to break the frame.
       ts: Date.now(), expectSeq: 3,
+      // What the pointer really did, which the server replays instead of
+      // synthesising: hold, position in the box, and the approach.
+      hold: 83, point: [250, 500], path: [100, 200, 0, 140, 260, 16, 180, 300, 21],
     })),
     text: encodeFrame(FrameType.Input, 1, inputBody({
       kind: 'text', node: 42, seq: 8, text: 'hello', ts: 1234,

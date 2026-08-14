@@ -390,6 +390,12 @@ export interface InputEventInit {
   start?: number;
   end?: number;
   repeat?: number;
+  /** How long the button was held, in milliseconds. */
+  hold?: number;
+  /** Where in the target's box the pointer was, in permille: [x, y]. */
+  point?: number[];
+  /** The approach: (x, y, dt) triplets, viewport permille and milliseconds. */
+  path?: number[];
 }
 
 export function inputBody(ev: InputEventInit): Map<number, unknown> {
@@ -409,6 +415,11 @@ export function inputBody(ev: InputEventInit): Map<number, unknown> {
   if (ev.start) m.set(F.input.start, safeInt(ev.start));
   if (ev.end) m.set(F.input.end, safeInt(ev.end));
   if (ev.repeat) m.set(F.input.repeat, safeInt(ev.repeat));
+  // Real pointer measurements, so the server replays what happened rather than
+  // synthesising a plausible imitation of it.
+  if (ev.hold) m.set(F.input.hold, safeInt(ev.hold));
+  if (ev.point?.length === 2) m.set(F.input.point, ev.point.map(safeInt));
+  if (ev.path?.length) m.set(F.input.path, ev.path.map(safeInt));
   return m;
 }
 

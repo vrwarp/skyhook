@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vrwarp/skyhook/internal/protocol"
 )
@@ -337,6 +338,75 @@ func TestDefaultBlocklistLeavesAnalyticsAlone(t *testing.T) {
 		}
 		if strings.Contains(pattern, "woff") || strings.Contains(pattern, "ttf") {
 			t.Errorf("default blocklist still blocks webfonts: %q", pattern)
+		}
+	}
+}
+
+// The reader's own click position beats anything the server could invent, and
+// it arrives as a fraction because their box and the landside box are laid out
+// with different fonts.
+func TestClickPointUsesTheReportedFraction(t *testing.T) {
+	tab := &Tab{}
+	r := &nodeRect{X: 100, Y: 200, W: 300, H: 40, CX: 250, CY: 220}
+
+	x, y := tab.clickPoint(r, &protocol.InputEvent{Point: []int32{250, 500}})
+	if x != 175 || y != 220 {
+		t.Errorf("point (250, 500) of the box = (%v, %v), want (175, 220)", x, y)
+	}
+
+	// Out of range cannot be allowed to land outside the element.
+	x, y = tab.clickPoint(r, &protocol.InputEvent{Point: []int32{-40, 4000}})
+	if x != 100 || y != 240 {
+		t.Errorf("clamped point = (%v, %v), want (100, 240)", x, y)
+	}
+
+	// An explicit pixel offset is for sliders and maps, and stays exact.
+	x, y = tab.clickPoint(r, &protocol.InputEvent{X: 7, Y: 3})
+	if x != 107 || y != 203 {
+		t.Errorf("explicit offset = (%v, %v), want (107, 203)", x, y)
+	}
+}
+
+// With no measurement to go on the click still has to land inside the element,
+// and still must not land on its exact centre every time.
+func TestClickPointFallsBackWithinTheBox(t *testing.T) {
+	tab := &Tab{}
+	r := &nodeRect{X: 0, Y: 0, W: 200, H: 100, CX: 100, CY: 50}
+	centres := 0
+	for i := 0; i < 50; i++ {
+		x, y := tab.clickPoint(r, &protocol.InputEvent{})
+		if x < r.X || x > r.X+r.W || y < r.Y || y > r.Y+r.H {
+			t.Fatalf("click landed outside the box: (%v, %v)", x, y)
+		}
+		if x == r.CX && y == r.CY {
+			centres++
+		}
+	}
+	if centres > 5 {
+		t.Errorf("%d of 50 clicks landed on the exact centre", centres)
+	}
+
+	// A box with nowhere else to aim is clicked in the middle, on purpose.
+	small := &nodeRect{X: 10, Y: 10, W: 4, H: 4, CX: 12, CY: 12}
+	if x, y := tab.clickPoint(small, &protocol.InputEvent{}); x != 12 || y != 12 {
+		t.Errorf("small box click = (%v, %v), want the centre (12, 12)", x, y)
+	}
+}
+
+func TestHoldPrefersWhatTheReaderDid(t *testing.T) {
+	if got := holdFor(&protocol.InputEvent{Hold: 83}); got != 83*time.Millisecond {
+		t.Errorf("hold = %v, want 83ms", got)
+	}
+	// A stuck button must not stall the tab.
+	if got := holdFor(&protocol.InputEvent{Hold: 99999}); got != holdMax {
+		t.Errorf("absurd hold = %v, want it capped at %v", got, holdMax)
+	}
+	// Nothing reported: invented, but never zero.
+	for i := 0; i < 20; i++ {
+		got := holdFor(&protocol.InputEvent{})
+		if got < pressHoldMin || got >= pressHoldMin+pressHoldSpan {
+			t.Fatalf("synthesised hold = %v, want it within [%v, %v)",
+				got, pressHoldMin, pressHoldMin+pressHoldSpan)
 		}
 	}
 }

@@ -350,6 +350,17 @@ func (c *Client) Click(tab uint32, node int64) error {
 	})
 }
 
+// Input sends a fully specified input event, for callers that have more to say
+// than Click does — the pointer measurements a real client takes, in particular.
+func (c *Client) Input(tab uint32, ev protocol.InputEvent) error {
+	c.inputSeq++
+	ev.Seq = c.inputSeq
+	if ev.TS == 0 {
+		ev.TS = time.Now().UnixMilli()
+	}
+	return c.send(protocol.ChInput, protocol.TypeInput, tab, ev)
+}
+
 // Type inserts text into a node.
 func (c *Client) Type(tab uint32, node int64, text string) error {
 	c.inputSeq++

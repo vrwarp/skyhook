@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -100,17 +101,61 @@ func (t *Tab) rect(ctx context.Context, node int64) (*nodeRect, error) {
 	return &r, nil
 }
 
+// A click replayed as a single instantaneous event, at the exact centre of an
+// element, from a pointer that was never anywhere else, is not what a mouse
+// produces — and pages run their own analytics on exactly these numbers.
+//
+// There is a real pointer at the other end of the link, so the client measures
+// what it did and sends it: how long the button was held, where in the box it
+// landed, and the path it took to get there. The server replays that. The
+// constants below are only the fallback for events that carry no measurements
+// — a click synthesised by an adapter, an older client, a keyboard activation.
+// Inventing a plausible number is second best; the reader's own is first.
+//
+// All of this is paid landside, where tens of milliseconds are nothing against
+// the second the user is already waiting for, and none of it adds a byte to
+// the link that is not already on the frame.
+const (
+	// pointerStepPause is the gap between synthesised intermediate moves. Real
+	// mouse events land 8-16 ms apart.
+	pointerStepPause = 9 * time.Millisecond
+	// pressHoldMin and pressHoldSpan bound a synthesised press. A human click is
+	// 40-100 ms; zero is a machine.
+	pressHoldMin  = 40 * time.Millisecond
+	pressHoldSpan = 50 * time.Millisecond
+	// pointerSteps is how many synthesised moves precede a click, target included.
+	pointerSteps = 3
+	// pathBudget caps the replay of a reported approach. A reader who rested on
+	// a link for a second before clicking it reported that honestly, and
+	// reproducing the whole second would spend the link's latency budget on it.
+	pathBudget = 150 * time.Millisecond
+	// pathMaxGap caps any single gap within an approach, for the same reason.
+	pathMaxGap = 60 * time.Millisecond
+	// holdMax caps a reported hold, so a stuck button cannot stall the tab.
+	holdMax = 400 * time.Millisecond
+)
+
+// buttonsMask is the bitmask of held buttons the page reads as event.buttons.
+// Reporting the left button while pressing the right is a small contradiction,
+// but it is one nobody has to look hard for.
+func buttonsMask(button string) int {
+	switch button {
+	case "right":
+		return 2
+	case "middle":
+		return 4
+	case "left":
+		return 1
+	}
+	return 0
+}
+
 func (t *Tab) click(ctx context.Context, ev *protocol.InputEvent) error {
 	r, err := t.rect(ctx, ev.Node)
 	if err != nil {
 		return err
 	}
-	x, y := r.CX, r.CY
-	// A click offset inside the box matters for things like sliders and maps;
-	// the client sends it only when it is meaningful.
-	if ev.X != 0 || ev.Y != 0 {
-		x, y = r.X+float64(ev.X), r.Y+float64(ev.Y)
-	}
+	x, y := t.clickPoint(r, ev)
 	button := "left"
 	clicks := 1
 	switch {
@@ -122,24 +167,33 @@ func (t *Tab) click(ctx context.Context, ev *protocol.InputEvent) error {
 	if ev.Kind == protocol.InDblClick {
 		clicks = 2
 	}
+
+	// A real pointer sequence: some SPAs bind to mousedown/mouseup or pointer
+	// events rather than click, and some watch the approach.
+	replayed, err := t.replayApproach(ctx, ev)
+	if err != nil {
+		return err
+	}
+	// A replayed approach has already carried the pointer across the page; all
+	// that is left is the last hop onto the target. Synthesising a fresh arc on
+	// top of a real one would only bend it.
+	steps := pointerSteps
+	if replayed {
+		steps = 1
+	}
+	if err := t.movePointerIn(ctx, x, y, ev.Modifiers, steps); err != nil {
+		return err
+	}
 	base := map[string]any{
 		"x": x, "y": y, "button": button, "clickCount": clicks,
-		"modifiers": ev.Modifiers, "buttons": 1,
-	}
-	// A real pointer sequence: some SPAs bind to mousedown/mouseup or pointer
-	// events rather than click.
-	move := cloneMap(base)
-	move["type"] = "mouseMoved"
-	move["clickCount"] = 0
-	move["buttons"] = 0
-	if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", move, nil); err != nil {
-		return err
+		"modifiers": ev.Modifiers, "buttons": buttonsMask(button),
 	}
 	down := cloneMap(base)
 	down["type"] = "mousePressed"
 	if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", down, nil); err != nil {
 		return err
 	}
+	sleepCtx(ctx, holdFor(ev))
 	up := cloneMap(base)
 	up["type"] = "mouseReleased"
 	up["buttons"] = 0
@@ -153,14 +207,162 @@ func (t *Tab) click(ctx context.Context, ev *protocol.InputEvent) error {
 	return nil
 }
 
+// clickPoint decides where inside the element the pointer lands.
+//
+// The exact centre, every time, on every element, is the one place a hand never
+// puts it. The offset is small enough that it cannot change which element is
+// hit and is skipped entirely on boxes too small to have anywhere else to aim.
+func (t *Tab) clickPoint(r *nodeRect, ev *protocol.InputEvent) (x, y float64) {
+	// A click offset inside the box matters for things like sliders and maps;
+	// the client sends it only when it is meaningful, and it is exact on purpose.
+	if ev.X != 0 || ev.Y != 0 {
+		return r.X + float64(ev.X), r.Y + float64(ev.Y)
+	}
+	// Where the reader actually pressed, as a fraction of the box they saw.
+	// Their box and this one are laid out with different fonts and are rarely
+	// the same size, which is why the client sends permille and not pixels.
+	if len(ev.Point) == 2 {
+		fx := clampPermille(ev.Point[0])
+		fy := clampPermille(ev.Point[1])
+		return r.X + r.W*float64(fx)/1000, r.Y + r.H*float64(fy)/1000
+	}
+	return r.CX + jitter(r.W), r.CY + jitter(r.H)
+}
+
+func clampPermille(v int32) int32 {
+	switch {
+	case v < 0:
+		return 0
+	case v > 1000:
+		return 1000
+	}
+	return v
+}
+
+// holdFor is how long to keep the button down: what the reader actually did,
+// or a plausible imitation when the event carries no measurement.
+func holdFor(ev *protocol.InputEvent) time.Duration {
+	if ev.Hold > 0 {
+		d := time.Duration(ev.Hold) * time.Millisecond
+		if d > holdMax {
+			return holdMax
+		}
+		return d
+	}
+	return pressHoldMin + time.Duration(rand.Int64N(int64(pressHoldSpan)))
+}
+
+// replayApproach walks the landside pointer along the path the reader's pointer
+// really took, mapped from viewport fractions onto the landside viewport.
+//
+// The client sends (x, y, dt) triplets. Gaps and the total are capped: the
+// point is to reproduce the shape and rough cadence of a human approach, not to
+// spend the reader's latency budget re-enacting a pause they took to read.
+func (t *Tab) replayApproach(ctx context.Context, ev *protocol.InputEvent) (bool, error) {
+	if len(ev.Path) < 6 || len(ev.Path)%3 != 0 {
+		return false, nil // nothing usable; the synthesised move covers it
+	}
+	t.mu.Lock()
+	vp := t.opts.Viewport
+	t.mu.Unlock()
+	if vp.W <= 0 || vp.H <= 0 {
+		return false, nil
+	}
+	spent := time.Duration(0)
+	for i := 0; i+2 < len(ev.Path); i += 3 {
+		x := float64(clampPermille(ev.Path[i])) / 1000 * float64(vp.W)
+		y := float64(clampPermille(ev.Path[i+1])) / 1000 * float64(vp.H)
+		if gap := time.Duration(ev.Path[i+2]) * time.Millisecond; gap > 0 && i > 0 {
+			if gap > pathMaxGap {
+				gap = pathMaxGap
+			}
+			if spent+gap > pathBudget {
+				gap = pathBudget - spent
+			}
+			if gap > 0 {
+				sleepCtx(ctx, gap)
+				spent += gap
+			}
+		}
+		if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": "mouseMoved", "x": x, "y": y,
+			"modifiers": ev.Modifiers, "buttons": 0, "clickCount": 0,
+		}, nil); err != nil {
+			return false, err
+		}
+		t.mu.Lock()
+		t.pointerX, t.pointerY, t.pointerSet = x, y, true
+		t.mu.Unlock()
+	}
+	return true, nil
+}
+
+// jitter returns an offset within the middle fifth of a span, or zero when the
+// span is too small for one to be safe.
+func jitter(span float64) float64 {
+	const minSpan = 8
+	if span < minSpan {
+		return 0
+	}
+	reach := span / 10
+	return (rand.Float64()*2 - 1) * reach
+}
+
+// movePointer walks the pointer to a position instead of teleporting it, and
+// remembers where it left it. Hover handlers, tooltip timers and any page
+// counting mousemove events all see an approach rather than an apparition.
+func (t *Tab) movePointer(ctx context.Context, x, y float64, modifiers int) error {
+	return t.movePointerIn(ctx, x, y, modifiers, pointerSteps)
+}
+
+func (t *Tab) movePointerIn(ctx context.Context, x, y float64, modifiers, steps int) error {
+	t.mu.Lock()
+	fromX, fromY, known := t.pointerX, t.pointerY, t.pointerSet
+	t.pointerX, t.pointerY, t.pointerSet = x, y, true
+	t.mu.Unlock()
+
+	if !known {
+		// Nothing to move from: the pointer has not been anywhere in this tab,
+		// and inventing a starting corner would be a story about a mouse that
+		// entered the window somewhere we did not see.
+		steps = 1
+	}
+	for i := 1; i <= steps; i++ {
+		px, py := x, y
+		if i < steps {
+			f := float64(i) / float64(steps)
+			px = fromX + (x-fromX)*f
+			py = fromY + (y-fromY)*f
+		}
+		if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": "mouseMoved", "x": px, "y": py,
+			"modifiers": modifiers, "buttons": 0, "clickCount": 0,
+		}, nil); err != nil {
+			return err
+		}
+		if i < steps {
+			sleepCtx(ctx, pointerStepPause)
+		}
+	}
+	return nil
+}
+
+// sleepCtx waits, or gives up early if the caller has.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
 func (t *Tab) hover(ctx context.Context, ev *protocol.InputEvent) error {
 	r, err := t.rect(ctx, ev.Node)
 	if err != nil {
 		return err
 	}
-	return t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
-		"type": "mouseMoved", "x": r.CX, "y": r.CY, "modifiers": ev.Modifiers,
-	}, nil)
+	return t.movePointer(ctx, r.CX+jitter(r.W), r.CY+jitter(r.H), ev.Modifiers)
 }
 
 func (t *Tab) insertText(ctx context.Context, ev *protocol.InputEvent) error {
@@ -239,9 +441,34 @@ func (t *Tab) submit(ctx context.Context, ev *protocol.InputEvent) error {
 	return err
 }
 
+// wheel scrolls under the pointer, which is where a wheel scrolls.
+//
+// This used to dispatch at (10, 10), a fixed point in the top-left corner. That
+// is not only unlike a mouse, it is wrong: whatever sits in that corner — a
+// sidebar, a sticky header, a nav drawer — took the scroll instead of the thing
+// the reader was looking at.
 func (t *Tab) wheel(ctx context.Context, ev *protocol.InputEvent) error {
+	t.mu.Lock()
+	x, y, known := t.pointerX, t.pointerY, t.pointerSet
+	vp := t.opts.Viewport
+	t.mu.Unlock()
+	// A reported path is the pointer's real position, which beats the last one
+	// we happen to have driven it to.
+	if n := len(ev.Path); n >= 3 && n%3 == 0 && vp.W > 0 && vp.H > 0 {
+		x = float64(clampPermille(ev.Path[n-3])) / 1000 * float64(vp.W)
+		y = float64(clampPermille(ev.Path[n-2])) / 1000 * float64(vp.H)
+		known = true
+	}
+	if !known {
+		// Nothing has moved the pointer yet: the middle of the viewport is where
+		// the content is, and is the least surprising place to scroll.
+		x, y = float64(vp.W)/2, float64(vp.H)/2
+		if vp.W == 0 || vp.H == 0 {
+			x, y = 400, 300
+		}
+	}
 	return t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
-		"type": "mouseWheel", "x": 10, "y": 10,
+		"type": "mouseWheel", "x": x, "y": y,
 		"deltaX": ev.X, "deltaY": ev.Y, "modifiers": ev.Modifiers,
 	}, nil)
 }

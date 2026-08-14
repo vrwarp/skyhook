@@ -147,6 +147,10 @@ type Tab struct {
 	// blockedFor is the denylist currently installed, so a navigation within a
 	// host does not re-send it.
 	blockedFor []string
+	// pointerX/pointerY track where the landside pointer was left, so the next
+	// move starts from there rather than materialising at its destination.
+	pointerX, pointerY float64
+	pointerSet         bool
 	// canBack and canForward are held here for the same reason url and title
 	// are: most state frames are partial, and a partial frame that left these
 	// out would read on the client as "there is no history", disabling the back

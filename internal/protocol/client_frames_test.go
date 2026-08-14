@@ -71,6 +71,16 @@ func TestClientInputFramesDecode(t *testing.T) {
 	if ev.TS <= 0 {
 		t.Fatalf("timestamp did not survive: %d", ev.TS)
 	}
+	// The pointer measurements the client takes for the server to replay.
+	if ev.Hold != 83 {
+		t.Errorf("hold = %d, want 83", ev.Hold)
+	}
+	if len(ev.Point) != 2 || ev.Point[0] != 250 || ev.Point[1] != 500 {
+		t.Errorf("point = %v, want [250 500]", ev.Point)
+	}
+	if len(ev.Path) != 9 || ev.Path[0] != 100 || ev.Path[8] != 21 {
+		t.Errorf("path = %v, want 9 elements starting 100 and ending 21", ev.Path)
+	}
 
 	f = decodeClientFrame(t, frames, "text")
 	var text protocol.InputEvent

@@ -134,6 +134,34 @@ var pixelPNG = func() []byte {
 	return buf.Bytes()
 }()
 
+// pointerPage reports what a click really looked like to the page: the press
+// duration, where in the box it landed, and how much pointer movement preceded
+// it. The mirror ships the results back as ordinary text.
+const pointerPage = `<!DOCTYPE html><html><head><title>Pointer</title></head>
+<body>
+  <button id="target" style="position:absolute;left:100px;top:80px;width:240px;height:60px">click me</button>
+  <p id="hold">hold: none</p>
+  <p id="where">where: none</p>
+  <p id="moves">moves: 0</p>
+<script>
+  var down = 0, moves = 0;
+  var target = document.getElementById('target');
+  document.addEventListener('mousemove', function () {
+    moves++;
+    document.getElementById('moves').textContent = 'moves: ' + moves;
+  });
+  target.addEventListener('mousedown', function (e) { down = e.timeStamp; });
+  target.addEventListener('click', function (e) {
+    var held = down ? Math.round(e.timeStamp - down) : -1;
+    document.getElementById('hold').textContent = 'hold: ' + held;
+    var r = target.getBoundingClientRect();
+    var fx = Math.round(((e.clientX - r.left) / r.width) * 1000);
+    var fy = Math.round(((e.clientY - r.top) / r.height) * 1000);
+    document.getElementById('where').textContent = 'where: ' + fx + ',' + fy;
+  });
+</script>
+</body></html>`
+
 type harness struct {
 	t          *testing.T
 	site       *httptest.Server
@@ -254,6 +282,12 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			html.EscapeString(r.Header.Get("Sec-CH-UA")),
 			html.EscapeString(r.Header.Get("Sec-CH-UA-Platform")),
 			html.EscapeString(r.Header.Get("Accept-Language")))
+	})
+	// Records what the landside page saw of a click: how long the button was
+	// held, where in the box it landed, and how many moves preceded it.
+	mux.HandleFunc("/pointer", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, pointerPage)
 	})
 	mux.HandleFunc("/tall", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -888,6 +922,94 @@ func TestUserAgentOverrideCarriesMatchingClientHints(t *testing.T) {
 	if got := text("lang"); !strings.HasPrefix(got, "en-GB") {
 		t.Errorf("Accept-Language = %q, want it to start with en-GB", got)
 	}
+}
+
+// A click is replayed into the landside page with the reader's own timing and
+// aim, not with numbers the server made up. The page measures what it received.
+func TestClickCarriesTheReadersOwnPointerData(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/pointer"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "hold: none", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+	node := cl.Model(tab).Find("button", "id", "target")
+	if node == nil {
+		t.Fatal("no button in the mirrored page")
+	}
+
+	// What a reader's pointer did on the way to the button: a short approach
+	// across the viewport, a click a quarter of the way into the box, held for
+	// 210 ms — outside the range the server invents when it is told nothing, so
+	// the assertion cannot pass on a synthesised press.
+	if err := cl.Input(tab, protocol.InputEvent{
+		Kind: protocol.InClick, Node: node.ID,
+		Hold:  210,
+		Point: []int32{250, 500},
+		Path:  []int32{100, 200, 0, 140, 260, 16, 180, 300, 21},
+	}); err != nil {
+		t.Fatalf("send click: %v", err)
+	}
+
+	deadline := time.Now().Add(budget(30 * time.Second))
+	var hold, where, moves string
+	for time.Now().Before(deadline) {
+		m := cl.Model(tab)
+		hold = nodeText(m, m.Find("p", "id", "hold"))
+		where = nodeText(m, m.Find("p", "id", "where"))
+		moves = nodeText(m, m.Find("p", "id", "moves"))
+		if hold != "" && hold != "hold: none" && where != "where: none" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// The page timed the press itself. Landside dispatch adds a millisecond or
+	// two, so the assertion is a window rather than an equality.
+	var held int
+	if _, err := fmt.Sscanf(hold, "hold: %d", &held); err != nil {
+		t.Fatalf("page never reported a hold (%q): %v", hold, err)
+	}
+	if held < 190 || held > 280 {
+		t.Errorf("page saw a %d ms press, want the reported 210 ms", held)
+	}
+	// A quarter across, halfway down — mapped onto the landside box, which is
+	// laid out independently of the reader's.
+	if where != "where: 250,500" {
+		t.Errorf("page saw the click at %q, want where: 250,500", where)
+	}
+	// Three reported samples plus the final hop onto the target.
+	var count int
+	if _, err := fmt.Sscanf(moves, "moves: %d", &count); err != nil {
+		t.Fatalf("page never reported moves (%q): %v", moves, err)
+	}
+	if count < 4 {
+		t.Errorf("page saw %d pointer moves, want the approach replayed", count)
+	}
+}
+
+// nodeText renders one element's direct text, which is all these fixtures need.
+func nodeText(m *mirror.Model, n *mirror.ModelNode) string {
+	if n == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range n.Children {
+		if child := m.Nodes[c]; child != nil {
+			b.WriteString(child.Text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func TestReconnectResumesSessionAndPage(t *testing.T) {
