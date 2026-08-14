@@ -520,10 +520,14 @@ turns that off for an operator who needs the contents. The pairing token is
 never in a bundle at all.
 
 The cost is deliberate and bounded: a capture is the one thing in Skyhook that
-spends the link on purpose. It is manual or divergence-triggered, rate-limited,
-capped in both directions, and gathered cheapest-and-most-valuable first so a
-capture cut short by an outage loses its screenshot rather than its DOM.
-`captureKeep: 0` removes the feature, and the frame journals with it.
+spends the link on purpose. Nothing is captured unless somebody asks — the
+divergence trigger exists, and is off until an operator turns it on, because a
+bundle written with nobody present is page content on disk that nobody chose to
+write. When it is on it is rate-limited, because a page that diverges once
+usually diverges every thirty seconds. Both directions are capped, and artifacts
+are gathered cheapest-and-most-valuable first, so a capture cut short by an
+outage loses its screenshot rather than its DOM. `captureKeep: 0` removes the
+feature, and the frame journals with it.
 
 ## Known gaps
 

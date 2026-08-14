@@ -162,9 +162,13 @@ device you cannot reach, in a tab that has since moved on.
 
 So Skyhook can take a **capture**: both halves frozen at the same instant and
 zipped up landside, in `<dataDir>/captures`. Right-click a mirrored page and
-choose *Report a rendering problem…* (or press Ctrl/⌘+Shift+D); the server also
-takes one by itself the first time its integrity check catches the two sides
-holding different documents, which is the moment nobody is ever present for.
+choose *Report a rendering problem…*, or press Ctrl/⌘+Shift+D.
+
+Nothing is captured unless somebody asks. While chasing a bug, `captureOnDivergence`
+lets the server take one by itself the moment its integrity check catches the
+two sides holding different documents — which is the moment nobody is ever
+present for, and also a page written to disk that nobody chose to write, so it
+is off until you turn it on.
 
 A bundle holds the real page and the mirrored one, a screenshot from each side,
 the wire frames actually sent, the document those frames add up to, both halves'

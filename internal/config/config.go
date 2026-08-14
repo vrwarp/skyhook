@@ -115,9 +115,12 @@ type Config struct {
 	// default: input is recorded either way, but as a length and a digest, so a
 	// bundle can be handed to somebody without handing them a password.
 	CaptureText bool `json:"captureText"`
-	// CaptureOnDivergence takes a capture the first time the integrity check
-	// finds the two halves holding different documents. That moment is the one
-	// worth having, and it is over before anybody can ask for it by hand.
+	// CaptureOnDivergence takes a capture when the integrity check finds the two
+	// halves holding different documents. That moment is the one worth having,
+	// and it is over before anybody can ask for it by hand — but it writes the
+	// contents of whatever page was on screen to disk without anybody asking,
+	// so it is off until an operator turns it on. Turn it on while chasing a
+	// mirror bug; leave it off the rest of the time.
 	CaptureOnDivergence bool `json:"captureOnDivergence"`
 	// CaptureInterval is the shortest gap between automatic captures. A page
 	// that diverges once usually diverges repeatedly.
@@ -214,7 +217,7 @@ func Default() Config {
 		CaptureClientBytes:  4 << 20,
 		CaptureScreenshots:  true,
 		CaptureText:         false,
-		CaptureOnDivergence: true,
+		CaptureOnDivergence: false,
 		CaptureInterval:     Duration(5 * time.Minute),
 		JournalBytes:        2 << 20,
 		LogLines:            2000,

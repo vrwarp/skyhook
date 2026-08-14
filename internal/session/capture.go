@@ -44,6 +44,8 @@ type CaptureOptions struct {
 	// Text writes what the reader typed verbatim instead of as a digest.
 	Text bool
 	// OnDivergence takes a capture when the integrity check finds a mismatch.
+	// Off unless an operator asks for it: it puts page content on disk without
+	// anybody present having decided to.
 	OnDivergence bool
 	// Interval is the shortest gap between automatic captures.
 	Interval time.Duration
@@ -216,6 +218,11 @@ func (s *Session) StartCapture(reason, note string, automatic bool) (string, err
 // the resync that repairs the tab.
 func (s *Session) captureDivergence(tab uint32) {
 	if !s.mgr.opts.Capture.OnDivergence {
+		// Said here rather than only in the documentation, because this line
+		// lands beside the divergence itself — which is where an operator is
+		// looking, and the moment they would have wanted the bundle.
+		s.log.Info("no capture taken: set captureOnDivergence to bundle both halves "+
+			"the next time this happens", "tab", tab)
 		return
 	}
 	note := fmt.Sprintf("automatic: the integrity check found tab %d holding a "+

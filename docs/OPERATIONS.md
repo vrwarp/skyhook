@@ -75,7 +75,7 @@ default; this is the whole surface:
   "captureKeep": 20,
   "captureScreenshots": true,
   "captureText": false,
-  "captureOnDivergence": true,
+  "captureOnDivergence": false,
   "captureInterval": "5m",
   "captureMaxBytes": 67108864,
   "captureClientBytes": 4194304,
@@ -452,7 +452,7 @@ page state, and that should be your decision rather than a merge's.
 | Connects, then drops immediately | Pinned certificate expired or rotated. Re-pair. |
 | Blank mirror, server logs "isolated world setup failed" | The page navigated during setup; a resync fixes it. Persistent failures mean Chromium is wedged — restart the service. |
 | Images never arrive | Check `avifenc`/`cwebp` are installed, and look for "image transcode failed" in the logs. The transcoder degrades to JPEG/PNG, so persistent silence means the *fetch* failed (authenticated asset, expired cookie). |
-| Mirror looks stale | Look for "mirror divergence" in the logs: the integrity check found a hash mismatch and resynced, and took a capture on its way past. Open the newest bundle in `<dataDir>/captures` — see [diagnosing the mirror](#diagnosing-the-mirror). |
+| Mirror looks stale | Look for "mirror divergence" in the logs: the integrity check found a hash mismatch and resynced. To find out *why* next time, set `captureOnDivergence: true` and leave it running — or take one by hand from the client while it still looks wrong. See [diagnosing the mirror](#diagnosing-the-mirror). |
 | High landside CPU | Image transcoding. Lower `imageWorkers`, or raise `imageQuality` (higher quality is *cheaper* for the fallback encoders). |
 | `no space left` in the container | The image cache. Lower `imageCacheBytes`; it evicts LRU but only up to its own limit. |
 
@@ -474,10 +474,18 @@ seat-back wifi, and asking it to hold a file is asking for the file to be lost.
 - **The reader**, from the client: right-click → *Report a rendering problem…*,
   or **Ctrl/⌘+Shift+D**. It asks what looked wrong; that note is the one thing
   in a bundle no amount of instrumentation can reconstruct.
-- **The server**, by itself, the first time the integrity check finds the two
-  halves holding different documents. Rate-limited to one per `captureInterval`,
+- **The server**, by itself, when the integrity check finds the two halves
+  holding different documents — but **only with `captureOnDivergence: true`**,
+  which is off by default. That moment is the one worth having and it is over
+  before anybody can ask for it by hand, which is the argument for turning it
+  on; it also writes whatever page was on screen to disk with nobody present to
+  decide that, which is the argument for it being a decision. Turn it on while
+  chasing a mirror bug. Rate-limited to one per `captureInterval` when it is on,
   because a page that diverges once usually diverges every thirty seconds.
-  Set `captureOnDivergence: false` to turn it off.
+
+  The server says so either way: a divergence with captures off logs
+  `no capture taken: set captureOnDivergence to bundle both halves the next time
+  this happens`, next to the `mirror divergence` line itself.
 - **From a terminal**, which is also the way to reproduce one in CI:
 
   ```sh

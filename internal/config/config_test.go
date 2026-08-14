@@ -332,3 +332,64 @@ func TestChromeAttachFromTheEnvironment(t *testing.T) {
 		t.Errorf("SKYHOOK_CHROME_ATTACH was ignored: %q", cfg.ChromeAttach)
 	}
 }
+
+// Captures put page content on disk. What the defaults do about that is a
+// decision, not an accident, so it is pinned here rather than left to be
+// noticed by whoever finds a bundle they did not ask for.
+func TestCaptureDefaults(t *testing.T) {
+	c := Default()
+
+	// Nothing is captured unless somebody asks. The divergence trigger is the
+	// one path that would write a page to disk with nobody present.
+	if c.CaptureOnDivergence {
+		t.Error("automatic captures on divergence are on by default")
+	}
+	// What the reader typed is recorded as a shape, not verbatim: a bundle is
+	// a thing people send to each other, and sometimes a password.
+	if c.CaptureText {
+		t.Error("captureText is on by default: bundles would carry typed text verbatim")
+	}
+	// But captures themselves are available without configuration — a feature
+	// nobody can reach when they need it is not a feature.
+	if !c.CapturesEnabled() {
+		t.Error("captures are disabled by default; a reader could not report a bug")
+	}
+	if c.CaptureKeep <= 0 || c.CaptureMaxBytes <= 0 || c.CaptureClientBytes <= 0 {
+		t.Errorf("captures are enabled with no bound on disk or link: keep=%d max=%d client=%d",
+			c.CaptureKeep, c.CaptureMaxBytes, c.CaptureClientBytes)
+	}
+	if c.CaptureInterval.Get() <= 0 {
+		t.Error("automatic captures have no rate limit")
+	}
+
+	// Turning captures off has to take the frame journals with it: they are the
+	// only thing the feature costs when nobody is taking one.
+	off := Default()
+	off.CaptureKeep = 0
+	if off.CapturesEnabled() {
+		t.Error("captureKeep = 0 did not disable captures")
+	}
+}
+
+// The environment override exists so an operator can turn the divergence
+// trigger on for one run without editing a config file.
+func TestCaptureEnvOverrides(t *testing.T) {
+	t.Setenv("SKYHOOK_CAPTURE_ON_DIVERGENCE", "1")
+	t.Setenv("SKYHOOK_CAPTURE_TEXT", "true")
+	t.Setenv("SKYHOOK_CAPTURE_KEEP", "3")
+	t.Setenv("SKYHOOK_DATA_DIR", t.TempDir())
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CaptureOnDivergence {
+		t.Error("SKYHOOK_CAPTURE_ON_DIVERGENCE was ignored")
+	}
+	if !cfg.CaptureText {
+		t.Error("SKYHOOK_CAPTURE_TEXT was ignored")
+	}
+	if cfg.CaptureKeep != 3 {
+		t.Errorf("SKYHOOK_CAPTURE_KEEP was ignored: %d", cfg.CaptureKeep)
+	}
+}
