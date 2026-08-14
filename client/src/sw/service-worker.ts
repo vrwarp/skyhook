@@ -6,20 +6,22 @@
  *
  *  1. Precache the app so it starts with no network at all — the whole point,
  *     given the client is opened at 35,000 feet.
- *  2. Serve /img/<hash> out of Cache Storage. The network worker writes
- *     transcoded bytes there, so images reach the mirror frame without another
- *     hop through the page.
+ *  2. Serve /img/<hash> out of Cache Storage, for anything that asks for one
+ *     by URL. The mirror frame does not: it is sandboxed, so it is not a
+ *     client of this worker, and the shell hands it a blob instead.
  *  3. Refuse every cross-origin request. The plane-side client makes exactly
  *     one connection — the WebTransport session to the VPS — and that is not a
  *     fetch, so it is unaffected by anything here.
  */
 /// <reference lib="webworker" />
 
+import { IMAGE_CACHE } from '../shared/caches.js';
+
 declare const self: ServiceWorkerGlobalScope;
 
 const VERSION = 'v1';
 const SHELL_CACHE = `skyhook-shell-${VERSION}`;
-const IMAGE_CACHE = 'skyhook-img-v1';
+
 
 /** Files that must be present for a cold, offline start. */
 const SHELL = [
@@ -96,9 +98,9 @@ async function serveImage(url: URL): Promise<Response> {
   const key = `/img/${url.pathname.slice('/img/'.length)}`;
   const hit = await cache.match(key);
   if (hit) return hit;
-  // A miss is answered rather than 404'd, but it has to say so: the shell mints
-  // a lasting blob URL out of whatever comes back, and a placeholder minted
-  // that way would stand in for the image for good.
+  // A miss is answered rather than 404'd, so an image whose bytes are still
+  // crossing the link draws nothing rather than a broken-image marker — but it
+  // says so, because a placeholder is not the picture.
   return new Response(TRANSPARENT_PNG, {
     headers: {
       'content-type': 'image/png',

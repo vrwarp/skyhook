@@ -16,6 +16,7 @@ import { ImageMeta, InputKind, Mutation, MutationOp, OpCode, Snapshot } from '..
 import {
   EchoEngine, asEditable, caretOf, modifierMask, setCaret, setValue, valueOf,
 } from './echo.js';
+import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { Patcher } from './patcher.js';
 
 /** Base styles for a mirrored document, injected into each frame. */
@@ -69,11 +70,6 @@ export interface HostEvents {
    * there rather than also reaching the page.
    */
   dismiss(tab: number): boolean;
-}
-
-/** Resolves a content hash to the URL the service worker serves it from. */
-export function imageURL(hash: string): string {
-  return `/img/${hash}`;
 }
 
 /**
@@ -769,21 +765,27 @@ export class MirrorHost {
   /**
    * Turns a hash into a URL the mirror frame can actually load.
    *
-   * The bytes live in Cache Storage, served by the service worker from
-   * `/img/<hash>` — but a sandboxed frame is not a service worker client, so
-   * inside the frame that URL reaches the network instead, and on this link
-   * there is no network. The shell's own document *is* a client, so it fetches
-   * the bytes here and hands the frame a blob URL, which needs no fetch at all.
+   * A sandboxed frame is not a service worker client, so `/img/<hash>` from
+   * inside it reaches the network — and on this link there is no network. The
+   * shell reads the bytes and hands the frame a blob URL, which needs no fetch
+   * at all.
+   *
+   * It reads Cache Storage directly rather than fetching that URL itself. The
+   * shell *is* a service worker client, but only once the worker has claimed
+   * it, and until then the same fetch goes to the network, where the server
+   * answers an unknown path with the app shell. Minting a blob out of that
+   * would leave the element pointing at an `index.html` that decodes to no
+   * image, for the rest of the session — the failure the network cannot
+   * produce is the one worth designing out.
    */
   private async blobFor(hash: string): Promise<string | null> {
     const known = this.blobs.get(hash);
     if (known) return known;
     try {
-      const res = await fetch(imageURL(hash));
-      // The worker answers a hash it has no bytes for with a placeholder rather
-      // than a 404; caching that as the image would freeze it there forever.
-      if (!res.ok || res.headers.get('x-skyhook-miss')) return null;
-      const blob = await res.blob();
+      const cache = await caches.open(IMAGE_CACHE);
+      const hit = await cache.match(imageCacheKey(hash));
+      if (!hit) return null;
+      const blob = await hit.blob();
       if (!blob.size) return null;
       const url = URL.createObjectURL(blob);
       this.blobs.set(hash, url);
