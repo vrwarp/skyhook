@@ -201,6 +201,10 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
 	})
+	mux.HandleFunc("/tall", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, tallPage())
+	})
 	site := httptest.NewServer(mux)
 	t.Cleanup(site.Close)
 

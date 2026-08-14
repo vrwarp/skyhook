@@ -255,18 +255,26 @@ func (t *Tab) HandleScroll(ctx context.Context, ev *protocol.ScrollEvent) error 
 		_, err := t.eval(ctx, fmt.Sprintf("__skyhook.scrollTo(%d,%d,%d)", ev.Node, ev.X, ev.Y))
 		return err
 	}
-	ratio := 0.0
-	if ev.DocH > 0 {
-		ratio = float64(ev.Y+ev.H) / float64(ev.DocH)
+	// How far through its scrollable range the client is, not how far down its
+	// document: the landside page is a different height, and matching the
+	// fraction of the range is what keeps "at the bottom" meaning the bottom.
+	fraction := 0.0
+	if span := ev.DocH - ev.H; span > 0 {
+		fraction = float64(ev.Y) / float64(span)
+	} else if ev.DocH > 0 {
+		fraction = 1
 	}
-	if ratio > 1 {
-		ratio = 1
+	if fraction > 1 {
+		fraction = 1
 	}
-	_, err := t.eval(ctx, fmt.Sprintf("__skyhook.scrollProbe(%f)", ratio))
+	if fraction < 0 {
+		fraction = 0
+	}
+	_, err := t.eval(ctx, fmt.Sprintf("__skyhook.scrollProbe(%f)", fraction))
 	if err != nil {
 		return err
 	}
-	if ratio > 0.85 {
+	if fraction > 0.85 {
 		// Near the end: nudge the real page so its intersection observers fire.
 		go t.flushSoon(400 * time.Millisecond)
 	}

@@ -628,6 +628,23 @@
     }
   }
 
+  /**
+   * Records a scroll position this agent just produced, so onScroll sees no
+   * change and reports nothing.
+   *
+   * Without this the host's own nudges come straight back to the client as
+   * scroll ops. The client is the authority on where the reader is looking, so
+   * that report is never useful, and applying it moved the reader by most of a
+   * viewport every round trip — a page being read scrolled itself away.
+   */
+  function ownScroll(id, el) {
+    if (!id) {
+      lastScroll.set(0, { x: globalThis.scrollX | 0, y: globalThis.scrollY | 0 });
+      return;
+    }
+    lastScroll.set(id, { x: el.scrollLeft | 0, y: el.scrollTop | 0 });
+  }
+
   function onScroll(ev) {
     var t = ev.target;
     var id = 0;
@@ -806,18 +823,25 @@
       return true;
     },
     scrollTo: function (id, x, y) {
-      if (!id) { globalThis.scrollTo(x, y); return true; }
+      if (!id) { globalThis.scrollTo(x, y); ownScroll(0); return true; }
       var el = byId.get(id);
       if (!el) return false;
       el.scrollLeft = x; el.scrollTop = y;
+      ownScroll(id, el);
       return true;
     },
-    // scrollProbe drives infinite-scroll landside: the client only reports how
-    // far down the mirrored document it is, and the host nudges the real page.
-    scrollProbe: function (ratio) {
+    // scrollProbe drives lazy loading and infinite scroll landside: the client
+    // reports how far through the mirrored document the reader is, and the host
+    // puts the real page at the same fraction of its own scrollable range. The
+    // mapping is by range rather than by document height so that the top stays
+    // the top and, more importantly, the bottom stays the bottom — an infinite
+    // list only fetches more when the page is genuinely at its end.
+    scrollProbe: function (fraction) {
       var h = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
-      var target = Math.max(0, Math.floor(h * ratio) - (globalThis.innerHeight || 800) / 2);
+      var range = Math.max(0, h - (globalThis.innerHeight || 800));
+      var target = Math.max(0, Math.min(range, Math.round(range * fraction)));
       globalThis.scrollTo({ top: target, behavior: 'instant' });
+      ownScroll(0);
       return { height: h, top: globalThis.scrollY | 0 };
     },
     links: function (limit) {

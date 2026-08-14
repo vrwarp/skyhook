@@ -31,6 +31,17 @@ function snapshot(): Snapshot {
   };
 }
 
+/** A batch carrying one scroll op, the way the server reports landside scroll. */
+function scrollOp(node: number, x: number, y: number): Mutation {
+  return {
+    strings: [], docHash: 0, flush: false,
+    ops: [{
+      op: OpCode.Scroll, node, parent: 0, before: 0, ref: 0, ref2: 0,
+      nodes: [], off: 0, del: 0, add: [], drop: [], x, y, str: '',
+    }],
+  };
+}
+
 function events() {
   return {
     input: vi.fn(),
@@ -152,6 +163,87 @@ describe('MirrorHost', () => {
     expect(submit).toBeDefined();
     expect(submit!.node).toBe(20);
     expect((submit!.fields as Record<string, string>).q).toBe('hello');
+  });
+
+  it('reserves an image its box before the bytes exist', async () => {
+    // Until the bitmap arrives the frame holds a 1x1 placeholder. Without a
+    // reserved box every image that lands pushes the page down under whoever
+    // is reading it.
+    const { host } = await mount();
+    const snap = snapshot();
+    snap.strings.push('img', 'skyhook://img/c0ffee', 'src');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('img'),
+      attrs: [snap.strings.indexOf('src'), snap.strings.indexOf('skyhook://img/c0ffee')],
+      flags: 2,
+    });
+    host.applySnapshot(snap);
+
+    const img = host.frame.contentDocument!.querySelector('img')!;
+    // The agent could not measure this one: no width, no height, no box.
+    expect(img.hasAttribute('width')).toBe(false);
+
+    host.setImageMeta({
+      node: 10, hash: 'c0ffee', w: 320, h: 240, blur: '', mime: 'image/png',
+      bytes: 900, priority: 0, alt: '',
+    });
+    expect(img.getAttribute('width')).toBe('320');
+    expect(img.getAttribute('height')).toBe('240');
+    expect(img.style.aspectRatio).toBe('320 / 240');
+  });
+
+  it('leaves the scroll position alone when the server resends the same document', async () => {
+    const { host } = await mount();
+    const win = host.frame.contentWindow!;
+    const scrollTo = vi.spyOn(win, 'scrollTo').mockImplementation(() => {});
+
+    const first = snapshot();
+    first.scrollY = 900;
+    host.applySnapshot(first);
+    // A new document adopts the landside position: that is what carries a
+    // #fragment target.
+    expect(scrollTo).toHaveBeenLastCalledWith(0, 900);
+
+    // The same URL again is a resync — a gap the server could not close with
+    // diffs — and the reader should not be able to tell it happened.
+    const again = snapshot();
+    again.scrollY = 4000;
+    host.applySnapshot(again);
+    expect(scrollTo).toHaveBeenLastCalledWith(0, 0);
+    scrollTo.mockRestore();
+  });
+
+  it('refuses to move a reader who has scrolled', async () => {
+    const { host } = await mount();
+    const win = host.frame.contentWindow!;
+    host.applySnapshot(snapshot());
+
+    const scrollTo = vi.spyOn(win, 'scrollTo').mockImplementation(() => {});
+    // The reader scrolls. jsdom does not move the window itself, so say where
+    // they landed and announce it the way a real scroll would.
+    Object.defineProperty(win, 'scrollY', { value: 1500, configurable: true });
+    win.dispatchEvent(new Event('scroll'));
+
+    host.applyMutation(scrollOp(0, 0, 8966), 4);
+    expect(scrollTo).not.toHaveBeenCalled();
+    scrollTo.mockRestore();
+  });
+
+  it('still follows a container the reader has not touched, and stops once they have', async () => {
+    const { host } = await mount();
+    host.applySnapshot(snapshot());
+    const doc = host.frame.contentDocument!;
+    const list = doc.querySelector('ul')!;
+
+    host.applyMutation(scrollOp(2, 0, 120), 4);
+    expect(list.scrollTop).toBe(120);
+
+    // The reader scrolls the container themselves; it is theirs from here.
+    list.scrollTop = 40;
+    list.dispatchEvent(new Event('scroll'));
+    host.applyMutation(scrollOp(2, 0, 500), 5);
+    expect(list.scrollTop).toBe(40);
   });
 
   it('applies mutations and keeps the sequence for acknowledgement', async () => {

@@ -95,15 +95,15 @@ export class Patcher {
 
     const body = this.doc.body;
     if (!body) return;
-    body.textContent = '';
     this.ensureStyleElement();
     this.cssRules = [];
     this.setCSS(snap.css);
 
+    // Built detached and swapped in whole. Appending thousands of nodes into
+    // the live document lays out the page again after every one of them, and
+    // on a resync the reader watches their page empty itself and refill.
     const container = this.doc.createElement('div');
     container.setAttribute('data-skyhook-root', '1');
-    this.root = container;
-    body.appendChild(container);
 
     for (const n of snap.nodes) {
       const el = this.createNode(n);
@@ -112,6 +112,8 @@ export class Patcher {
       if (!parent) continue;
       parent.appendChild(el);
     }
+    this.root = container;
+    body.replaceChildren(container);
     this.doc.title = snap.title || this.doc.title;
     this.hooks.onApplied?.(0);
   }

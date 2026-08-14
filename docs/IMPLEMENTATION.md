@@ -184,6 +184,39 @@ writer implements strict priority across four queues instead (ctrl/input, dom,
 media, bulk), which gives the same ordering guarantee at the point where it
 matters: nothing gets written to the socket ahead of a DOM diff.
 
+### 10. The reader owns the viewport; landside scroll is never adopted
+
+The design has `scroll` telemetry flowing plane-side → landside to drive lazy
+loading and infinite scroll, and the agent reporting landside scroll positions
+back as ops. Wiring both directions up as described produces a feedback loop:
+the client reports where the reader is, the server scrolls the real page there,
+the agent reports the real page's new position, and the client applies it. The
+landside position is never exactly the reader's — different document height,
+different image sizes — so every round trip displaced the reader by the error,
+and a page that was merely being read scrolled itself to the bottom at roughly
+a viewport every second.
+
+Telemetry still flows landside, because lazy loading genuinely needs it. What
+changed is that the return path is no longer authoritative:
+
+- the agent does not report scroll positions it produced itself (`ownScroll`),
+  which is also a small saving on the wire;
+- the client applies a server scroll only to a scroller the reader has not
+  moved, or one they are parked at the bottom of — following a chat log to its
+  tail is the one case where being moved is the point;
+- landside focus is applied with `preventScroll`, since focusing an element
+  scrolls it into view and a landside focus change is not a request to move the
+  reader;
+- a snapshot for the URL already on screen is treated as a resync and keeps the
+  reader's scroll position, rather than adopting the landside one. Only a real
+  navigation adopts it, which is what carries a `#fragment` target.
+
+The mapping the server sends is a fraction of the *scrollable range* rather than
+of document height, so the top stays the top and the bottom stays the bottom —
+an infinite list still only fetches when the reader is genuinely at the end.
+
+`test/stability_test.go` pins all of this in the real client.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
