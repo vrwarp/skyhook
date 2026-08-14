@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -27,20 +28,66 @@ const worldName = "skyhook"
 // cssImageMaxDim caps background images, which have no layout box to measure.
 const cssImageMaxDim = 512
 
-// Blocked request patterns. Blocking landside saves server work, removes mirror
-// noise, and means ad frames never generate mutations we would have to ship.
+// Blocked request patterns.
+//
+// This list used to include the measurement endpoints — analytics, tag
+// managers, session recorders — and webfonts. Both were false economies. None
+// of those bytes ever cross the bad link: they are paid for landside, on the
+// half of the connection that has bandwidth to spare. What they bought instead
+// was a browser that loads a page, renders it, interacts with it and never once
+// reports anything back, which is not a shape a real visitor has. Fonts were
+// the same trade with less upside; the agent drops @font-face rules anyway, so
+// the client never sees a font URL whether or not the server fetched one.
+//
+// What is left is what earns its place plane-side: ad and creative networks
+// inject iframes and DOM that the mirror would otherwise have to serialise,
+// diff and ship, on a link where every kilobyte is a second.
 var defaultBlockedURLs = []string{
 	"*://*.doubleclick.net/*",
 	"*://*.googlesyndication.com/*",
-	"*://*.googletagmanager.com/*",
-	"*://*.google-analytics.com/*",
-	"*://*.scorecardresearch.com/*",
-	"*://*.hotjar.com/*",
-	"*://*.segment.io/*",
-	"*://*.amplitude.com/*",
-	"*://*.mixpanel.com/*",
 	"*://*.adservice.google.com/*",
-	"*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot",
+	"*://*.amazon-adsystem.com/*",
+	"*://*.adnxs.com/*",
+	"*://*.criteo.com/*",
+	"*://*.taboola.com/*",
+	"*://*.outbrain.com/*",
+}
+
+// Blocklist is what the landside browser refuses to fetch, per host.
+//
+// Per-host because the trade differs by site. An ad-heavy news page is worth
+// stripping; a site that scores its visitors will notice the same stripping and
+// hold it against a session that is not a bot. Naming a host with an empty list
+// turns blocking off there entirely, which is the escape hatch that matters.
+type Blocklist struct {
+	// Default applies to any host with no entry of its own. A nil Default means
+	// defaultBlockedURLs; an empty non-nil one means block nothing.
+	Default []string
+	// ByHost is keyed by registrable-ish domain: "reddit.com" also covers
+	// "www.reddit.com" and "old.reddit.com".
+	ByHost map[string][]string
+}
+
+// For returns the patterns to block while showing a URL.
+func (b Blocklist) For(rawURL string) []string {
+	host := hostOf(rawURL)
+	for suffix, patterns := range b.ByHost {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return patterns
+		}
+	}
+	if b.Default == nil {
+		return defaultBlockedURLs
+	}
+	return b.Default
+}
+
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // Emitter receives frames produced by a tab.
@@ -60,17 +107,21 @@ type ImageRequest struct {
 	Priority int
 	Node     int64
 	Referer  string
-	Cookies  string
 }
 
 // Options configures a mirrored tab.
 type Options struct {
 	Viewport protocol.Viewport
 	Logger   *slog.Logger
-	// BlockURLs overrides the landside request denylist.
-	BlockURLs []string
+	// Blocked is the landside request denylist, per host.
+	Blocked Blocklist
 	// UserAgent overrides the browser default (kept realistic on purpose).
+	// Client-hint metadata is derived from it, so the two agree.
 	UserAgent string
+	// AcceptLanguage is sent with the override, because a browser whose UA was
+	// replaced but whose language header was not is a browser with a story that
+	// does not add up.
+	AcceptLanguage string
 	// IdleSnapshotAfter re-snapshots if the page has been silent this long and
 	// the client asked for a resync. Zero disables.
 	IdleSnapshotAfter time.Duration
@@ -93,6 +144,13 @@ type Tab struct {
 	title   string
 	loading bool
 	closed  bool
+	// blockedFor is the denylist currently installed, so a navigation within a
+	// host does not re-send it.
+	blockedFor []string
+	// pointerX/pointerY track where the landside pointer was left, so the next
+	// move starts from there rather than materialising at its destination.
+	pointerX, pointerY float64
+	pointerSet         bool
 	// canBack and canForward are held here for the same reason url and title
 	// are: most state frames are partial, and a partial frame that left these
 	// out would read on the client as "there is no history", disabling the back
@@ -101,9 +159,6 @@ type Tab struct {
 	canForward bool
 	chunks     map[int][]string
 	chunkN     map[int]int
-	// cookies is the Cookie header the image fetcher reuses, so authenticated
-	// avatars and attachments resolve the way they do for the page.
-	cookies string
 	// pendingInput is the seq of the most recent input event, tagged onto the
 	// next mutation batch so the client can reconcile local echo.
 	pendingInput uint64
@@ -134,15 +189,9 @@ func (t *Tab) install(ctx context.Context) error {
 	if err := s.Do(ctx, "Page.setLifecycleEventsEnabled", map[string]any{"enabled": true}, nil); err != nil {
 		t.log.Debug("lifecycle events unavailable", "err", err)
 	}
-	blocked := t.opts.BlockURLs
-	if blocked == nil {
-		blocked = defaultBlockedURLs
-	}
-	if err := s.Do(ctx, "Network.setBlockedURLs", map[string]any{"urls": blocked}, nil); err != nil {
-		t.log.Debug("blocked urls unsupported", "err", err)
-	}
-	if t.opts.UserAgent != "" {
-		_ = s.Do(ctx, "Network.setUserAgentOverride", map[string]any{"userAgent": t.opts.UserAgent}, nil)
+	t.applyBlocklist(ctx, "")
+	if err := t.overrideUserAgent(ctx); err != nil {
+		t.log.Debug("user agent override failed", "err", err)
 	}
 	if err := t.SetViewport(ctx, t.opts.Viewport); err != nil {
 		t.log.Debug("viewport override failed", "err", err)
@@ -240,19 +289,37 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 	t.url = p.Frame.URL
 	t.ctxID = 0
 	t.mu.Unlock()
-	t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// The history flags have to leave with the URL, in the same frame.
+		//
+		// Every state frame is stamped with the tab's cached canBack and
+		// canForward, and a navigation is exactly the moment those change.
+		// Announcing the new URL before asking the browser what its history
+		// now looks like sends the client a frame that says "you are on the
+		// index" and "there is nothing forward of here" — the second of which
+		// was true a moment ago and is not any more. The correction follows in
+		// a later frame, so on a landside link nobody notices; on the link this
+		// project exists for the two are seconds apart, and every back or
+		// forward gesture the reader makes in that window is dropped on the
+		// floor, because the shell believes the tab has nowhere to go.
+		//
+		// Asking first costs one landside CDP call before the URL bar updates,
+		// which is nothing next to the second that frame then spends in the air.
+		t.syncHistory(ctx)
+		t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})
+
+		t.applyBlocklist(ctx, p.Frame.URL)
 		if err := t.ensureWorld(ctx); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
 		}
 		if _, err := t.eval(ctx, resnapshotIfSettled); err != nil {
 			t.log.Debug("post-navigation snapshot check failed", "tab", t.ID, "err", err)
 		}
-		// History moves at navigation time, not at load time; refreshing here
-		// means the back button is right while the page is still arriving.
+		// Again once the page has settled: a redirect or a client-side route
+		// change moves the history under a URL that has already been announced.
 		t.refreshState(ctx)
 	}()
 }
@@ -596,13 +663,22 @@ func (t *Tab) emitMutation(m *agentMutation) {
 	}
 }
 
+// FetchResource loads a URL through this tab's own browser, with the tab's
+// frame as the initiator. The image pipeline uses it so that assets are
+// fetched by the client that rendered the page, not beside it.
+func (t *Tab) FetchResource(ctx context.Context, url string, limit int) ([]byte, error) {
+	t.mu.Lock()
+	frame := t.frameID
+	t.mu.Unlock()
+	return t.sess.FetchResource(ctx, frame, url, limit)
+}
+
 func (t *Tab) requestImages(imgs []agentImage) {
 	if len(imgs) == 0 {
 		return
 	}
 	t.mu.Lock()
 	ref := t.url
-	cookies := t.cookies
 	t.mu.Unlock()
 	for _, im := range imgs {
 		if im.URL == "" || im.Key == "" {
@@ -610,7 +686,7 @@ func (t *Tab) requestImages(imgs []agentImage) {
 		}
 		t.out.WantImage(t.ID, ImageRequest{
 			Key: im.Key, URL: im.URL, W: im.W, H: im.H, Alt: im.Alt,
-			Priority: im.Pri, Node: im.N, Referer: ref, Cookies: cookies,
+			Priority: im.Pri, Node: im.N, Referer: ref,
 		})
 	}
 }
@@ -634,7 +710,11 @@ func (t *Tab) emitState(st protocol.TabState) {
 	t.out.EmitFrame(protocol.ChCtrl, f)
 }
 
-func (t *Tab) refreshState(ctx context.Context) {
+// syncHistory asks the browser where the tab sits in its own history and caches
+// the answer. It emits nothing: callers that want the client told use
+// refreshState, and callers that are about to emit for their own reasons — a
+// navigation announcing its URL — want the cache correct before they do.
+func (t *Tab) syncHistory(ctx context.Context) (url, title string) {
 	var hist struct {
 		CurrentIndex int `json:"currentIndex"`
 		Entries      []struct {
@@ -643,18 +723,21 @@ func (t *Tab) refreshState(ctx context.Context) {
 		} `json:"entries"`
 	}
 	if err := t.sess.Do(ctx, "Page.getNavigationHistory", nil, &hist); err != nil {
-		return
+		return "", ""
 	}
 	t.mu.Lock()
 	t.canBack = hist.CurrentIndex > 0
 	t.canForward = hist.CurrentIndex < len(hist.Entries)-1
 	t.mu.Unlock()
-	var st protocol.TabState
 	if hist.CurrentIndex >= 0 && hist.CurrentIndex < len(hist.Entries) {
-		st.URL = hist.Entries[hist.CurrentIndex].URL
-		st.Title = hist.Entries[hist.CurrentIndex].Title
+		return hist.Entries[hist.CurrentIndex].URL, hist.Entries[hist.CurrentIndex].Title
 	}
-	t.emitState(st)
+	return "", ""
+}
+
+func (t *Tab) refreshState(ctx context.Context) {
+	url, title := t.syncHistory(ctx)
+	t.emitState(protocol.TabState{URL: url, Title: title})
 }
 
 // Seq reports the last emitted mutation sequence.
@@ -819,4 +902,64 @@ func decodeOpRow(row []json.RawMessage) (protocol.Op, bool) {
 		return op, false
 	}
 	return op, true
+}
+
+// overrideUserAgent applies the configured identity to this tab.
+//
+// Emulation.setUserAgentOverride rather than Network's: the Network call moves
+// the `User-Agent` header and `navigator.userAgent` and nothing else, leaving
+// `Sec-CH-UA`, `Sec-CH-UA-Platform` and `navigator.userAgentData` describing
+// the browser that is really running. A site that reads both then sees a
+// browser disagreeing with itself, which is a far louder signal than the
+// default user agent it would otherwise have seen. The Emulation call takes
+// the metadata too, so there is one story.
+func (t *Tab) overrideUserAgent(ctx context.Context) error {
+	ua, lang := t.opts.UserAgent, t.opts.AcceptLanguage
+	if ua == "" {
+		// Nothing to correct. The browser's own identity is already consistent
+		// with itself, which is the state every override is trying to imitate,
+		// and --lang has already set the language it reports.
+		return nil
+	}
+	meta, ok := cdp.MetadataForUA(ua)
+	if !ok {
+		t.log.Warn("user agent is not recognisably Chromium; "+
+			"client hints will claim no brands", "userAgent", ua)
+	}
+	params := map[string]any{
+		"userAgent":         ua,
+		"userAgentMetadata": meta,
+	}
+	if lang != "" {
+		params["acceptLanguage"] = lang
+	}
+	return t.sess.Do(ctx, "Emulation.setUserAgentOverride", params, nil)
+}
+
+// applyBlocklist tells the browser what not to fetch while it is showing this
+// URL. It is re-applied on navigation, because the answer is per host.
+func (t *Tab) applyBlocklist(ctx context.Context, pageURL string) {
+	urls := t.opts.Blocked.For(pageURL)
+	t.mu.Lock()
+	unchanged := t.blockedFor != nil && equalStrings(t.blockedFor, urls)
+	t.blockedFor = urls
+	t.mu.Unlock()
+	if unchanged {
+		return
+	}
+	if err := t.sess.Do(ctx, "Network.setBlockedURLs", map[string]any{"urls": urls}, nil); err != nil {
+		t.log.Debug("blocked urls unsupported", "err", err)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

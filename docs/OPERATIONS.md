@@ -24,9 +24,9 @@ docker compose -f deploy/docker-compose.yml exec skyhook \
   skyhookctl pairing -file /data/pairing.json
 ```
 
-The image ships Chromium, `avifenc`, `cwebp` and Xvfb. Set `SKYHOOK_HEADFUL=1`
-to run Chromium headful under Xvfb, which is the mitigation for sites with
-aggressive bot detection.
+The image ships Chromium, `avifenc`, `cwebp` and Xvfb, and runs Chromium
+headful under Xvfb by default, because headless Chromium announces itself to
+every site it visits. `SKYHOOK_HEADFUL=0` opts out: lighter, and conspicuous.
 
 It runs as uid **10001**, and `/data` in the image is owned by it. A named
 volume inherits that; a **bind mount does not**, so a host directory needs
@@ -60,14 +60,15 @@ default; this is the whole surface:
   "dataDir": "/var/lib/skyhook",
   "hosts": ["vps.example.com"],
   "token": "",
-  "headless": true,
+  "headless": false,
+  "lang": "en-US",
   "sessionTtl": "12h",
   "compression": true,
-  "prefetch": true,
   "maxTabs": 8,
   "imageQuality": 40,
   "imageCacheBytes": 536870912,
   "homeUrl": "",
+  "blockUrls": { "reddit.com": [] },
   "adapters": ["googlechat"],
   "adapterConfig": "/var/lib/skyhook/adapters.json",
   "logLevel": "info"
@@ -76,7 +77,8 @@ default; this is the whole surface:
 
 Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_DATA_DIR`, `SKYHOOK_TOKEN`, `SKYHOOK_CHROME`, `SKYHOOK_CHROME_ATTACH`,
-`SKYHOOK_HOSTS`, `SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`,
+`SKYHOOK_HOSTS`, `SKYHOOK_HEADLESS`, `SKYHOOK_LANG`, `SKYHOOK_ADAPTERS`,
+`SKYHOOK_WEB_ROOT`,
 `SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`,
 `SKYHOOK_PUBLIC_URL`, `SKYHOOK_BEHIND_PROXY`.
 
@@ -331,10 +333,40 @@ instant.
 profile on disk; the client re-snapshots its tabs. Logins survive; open page
 state does not.
 
-**Bot detection.** Set `SKYHOOK_HEADFUL=1` (Docker) or `headless: false` plus a
-`DISPLAY` (systemd + Xvfb). Persisting a real profile is the other half of the
-mitigation. If a site still fights it, use the mirror for reading and do the
-awkward part on the ground.
+**Being recognised as a person.** Most of this is now the default rather than
+something to switch on: Chromium runs headful under a virtual display, images
+are fetched by the browser rather than beside it, the user agent and its client
+hints tell one story, the denylist no longer suppresses the telemetry a real
+visit produces, and clicks are replayed with the timing and aim the reader's
+own pointer had.
+
+Two things are still yours to get right, and they matter more than any of the
+above:
+
+- **Where the traffic comes from.** A VPS address is a datacenter address, and
+  that is the strongest signal about you that any origin has. Egress through
+  your home connection — a WireGuard tunnel or a Tailscale exit node — puts the
+  browser back on a network with your history on it.
+- **Being logged in, on a profile with age.** The persistent profile is the
+  point of the landside browser. Do first logins on the ground, where a captcha
+  is an annoyance rather than a trip-ruining one, and remember that
+  `skyhookctl kill -yes` wipes the profile: it costs the account's warmth, not
+  just its cookies.
+
+If a site still fights it, use the mirror for reading and do the awkward part
+on the ground.
+
+**What the browser refuses to fetch.** `blockUrls` is keyed by host, with `"*"`
+for the default. The built-in default blocks ad and creative networks, because
+their iframes are DOM the mirror would have to ship over the bad link. It does
+not block analytics or webfonts: those bytes are paid for landside, where there
+is bandwidth to spare, and a browser that renders a page and never reports
+anything back is not a shape a real visitor has. Naming a host with an empty
+list turns blocking off there entirely:
+
+```json
+{ "blockUrls": { "reddit.com": [], "*": ["*://*.doubleclick.net/*"] } }
+```
 
 **Adapter selectors.** `adapterConfig` points at a JSON file of per-adapter
 overrides, so a Chat redesign is a config edit rather than a rebuild:

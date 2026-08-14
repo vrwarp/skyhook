@@ -140,6 +140,13 @@ export class MirrorHost {
   /** The mirrored page's own URL, which relative links resolve against. It
    *  follows the tab wherever it goes, snapshot or not. */
   private pageUrl = '';
+  /** Recent pointer positions over the mirror, in viewport permille with the
+   *  gap since the previous sample. The server replays these ahead of a click
+   *  so the landside page sees the approach the reader actually made, rather
+   *  than a cursor materialising on the target. */
+  private pointerPath: Array<{ x: number; y: number; t: number }> = [];
+  /** When the button went down, so a click can report how long it was held. */
+  private pointerDownAt = 0;
 
   constructor(tab: number, events: HostEvents) {
     this.tab = tab;
@@ -226,7 +233,71 @@ export class MirrorHost {
     });
   }
 
+  /** How many pointer samples travel with a click. Enough to describe an
+   *  approach, few enough that the frame stays a frame. */
+  private static readonly PATH_SAMPLES = 6;
+
+  /** Samples closer together than this are the same gesture; dropping them
+   *  costs nothing and keeps the frame small. */
+  private static readonly PATH_MIN_GAP_MS = 12;
+
+  /** A sample older than this is not part of the approach to this click. */
+  private static readonly PATH_MAX_AGE_MS = 500;
+
+  private recordPointer(ev: MouseEvent): void {
+    const now = performance.now();
+    const last = this.pointerPath[this.pointerPath.length - 1];
+    if (last && now - last.t < MirrorHost.PATH_MIN_GAP_MS) return;
+    const win = this.frame.contentWindow;
+    const w = win?.innerWidth ?? 0;
+    const h = win?.innerHeight ?? 0;
+    if (!w || !h) return;
+    this.pointerPath.push({
+      x: Math.round((ev.clientX / w) * 1000),
+      y: Math.round((ev.clientY / h) * 1000),
+      t: now,
+    });
+    if (this.pointerPath.length > MirrorHost.PATH_SAMPLES) this.pointerPath.shift();
+  }
+
+  /** The approach as the wire carries it: (x, y, dt) triplets, oldest first. */
+  private approachPath(): number[] | undefined {
+    const now = performance.now();
+    const fresh = this.pointerPath.filter((p) => now - p.t <= MirrorHost.PATH_MAX_AGE_MS);
+    if (fresh.length < 2) return undefined;
+    const out: number[] = [];
+    for (let i = 0; i < fresh.length; i++) {
+      const gap = i === 0 ? 0 : Math.round(fresh[i].t - fresh[i - 1].t);
+      out.push(fresh[i].x, fresh[i].y, gap);
+    }
+    return out;
+  }
+
+  /** Where in the target's box the pointer was, in permille. The landside box
+   *  is laid out with different fonts, so a fraction travels and pixels do not. */
+  private pointInBox(ev: MouseEvent, target: Element | null): number[] | undefined {
+    if (!target?.getBoundingClientRect) return undefined;
+    const r = target.getBoundingClientRect();
+    if (!r.width || !r.height) return undefined;
+    const fx = Math.round(((ev.clientX - r.left) / r.width) * 1000);
+    const fy = Math.round(((ev.clientY - r.top) / r.height) * 1000);
+    if (fx < 0 || fx > 1000 || fy < 0 || fy > 1000) return undefined;
+    return [fx, fy];
+  }
+
+  /** How long the button was held, when this click came from a real press. */
+  private holdMs(): number | undefined {
+    if (!this.pointerDownAt) return undefined;
+    const held = Math.round(performance.now() - this.pointerDownAt);
+    // A keyboard-activated click has no press; a press from minutes ago is not
+    // this click's. Either way the server is better off inventing a duration.
+    if (held < 0 || held > 2000) return undefined;
+    return held;
+  }
+
   private wireInput(doc: Document): void {
+    doc.addEventListener('mousemove', (ev) => this.recordPointer(ev as MouseEvent), true);
+
     doc.addEventListener('click', (ev) => {
       const target = ev.target as HTMLElement | null;
       if (!target) return;
@@ -252,12 +323,15 @@ export class MirrorHost {
       }
       const node = this.patcher?.idOf(anchor ?? target) ?? 0;
       if (!node) return;
+      const mouse = ev as MouseEvent;
       this.send({
         kind: InputKind.Click,
         node,
         modifiers: modifierMask(ev),
-        button: ev.button,
-        url: anchor?.getAttribute('href') ?? undefined,
+        button: mouse.button,
+        hold: this.holdMs(),
+        point: this.pointInBox(mouse, (anchor ?? target) as Element),
+        path: this.approachPath(),
       });
       // The frame has no allow-forms, so a submit control never produces a
       // native submit event; recognise it here instead.
@@ -271,6 +345,8 @@ export class MirrorHost {
     // knows nothing about.
     doc.addEventListener('mousedown', (ev) => {
       const mouse = ev as MouseEvent;
+      this.pointerDownAt = performance.now();
+      this.recordPointer(mouse);
       this.events.dismiss(this.tab);
       // Inside a text field the gesture is X11's primary-selection paste, which
       // the browser performs natively and the echo engine picks up as an input
@@ -288,7 +364,16 @@ export class MirrorHost {
 
     doc.addEventListener('dblclick', (ev) => {
       const node = this.patcher?.idOf(ev.target as Node) ?? 0;
-      if (node) this.send({ kind: InputKind.DblClick, node, modifiers: modifierMask(ev) });
+      if (!node) return;
+      const mouse = ev as MouseEvent;
+      this.send({
+        kind: InputKind.DblClick,
+        node,
+        modifiers: modifierMask(ev),
+        hold: this.holdMs(),
+        point: this.pointInBox(mouse, mouse.target as Element),
+        path: this.approachPath(),
+      });
     }, true);
 
     doc.addEventListener('contextmenu', (ev) => {
@@ -407,8 +492,8 @@ export class MirrorHost {
   /**
    * The link a node sits inside, resolved and filtered down to what the shell
    * can actually act on. The agent absolutises URL attributes landside, but a
-   * speculative snapshot or a `<base>`-less fragment can still arrive relative,
-   * so the page's own URL is the fallback base.
+   * `<base>`-less fragment can still arrive relative, so the page's own URL is
+   * the fallback base.
    */
   private linkAt(target: EventTarget | Node | null): { url: string; text: string } | undefined {
     const el = target as HTMLElement | null;

@@ -16,7 +16,9 @@ services:
       SKYHOOK_CONFIG: /data/config.json
       SKYHOOK_HOSTS: ${SKYHOOK_HOSTS:-localhost}
       SKYHOOK_LOG_LEVEL: ${SKYHOOK_LOG_LEVEL:-info}
-      SKYHOOK_HEADFUL: ${SKYHOOK_HEADFUL:-0}
+      # Headful under Xvfb is the default; set 0 for headless, which is
+      # lighter and more conspicuous.
+      SKYHOOK_HEADFUL: ${SKYHOOK_HEADFUL:-1}
       # Behind a reverse proxy, use docker-compose.proxy.yml instead: the
       # server has to be told the address the proxy answers on, because
       # everything it hands the client is built from it.

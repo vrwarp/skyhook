@@ -13,7 +13,7 @@ this is what survived contact.
 | **M2 — Feel** | Local echo, ghost-send, scroll telemetry, images with blurhash, used-CSS | **Done.** Echo and reconciliation are unit-tested; used-CSS filtering and image transcoding are covered end-to-end. |
 | **M3 — Survive** | Reconnect, resync, offline mode | **Done for reconnect/resync/offline queueing.** 0-RTT resumption is enabled in the QUIC config; it is not separately asserted by a test. FEC is not implemented — see below. |
 | **M4 — Chat adapter** | Warm open ≤ 3 s, offline history, outbox | **Framework and adapter are built** (append-log, outbox, backlog replay, client archive and UI). The Google Chat selectors are a starting point, not a validated set: they need a session against the real app to tune. |
-| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Prefetch, tabs, bookmarks and the HUD are built.** Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
+| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 17. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
 
 The client is a Chrome-targeted PWA served by the server itself; the Electron
 shell the design called for was built first and then pivoted away from
@@ -319,7 +319,31 @@ the entry behind, where the app looks unchanged and a second press leaves for
 real. The trap is armed again as soon as a tab has somewhere to go back to. A
 browser that cannot be left by the gesture that leaves browsers is worse than
 one that has to be told twice.
-### 15. Attaching to a running browser needs `window.open`, not `Target.createTarget`
+### 15. A navigation's URL and its history flags travel together
+
+Every tab-state frame is stamped with the tab's cached `canBack` and
+`canForward`, and a navigation is exactly the moment those change. The frame
+announcing a new URL was sent before asking the browser what the history now
+looked like, so it carried the *previous* page's flags: "you are on the index"
+and "there is nothing forward of here", the second of which stopped being true
+the instant the first became true. A corrected frame followed once the page had
+settled.
+
+Landside that gap is 11 ms and nobody notices. On the link this project exists
+for, the correction queues behind the new page's snapshot at 250 kbps, and the
+two frames are seconds apart. Every back or forward gesture the reader makes in
+that window is dropped on the floor — `goHistory` refuses to spend a gesture the
+tab says it cannot answer, so the press does nothing at all and the reader
+presses again.
+
+The history is now read before the URL is announced, in the same frame. It costs
+one landside CDP call ahead of the URL bar updating, against the second that
+frame then spends in the air.
+
+`test/navigation_test.go` catches this only over the emulated link, where it
+appears as a forward gesture that never arrives.
+
+### 16. Attaching to a running browser needs `window.open`, not `Target.createTarget`
 
 The design assumes the server launches Chromium and owns it. `chromeAttach`
 adds the other case — a browser already running, whose profile and logins are
@@ -357,6 +381,68 @@ calling `Browser.close`, which would quit the browser out from under whoever is
 using it. `test/attach_test.go` drives a second real browser as "the user" and
 asserts each of these, including that the user activating their own window
 mid-run does not divert the next tab.
+### 17. Speculative prefetch was built, and then removed
+
+The design's §2.8 asked for it and it worked: a hidden pooled tab walked the
+top five same-origin links on the page, and a link-follow that hit a
+speculation cost zero perceived round trips. It is gone anyway.
+
+What it looked like from the origin's side is the problem. A logged-in session
+requesting five permalinks every four seconds, each from `about:blank` with no
+referer, no user activation and no interaction between them, is not a reading
+pattern — it is a crawl, and it is the pattern rate limiters and bot scoring
+exist to catch. Skyhook is not a scraper, but the traffic it generated could
+not be told apart from one, and the account paying for that was the user's own.
+
+The trade was bad on its merits too. Speculation spent landside bandwidth and
+origin goodwill on pages the user mostly did not open, to save one round trip
+on the ones they did. On a 1.2 s link that round trip is worth something, but
+not an account.
+
+Removed with it: `TypeSpeculative` (frame 23) and `Snapshot.speculative`
+(field 10), the client's speculation cache, the agent's `links()` collector,
+and `InputEvent.URL` — the anchor href the client attached to every click,
+which only speculation ever read. The frame and field numbers are retired
+rather than reused, so a stale client cannot be silently misread by a new
+server.
+
+### 18. The landside browser is used as a browser, not as an instrument
+
+Skyhook is not a scraper, but almost everything about how it drove Chromium
+looked like one to an origin, and the account paying for that was the user's.
+Four things changed, all of them the same change.
+
+**The browser fetches its own images.** The transcoder used to fetch image
+bytes itself over a Go `http.Client`, with a hardcoded `Chrome/126` user agent
+and the page's cookies, which is a second visitor arriving with the first one's
+session: different TLS fingerprint, different header order, no client hints, a
+UA disagreeing with the browser that requested the page. Images now come back
+through `Network.loadNetworkResource` on the tab that referenced them. The
+direct path survives only for assets whose tab has closed, and sends no
+credentials, so a cookie never leaves Chromium.
+
+**One story about who it is.** Setting `userAgent` moved the `User-Agent`
+header and `navigator.userAgent` and nothing else; `Sec-CH-UA` and
+`navigator.userAgentData` kept describing the real build. The option therefore
+made things worse than leaving it unset — a browser contradicting itself is a
+louder signal than an unusual user agent. The override is now
+`Emulation.setUserAgentOverride` with client-hint metadata derived from the
+string itself, so the two cannot drift.
+
+**Headful by default.** Headless Chromium puts `HeadlessChrome` in its own user
+agent and sets `navigator.webdriver`. The image and the systemd unit both
+supply a virtual display; on Linux with none available the server says what is
+missing and starts headless rather than refusing to boot.
+
+**The reader's own pointer.** A click used to be replayed as one instantaneous
+event at the exact centre of the element. The client now measures what its
+pointer actually did — hold, position within the box, approach — and the server
+replays that, synthesising only when there is nothing to replay. The data is a
+few tens of bytes on a frame already being sent.
+
+What is deliberately *not* here: nothing in this list lies about what the
+browser is. It is a real Chromium, driven by a real person, on a real profile;
+the work was in stopping the plumbing from contradicting that.
 
 ## Known gaps
 

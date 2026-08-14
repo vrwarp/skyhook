@@ -16,6 +16,7 @@ import (
 	"github.com/vrwarp/skyhook/internal/adapter"
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/imgproc"
+	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/protocol"
 	"github.com/vrwarp/skyhook/internal/transport"
 )
@@ -37,10 +38,12 @@ type ManagerOptions struct {
 	ProfileDir string
 	// UserAgent overrides the browser default.
 	UserAgent string
+	// AcceptLanguage rides with the user agent override.
+	AcceptLanguage string
+	// Blocked is the landside request denylist, per host.
+	Blocked mirror.Blocklist
 	// MaxTabs caps concurrent tabs.
 	MaxTabs int
-	// Prefetch enables speculative same-origin link prefetch.
-	Prefetch bool
 	// Adapters builds the adapters started for each session.
 	Adapters []adapter.Factory
 	// HomeURL is opened in the first tab of a fresh session.

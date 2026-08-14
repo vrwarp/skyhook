@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+// TestMain clears the SKYHOOK_* environment before anything runs.
+//
+// Load reads the process environment by design, so these tests are otherwise at
+// the mercy of the shell they are run from. `SKYHOOK_CHROME` is the documented
+// way to point Skyhook at a browser and is what the end-to-end suite exports,
+// and with it set two of the tests below failed on assertions about
+// configurations they never described — a `chromeArgs` case that reported
+// "exclusive" instead, and an attach case that would not load at all.
+//
+// Tests that want a variable set it themselves with t.Setenv.
+func TestMain(m *testing.M) {
+	for _, kv := range os.Environ() {
+		if name, _, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(name, "SKYHOOK_") {
+			_ = os.Unsetenv(name)
+		}
+	}
+	os.Exit(m.Run())
+}
+
 func TestParsePublicURL(t *testing.T) {
 	cases := []struct {
 		raw    string

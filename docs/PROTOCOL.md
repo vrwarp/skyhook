@@ -47,7 +47,7 @@ are already compressed.
 | `input` | 1 | 0 | semantic input events |
 | `dom` | 2 | 1 | snapshots, mutation batches, style updates |
 | `media` | 3 | 2 | images and favicons, one stream per object |
-| `bulk` | 4 | 3 | dictionaries, adapter backlog, speculative snapshots |
+| `bulk` | 4 | 3 | dictionaries, adapter backlog |
 | `telemetry` | 5 | 0 | scroll and viewport telemetry (datagrams, latest wins) |
 
 Priority is enforced by the server's outbound scheduler: a burst of image bytes
@@ -118,7 +118,7 @@ rather than a hashing difference.
 Input is semantic, never coordinates when a node id will do:
 
 ```
-click(node, {button, modifiers})   server resolves the node and clicks its centre
+click(node, {button, modifiers})   server resolves the node and clicks it
 key(key | text)                    Input.insertText for text, key events for control keys
 setValue(node, text, start, end)   non-append edits, IME results, masks
 submit(form, fields{})             one frame on submit, not per keystroke
@@ -131,6 +131,22 @@ echo reconciliation.
 
 Resolving clicks by node id rather than coordinates is what makes the mirror
 robust to layout drift between the mirrored document and the real page.
+
+A click additionally carries what the reader's pointer actually did, because
+the alternative is the server inventing it:
+
+```
+hold  17  ms the button was down
+point 18  where in the node's box the pointer was, permille of its width/height
+path  19  the approach: (x, y, dt) triplets, viewport permille and milliseconds
+```
+
+Permille rather than pixels: the reader's box was laid out with different fonts
+and is rarely the size the landside box is. All three are optional — an adapter
+or a keyboard activation has nothing to report, and the server falls back to a
+plausible imitation. The whole set costs a few tens of bytes on a frame already
+being sent, and it is the difference between a click a page can measure as
+human and one it can measure as not.
 
 ### Media
 

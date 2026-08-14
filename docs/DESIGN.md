@@ -56,7 +56,7 @@ Single user (you), technical, owns both endpoints. Primary tasks, in priority or
 - R7. Per-app adapter for Google Chat delivering G1's warm-open target.
 
 **P1 (fast follow)**
-- R8. Speculative interaction prefetch (§2.8).
+- R8. Speculative interaction prefetch (§2.8). **Withdrawn** — built, then removed; see IMPLEMENTATION.md deviation 17.
 - R9. Persistent cross-flight client cache (compression dictionaries, styles, images, adapter data).
 - R10. Clipboard integration, basic file upload (≤ 5 MB, resumable).
 
@@ -215,7 +215,12 @@ Special case, **Enter in chat inputs**: client optimistically appends the sent m
 
 Popup-dependent widgets (mention pickers, autocomplete dropdowns) inherently lag one RTT. Accepted; they still *work*.
 
-## 2.8 Speculative Prefetch (P1)
+## 2.8 Speculative Prefetch (P1) — withdrawn
+
+> This was built as described and then removed. Fetching links the user never
+> asked for is the traffic pattern origins bot-block on, and it was spending a
+> logged-in session's reputation to save a round trip. See IMPLEMENTATION.md
+> deviation 17.
 
 Server-side heuristic ranks likely next interactions: visible links in reading order, elements with cursor-proximity from scroll telemetry, app-specific hints from adapters (e.g., "conversation list items"). For the top N=5, the server clones the tab's state cheaply where possible — for same-origin `<a href>` navigations it *actually navigates* a hidden pooled tab and pre-computes the snapshot diff vs. current page; for JS-driven clicks it does nothing (cloning arbitrary SPA state is unreliable — cut from scope).
 
@@ -275,7 +280,7 @@ This dual-path design is deliberate: adapters where you live, mirror everywhere 
 2. **M2 — Feel (2 weekends).** Local echo + reconciliation, ghost-send, scroll telemetry, image pipeline with blurhash, used-CSS extraction. *Exit: G2/G4 met; Google Chat usable end-to-end via mirror.*
 3. **M3 — Survive (1 weekend).** QUIC hardening: 0-RTT resume, FEC, offline mode, resync protocol. *Exit: G5 met under scripted 60 s outages.*
 4. **M4 — Chat adapter (2 weekends).** *Exit: G1 warm-open ≤ 3 s; offline history; outbox.*
-5. **M5 — Polish.** Speculative prefetch, dictionaries trained per-origin, tabs/bookmarks UX, metrics HUD. *Exit: G3/G6 measured and met.*
+5. **M5 — Polish.** ~~Speculative prefetch~~ (withdrawn, §2.8), dictionaries trained per-origin, tabs/bookmarks UX, metrics HUD. *Exit: G3/G6 measured and met.*
 
 Every milestone is tested against the netem-emulated link, not real flights; real flights are the victory lap.
 

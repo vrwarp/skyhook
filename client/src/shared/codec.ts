@@ -204,7 +204,6 @@ export function decodeSnapshot(body: unknown): Snapshot {
     images: arr<Fields>(f, F.snapshot.images).map(decodeImage),
     scrollX: num(f, F.snapshot.scrollX),
     scrollY: num(f, F.snapshot.scrollY),
-    speculative: bool(f, F.snapshot.speculative),
     viewport: {
       w: num(vp, F.viewport.w),
       h: num(vp, F.viewport.h),
@@ -390,8 +389,13 @@ export interface InputEventInit {
   ts?: number;
   start?: number;
   end?: number;
-  url?: string;
   repeat?: number;
+  /** How long the button was held, in milliseconds. */
+  hold?: number;
+  /** Where in the target's box the pointer was, in permille: [x, y]. */
+  point?: number[];
+  /** The approach: (x, y, dt) triplets, viewport permille and milliseconds. */
+  path?: number[];
 }
 
 export function inputBody(ev: InputEventInit): Map<number, unknown> {
@@ -410,8 +414,12 @@ export function inputBody(ev: InputEventInit): Map<number, unknown> {
   if (ev.ts) m.set(F.input.ts, safeInt(ev.ts));
   if (ev.start) m.set(F.input.start, safeInt(ev.start));
   if (ev.end) m.set(F.input.end, safeInt(ev.end));
-  if (ev.url) m.set(F.input.url, ev.url);
   if (ev.repeat) m.set(F.input.repeat, safeInt(ev.repeat));
+  // Real pointer measurements, so the server replays what happened rather than
+  // synthesising a plausible imitation of it.
+  if (ev.hold) m.set(F.input.hold, safeInt(ev.hold));
+  if (ev.point?.length === 2) m.set(F.input.point, ev.point.map(safeInt));
+  if (ev.path?.length) m.set(F.input.path, ev.path.map(safeInt));
   return m;
 }
 

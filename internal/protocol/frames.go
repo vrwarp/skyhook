@@ -117,10 +117,12 @@ const (
 	TypeAdapterEvent Type = 20 // server -> client (append-log records)
 	TypeAdapterCmd   Type = 21 // client -> server (send message, mark read, sync)
 	TypeDict         Type = 22 // server -> client, zstd dictionary on bulk
-	TypeSpeculative  Type = 23 // server -> client, prefetched snapshot for a URL
-	TypeKill         Type = 24 // client -> server, wipe landside session + profile
-	TypeIntegrity    Type = 25 // server -> client subtree hashes; client replies on ctrl
-	TypeViewport     Type = 26 // client -> server, window size / dpr changed
+	// 23 was TypeSpeculative, a prefetched snapshot. Speculation is gone: it
+	// crawled links the user never opened, which is what a scraper looks like
+	// from the origin's side. The number stays retired rather than reused.
+	TypeKill      Type = 24 // client -> server, wipe landside session + profile
+	TypeIntegrity Type = 25 // server -> client subtree hashes; client replies on ctrl
+	TypeViewport  Type = 26 // client -> server, window size / dpr changed
 )
 
 // Frame is the envelope. Body is a CBOR-encoded, type-specific payload; keeping
@@ -278,10 +280,9 @@ type Snapshot struct {
 	Images   []ImageMeta `cbor:"7,keyasint,omitempty"`
 	ScrollX  int         `cbor:"8,keyasint,omitempty"`
 	ScrollY  int         `cbor:"9,keyasint,omitempty"`
-	// Speculative marks a prefetched snapshot for URL, not yet displayed.
-	Speculative bool   `cbor:"10,keyasint,omitempty"`
-	DocHash     uint64 `cbor:"11,keyasint,omitempty"`
-	BaseURL     string `cbor:"12,keyasint,omitempty"`
+	// 10 was Speculative, which marked a prefetched snapshot.
+	DocHash uint64 `cbor:"11,keyasint,omitempty"`
+	BaseURL string `cbor:"12,keyasint,omitempty"`
 }
 
 // Mutation op codes.
@@ -395,8 +396,22 @@ type InputEvent struct {
 	TS        int64             `cbor:"12,keyasint,omitempty"` // client monotonic ms
 	Start     int32             `cbor:"13,keyasint,omitempty"` // selection/caret
 	End       int32             `cbor:"14,keyasint,omitempty"`
-	URL       string            `cbor:"15,keyasint,omitempty"` // anchor href for speculative match
-	Repeat    int               `cbor:"16,keyasint,omitempty"`
+	// 15 was URL, the anchor href a click landed on, which only speculation read.
+	Repeat int `cbor:"16,keyasint,omitempty"`
+	// Hold is how long the button was really down plane-side, in milliseconds.
+	// The landside replay of a click is otherwise instantaneous, which no hand
+	// produces; the reader's own timing is better than any number the server
+	// could invent, and it costs two bytes on a frame that is already being sent.
+	Hold int `cbor:"17,keyasint,omitempty"`
+	// Point is where in the node's box the pointer really was, in permille of
+	// its width and height — two elements, or absent. Permille rather than
+	// pixels because the landside box is laid out with different fonts and is
+	// rarely exactly the size the reader saw.
+	Point []int32 `cbor:"18,keyasint,omitempty"`
+	// Path is the pointer's approach to the click: triplets of (x, y, dt), x
+	// and y in permille of the viewport, dt in milliseconds since the previous
+	// sample. Real cursor movement, sampled plane-side, replayed landside.
+	Path []int32 `cbor:"19,keyasint,omitempty"`
 }
 
 // ScrollEvent is telemetry: it drives image prioritisation and infinite-scroll

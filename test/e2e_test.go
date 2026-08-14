@@ -9,7 +9,9 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"html"
 	"image"
 	"image/color"
 	"image/png"
@@ -132,6 +134,34 @@ var pixelPNG = func() []byte {
 	return buf.Bytes()
 }()
 
+// pointerPage reports what a click really looked like to the page: the press
+// duration, where in the box it landed, and how much pointer movement preceded
+// it. The mirror ships the results back as ordinary text.
+const pointerPage = `<!DOCTYPE html><html><head><title>Pointer</title></head>
+<body>
+  <button id="target" style="position:absolute;left:100px;top:80px;width:240px;height:60px">click me</button>
+  <p id="hold">hold: none</p>
+  <p id="where">where: none</p>
+  <p id="moves">moves: 0</p>
+<script>
+  var down = 0, moves = 0;
+  var target = document.getElementById('target');
+  document.addEventListener('mousemove', function () {
+    moves++;
+    document.getElementById('moves').textContent = 'moves: ' + moves;
+  });
+  target.addEventListener('mousedown', function (e) { down = e.timeStamp; });
+  target.addEventListener('click', function (e) {
+    var held = down ? Math.round(e.timeStamp - down) : -1;
+    document.getElementById('hold').textContent = 'hold: ' + held;
+    var r = target.getBoundingClientRect();
+    var fx = Math.round(((e.clientX - r.left) / r.width) * 1000);
+    var fy = Math.round(((e.clientY - r.top) / r.height) * 1000);
+    document.getElementById('where').textContent = 'where: ' + fx + ',' + fy;
+  });
+</script>
+</body></html>`
+
 type harness struct {
 	t          *testing.T
 	site       *httptest.Server
@@ -162,6 +192,15 @@ func (r *router) ImageBytes(tab uint32, data protocol.ImageData) {
 	}
 }
 
+func (r *router) FetchImage(ctx context.Context, tab uint32, url string, limit int) ([]byte, error) {
+	for _, s := range r.mgr.Sessions() {
+		if t := s.Tab(tab); t != nil {
+			return t.FetchResource(ctx, url, limit)
+		}
+	}
+	return nil, errors.New("no live tab for image fetch")
+}
+
 // shapedAddr is the address the link emulator shapes. The netem filter targets
 // exactly this port, so the CDP socket and the fixture web server keep running
 // at landside speed — which is what they do in reality.
@@ -176,10 +215,20 @@ func newHarness(t *testing.T) *harness {
 	return newHarnessOn(t, shapedAddr())
 }
 
+// newHarnessWith builds the standard harness with the manager options adjusted,
+// for tests about what the landside browser claims to be.
+func newHarnessWith(t *testing.T, tweak func(*session.ManagerOptions)) *harness {
+	return newHarnessTweaked(t, shapedAddr(), tweak)
+}
+
 // newHarnessOn builds the landside half with its client listener on a given
 // address. The PWA tests take the shaped address for their own app listener
 // instead, so the browser client is what crosses the emulated link.
 func newHarnessOn(t *testing.T, listenAddr string) *harness {
+	return newHarnessTweaked(t, listenAddr, nil)
+}
+
+func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.ManagerOptions)) *harness {
 	t.Helper()
 	if _, err := cdp.FindChromium(""); err != nil {
 		if os.Getenv("SKYHOOK_E2E") == "1" {
@@ -201,6 +250,44 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
+	})
+	// A "logged in" page and an asset only its cookie can reach. Nothing but the
+	// browser holds that cookie, so an image arriving here proves the fetch went
+	// through the browser rather than around it.
+	mux.HandleFunc("/private", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "landside-only", Path: "/"})
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Private</title></head>
+			<body><h1>members only</h1><img id="secret" src="/private.png" width="8" height="8"></body></html>`)
+	})
+	mux.HandleFunc("/private.png", func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie("session"); err != nil || c.Value != "landside-only" {
+			http.Error(w, "no cookie, no picture", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pixelPNG)
+	})
+	// Echoes what the browser claimed on the wire, so a test can compare the
+	// headers against what the page's own JavaScript reports.
+	mux.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><title>Who</title></head><body>
+			<p id="ua">%s</p>
+			<p id="ch">%s</p>
+			<p id="platform">%s</p>
+			<p id="lang">%s</p>
+			</body></html>`,
+			html.EscapeString(r.Header.Get("User-Agent")),
+			html.EscapeString(r.Header.Get("Sec-CH-UA")),
+			html.EscapeString(r.Header.Get("Sec-CH-UA-Platform")),
+			html.EscapeString(r.Header.Get("Accept-Language")))
+	})
+	// Records what the landside page saw of a click: how long the button was
+	// held, where in the box it landed, and how many moves preceded it.
+	mux.HandleFunc("/pointer", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, pointerPage)
 	})
 	mux.HandleFunc("/tall", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -281,6 +368,7 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 	r := &router{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{
 		Workers: 2, CacheDir: t.TempDir(), CacheSize: 8 << 20, Logger: log,
+		Fetcher:   r,
 		Transcode: imgproc.Options{Encoder: imgproc.EncoderPNG},
 	}, r)
 	if err != nil {
@@ -289,10 +377,14 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 	t.Cleanup(pipe.Close)
 	h.images = pipe
 
-	h.mgr = session.NewManager(br, pipe, session.ManagerOptions{
+	mgrOpts := session.ManagerOptions{
 		Logger: log, Token: h.token, TTL: time.Hour, RingBytes: 1 << 20,
 		Compression: true, ProfileDir: t.TempDir(), MaxTabs: 8,
-	})
+	}
+	if tweak != nil {
+		tweak(&mgrOpts)
+	}
+	h.mgr = session.NewManager(br, pipe, mgrOpts)
 	r.mgr = h.mgr
 	t.Cleanup(func() {
 		c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -734,6 +826,190 @@ func TestImagesArriveTranscodedWithBlurhash(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("image %q never arrived; known keys: %v", key, keysOf(cl.Images()))
+}
+
+// An image behind a login only resolves if the fetch carried the browser's
+// cookie jar. The pipeline's fallback path deliberately sends no credentials,
+// so this passes only when the browser itself did the fetching.
+func TestAuthenticatedImagesAreFetchedByTheBrowser(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/private"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "members only", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) {
+		img := cl.Model(tab).Find("img", "id", "secret")
+		if img != nil {
+			key := strings.TrimPrefix(img.Attrs["src"], "skyhook://img/")
+			if key != "" && key != img.Attrs["src"] {
+				if _, ok := cl.ImageBytes(key); ok {
+					return
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("the cookie-protected image never arrived; the fetch did not go through the browser")
+}
+
+// Overriding the user agent string alone leaves Sec-CH-UA describing the
+// browser that is really running, which is a louder signal than the default
+// user agent would have been. Whatever we claim, the headers have to agree.
+func TestUserAgentOverrideCarriesMatchingClientHints(t *testing.T) {
+	// A version and a platform the test browser is not, so an assertion cannot
+	// pass by accident on a machine whose Chromium happens to match.
+	const claimed = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+		"(KHTML, like Gecko) Chrome/128.0.6613.120 Safari/537.36"
+	h := newHarnessWith(t, func(o *session.ManagerOptions) {
+		o.UserAgent = claimed
+		o.AcceptLanguage = "en-GB,en;q=0.9"
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/whoami"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "Chrome/128", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	text := func(id string) string {
+		m := cl.Model(tab)
+		n := m.Find("p", "id", id)
+		if n == nil {
+			t.Fatalf("no #%s in the mirrored page", id)
+		}
+		var b strings.Builder
+		for _, c := range n.Children {
+			if child := m.Nodes[c]; child != nil {
+				b.WriteString(child.Text)
+			}
+		}
+		return strings.TrimSpace(b.String())
+	}
+
+	if got := text("ua"); got != claimed {
+		t.Errorf("User-Agent header:\n got %q\nwant %q", got, claimed)
+	}
+	// The brand list must name the version the string claims, not the one the
+	// binary actually is.
+	if got := text("ch"); !strings.Contains(got, `"128"`) {
+		t.Errorf("Sec-CH-UA = %q, want it to claim version 128", got)
+	}
+	if got := text("platform"); got != `"Windows"` {
+		t.Errorf("Sec-CH-UA-Platform = %q, want \"Windows\"", got)
+	}
+	if got := text("lang"); !strings.HasPrefix(got, "en-GB") {
+		t.Errorf("Accept-Language = %q, want it to start with en-GB", got)
+	}
+}
+
+// A click is replayed into the landside page with the reader's own timing and
+// aim, not with numbers the server made up. The page measures what it received.
+func TestClickCarriesTheReadersOwnPointerData(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/pointer"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "hold: none", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+	node := cl.Model(tab).Find("button", "id", "target")
+	if node == nil {
+		t.Fatal("no button in the mirrored page")
+	}
+
+	// What a reader's pointer did on the way to the button: a short approach
+	// across the viewport, a click a quarter of the way into the box, held for
+	// 210 ms — outside the range the server invents when it is told nothing, so
+	// the assertion cannot pass on a synthesised press.
+	if err := cl.Input(tab, protocol.InputEvent{
+		Kind: protocol.InClick, Node: node.ID,
+		Hold:  210,
+		Point: []int32{250, 500},
+		Path:  []int32{100, 200, 0, 140, 260, 16, 180, 300, 21},
+	}); err != nil {
+		t.Fatalf("send click: %v", err)
+	}
+
+	deadline := time.Now().Add(budget(30 * time.Second))
+	var hold, where, moves string
+	for time.Now().Before(deadline) {
+		m := cl.Model(tab)
+		hold = nodeText(m, m.Find("p", "id", "hold"))
+		where = nodeText(m, m.Find("p", "id", "where"))
+		moves = nodeText(m, m.Find("p", "id", "moves"))
+		if hold != "" && hold != "hold: none" && where != "where: none" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// The page timed the press itself. Landside dispatch adds a millisecond or
+	// two, so the assertion is a window rather than an equality.
+	var held int
+	if _, err := fmt.Sscanf(hold, "hold: %d", &held); err != nil {
+		t.Fatalf("page never reported a hold (%q): %v", hold, err)
+	}
+	if held < 190 || held > 280 {
+		t.Errorf("page saw a %d ms press, want the reported 210 ms", held)
+	}
+	// A quarter across, halfway down — mapped onto the landside box, which is
+	// laid out independently of the reader's.
+	if where != "where: 250,500" {
+		t.Errorf("page saw the click at %q, want where: 250,500", where)
+	}
+	// Three reported samples plus the final hop onto the target.
+	var count int
+	if _, err := fmt.Sscanf(moves, "moves: %d", &count); err != nil {
+		t.Fatalf("page never reported moves (%q): %v", moves, err)
+	}
+	if count < 4 {
+		t.Errorf("page saw %d pointer moves, want the approach replayed", count)
+	}
+}
+
+// nodeText renders one element's direct text, which is all these fixtures need.
+func nodeText(m *mirror.Model, n *mirror.ModelNode) string {
+	if n == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range n.Children {
+		if child := m.Nodes[c]; child != nil {
+			b.WriteString(child.Text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func TestReconnectResumesSessionAndPage(t *testing.T) {

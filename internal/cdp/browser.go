@@ -25,8 +25,10 @@ type BrowserOptions struct {
 	// UserDataDir holds the persistent profile: real cookies, real logins,
 	// surviving across flights. This is the whole point of the landside browser.
 	UserDataDir string
-	// Headless uses --headless=new. Sites that fight headless get Headless=false
-	// plus an Xvfb display (see docs/OPERATIONS.md).
+	// Headless uses --headless=new. It is not the default: headless Chromium
+	// announces itself in its own user agent and in navigator.webdriver. On
+	// Linux, headful needs a display; when there is none, Launch says so and
+	// falls back rather than failing to start.
 	Headless bool
 	// Display sets DISPLAY for headful-under-Xvfb operation.
 	Display string
@@ -175,9 +177,23 @@ func Launch(ctx context.Context, opts BrowserOptions) (*Browser, error) {
 		"--mute-audio",
 		"--password-store=basic",
 		"--use-mock-keychain",
+		// navigator.webdriver is set from Blink's AutomationControlled feature,
+		// and CDP turns it on. Nothing about a remote-controlled browser being
+		// used as a browser needs the page to know it is being driven.
+		"--disable-blink-features=AutomationControlled",
 		"--window-size=" + strconv.Itoa(w) + "," + strconv.Itoa(h),
 	}
-	if opts.Headless {
+	headless := opts.Headless
+	if !headless && needsDisplay() && opts.Display == "" && os.Getenv("DISPLAY") == "" {
+		// Refusing to boot would be the purist answer, and would strand anyone
+		// who installed the server before the virtual display. Say exactly what
+		// is missing and carry on in the mode that does work.
+		opts.Logger.Warn("headful Chromium needs a display and there is none; " +
+			"starting headless. Run Xvfb and set DISPLAY (see docs/OPERATIONS.md) " +
+			"— headless is the configuration sites notice.")
+		headless = true
+	}
+	if headless {
 		args = append(args, "--headless=new", "--hide-scrollbars")
 	}
 	if opts.Lang != "" {
@@ -230,7 +246,7 @@ func Launch(ctx context.Context, opts BrowserOptions) (*Browser, error) {
 		return nil, fmt.Errorf("cdp: chromium did not expose devtools: %w", err)
 	}
 	b.Client = cl
-	opts.Logger.Info("chromium started", "bin", bin, "port", port, "headless", opts.Headless, "profile", dataDir)
+	opts.Logger.Info("chromium started", "bin", bin, "port", port, "headless", headless, "profile", dataDir)
 	return b, nil
 }
 
@@ -592,18 +608,18 @@ func (b *Browser) Version(ctx context.Context) (string, error) {
 	return out.Product, nil
 }
 
-// Cookies returns cookies for a URL, used by the image fetcher so transcoded
-// assets come from the same authenticated context as the page.
-func (b *Browser) Cookies(ctx context.Context, urls []string) ([]map[string]any, error) {
+// DefaultUserAgent reports the user agent this build sends when nothing
+// overrides it. It is the honest starting point for any override: the closer
+// the claim stays to the browser actually running, the fewer things there are
+// to contradict it.
+func (b *Browser) DefaultUserAgent(ctx context.Context) (string, error) {
 	var out struct {
-		Cookies []map[string]any `json:"cookies"`
+		UserAgent string `json:"userAgent"`
 	}
-	// Browser-wide, which when attached is the running browser's own jar: our
-	// tabs share its profile, so the image fetcher must share its cookies too.
-	if err := b.Call(ctx, "", "Storage.getCookies", nil, &out); err != nil {
-		return nil, err
+	if err := b.Call(ctx, "", "Browser.getVersion", nil, &out); err != nil {
+		return "", err
 	}
-	return out.Cookies, nil
+	return out.UserAgent, nil
 }
 
 // RawJSON is a helper for callers that want the raw event payload.
@@ -617,3 +633,7 @@ func freePort() (int, error) {
 	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
+
+// needsDisplay reports whether this platform requires an X display to run a
+// browser with a window. macOS and Windows draw their own.
+func needsDisplay() bool { return runtime.GOOS == "linux" }

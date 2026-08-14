@@ -43,8 +43,8 @@ type Session struct {
 
 	inputSeq atomic.Uint64
 	adapters map[string]adapter.Adapter
-	// activeTab tracks which tab the user is looking at, so prefetch and image
-	// priority spend the link on what is visible.
+	// activeTab tracks which tab the user is looking at, so image priority
+	// spends the link on what is visible.
 	activeTab atomic.Uint32
 }
 
@@ -57,7 +57,6 @@ type tabState struct {
 	ring     *Ring
 	acked    uint64
 	lastHash uint64
-	spec     *speculation
 }
 
 type outbound struct {
@@ -298,7 +297,7 @@ func (s *Session) WantImage(tab uint32, req mirror.ImageRequest) {
 	}
 	s.mgr.images.Submit(imgproc.Request{
 		Tab: tab, Key: req.Key, URL: req.URL, W: req.W, H: req.H, Alt: req.Alt,
-		Priority: pri, Node: req.Node, Referer: req.Referer, Cookies: req.Cookies,
+		Priority: pri, Node: req.Node, Referer: req.Referer,
 	})
 }
 
@@ -338,6 +337,8 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 	}
 	t, err := mirror.NewTab(ctx, id, s.mgr.browser, sess, s, mirror.Options{
 		Viewport: vp, Logger: s.log, UserAgent: s.mgr.opts.UserAgent,
+		AcceptLanguage: s.mgr.opts.AcceptLanguage,
+		Blocked:        s.mgr.opts.Blocked,
 	})
 	if err != nil {
 		return 0, err
@@ -632,9 +633,6 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return errNoTab
 		}
 		s.activeTab.Store(f.Tab)
-		if applied := s.applySpeculation(ctx, f.Tab, n.URL); applied {
-			return nil
-		}
 		return t.Navigate(ctx, n)
 	case protocol.TypeInput:
 		var ev protocol.InputEvent
@@ -646,11 +644,7 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return errNoTab
 		}
 		s.activeTab.Store(f.Tab)
-		if err := t.HandleInput(ctx, &ev); err != nil {
-			return err
-		}
-		s.schedulePrefetch(f.Tab)
-		return nil
+		return t.HandleInput(ctx, &ev)
 	case protocol.TypeScroll:
 		var ev protocol.ScrollEvent
 		if err := f.DecodeBody(&ev); err != nil {

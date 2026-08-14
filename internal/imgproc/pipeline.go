@@ -25,7 +25,13 @@ type Request struct {
 	Priority int // 0 = above the fold, ship immediately
 	Node     int64
 	Referer  string
-	Cookies  string
+}
+
+// Fetcher retrieves image bytes through the landside browser, so an asset is
+// fetched by the same client that rendered the page referencing it. The tab id
+// says which browser tab to fetch on behalf of; limit bounds the read.
+type Fetcher interface {
+	FetchImage(ctx context.Context, tab uint32, url string, limit int) ([]byte, error)
 }
 
 // Delivery is how the pipeline hands results back to the session.
@@ -41,11 +47,13 @@ type Delivery interface {
 // waits for the client to say it does not already have that content hash, which
 // is what makes a warm cross-flight cache pay off.
 type Pipeline struct {
-	tc      *Transcoder
-	deliver Delivery
-	log     *slog.Logger
-	client  *http.Client
-	cache   *diskCache
+	tc        *Transcoder
+	deliver   Delivery
+	fetcher   Fetcher
+	userAgent string
+	log       *slog.Logger
+	client    *http.Client
+	cache     *diskCache
 
 	hi   chan Request
 	lo   chan Request
@@ -65,9 +73,15 @@ type PipelineOptions struct {
 	CacheSize int64
 	Transcode Options
 	Logger    *slog.Logger
-	// Client is the HTTP client used for fetches; it must not follow requests
-	// to the local network.
+	// Client is the HTTP client used for the fallback fetch path; it must not
+	// follow requests to the local network.
 	Client *http.Client
+	// Fetcher fetches through the landside browser. Nil means every fetch takes
+	// the uncredentialed direct path, which is what the tests want.
+	Fetcher Fetcher
+	// UserAgent is sent on the direct path, so the fallback at least agrees
+	// with the browser about who it is.
+	UserAgent string
 }
 
 // NewPipeline starts the workers.
@@ -98,7 +112,8 @@ func NewPipeline(opts PipelineOptions, d Delivery) (*Pipeline, error) {
 		return nil, err
 	}
 	p := &Pipeline{
-		tc: New(opts.Transcode), deliver: d, log: opts.Logger, client: cl, cache: cache,
+		tc: New(opts.Transcode), deliver: d, fetcher: opts.Fetcher, userAgent: opts.UserAgent,
+		log: opts.Logger, client: cl, cache: cache,
 		hi: make(chan Request, 512), lo: make(chan Request, 4096),
 		stop:     make(chan struct{}),
 		inFlight: map[string]bool{},
@@ -237,21 +252,43 @@ func (p *Pipeline) process(req Request) {
 	}
 }
 
+// fetch gets the source bytes, preferring the browser that asked for them.
+//
+// The browser is not just the more convenient client here, it is the only
+// correct one: it already holds the connection, the cookie jar, the client
+// hints and the TLS fingerprint the origin associates with this user. A
+// second client fetching the same asset alongside it is a different visitor
+// arriving with the same session, which is precisely the shape of a stolen
+// cookie.
+//
+// The direct path remains for what the browser cannot be asked — an asset
+// whose tab has closed, a build with no loadNetworkResource, and the tests.
+// It sends no credentials, so an asset that needs a login simply fails there
+// rather than leaking one.
 func (p *Pipeline) fetch(ctx context.Context, req Request) ([]byte, error) {
+	limit := p.tc.opts.MaxBytes + 1
+	if p.fetcher != nil {
+		data, err := p.fetcher.FetchImage(ctx, req.Tab, req.URL, limit)
+		if err == nil {
+			return data, nil
+		}
+		p.log.Debug("browser image fetch failed, trying direct", "url", req.URL, "err", err)
+	}
+	return p.fetchDirect(ctx, req, limit)
+}
+
+func (p *Pipeline) fetchDirect(ctx context.Context, req Request, limit int) ([]byte, error) {
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.URL, nil)
 	if err != nil {
 		return nil, err
 	}
-	// Fetch as the page would: same referer, same cookies, so authenticated
-	// avatars and attachments resolve.
 	if req.Referer != "" {
 		hreq.Header.Set("Referer", req.Referer)
 	}
-	if req.Cookies != "" {
-		hreq.Header.Set("Cookie", req.Cookies)
-	}
 	hreq.Header.Set("Accept", "image/avif,image/webp,image/png,image/*;q=0.8,*/*;q=0.5")
-	hreq.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+	if p.userAgent != "" {
+		hreq.Header.Set("User-Agent", p.userAgent)
+	}
 	resp, err := p.client.Do(hreq)
 	if err != nil {
 		return nil, err
@@ -260,7 +297,7 @@ func (p *Pipeline) fetch(ctx context.Context, req Request) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.New("imgproc: http " + resp.Status)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, int64(p.tc.opts.MaxBytes)+1))
+	return io.ReadAll(io.LimitReader(resp.Body, int64(limit)))
 }
 
 // diskCache is a bounded content-addressed store shared by all sessions.

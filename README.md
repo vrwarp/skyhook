@@ -22,7 +22,7 @@ knew that this did not, and which of their lessons changed the code.
 PLANE SIDE (a browser)                    LANDSIDE (VPS)
 ┌────────────────────────┐                ┌──────────────────────────────┐
 │ Skyhook PWA            │                │ skyhookd (Go)                │
-│  ├ chrome UI + HUD     │   one QUIC /   │  ├ headless Chromium via CDP │
+│  ├ chrome UI + HUD     │   one QUIC /   │  ├ real Chromium via CDP     │
 │  ├ sandboxed mirror    │◄──WebTransport─┤  ├ injected mirror agent     │
 │  │   frames (no JS)    │   connection   │  ├ used-CSS extraction       │
 │  ├ network worker      │                │  ├ image transcoder          │
@@ -164,7 +164,7 @@ is how the reconnect-and-resync path is exercised.
 | `internal/cdp` | A small Chrome DevTools Protocol client; launches or attaches |
 | `internal/mirror` | The injected agent, snapshot/mutation pipeline, input replay |
 | `internal/imgproc` | Image transcoding, blurhash, the landside cache |
-| `internal/session` | Sessions, replay ring, resync, speculative prefetch |
+| `internal/session` | Sessions, replay ring, resync |
 | `internal/adapter` | Adapter framework and the Google Chat adapter |
 | `internal/client` | A headless Go client, used by tests and `skyhookctl` |
 | `client/` | The PWA: app shell, sandboxed mirror host, patcher, local echo |

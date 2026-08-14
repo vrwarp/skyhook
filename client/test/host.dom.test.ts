@@ -27,7 +27,6 @@ function snapshot(): Snapshot {
     images: [],
     scrollX: 0,
     scrollY: 0,
-    speculative: false,
   };
 }
 

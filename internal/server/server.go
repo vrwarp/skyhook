@@ -22,6 +22,7 @@ import (
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/config"
 	"github.com/vrwarp/skyhook/internal/imgproc"
+	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/protocol"
 	"github.com/vrwarp/skyhook/internal/session"
 	"github.com/vrwarp/skyhook/internal/transport"
@@ -91,7 +92,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		Headless:    cfg.Headless,
 		Display:     cfg.Display,
 		Logger:      log,
-		Lang:        "en-US",
+		Lang:        cfg.Lang,
 		ExtraArgs:   cfg.ChromeArgs,
 		Attach:      cfg.ChromeAttach,
 	})
@@ -102,6 +103,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 	if v, err := br.Version(ctx); err == nil {
 		log.Info("browser ready", "product", v)
 	}
+	userAgent := effectiveUserAgent(ctx, br, cfg.UserAgent, log)
 
 	factories, err := adapterFactories(cfg)
 	if err != nil {
@@ -109,17 +111,18 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 	}
 
 	mgrOpts := session.ManagerOptions{
-		Logger:      log,
-		Token:       cfg.Token,
-		TTL:         cfg.SessionTTL.Get(),
-		RingBytes:   cfg.RingBytes,
-		Compression: cfg.Compression,
-		ProfileDir:  cfg.ProfileDir(),
-		UserAgent:   cfg.UserAgent,
-		MaxTabs:     cfg.MaxTabs,
-		Prefetch:    cfg.Prefetch,
-		Adapters:    factories,
-		HomeURL:     cfg.HomeURL,
+		Logger:         log,
+		Token:          cfg.Token,
+		TTL:            cfg.SessionTTL.Get(),
+		RingBytes:      cfg.RingBytes,
+		Compression:    cfg.Compression,
+		ProfileDir:     cfg.ProfileDir(),
+		UserAgent:      userAgent,
+		AcceptLanguage: cfg.Lang,
+		Blocked:        blocklistFrom(cfg.BlockURLs),
+		MaxTabs:        cfg.MaxTabs,
+		Adapters:       factories,
+		HomeURL:        cfg.HomeURL,
 	}
 	// The pipeline needs the manager to route deliveries, and the manager needs
 	// the pipeline to submit work, so the pipeline is created with a router that
@@ -130,6 +133,8 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		CacheDir:  cfg.ImageCacheDir(),
 		CacheSize: cfg.ImageCacheBytes,
 		Logger:    log,
+		Fetcher:   router,
+		UserAgent: userAgent,
 		Transcode: imgproc.Options{
 			Encoder:      imgproc.EncoderAuto,
 			PhotoQuality: cfg.ImageQuality,
@@ -145,6 +150,52 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 	router.mgr = s.mgr
 
 	return s, nil
+}
+
+// blocklistFrom turns the configured map into the per-host structure the mirror
+// wants. "*" is the default; every other key is a host suffix.
+func blocklistFrom(cfg map[string][]string) mirror.Blocklist {
+	var b mirror.Blocklist
+	for host, patterns := range cfg {
+		if host == "*" || host == "" {
+			// Non-nil and empty is meaningfully different from absent: it means
+			// "block nothing", where absent means "use the built-in list".
+			if patterns == nil {
+				patterns = []string{}
+			}
+			b.Default = patterns
+			continue
+		}
+		if b.ByHost == nil {
+			b.ByHost = map[string][]string{}
+		}
+		b.ByHost[strings.ToLower(host)] = patterns
+	}
+	return b
+}
+
+// effectiveUserAgent decides what the browser should claim to be.
+//
+// An operator override wins. Otherwise the browser's own user agent is the
+// most consistent thing it could send, and is left alone — with one exception:
+// headless Chromium puts "HeadlessChrome" in it, which is the browser
+// volunteering the single fact we would most like it not to. That token is
+// corrected and nothing else is touched.
+func effectiveUserAgent(ctx context.Context, br *cdp.Browser, override string, log *slog.Logger) string {
+	if override != "" {
+		return override
+	}
+	real, err := br.DefaultUserAgent(ctx)
+	if err != nil || real == "" {
+		return ""
+	}
+	stripped := cdp.StripHeadless(real)
+	if stripped == real {
+		return ""
+	}
+	log.Info("correcting the headless token in the browser's user agent",
+		"userAgent", stripped)
+	return stripped
 }
 
 // deliveryRouter sends transcoded images to whichever session asked for them.
@@ -175,6 +226,25 @@ func (d *deliveryRouter) ImageBytes(tab uint32, data protocol.ImageData) {
 		}
 	}
 }
+
+// FetchImage implements imgproc.Fetcher: the tab that wants the image is the
+// tab that fetches it, so the request carries the browser's own connection,
+// cookies and headers instead of a second client's.
+func (d *deliveryRouter) FetchImage(ctx context.Context, tab uint32, url string, limit int) ([]byte, error) {
+	if d.mgr == nil {
+		return nil, errNoTabForImage
+	}
+	for _, s := range d.mgr.Sessions() {
+		if t := s.Tab(tab); t != nil {
+			return t.FetchResource(ctx, url, limit)
+		}
+	}
+	return nil, errNoTabForImage
+}
+
+// errNoTabForImage means the tab that asked has since closed; the pipeline
+// falls back to an uncredentialed direct fetch.
+var errNoTabForImage = errors.New("server: no live tab for image fetch")
 
 // Start binds the listeners and serves until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
