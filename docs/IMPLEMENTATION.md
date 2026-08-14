@@ -289,6 +289,37 @@ fields and the chat panel. Those are real local documents, so the browser's
 clipboard entries do the right thing there, and the URL bar is where people
 paste.
 
+### 14. The browser's own back and forward drive the tab, not the shell
+
+The toolbar's arrows were the only working way back. Every other one a reader
+has — the browser's buttons, the mouse's side buttons, Alt+←, ⌘+[, the
+two-finger swipe, Android's system back — acts on the shell's history, and the
+shell has one entry: the app. The most ordinary instinct in browsing therefore
+threw away the session and every page it had paid for, while the page the reader
+wanted sat one round trip away, never asked for.
+
+The shell now keeps a history entry on either side of itself and lives in the
+middle one (`claimHistoryGestures` in `client/src/app/main.ts`). A `popstate`
+onto either side is the gesture: it is spent on the active tab's history and the
+middle entry is restored underneath the reader.
+
+Catching the step rather than the gesture is the whole point. Chromium resolves
+all of them to a session-history traversal before any of them is an event a page
+can see — a mouse side button is not cancelable from the renderer at all, and a
+cancelable chord like Alt+← only stays cancelable per platform and per browser.
+Recognising them individually means re-implementing that keymap and being wrong
+in the expensive direction: a chord the browser acts on *and* the shell answers
+goes back two pages, which on this link is a page fetched in order to be thrown
+away. The first implementation of this did exactly that, and
+`test/navigation_test.go` presses a real mouse back button through CDP because
+that is the only way to tell the two apart.
+
+A back gesture the tab cannot answer is deliberately let through: it lands on
+the entry behind, where the app looks unchanged and a second press leaves for
+real. The trap is armed again as soon as a tab has somewhere to go back to. A
+browser that cannot be left by the gesture that leaves browsers is worse than
+one that has to be told twice.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

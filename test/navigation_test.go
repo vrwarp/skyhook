@@ -107,6 +107,131 @@ func TestPWAReadsAnAggregatorAndComesBack(t *testing.T) {
 		budget(60*time.Second), "the index again")
 }
 
+// The reader's other back buttons: the mouse's side buttons, Alt+Arrow, and the
+// browser's own back — which arrives as a history entry the shell has already
+// left. Every one of them acts on the app shell by default, so left alone the
+// most ordinary gesture in browsing throws away the session and every page it
+// paid for. Each has to land on the mirrored tab's history instead, and none of
+// them may take the shell's document with it.
+func TestTheBrowsersOwnBackAndForwardDriveTheTab(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(240*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+
+	atURL := func(u string) string {
+		return fmt.Sprintf(`document.getElementById('urlbar').value === %q`, u)
+	}
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/index"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('the stories')`,
+		budget(60*time.Second), "the index page")
+
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      doc.querySelector('a[href*="/comments"]').dispatchEvent(
+        new doc.defaultView.MouseEvent('click', { bubbles: true, cancelable: true }));
+      return true;
+    })()`, nil)
+	waitFor(ctx, t, page, atURL(h.site.URL+"/comments?id=1"), budget(60*time.Second),
+		"the comments page")
+
+	// Anything that navigates the shell destroys this, which is the whole point:
+	// it is the session, standing in for every page the reader has paid for.
+	evalJSON(ctx, t, page, `window.__session = 'alive', true`, nil)
+	alive := func(what string) {
+		t.Helper()
+		var session string
+		evalJSON(ctx, t, page, `window.__session || ''`, &session)
+		if session != "alive" {
+			t.Fatalf("%s took the app shell with it: the session is gone", what)
+		}
+	}
+
+	// The mouse's back button, pressed over the mirror as a reader would. Real
+	// input through the browser, not a synthesised event: what is being tested
+	// is precisely that Chromium's own navigation is the one that does not happen.
+	var box struct{ X, Y float64 }
+	evalJSON(ctx, t, page, `(() => {
+      const r = document.querySelector('iframe.mirror').getBoundingClientRect();
+      return { X: Math.round(r.left + r.width / 2), Y: Math.round(r.top + r.height / 2) };
+    })()`, &box)
+	mouse := func(kind, button string, buttons int) {
+		t.Helper()
+		if err := page.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": kind, "x": box.X, "y": box.Y, "button": button,
+			"buttons": buttons, "clickCount": 1,
+		}, nil); err != nil {
+			t.Fatalf("dispatch %s %s: %v", kind, button, err)
+		}
+	}
+	mouse("mousePressed", "back", 8)
+	mouse("mouseReleased", "back", 0)
+	waitFor(ctx, t, page, atURL(h.site.URL+"/index"), budget(60*time.Second),
+		"the mouse's back button to reach the index")
+	waitFor(ctx, t, page, mirrorText+`.includes('the stories')`,
+		budget(60*time.Second), "the index again")
+	alive("the mouse's back button")
+
+	// Forward, and then back again, as a step through the shell's own history:
+	// what the browser has already resolved every one of these gestures to by
+	// the time the app can see it. Its buttons, Alt+←, ⌘+], Android's system
+	// back and a two-finger swipe all arrive here and nowhere else — none of
+	// them something a test can perform, and none of them different.
+	evalJSON(ctx, t, page, `history.forward(), true`, nil)
+	waitFor(ctx, t, page, atURL(h.site.URL+"/comments?id=1"), budget(60*time.Second),
+		"a forward gesture to reach the comments")
+	alive("a forward gesture")
+
+	evalJSON(ctx, t, page, `history.back(), true`, nil)
+	waitFor(ctx, t, page, atURL(h.site.URL+"/index"), budget(60*time.Second),
+		"the browser's back button to reach the index")
+	alive("the browser's back button")
+
+	// Back again, to the blank page the tab was opened on: the start of its
+	// history, where the gesture has nothing left to spend.
+	evalJSON(ctx, t, page, `history.back(), true`, nil)
+	waitFor(ctx, t, page, atURL("about:blank"), budget(60*time.Second),
+		"the tab to reach the page it was opened on")
+
+	// Here the gesture is let through instead of being kept, so that a browser
+	// which cannot be left is not what this becomes: the shell is left standing
+	// on the entry behind, where a second press leaves for real. Nothing the
+	// reader can see has moved.
+	trap := `((history.state || {}).skyhook || '')`
+	evalJSON(ctx, t, page, `history.back(), true`, nil)
+	waitFor(ctx, t, page, trap+` === 'skyhook:back'`, budget(30*time.Second),
+		"the back gesture to be let through")
+	alive("a back at the start of the tab's history")
+
+	// And it has to be armed again once there is something to protect, or it
+	// works exactly once per session.
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/index"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('the stories')`,
+		budget(60*time.Second), "the index once more")
+	waitFor(ctx, t, page, trap+` === 'skyhook:here'`, budget(30*time.Second),
+		"the back gesture to be worth keeping again")
+	evalJSON(ctx, t, page, `history.back(), true`, nil)
+	waitFor(ctx, t, page, atURL("about:blank"), budget(60*time.Second),
+		"the back gesture to work a second time")
+	alive("the back gesture, rearmed")
+}
+
 // Going back to a page Chromium kept in its back/forward cache does not create
 // a document: nothing re-runs and the agent that came back with the page still
 // believes it has mirrored what is on screen. Without something to notice that,
