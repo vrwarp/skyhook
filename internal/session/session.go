@@ -117,7 +117,11 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 // Attach binds a connection to the session, replacing any previous one.
 func (s *Session) Attach(c transport.Conn) {
 	if old := s.conn.Swap(&connHolder{conn: c}); old != nil && old.conn != nil {
-		_ = old.conn.Close(protocol.CloseNormal, "replaced by newer connection")
+		// Not CloseNormal: a client cannot tell that from a dropped link, so it
+		// reconnects — and its reconnect evicts the connection that just
+		// replaced it, which reconnects in turn. CloseReplaced says which of
+		// the two happened, and is the only thing that stops the trade.
+		_ = old.conn.Close(protocol.CloseReplaced, "replaced by newer connection")
 	}
 	s.mu.Lock()
 	s.lastSeen = time.Now()

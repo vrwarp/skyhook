@@ -19,7 +19,9 @@ import {
   scrollBody, unframeMessage, viewportBody, InputEventInit,
 } from '../shared/codec.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
-import { Channel, CloseCode, FrameType, isFatalClose, Viewport } from '../shared/protocol.js';
+import {
+  Channel, CloseCode, FrameType, isFatalClose, Refusal, Viewport,
+} from '../shared/protocol.js';
 
 import { Transport, TransportConfig } from '../app/transport.js';
 
@@ -54,7 +56,32 @@ let reconnectDelay = 500;
  * new pairing or an explicit retry — otherwise the app spends forever
  * alternating between "offline" and "connected" a second apart.
  */
-let refused: 'unauthorized' | 'version' | null = null;
+let refused: Refusal | null = null;
+
+function refusalFor(code: CloseCode | undefined): Refusal {
+  if (code === CloseCode.Unauthorized) return 'unauthorized';
+  if (code === CloseCode.VersionMismatch) return 'version';
+  return 'replaced';
+}
+
+/**
+ * Cancels a pending reconnect.
+ *
+ * This is the whole of a bug that made the app unusable behind a reverse proxy.
+ * A reconnect was armed whenever the link went down and cancelled only by
+ * firing, so anything that closed the link and then dialled straight away — the
+ * `reconnect` command below, which every `visibilitychange` sends — left a timer
+ * behind that came due half a second after the new connection was already up.
+ * It dialled a second one. The server gives the session to the newest connection
+ * and hangs up on the one it replaced, that hang-up read as an outage, and the
+ * outage armed the next timer: a connection per second, every tab resynced on
+ * each one, for as long as the page stayed open.
+ */
+function clearReconnect(): void {
+  if (!reconnectTimer) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
 
 function post(kind: string, args: Record<string, unknown>, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage({ kind, args }, transfer);
@@ -62,7 +89,14 @@ function post(kind: string, args: Record<string, unknown>, transfer: Transferabl
 
 async function connect(): Promise<void> {
   if (!pairing || refused) return;
-  transport = new Transport(pairing, {
+  // A connection in hand — or one already on its way — is never improved by a
+  // second. The server hands the session to the newest connection and hangs up
+  // on the one it replaced, so a duplicate does not merely waste a socket: it
+  // evicts the socket that was working.
+  if (transport) return;
+  clearReconnect();
+
+  const t = new Transport(pairing, {
     onOpen: (kind) => {
       online = true;
       // Note that the backoff is *not* reset here. An open socket is not a
@@ -74,32 +108,68 @@ async function connect(): Promise<void> {
       sendHello();
     },
     onClose: (reason, code) => {
-      if (!online) return;
+      // A socket we have already let go of has nothing left to say, and what it
+      // would say — "offline" — is wrong: the link it is talking about is not
+      // the one the app is on.
+      if (transport !== t) return;
+      transport = null;
+      stopTimers();
+      const wasOnline = online;
       online = false;
-      if (statsTick) {
-        clearInterval(statsTick);
-        statsTick = null;
-      }
       if (isFatalClose(code)) {
-        refused = code === CloseCode.Unauthorized ? 'unauthorized' : 'version';
+        refused = refusalFor(code);
         post('status', { online: false, kind: 'none', reason, refused });
         return;
       }
+      // An attempt that never opened is the connect() call's to report: it is
+      // still on the stack, holding the error that says what went wrong.
+      if (!wasOnline) return;
       post('status', { online: false, kind: 'none', reason });
       scheduleReconnect();
     },
+    onNotice: (message) => post('log', { message }),
     onMessage: (_channel, msg) => handleMessage(msg),
   });
+  transport = t;
+
   try {
-    await transport.connect();
+    await t.connect();
   } catch (err) {
+    if (transport === t) {
+      transport = null;
+      stopTimers();
+    }
     post('status', { online: false, kind: 'none', reason: String(err) });
     scheduleReconnect();
   }
 }
 
+/**
+ * Drops whatever connection is up and dials again now.
+ *
+ * Closing runs `onClose`, which arms a reconnect; that timer is cancelled here
+ * rather than left to come due behind the connection this is about to make.
+ */
+function redial(): void {
+  transport?.close();
+  clearReconnect();
+  void connect();
+}
+
+/** Stops everything that only makes sense while a connection is up. */
+function stopTimers(): void {
+  if (statsTick) {
+    clearInterval(statsTick);
+    statsTick = null;
+  }
+  if (keepalive) {
+    clearInterval(keepalive);
+    keepalive = null;
+  }
+}
+
 function scheduleReconnect(): void {
-  if (reconnectTimer) return;
+  if (reconnectTimer || refused) return;
   // Aggressive at first, then backing off: outages on this link are usually
   // seconds, occasionally minutes.
   reconnectTimer = setTimeout(() => {
@@ -379,7 +449,7 @@ self.addEventListener('message', (event: MessageEvent) => {
       // waiting for.
       refused = null;
       reconnectDelay = 500;
-      void connect();
+      redial();
       break;
     case 'openTab':
       void send(Channel.Ctrl,
@@ -456,10 +526,10 @@ self.addEventListener('message', (event: MessageEvent) => {
       // restarted, or repaired, since it last said no.
       refused = null;
       reconnectDelay = 500;
-      transport?.close();
-      void connect();
+      redial();
       break;
     case 'disconnect':
+      clearReconnect();
       transport?.close();
       break;
     default:

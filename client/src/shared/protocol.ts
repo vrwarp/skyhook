@@ -71,7 +71,12 @@ export enum CloseCode {
   Unauthorized = 2,
   VersionMismatch = 3,
   SetupFailed = 4,
+  /** A newer connection took the session over. Reconnecting would take it back. */
+  Replaced = 5,
 }
+
+/** Why the server will not have this client, in the terms the shell shows. */
+export type Refusal = 'unauthorized' | 'version' | 'replaced';
 
 /** WebSocket carries the server's code in the private 4000-4999 range. */
 export function closeCodeFromSocket(code: number): CloseCode {
@@ -79,9 +84,18 @@ export function closeCodeFromSocket(code: number): CloseCode {
   return CloseCode.Normal;
 }
 
-/** Whether a close is one that reconnecting cannot fix. */
+/**
+ * Whether a close is one that reconnecting cannot fix.
+ *
+ * Replaced belongs here for a different reason than the other two. Nothing is
+ * wrong with this client and nothing is wrong with the link — but the session
+ * now belongs to a newer connection, and taking it back would only hand the
+ * same close to whoever took it, who would take it back in turn.
+ */
 export function isFatalClose(code: CloseCode | undefined): boolean {
-  return code === CloseCode.Unauthorized || code === CloseCode.VersionMismatch;
+  return code === CloseCode.Unauthorized
+    || code === CloseCode.VersionMismatch
+    || code === CloseCode.Replaced;
 }
 
 export enum NodeKind {

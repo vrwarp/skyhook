@@ -13,8 +13,8 @@ import { gather } from './capture.js';
 import * as clientlog from './clientlog.js';
 import { Store, type Pairing } from '../store/store.js';
 import type {
-  AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Snapshot, Stats, TabState,
-  Welcome,
+  AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Refusal, Snapshot, Stats,
+  TabState, Welcome,
 } from '../shared/protocol.js';
 
 const store = new Store();
@@ -220,7 +220,7 @@ function handle(kind: string, args: Record<string, unknown>): void {
       const online = args.online === true;
       const changed = online !== connected;
       connected = online;
-      const refused = args.refused as 'unauthorized' | 'version' | undefined;
+      const refused = args.refused as Refusal | undefined;
       renderStatus(online, String(args.kind ?? ''), args.reason as string | undefined, refused);
       for (const h of hosts.values()) h.setOffline(!online);
       if (changed) renderTabs();
@@ -747,13 +747,18 @@ function renderStats(s: Partial<Stats> & { rttMs?: number }): void {
   }
 }
 
+const REFUSAL_LABEL: Record<Refusal, string> = {
+  unauthorized: 'unpaired',
+  version: 'stale',
+  replaced: 'taken over',
+};
+
 function renderStatus(
-  online: boolean, kind: string, reason?: string,
-  refused?: 'unauthorized' | 'version',
+  online: boolean, kind: string, reason?: string, refused?: Refusal,
 ): void {
   el.hudState.className = online ? 'online' : 'offline';
   el.hudState.textContent = online ? kind.replace('web', '') : 'offline';
-  if (refused) el.hudState.textContent = refused === 'version' ? 'stale' : 'unpaired';
+  if (refused) el.hudState.textContent = REFUSAL_LABEL[refused];
   el.hudState.title = reason ?? '';
 }
 
@@ -766,7 +771,16 @@ function renderStatus(
  * without a persisted one used to do this — so the pairing dialog is the fix,
  * with a fresh pairing link or the server's pairing.json.
  */
-function showRefusal(refused: 'unauthorized' | 'version'): void {
+function showRefusal(refused: Refusal): void {
+  if (refused === 'replaced') {
+    // Not a fault, and not the pairing dialog's business: the session is fine,
+    // it is just being read somewhere else now. Whichever copy of the app the
+    // reader brings to the front takes it back, which is what they mean by
+    // bringing it to the front.
+    log('another Skyhook window took over this session');
+    toast('This session is open in another window. Switch back to this one to take it over.');
+    return;
+  }
   if (refused === 'version') {
     log('server refused the connection: client and server are different builds');
     if (!el.pairing.open) {
@@ -1057,10 +1071,16 @@ document.addEventListener('keydown', (ev) => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  // A backgrounded tab gets throttled and may lose the connection. Coming back
-  // is exactly the outage case the reconnect path already handles, so nudge it
-  // rather than waiting for a keepalive to notice.
-  if (document.visibilityState === 'visible') send('reconnect', {});
+  if (document.visibilityState !== 'visible') return;
+  // A backgrounded tab gets throttled: a connection it lost while hidden has a
+  // reconnect pending on a timer the browser is running at once a minute, so
+  // coming back is worth a nudge rather than waiting that out.
+  //
+  // Only when the link is actually down, though. A reconnect resyncs every open
+  // tab, and this fires every single time the reader switches back to the app —
+  // so nudging a healthy connection spends a snapshot per tab to replace a
+  // connection that was working.
+  if (!connected) send('reconnect', {});
 });
 
 void main();

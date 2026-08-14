@@ -233,6 +233,16 @@ plain HTTP, so no proxy needs `proxy_ssl_verify off` to talk to it, and the
 QUIC listener is not started at all. It requires `publicUrl`, and it requires
 `webSocketFallback`: the socket is the only transport left.
 
+Set it. Without it the server keeps its own self-signed certificate on the
+upstream port, and the proxy has to be told to trust it — `proxy_ssl_verify
+off` in nginx, `tls_insecure_skip_verify` in Caddy, and in an appliance UI
+(Synology's DSM among them) usually nothing at all, because the setting is not
+exposed. `behindProxy` removes the problem rather than working around it: point
+the proxy at `http://<host>:4434` and there is no upstream certificate to
+verify. It also stops the client being handed a pairing that sends it looking
+for a QUIC listener on the far side of a proxy that cannot carry one — every
+reconnect paying for a WebTransport handshake that cannot succeed.
+
 Two things are genuinely lost, and no configuration recovers them:
 
 * **WebTransport.** It rides HTTP/3 over UDP, and no HTTP reverse proxy
@@ -445,6 +455,7 @@ page state, and that should be your decision rather than a merge's.
 | Stale UI after a deploy | The service worker serves its cache first and refreshes behind you. Reload twice, or use the browser's "Update on reload". |
 | `unauthorized` on connect | Token mismatch: re-read `pairing.json`. The client says `unpaired` in the HUD and opens its pairing dialog rather than retrying. |
 | HUD alternates between offline and connected every second or two | The server is refusing the token on every attempt. Older builds retried it forever; check the server log for `unauthorized client`, and for a restart just before it — a server that generated a fresh token has un-paired every client. Pair again from the link in the log. |
+| HUD flaps once a second, log shows `client connected`/`client disconnected` pairs and a resync of every tab on each one | Two connections trading one session. The log tells you which: the same `session=` on every line, and a `client connected` about 120 ms before each disconnect. Normally that means the app is open twice on the same origin — an installed window beside a browser tab, sharing the stored session — and the copy you bring to the front takes it back; the other now says `taken over` rather than reconnecting. Older builds had no way to say that, and traded the session back and forth indefinitely, resyncing every tab each pass. |
 | Server restarts on its own, log ends in a `panic` | Whatever the trace names, and worth reporting. The restart itself is the visible part: sessions are gone and the browser starts cold. |
 | Behind a proxy: the app loads, the HUD stays offline | The pairing names the container's ports, not the proxy's. Set `publicUrl` (and `behindProxy`), restart, and re-pair with the new link — the old one is stored in IndexedDB until it is replaced. |
 | Behind a proxy: connects, then drops after ~60s of idle | The proxy's idle timeout, not the link. Raise `proxy_read_timeout` (nginx); see [behind a reverse proxy](#behind-a-reverse-proxy). |

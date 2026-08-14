@@ -21,6 +21,13 @@ export interface TransportEvents {
    * be refused exactly the same way.
    */
   onClose(reason: string, code?: CloseCode): void;
+  /**
+   * Something worth recording that is not a change of link state. Falling back
+   * from WebTransport is the case that matters: it is one of two dials inside a
+   * single connect, and reporting it as a close made the caller believe a live
+   * link had gone away.
+   */
+  onNotice?(message: string): void;
   onStats?(stats: { bytesSent: number; bytesRecv: number; rttMs: number }): void;
 }
 
@@ -43,6 +50,13 @@ export class Transport {
   private events: TransportEvents;
   private wt: WebTransport | null = null;
   private ws: WebSocket | null = null;
+  /**
+   * The socket while it is still opening. Held separately from `ws`, which is
+   * what `send` writes to and so may only ever be an open one — but a socket
+   * abandoned mid-handshake still finishes opening, and an open socket nobody
+   * owns is a second client as far as the server is concerned.
+   */
+  private dialing: WebSocket | null = null;
   private writers = new Map<Channel, WritableStreamDefaultWriter<Uint8Array>>();
   private closed = false;
   private bytesSent = 0;
@@ -61,8 +75,10 @@ export class Transport {
         await this.connectWebTransport();
         return;
       } catch (err) {
-        // Falling back is normal, not exceptional: some networks drop UDP.
-        this.events.onClose(`webtransport unavailable: ${String(err)}`);
+        // Falling back is normal, not exceptional: some networks drop UDP, and
+        // so does every reverse proxy. A notice rather than a close, because
+        // this connect has not finished and nothing has been lost yet.
+        this.events.onNotice?.(`webtransport unavailable: ${String(err)}`);
       }
     }
     await this.connectWebSocket();
@@ -102,8 +118,16 @@ export class Transport {
     const url = this.cfg.fallbackUrl ?? this.cfg.url.replace(/^https:/, 'wss:');
     await new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(url);
+      this.dialing = ws;
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => {
+        this.dialing = null;
+        if (this.closed) {
+          // Closed while this was still opening. Nothing owns it, and leaving
+          // it up would put a second connection on the server's session.
+          ws.close();
+          return;
+        }
         this.ws = ws;
         this.kind = 'websocket';
         this.events.onOpen('websocket');
@@ -242,6 +266,7 @@ export class Transport {
     this.writers.clear();
     this.wt = null;
     this.ws = null;
+    this.dialing = null;
     this.kind = 'none';
     this.events.onClose(reason, code);
   }
@@ -250,6 +275,7 @@ export class Transport {
     try {
       this.wt?.close();
       this.ws?.close();
+      this.dialing?.close();
     } catch {
       // Already gone; the close handler has run or will.
     }

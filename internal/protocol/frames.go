@@ -36,6 +36,13 @@ const (
 	CloseVersionMismatch uint32 = 3
 	// CloseSetupFailed means the session could not be built. Retryable.
 	CloseSetupFailed uint32 = 4
+	// CloseReplaced means a newer connection took this session over. Fatal for
+	// the connection that receives it: the session is not gone and the link is
+	// not broken, but reconnecting would evict whichever connection replaced
+	// this one, which would reconnect and evict the next — two clients trading
+	// a session back and forth once a second, resyncing every tab each time.
+	// Whoever is told this has lost, and has to stop rather than retry.
+	CloseReplaced uint32 = 5
 )
 
 // Channel identifies a logical stream. Channels map onto real QUIC streams in
