@@ -382,6 +382,44 @@ which only speculation ever read. The frame and field numbers are retired
 rather than reused, so a stale client cannot be silently misread by a new
 server.
 
+### 17. The landside browser is used as a browser, not as an instrument
+
+Skyhook is not a scraper, but almost everything about how it drove Chromium
+looked like one to an origin, and the account paying for that was the user's.
+Four things changed, all of them the same change.
+
+**The browser fetches its own images.** The transcoder used to fetch image
+bytes itself over a Go `http.Client`, with a hardcoded `Chrome/126` user agent
+and the page's cookies, which is a second visitor arriving with the first one's
+session: different TLS fingerprint, different header order, no client hints, a
+UA disagreeing with the browser that requested the page. Images now come back
+through `Network.loadNetworkResource` on the tab that referenced them. The
+direct path survives only for assets whose tab has closed, and sends no
+credentials, so a cookie never leaves Chromium.
+
+**One story about who it is.** Setting `userAgent` moved the `User-Agent`
+header and `navigator.userAgent` and nothing else; `Sec-CH-UA` and
+`navigator.userAgentData` kept describing the real build. The option therefore
+made things worse than leaving it unset — a browser contradicting itself is a
+louder signal than an unusual user agent. The override is now
+`Emulation.setUserAgentOverride` with client-hint metadata derived from the
+string itself, so the two cannot drift.
+
+**Headful by default.** Headless Chromium puts `HeadlessChrome` in its own user
+agent and sets `navigator.webdriver`. The image and the systemd unit both
+supply a virtual display; on Linux with none available the server says what is
+missing and starts headless rather than refusing to boot.
+
+**The reader's own pointer.** A click used to be replayed as one instantaneous
+event at the exact centre of the element. The client now measures what its
+pointer actually did — hold, position within the box, approach — and the server
+replays that, synthesising only when there is nothing to replay. The data is a
+few tens of bytes on a frame already being sent.
+
+What is deliberately *not* here: nothing in this list lies about what the
+browser is. It is a real Chromium, driven by a real person, on a real profile;
+the work was in stopping the plumbing from contradicting that.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

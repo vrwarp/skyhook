@@ -333,10 +333,28 @@ instant.
 profile on disk; the client re-snapshots its tabs. Logins survive; open page
 state does not.
 
-**Bot detection.** Set `SKYHOOK_HEADFUL=1` (Docker) or `headless: false` plus a
-`DISPLAY` (systemd + Xvfb). Persisting a real profile is the other half of the
-mitigation. If a site still fights it, use the mirror for reading and do the
-awkward part on the ground.
+**Being recognised as a person.** Most of this is now the default rather than
+something to switch on: Chromium runs headful under a virtual display, images
+are fetched by the browser rather than beside it, the user agent and its client
+hints tell one story, the denylist no longer suppresses the telemetry a real
+visit produces, and clicks are replayed with the timing and aim the reader's
+own pointer had.
+
+Two things are still yours to get right, and they matter more than any of the
+above:
+
+- **Where the traffic comes from.** A VPS address is a datacenter address, and
+  that is the strongest signal about you that any origin has. Egress through
+  your home connection — a WireGuard tunnel or a Tailscale exit node — puts the
+  browser back on a network with your history on it.
+- **Being logged in, on a profile with age.** The persistent profile is the
+  point of the landside browser. Do first logins on the ground, where a captcha
+  is an annoyance rather than a trip-ruining one, and remember that
+  `skyhookctl kill -yes` wipes the profile: it costs the account's warmth, not
+  just its cookies.
+
+If a site still fights it, use the mirror for reading and do the awkward part
+on the ground.
 
 **What the browser refuses to fetch.** `blockUrls` is keyed by host, with `"*"`
 for the default. The built-in default blocks ad and creative networks, because
