@@ -1,0 +1,205 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestParsePublicURL(t *testing.T) {
+	cases := []struct {
+		raw    string
+		origin string
+		socket string
+	}{
+		{"https://skyhook.example.com", "https://skyhook.example.com", "wss://skyhook.example.com/skyhook"},
+		{"https://skyhook.example.com/", "https://skyhook.example.com", "wss://skyhook.example.com/skyhook"},
+		{"https://skyhook.example.com:8443", "https://skyhook.example.com:8443",
+			"wss://skyhook.example.com:8443/skyhook"},
+		// A plain-HTTP proxy is a mistake in production, but it is the shape a
+		// tunnel takes during setup, and it should behave rather than surprise.
+		{"http://box.lan:8080", "http://box.lan:8080", "ws://box.lan:8080/skyhook"},
+		{"https://skyhook.example.com:443", "https://skyhook.example.com", "wss://skyhook.example.com/skyhook"},
+	}
+	for _, c := range cases {
+		ep, err := ParsePublicURL(c.raw)
+		if err != nil {
+			t.Errorf("%s: %v", c.raw, err)
+			continue
+		}
+		if got := ep.String(); got != c.origin {
+			t.Errorf("%s: origin = %q, want %q", c.raw, got, c.origin)
+		}
+		if got := ep.SocketURL("/skyhook"); got != c.socket {
+			t.Errorf("%s: socket = %q, want %q", c.raw, got, c.socket)
+		}
+	}
+}
+
+func TestParsePublicURLRejectsWhatCannotWork(t *testing.T) {
+	// A sub-path would half-work: the app asks for /sw.js by absolute path and
+	// registers its service worker at the root of the origin.
+	for _, raw := range []string{
+		"skyhook.example.com",
+		"ftp://skyhook.example.com",
+		"https://",
+		"https://skyhook.example.com/app",
+		"https://skyhook.example.com:0",
+	} {
+		if _, err := ParsePublicURL(raw); err == nil {
+			t.Errorf("%q was accepted", raw)
+		}
+	}
+}
+
+// The link an operator clicks and the file they can paste have to describe the
+// same server, in every deployment shape.
+func TestPairingFileAndLinkAgree(t *testing.T) {
+	base := func() Config {
+		c := Default()
+		c.Hosts = []string{"vps.example.com"}
+		c.Token = "tok"
+		return c
+	}
+
+	t.Run("direct", func(t *testing.T) {
+		p := base().PairingFor("aGFzaA==", "2030-01-01T00:00:00Z")
+		if p.Host != "vps.example.com" || p.Port != 4433 {
+			t.Errorf("pairing = %s:%d", p.Host, p.Port)
+		}
+		if p.Fallback != "wss://vps.example.com:4434/skyhook" {
+			t.Errorf("fallback = %q", p.Fallback)
+		}
+		// The app is served by the fallback listener, so that is the port the
+		// link has to open — not the QUIC one the pairing also names.
+		if got := p.Link(); !strings.HasPrefix(got, "https://vps.example.com:4434/#") {
+			t.Errorf("link = %q", got)
+		}
+		if !strings.Contains(p.Link(), "cert=aGFzaA") {
+			t.Errorf("link drops the pin: %s", p.Link())
+		}
+	})
+
+	t.Run("proxied", func(t *testing.T) {
+		c := base()
+		c.PublicURL = "https://skyhook.example.com"
+		c.BehindProxy = true
+		p := c.PairingFor("aGFzaA==", "2030-01-01T00:00:00Z")
+		if p.CertSHA256 != "" || p.CertExpires != "" {
+			t.Error("a proxied pairing must not pin our certificate")
+		}
+		if !p.PreferFallback {
+			t.Error("a proxied pairing must not send the client looking for QUIC")
+		}
+		if got := p.Link(); !strings.HasPrefix(got, "https://skyhook.example.com/#") {
+			t.Errorf("link = %q", got)
+		}
+	})
+
+	t.Run("loopback demo", func(t *testing.T) {
+		c := base()
+		c.InsecureLoopback = true
+		c.Hosts = []string{"127.0.0.1"}
+		c.Listen = "127.0.0.1:4433"
+		c.FallbackListen = "127.0.0.1:4434"
+		p := c.PairingFor("aGFzaA==", "2030-01-01T00:00:00Z")
+		// There is no TLS in this mode, so a wss:// socket and a pinned
+		// certificate would both be promises nothing keeps.
+		if p.Fallback != "ws://127.0.0.1:4434/skyhook" {
+			t.Errorf("fallback = %q", p.Fallback)
+		}
+		if p.CertSHA256 != "" {
+			t.Error("nothing pins a certificate that is never served")
+		}
+		if got := p.Link(); !strings.HasPrefix(got, "http://127.0.0.1:4434/#") {
+			t.Errorf("link = %q", got)
+		}
+	})
+}
+
+func TestLoadRejectsAProxySetupThatCannotBePairedWith(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			// Without a public URL the pairing link would name the container's
+			// own ports, which is precisely what does not work behind a proxy.
+			name: "proxy without a public url",
+			body: `{"dataDir":"/tmp/skyhook","behindProxy":true}`,
+			want: "publicUrl",
+		},
+		{
+			// The socket is the only transport a proxy can carry.
+			name: "proxy without the socket",
+			body: `{"dataDir":"/tmp/skyhook","behindProxy":true,
+			        "publicUrl":"https://skyhook.example.com","webSocketFallback":false}`,
+			want: "webSocketFallback",
+		},
+		{
+			name: "loopback demo and a proxy at once",
+			body: `{"dataDir":"/tmp/skyhook","insecureLoopback":true,
+			        "publicUrl":"https://skyhook.example.com"}`,
+			want: "insecureLoopback",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Load(write(t, c.body))
+			if err == nil {
+				t.Fatal("accepted a configuration that cannot be paired with")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error does not mention %q: %v", c.want, err)
+			}
+		})
+	}
+}
+
+func TestLoadNormalisesThePublicURL(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	body := `{"dataDir":"/tmp/skyhook","behindProxy":true,
+	          "publicUrl":"https://skyhook.example.com:443/ "}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.PublicURL != "https://skyhook.example.com" {
+		t.Fatalf("publicUrl = %q", cfg.PublicURL)
+	}
+	ep, ok := cfg.Public()
+	if !ok || ep.Port != 443 || !ep.Secure() {
+		t.Fatalf("public endpoint = %+v (ok=%v)", ep, ok)
+	}
+}
+
+func TestPublicURLFromTheEnvironment(t *testing.T) {
+	t.Setenv("SKYHOOK_PUBLIC_URL", "https://skyhook.example.com")
+	t.Setenv("SKYHOOK_BEHIND_PROXY", "1")
+	t.Setenv("SKYHOOK_DATA_DIR", t.TempDir())
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.BehindProxy {
+		t.Error("SKYHOOK_BEHIND_PROXY was ignored")
+	}
+	ep, ok := cfg.Public()
+	if !ok || ep.Host != "skyhook.example.com" {
+		t.Fatalf("public endpoint = %+v (ok=%v)", ep, ok)
+	}
+}

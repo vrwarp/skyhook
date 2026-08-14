@@ -77,7 +77,12 @@ default; this is the whole surface:
 Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_DATA_DIR`, `SKYHOOK_TOKEN`, `SKYHOOK_CHROME`, `SKYHOOK_HOSTS`,
 `SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`,
-`SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`.
+`SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`,
+`SKYHOOK_PUBLIC_URL`, `SKYHOOK_BEHIND_PROXY`.
+
+`publicUrl` and `behindProxy` are for deployments where the client does not
+reach the server where the server listens — see
+[behind a reverse proxy](#behind-a-reverse-proxy).
 
 `chromeArgs` (or `SKYHOOK_CHROME_ARGS`, space separated) is appended to
 Chromium's command line. It exists for sandboxing: Chromium isolates itself with
@@ -140,6 +145,88 @@ which is stronger than trusting the public CA set and is what lets a personal
 server run without a public certificate. **Treat this file as a credential**: it
 carries the token.
 
+### Behind a reverse proxy
+
+Terminating TLS somewhere else — nginx, Caddy, Traefik, a Cloudflare tunnel —
+changes where the client has to look, and the server cannot infer that. Left
+unset, everything it hands the client names its own listeners: the link points
+at port 4434, the fragment sends the transport to port 4433, the pairing file
+pins a certificate the browser never sees, and `connect-src` allows origins the
+browser cannot reach. Each one fails on its own; together they look like
+"pairing is broken".
+
+Tell it where it is answered:
+
+```json
+{
+  "publicUrl": "https://skyhook.example.com",
+  "behindProxy": true
+}
+```
+
+or `SKYHOOK_PUBLIC_URL` and `SKYHOOK_BEHIND_PROXY=1`, which is what
+`deploy/docker-compose.proxy.yml` sets. `deploy/nginx.example.conf` and
+`deploy/Caddyfile.example` are working proxy configurations for it.
+
+`publicUrl` is the origin the browser uses. Every address the server hands out
+is then built from it: the pairing link, `pairing.json`, and the content
+security policy. It must be an origin, not a sub-path — the client app owns the
+root of its origin, because its service worker has to — and the server refuses
+to start rather than half-work if it is given one.
+
+`behindProxy` says TLS terminates in front. The fallback listener then serves
+plain HTTP, so no proxy needs `proxy_ssl_verify off` to talk to it, and the
+QUIC listener is not started at all. It requires `publicUrl`, and it requires
+`webSocketFallback`: the socket is the only transport left.
+
+Two things are genuinely lost, and no configuration recovers them:
+
+* **WebTransport.** It rides HTTP/3 over UDP, and no HTTP reverse proxy
+  forwards it upstream. Everything falls back to the WebSocket — same wire
+  format, one TCP connection — which gives up stream independence (a slow image
+  can head-of-line block a DOM diff) and 0-RTT resume after an outage. On a
+  link that drops every few minutes you will feel it. Reach the server
+  directly, on its own hostname and ports, if that matters more than sharing a
+  port with everything else on the box.
+* **The certificate pin.** The certificate the browser validates is the
+  proxy's, so `pairing.json` carries no `certSha256` and the client uses
+  ordinary TLS trust. The proxy therefore needs a real certificate; a
+  self-signed one there stops the PWA from installing at all. In exchange the
+  fortnightly rotation dance below stops applying.
+
+The pairing link is unchanged in kind — open it once, on the plane-side
+machine — but it now points at the proxy and carries `preferFallback=1` instead
+of a pin:
+
+```
+https://skyhook.example.com/#token=…&host=skyhook.example.com&port=443&path=/skyhook&preferFallback=1&fallback=wss%3A%2F%2Fskyhook.example.com%2Fskyhook
+```
+
+To print it again later, from the pairing file rather than the startup log:
+
+```sh
+docker compose -f deploy/docker-compose.proxy.yml exec skyhook \
+  skyhookctl pairing -file /data/pairing.json -link
+```
+
+Whatever proxy you use, three settings matter:
+
+* **Pass the upgrade through.** The mirror is a WebSocket on `path`
+  (`/skyhook`). nginx needs `proxy_http_version 1.1` with the `Upgrade` and
+  `Connection` headers; Caddy and Traefik do it by themselves.
+* **Do not idle-timeout it.** A mirrored tab is idle for exactly as long as its
+  reader is, and nginx's default `proxy_read_timeout` of 60s will cut a
+  connection out from under someone who is reading. Plane-side that is
+  indistinguishable from the link dropping.
+* **Serve one whole origin.** The app registers a service worker at `/` and
+  asks for `/sw.js` and `/net.worker.js` by absolute path. A proxy that mounts
+  it under a sub-path, or strips `Service-Worker-Allowed`, breaks offline start
+  — which is the entire point of the client.
+
+If the app loads but never connects, look in the browser console for a CSP
+`connect-src` violation naming a port you did not expect: that is `publicUrl`
+disagreeing with where the page was actually opened.
+
 ### Certificate rotation
 
 Chromium refuses pinned certificates whose validity exceeds 14 days, so the
@@ -150,7 +237,8 @@ Restart the service (a nightly `systemctl restart skyhook` is fine; sessions
 rebuild from the profile) and re-pair the client with the new fingerprint.
 
 If you have a real certificate for the host, set `tlsCert` and `tlsKey` and none
-of this applies: no pinning, no rotation dance.
+of this applies: no pinning, no rotation dance. The same is true behind a
+reverse proxy, where the certificate that matters is the proxy's.
 
 ## Security posture
 
@@ -258,6 +346,9 @@ page state, and that should be your decision rather than a merge's.
 | The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. |
 | Stale UI after a deploy | The service worker serves its cache first and refreshes behind you. Reload twice, or use the browser's "Update on reload". |
 | `unauthorized` on connect | Token mismatch: re-read `pairing.json`. |
+| Behind a proxy: the app loads, the HUD stays offline | The pairing names the container's ports, not the proxy's. Set `publicUrl` (and `behindProxy`), restart, and re-pair with the new link — the old one is stored in IndexedDB until it is replaced. |
+| Behind a proxy: connects, then drops after ~60s of idle | The proxy's idle timeout, not the link. Raise `proxy_read_timeout` (nginx); see [behind a reverse proxy](#behind-a-reverse-proxy). |
+| Behind a proxy: console shows a `connect-src` violation | `publicUrl` is not the origin the page was opened on. They have to match exactly, port included. |
 | Connects, then drops immediately | Pinned certificate expired or rotated. Re-pair. |
 | Blank mirror, server logs "isolated world setup failed" | The page navigated during setup; a resync fixes it. Persistent failures mean Chromium is wedged — restart the service. |
 | Images never arrive | Check `avifenc`/`cwebp` are installed, and look for "image transcode failed" in the logs. The transcoder degrades to JPEG/PNG, so persistent silence means the *fetch* failed (authenticated asset, expired cookie). |

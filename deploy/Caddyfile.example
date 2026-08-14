@@ -1,0 +1,24 @@
+# Skyhook behind Caddy. Pair this with deploy/docker-compose.proxy.yml, which
+# publishes the container on 127.0.0.1:4434 and speaks plain HTTP upstream.
+#
+# The server must be told where this listens:
+#   SKYHOOK_PUBLIC_URL=https://skyhook.example.com   SKYHOOK_BEHIND_PROXY=1
+#
+# Caddy gets the certificate itself, upgrades WebSockets without being asked,
+# and puts no idle timeout on a hijacked connection, so the whole configuration
+# is one line. Two things to leave alone:
+#
+#   * Do not set a global read_timeout/write_timeout in the servers block. A
+#     mirrored tab can sit idle for as long as its reader does, and a timeout
+#     plane-side is indistinguishable from the bad link Skyhook exists to
+#     survive.
+#   * Do not add `encode`. Frames are already zstd-compressed; re-compressing
+#     costs latency and saves nothing.
+#
+# Caddy serves this origin over HTTP/3 to the browser, which is a fine thing to
+# have — but it is not WebTransport, and it is not the QUIC transport Skyhook
+# uses when it is reached directly. The mirror still rides the WebSocket.
+
+skyhook.example.com {
+	reverse_proxy 127.0.0.1:4434
+}

@@ -71,6 +71,19 @@ self-signed ECDSA certificate, and writes `pairing.json` into its data
 directory. That file is what the client needs: host, port, token, and the
 certificate fingerprint it will pin.
 
+Behind a reverse proxy, tell the server the address the proxy answers on —
+everything it hands the client is built from it, and it cannot infer it:
+
+```sh
+SKYHOOK_PUBLIC_URL=https://skyhook.example.com \
+  docker compose -f deploy/docker-compose.proxy.yml up -d
+```
+
+That deployment trades WebTransport for the WebSocket fallback, because no HTTP
+proxy forwards HTTP/3, and trades the certificate pin for the proxy's real
+certificate. [docs/OPERATIONS.md](docs/OPERATIONS.md#behind-a-reverse-proxy)
+has the details, with worked nginx and Caddy configurations in `deploy/`.
+
 ### Plane side (the laptop)
 
 The server serves the client. Build it once, point the server at it, and open

@@ -111,6 +111,11 @@ func demoConfig(cfg config.Config) config.Config {
 	cfg.InsecureLoopback = true
 	cfg.WebSocketFallback = true
 	cfg.Hosts = []string{"127.0.0.1"}
+	// -demo is an explicit "this machine only", which is the opposite of a
+	// deployment that lives behind something. Drop those settings rather than
+	// producing a link to a proxy that is not in front of this process.
+	cfg.PublicURL = ""
+	cfg.BehindProxy = false
 	if isDefaultAddr(cfg.Listen) {
 		cfg.Listen = "127.0.0.1:4433"
 	}
