@@ -404,3 +404,82 @@ func TestPWATypingReachesTheLandsidePage(t *testing.T) {
 
 var _ = imgproc.DefaultOptions
 var _ = session.NewToken
+
+// What a mirrored page is made of has to survive the trip into the sandboxed
+// frame, and three whole classes of it did not: every bitmap, every vector, and
+// every image a stylesheet named. None of it failed loudly — the page simply
+// arrived without its pictures.
+func TestPWARendersTheImagesAndVectorsInTheDocument(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('first message')`,
+		budget(60*time.Second), "the mirrored page")
+
+	const mirrorDoc = `document.querySelector('iframe.mirror').contentDocument`
+
+	// A sandboxed frame is not a service worker client, so the URL the bytes
+	// are cached under fetches the app shell from inside it and the image is a
+	// broken box. The shell resolves them and hands the frame a blob.
+	waitFor(ctx, t, page,
+		`(() => { const i = `+mirrorDoc+`.getElementById('pic');
+		  return !!i && i.getAttribute('src').startsWith('blob:') && i.naturalWidth > 1; })()`,
+		budget(60*time.Second), "the bitmap to be drawn")
+
+	// Go decodes no SVG, so a vector image used to fail in the transcoder and
+	// never arrive at all.
+	waitFor(ctx, t, page,
+		`(() => { const i = `+mirrorDoc+`.getElementById('vector');
+		  return !!i && i.getAttribute('src').startsWith('blob:') && i.naturalWidth > 1; })()`,
+		budget(60*time.Second), "the vector image to be drawn")
+
+	// And an image a rule names: the server rewrites url() to a content hash,
+	// which is a scheme no browser knows until the client resolves it.
+	waitFor(ctx, t, page,
+		`[...`+mirrorDoc+`.querySelectorAll('style')]
+		   .some(s => s.textContent.includes('url(blob:'))`,
+		budget(60*time.Second), "the stylesheet's image to resolve")
+
+	// Inline SVG built with createElement lands in the HTML namespace, where it
+	// draws nothing and viewBox decays to viewbox.
+	var svg struct {
+		NS, ViewBox, Clip, ChildNS string
+		Width                      float64
+	}
+	evalJSON(ctx, t, page, `(() => {
+      const el = `+mirrorDoc+`.getElementById('drawing');
+      const clip = el.querySelector('clipPath');
+      return {
+        NS: el.namespaceURI,
+        ViewBox: el.getAttribute('viewBox') || '',
+        Clip: clip ? clip.localName : '',
+        ChildNS: clip ? clip.namespaceURI : '',
+        Width: el.getBoundingClientRect().width,
+      };
+    })()`, &svg)
+	if svg.NS != "http://www.w3.org/2000/svg" {
+		t.Errorf("svg namespace = %q, an SVG in the HTML namespace draws nothing", svg.NS)
+	}
+	if svg.ViewBox != "0 0 20 10" {
+		t.Errorf("viewBox = %q: case-folded, it gives the drawing no coordinate system", svg.ViewBox)
+	}
+	if svg.Clip != "clipPath" || svg.ChildNS != "http://www.w3.org/2000/svg" {
+		t.Errorf("clipPath = %q in %q: SVG element names are case-sensitive", svg.Clip, svg.ChildNS)
+	}
+	if svg.Width < 1 {
+		t.Errorf("the drawing has no box: width = %v", svg.Width)
+	}
+}

@@ -42,6 +42,7 @@ const fixturePage = `<!DOCTYPE html>
   .used { color: rgb(1, 2, 3); }
   .never-matches-anything { color: rgb(9, 9, 9); }
   #log li { padding: 2px; }
+  #tile { width: 16px; height: 16px; background-image: url(/pixel.png); }
 </style>
 </head>
 <body>
@@ -55,6 +56,12 @@ const fixturePage = `<!DOCTYPE html>
   <button id="hoist">hoist</button>
   <div id="block"></div>
   <img id="pic" src="/pixel.png" width="40" height="40" alt="a pixel">
+  <img id="vector" src="/mark.svg" width="24" height="12" alt="a mark">
+  <svg id="drawing" viewBox="0 0 20 10" width="20" height="10">
+    <clipPath id="half"><rect x="0" y="0" width="10" height="10"/></clipPath>
+    <rect x="0" y="0" width="20" height="10" fill="rgb(2, 4, 6)"/>
+  </svg>
+  <div id="tile"></div>
   <div class="used">styled</div>
   <form id="login"><input id="secret" type="password" value=""></form>
   <sky-card id="card"></sky-card>
@@ -288,6 +295,11 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	mux.HandleFunc("/pointer", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, pointerPage)
+	})
+	mux.HandleFunc("/mark.svg", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		_, _ = io.WriteString(w, `<svg xmlns="http://www.w3.org/2000/svg" `+
+			`viewBox="0 0 24 12"><rect width="24" height="12" fill="rgb(3,5,7)"/></svg>`)
 	})
 	mux.HandleFunc("/tall", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
