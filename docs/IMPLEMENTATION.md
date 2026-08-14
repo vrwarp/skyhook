@@ -336,11 +336,20 @@ matter which window has focus.
 
 So attach mode opens one window with `newWindow`, keeps a blank anchor tab in
 it, and creates every later tab by evaluating `window.open` there —
-`userGesture` set so the popup blocker allows it, `noopener` set so a mirrored
-page gets no handle on the anchor, and a per-tab nonce in the `about:blank`
-fragment so concurrent callers can each recognise the tab their own call made.
-The tab is opened blank and navigated afterwards, so no page URL is ever
-spliced into JavaScript source.
+`userGesture` set so the popup blocker allows it, and `noopener` set so a
+mirrored page gets no handle on the anchor. The new tab is recognised by its
+`openerId`, which Chromium records as the anchor even under `noopener`; tab
+creation is serialised, so only one is ever in flight. The tab is opened blank
+and navigated afterwards, so no page URL is ever spliced into JavaScript
+source.
+
+A tab meant to stay blank is *not* navigated to `about:blank`. An earlier
+version marked each tab with a nonce in its URL fragment and then navigated it
+away to clear the mark; Chromium wedges a tab closed immediately after a
+navigation it has not committed, so the prefetch pool discarding a spare left
+an unclosable tab in the reader's browser — reproducible on Chrome 151, not on
+Chromium 141. Identifying the tab by opener rather than by a mark in its URL
+removes the navigation, and with it the wedge.
 
 The rest is restraint: targets that existed before we attached are never
 attached to, closed or listed, and shutdown closes our own tabs instead of

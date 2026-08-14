@@ -2,8 +2,6 @@ package cdp
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -312,6 +310,9 @@ type TargetInfo struct {
 	Title    string `json:"title"`
 	URL      string `json:"url"`
 	Attached bool   `json:"attached"`
+	// OpenerID is the target whose script opened this one. Chromium sets it
+	// even for a noopener window.open, which is what attach mode relies on.
+	OpenerID string `json:"openerId"`
 }
 
 // NewPage creates a tab and attaches a flattened session to it.
@@ -361,7 +362,10 @@ func (b *Browser) adopt(ctx context.Context, targetID string) (*Session, error) 
 // matter which window the user is working in.
 //
 // The tab is opened blank and navigated afterwards, so no page URL is ever
-// spliced into JavaScript source.
+// spliced into JavaScript source. A tab that is meant to stay blank is left
+// alone rather than navigated to about:blank: Chromium wedges a tab that is
+// closed immediately after a navigation it has not committed, and the prefetch
+// pool does exactly that when it discards a spare.
 func (b *Browser) newPageAttached(ctx context.Context, pageURL string) (*Session, error) {
 	b.anchorMu.Lock()
 	defer b.anchorMu.Unlock()
@@ -377,13 +381,13 @@ func (b *Browser) newPageAttached(ctx context.Context, pageURL string) (*Session
 	if err != nil {
 		return nil, err
 	}
-	// Always navigate, even for a blank tab: that clears the nonce fragment,
-	// which is ours to match on and has no business showing up in a URL bar.
-	if err := sess.Do(ctx, "Page.navigate", map[string]any{"url": pageURL}, nil); err != nil {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = b.CloseTarget(closeCtx, sess.Target)
-		cancel()
-		return nil, err
+	if pageURL != "about:blank" {
+		if err := sess.Do(ctx, "Page.navigate", map[string]any{"url": pageURL}, nil); err != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = b.CloseTarget(closeCtx, sess.Target)
+			cancel()
+			return nil, err
+		}
 	}
 	return sess, nil
 }
@@ -394,13 +398,7 @@ func (b *Browser) openFromAnchor(ctx context.Context) (*Session, error) {
 	if err := b.ensureAnchor(ctx); err != nil {
 		return nil, err
 	}
-	nonce := make([]byte, 8)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	// A fragment on about:blank, unique per tab, so the target this call
-	// created can be told apart from any other tab appearing at the same time.
-	blank := "about:blank#skyhook-" + hex.EncodeToString(nonce)
+	anchor := b.anchorSession.Target
 
 	// userGesture, or the popup blocker eats it. noopener, or the page we are
 	// about to mirror gets a window handle on the anchor and can navigate it.
@@ -408,7 +406,7 @@ func (b *Browser) openFromAnchor(ctx context.Context) (*Session, error) {
 		ExceptionDetails json.RawMessage `json:"exceptionDetails"`
 	}
 	if err := b.anchorSession.Do(ctx, "Runtime.evaluate", map[string]any{
-		"expression":  "window.open(" + strconv.Quote(blank) + ", '_blank', 'noopener')",
+		"expression":  "window.open('about:blank', '_blank', 'noopener')",
 		"userGesture": true,
 	}, &res); err != nil {
 		return nil, err
@@ -416,7 +414,7 @@ func (b *Browser) openFromAnchor(ctx context.Context) (*Session, error) {
 	if len(res.ExceptionDetails) > 0 {
 		return nil, fmt.Errorf("cdp: opening a tab in the skyhook window: %s", res.ExceptionDetails)
 	}
-	targetID, err := b.awaitTarget(ctx, blank)
+	targetID, err := b.awaitOpened(ctx, anchor)
 	if err != nil {
 		return nil, err
 	}
@@ -487,8 +485,13 @@ func (b *Browser) awaitClosed(ctx context.Context, targets []string) {
 	}
 }
 
-// awaitTarget waits for the tab window.open was told to create.
-func (b *Browser) awaitTarget(ctx context.Context, url string) (string, error) {
+// awaitOpened waits for the tab window.open was told to create. Chromium
+// records the anchor as the new tab's opener even under noopener, so the tab
+// is recognised by that rather than by anything written into its URL: a tab
+// that is meant to stay blank cannot be marked without leaving a mark the
+// reader would see. Callers hold anchorMu, so only one is ever in flight, and
+// tabs from earlier calls are already owned.
+func (b *Browser) awaitOpened(ctx context.Context, anchor string) (string, error) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var out struct {
@@ -498,12 +501,12 @@ func (b *Browser) awaitTarget(ctx context.Context, url string) (string, error) {
 			return "", err
 		}
 		for _, t := range out.TargetInfos {
-			if t.Type == "page" && t.URL == url {
+			if t.Type == "page" && t.OpenerID == anchor && !b.owns(t.TargetID) {
 				return t.TargetID, nil
 			}
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("cdp: tab %s never opened in the skyhook window", url)
+			return "", errors.New("cdp: the tab never opened in the skyhook window")
 		}
 		select {
 		case <-ctx.Done():

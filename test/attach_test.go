@@ -162,8 +162,9 @@ func TestAttachOpensConcurrentTabsWithoutCrossingThem(t *testing.T) {
 		}
 		seen[s.Target] = i
 	}
-	// The nonce that told the tabs apart is an implementation detail; a reader
-	// must never see it in a URL bar.
+	// However the tabs are told apart, it must not be by anything written into
+	// their URLs: a blank tab has to look blank to the reader, and a tab that
+	// has to be navigated to clear a mark is a tab Chromium can wedge on close.
 	for i, s := range got {
 		if u := evalString(ctx, t, s, "location.href"); u != "about:blank" {
 			t.Errorf("tab %d is parked on %q, want a clean about:blank", i, u)
@@ -177,6 +178,57 @@ func TestAttachOpensConcurrentTabsWithoutCrossingThem(t *testing.T) {
 	for i, s := range got {
 		if w := windowOf(ctx, t, user, s.Target); w != window {
 			t.Errorf("tab %d is in window %d, want %d", i, w, window)
+		}
+	}
+}
+
+// The prefetch pool opens spare tabs and discards the ones it does not use, so
+// a tab is routinely closed moments after it is opened. Chromium wedges a tab
+// closed immediately after a navigation it has not committed, which is why a
+// blank tab is left blank rather than navigated to about:blank.
+func TestAttachClosesATabItJustOpened(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	user, _, devtools := userBrowser(ctx, t)
+
+	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools})
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	defer func() { _ = sky.Close() }()
+
+	// Keep one tab open throughout, so the window is never emptied and each
+	// close is a plain tab close rather than a window teardown.
+	if _, err := sky.NewPage(ctx, "about:blank"); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 5 {
+		spare, err := sky.NewPage(ctx, "about:blank")
+		if err != nil {
+			t.Fatalf("spare %d: %v", i, err)
+		}
+		if err := sky.CloseTarget(ctx, spare.Target); err != nil {
+			t.Fatalf("close spare %d: %v", i, err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			left, err := user.Targets(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found bool
+			for _, tgt := range left {
+				if tgt.TargetID == spare.Target {
+					found = true
+				}
+			}
+			if !found {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("spare %d never closed: it is wedged open in the browser", i)
+			}
+			time.Sleep(25 * time.Millisecond)
 		}
 	}
 }
