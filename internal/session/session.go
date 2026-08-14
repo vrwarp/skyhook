@@ -471,6 +471,18 @@ func (s *Session) Resync(ctx context.Context, tab uint32, haveTo uint64, reason 
 	// cannot apply diffs: only a snapshot puts it back in business.
 	cold := haveTo == 0 || reason == "cold" || reason == "apply-failed"
 	frames, size, ok := ts.ring.Since(haveTo)
+	// A replay of nothing cannot repair a proven divergence. The integrity check
+	// only calls here once it has compared two hashes and found them different,
+	// and if the ring has nothing past what the client acknowledged then the two
+	// sides differ over something no diff can express — a document the client
+	// never saw at all. Replaying zero frames leaves it diverged, to be noticed
+	// again in thirty seconds, and again, for as long as the session lives.
+	//
+	// A reconnect is not this: coming back with nothing missed is the good case,
+	// and it must stay free.
+	if len(frames) == 0 && reason == "hash-mismatch" {
+		cold = true
+	}
 	if !cold && ok && size < 256<<10 {
 		s.log.Info("resync by replay", "tab", tab, "frames", len(frames), "bytes", size, "reason", reason)
 		for _, f := range frames {

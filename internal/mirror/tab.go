@@ -248,11 +248,33 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		if err := t.ensureWorld(ctx); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
 		}
+		if _, err := t.eval(ctx, resnapshotIfSettled); err != nil {
+			t.log.Debug("post-navigation snapshot check failed", "tab", t.ID, "err", err)
+		}
 		// History moves at navigation time, not at load time; refreshing here
 		// means the back button is right while the page is still arriving.
 		t.refreshState(ctx)
 	}()
 }
+
+// resnapshotIfSettled re-mirrors a document that navigation delivered already
+// finished.
+//
+// Going back to a page Chromium kept in its back/forward cache does not create
+// a document: nothing re-runs, no DOMContentLoaded fires, and the agent that
+// came back with the page still believes it has mirrored what is on screen. It
+// has — but the client was shown a different page in between, and without this
+// nothing ever tells it otherwise. The reader is left looking at the page they
+// navigated away from, and since no diff can express "you have the wrong
+// document", not even the integrity check can talk them out of it.
+//
+// A navigation to a document that is still parsing is the ordinary case and is
+// left alone: the agent snapshots itself when the parse finishes.
+const resnapshotIfSettled = `(function () {
+  if (!globalThis.__skyhook) return false;
+  if (document.readyState === 'loading') return false;
+  return __skyhook.snapshot();
+})()`
 
 func (t *Tab) onLoad() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
