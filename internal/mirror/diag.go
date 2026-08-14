@@ -16,30 +16,63 @@ import (
 // to do it, which turns "this page looks wrong" into "this page went blank when
 // I reported it".
 
+// MaxShotHeight is the tallest page rendered whole. Past this the picture falls
+// back to the viewport, because a 40,000 pixel screenshot is a way to run a
+// headless Chromium out of memory.
+const MaxShotHeight = 12000
+
+// Shot is a picture together with what it is a picture *of*.
+//
+// The second part is not decoration. This screenshot silently covers either the
+// whole scrollable page or just the viewport, and the plane side's covers the
+// top of the document up to its own limit; a bundle holding two images of the
+// same tab, at different scales, over different regions, with nothing saying so
+// invites exactly one mistake — diffing them and believing the result. Every
+// picture in a bundle now states its own coverage.
+type Shot struct {
+	Data []byte `json:"-"`
+	// Covers is "page" when the whole scrollable document is in the image, and
+	// "viewport" when only the part the window was showing is.
+	Covers string `json:"covers"`
+	// Format is the image encoding actually produced, which is not always the
+	// one asked for.
+	Format string `json:"format"`
+	// PageHeight is the document's full scrollable height in CSS pixels.
+	PageHeight int `json:"pageHeight"`
+	// Width and Height are the viewport in CSS pixels, and DPR the scale the
+	// image is rendered at: an image is DPR times these.
+	Width  int     `json:"width"`
+	Height int     `json:"height"`
+	DPR    float64 `json:"dpr"`
+	Bytes  int     `json:"bytes"`
+}
+
 // Screenshot renders the tab as the landside browser sees it.
 //
-// The whole scrollable page is captured, not the viewport: the divergence a
-// capture is taken for is often just below the fold, and a picture that stops
-// where the window does is a picture of the part that was already fine. Very
-// tall pages fall back to the viewport, because a 40,000 pixel screenshot is a
-// way to run a headless Chromium out of memory.
-func (t *Tab) Screenshot(ctx context.Context, format string, quality int) ([]byte, error) {
+// The whole scrollable page is captured where it can be, not just the viewport:
+// the divergence a capture is taken for is often just below the fold, and a
+// picture that stops where the window does is a picture of the part that was
+// already fine.
+func (t *Tab) Screenshot(ctx context.Context, format string, quality int) (Shot, error) {
 	if format == "" {
 		format = "webp"
 	}
-	beyond := true
+	vp := t.Viewport()
+	out := Shot{Covers: "page", Format: format, Width: vp.W, Height: vp.H, DPR: vp.DPR}
+
 	var metrics struct {
 		CSSContentSize struct {
 			Height float64 `json:"height"`
 		} `json:"cssContentSize"`
 	}
 	if err := t.sess.Do(ctx, "Page.getLayoutMetrics", nil, &metrics); err == nil {
-		if metrics.CSSContentSize.Height > 12000 {
-			beyond = false
+		out.PageHeight = int(metrics.CSSContentSize.Height)
+		if metrics.CSSContentSize.Height > MaxShotHeight {
+			out.Covers = "viewport"
 		}
 	}
 	shot := func(f string, beyondViewport bool) ([]byte, error) {
-		var out struct {
+		var res struct {
 			Data []byte `json:"data"`
 		}
 		params := map[string]any{
@@ -50,22 +83,26 @@ func (t *Tab) Screenshot(ctx context.Context, format string, quality int) ([]byt
 		if f == "jpeg" || f == "webp" {
 			params["quality"] = quality
 		}
-		if err := t.sess.Do(ctx, "Page.captureScreenshot", params, &out); err != nil {
+		if err := t.sess.Do(ctx, "Page.captureScreenshot", params, &res); err != nil {
 			return nil, err
 		}
-		return out.Data, nil
+		return res.Data, nil
 	}
-	data, err := shot(format, beyond)
+	data, err := shot(format, out.Covers == "page")
 	if err == nil {
-		return data, nil
+		out.Data, out.Bytes = data, len(data)
+		return out, nil
 	}
 	// Older Chromium builds refuse webp, and captureBeyondViewport fails on a
 	// page whose compositor is unhappy. Neither is a reason to come back with
-	// nothing when a plain viewport PNG would have done.
+	// nothing when a plain viewport PNG would have done — but the bundle has to
+	// say that is what it got.
 	if data, err2 := shot("png", false); err2 == nil {
-		return data, nil
+		out.Data, out.Bytes = data, len(data)
+		out.Covers, out.Format = "viewport", "png"
+		return out, nil
 	}
-	return nil, err
+	return out, err
 }
 
 // PageHTML serialises the real document, which is what the mirror was built
@@ -115,6 +152,63 @@ func (t *Tab) Fingerprint(ctx context.Context, limit int) (json.RawMessage, erro
 		return nil, fmt.Errorf("mirror: agent returned no fingerprint")
 	}
 	return raw, nil
+}
+
+// RejectedCSS is what the used-rule filter turned down on its last pass.
+type RejectedCSS struct {
+	Seen      int      `json:"seen"`
+	Rejected  int      `json:"rejected"`
+	Truncated bool     `json:"truncated"`
+	Selectors []string `json:"selectors"`
+}
+
+// RejectedCSS asks the agent which selectors matched nothing.
+//
+// The used-rule filter is the piece of this system most likely to be wrong
+// about a page, and it is the piece a bundle says least about: it carries the
+// rules that passed and no trace of the rest, so a rule dropped in error reads
+// exactly like a rule the site never wrote. This is the other half of that
+// record, and it is the difference between finding a filter bug in an hour and
+// inferring it from which neighbouring rules happened to survive.
+func (t *Tab) RejectedCSS(ctx context.Context) (RejectedCSS, error) {
+	var out RejectedCSS
+	raw, err := t.eval(ctx, "__skyhook.rejectedCSS()")
+	if err != nil {
+		return out, err
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// SheetStatus is what became of the page's stylesheets.
+type SheetStatus struct {
+	// Blocked are sheets nothing has been able to read: cross-origin, and not
+	// recovered over the protocol either.
+	Blocked []string `json:"blocked"`
+	// Recovered counts the ones the host fetched and handed back.
+	Recovered int `json:"recovered"`
+}
+
+// SheetStatus asks which stylesheets the agent could not open.
+//
+// A page that arrives without its design has exactly two explanations — the
+// filter rejected the rules, or nothing could read them in the first place —
+// and until this was in a bundle, telling them apart meant guessing. It reads
+// what the last CSS pass found rather than walking the sheets itself, because
+// walking them counts as sending what it finds, and a capture must not change
+// what the reader is looking at.
+func (t *Tab) SheetStatus(ctx context.Context) (SheetStatus, error) {
+	var out SheetStatus
+	raw, err := t.eval(ctx, "__skyhook.sheets()")
+	if err != nil {
+		return out, err
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, err
+	}
+	return out, nil
 }
 
 // AgentHash identifies the injected agent by content. Two bundles whose

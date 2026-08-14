@@ -70,7 +70,7 @@ export interface MirrorFreeze {
   scrollY: number;
   /** What the host and patcher believe, for planeside/tabs/<id>/state.json. */
   state: Record<string, unknown>;
-  fingerprint: { total: number; truncated: boolean; nodes: [number, number, string][] };
+  fingerprint: { total: number; truncated: boolean; nodes: [number, number, string, number][] };
   error?: string;
 }
 

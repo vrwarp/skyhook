@@ -325,7 +325,11 @@ func (c *capture) manifest(planeFiles, planeBytes int) map[string]any {
 		"textRedacted": !s.mgr.opts.Capture.Text,
 		"readMe": "landside/ is what the server had; planeside/ is what the client " +
 			"showed. tabs/<id>/expected.html is the client's document reconstructed " +
-			"from the frames actually sent — diff it against planeside/tabs/<id>/mirror.html.",
+			"from the frames actually sent — diff it against planeside/tabs/<id>/mirror.html. " +
+			"If the documents agree and the styling does not, read " +
+			"landside/tabs/<id>/css-rejected.txt: the rules that were deliberately not " +
+			"sent. Read both screenshot.json files before comparing the pictures — the " +
+			"two halves photograph different regions at different scales.",
 	}
 }
 
@@ -393,12 +397,52 @@ func (c *capture) gatherTab(f *frozenTab) {
 			fail["docHash"] = err.Error()
 		} else {
 			report["serverHash"] = h
-			report["hashesAgree"] = h == f.clientHash
+			// clientHash is what the client reported for the last frame it
+			// acknowledged; this one is the page as it stands now. Those are
+			// the same document only when the client is caught up, and a
+			// bundle that claims they disagree when it is merely behind sends
+			// the reader after a divergence that was never there.
+			if f.acked == f.seq {
+				report["hashesAgree"] = h == f.clientHash
+			} else {
+				report["hashesComparable"] = false
+				c.bundle.Note("tab %d: the client had acknowledged frame %d of %d when this "+
+					"was taken, so its hash and the live page's describe different instants; "+
+					"the bundle claims no agreement either way", f.id, f.acked, f.seq)
+			}
 		}
 		if d, err := ts.tab.AgentDiag(ctx); err != nil {
 			fail["agent"] = err.Error()
 		} else {
 			_ = c.bundle.Add(base+"/agent.json", d)
+		}
+		// The used-CSS filter's other half. Without it a rule dropped in error
+		// and a rule the site never wrote are the same artifact: nothing.
+		if rej, err := ts.tab.RejectedCSS(ctx); err != nil {
+			fail["rejectedCss"] = err.Error()
+		} else {
+			report["cssSeen"] = rej.Seen
+			report["cssRejected"] = rej.Rejected
+			header := fmt.Sprintf(
+				"# %d of %d style rules matched nothing in this document and were not sent.\n"+
+					"# One selector per line, from the filter's most recent pass.\n",
+				rej.Rejected, rej.Seen)
+			if rej.Truncated {
+				header += fmt.Sprintf("# Capped at %d; the rest are not listed.\n", len(rej.Selectors))
+			}
+			_ = c.bundle.AddText(base+"/css-rejected.txt",
+				header+strings.Join(rej.Selectors, "\n")+"\n")
+		}
+		if sheets, err := ts.tab.SheetStatus(ctx); err != nil {
+			fail["sheets"] = err.Error()
+		} else {
+			report["sheetsRecovered"] = sheets.Recovered
+			report["sheetsBlocked"] = sheets.Blocked
+			if len(sheets.Blocked) > 0 {
+				c.bundle.Note("tab %d: %d stylesheet(s) could not be read at all — "+
+					"cross-origin, and not recovered over the protocol either. Any rule "+
+					"missing from this page may simply never have arrived", f.id, len(sheets.Blocked))
+			}
 		}
 		if fp, err := ts.tab.Fingerprint(ctx, 20000); err != nil {
 			fail["fingerprint"] = err.Error()
@@ -414,15 +458,25 @@ func (c *capture) gatherTab(f *frozenTab) {
 
 		if s.mgr.opts.Capture.Screenshots {
 			shotCtx, shotCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			img, err := ts.tab.Screenshot(shotCtx, "webp", 70)
+			shot, err := ts.tab.Screenshot(shotCtx, "webp", 70)
 			shotCancel()
 			switch {
 			case err != nil:
 				fail["screenshot"] = err.Error()
-			case len(img) == 0:
+			case len(shot.Data) == 0:
 				fail["screenshot"] = "the browser returned an empty image"
 			default:
-				_ = c.bundle.Add(base+"/screenshot.webp", img)
+				_ = c.bundle.Add(base+"/screenshot."+shot.Format, shot.Data)
+				// What the picture covers travels with it. The two halves of a
+				// bundle photograph different regions at different scales, and
+				// the reader's first instinct is to diff them.
+				_ = c.bundle.AddJSON(base+"/screenshot.json", shot)
+				if shot.Covers != "page" {
+					c.bundle.Note("tab %d: the landside picture is the %dx%d viewport of a "+
+						"%dpx-tall page, not the whole document: past %dpx a full-page render "+
+						"is how a headless browser runs out of memory",
+						f.id, shot.Width, shot.Height, shot.PageHeight, mirror.MaxShotHeight)
+				}
 			}
 		}
 	} else {

@@ -395,6 +395,7 @@ func (t *Tab) recoverBlockedSheets(ctx context.Context) {
 	if err := json.Unmarshal(raw, &hrefs); err != nil || len(hrefs) == 0 {
 		return
 	}
+	t.log.Debug("recovering stylesheets the page cannot read", "tab", t.ID, "sheets", len(hrefs))
 	texts := t.styleSheetTexts(ctx, hrefs)
 	for _, href := range hrefs {
 		text, ok := texts[href]
@@ -862,6 +863,22 @@ func (t *Tab) Seq() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.seq
+}
+
+// Viewport reports the window this tab is laid out for.
+func (t *Tab) Viewport() protocol.Viewport {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.opts.Viewport
+}
+
+// Loading reports whether the page is between documents. Nothing about a tab in
+// that state is worth comparing against a client: the document being hashed is
+// on its way out, and the one replacing it has not arrived.
+func (t *Tab) Loading() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.loading
 }
 
 // URL reports the current page URL.

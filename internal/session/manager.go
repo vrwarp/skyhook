@@ -50,6 +50,10 @@ type ManagerOptions struct {
 	HomeURL string
 	// Capture configures the diagnostic bundles this server writes.
 	Capture CaptureOptions
+	// IntegrityInterval is how often each tab's document is checked against the
+	// client's. Zero means the default; a test that would otherwise wait out
+	// two ticks turns it down.
+	IntegrityInterval time.Duration
 }
 
 // Manager owns the browser and the set of sessions.

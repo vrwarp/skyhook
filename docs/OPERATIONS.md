@@ -507,8 +507,10 @@ session/events.json              the timeline: navigations, input, resyncs, dive
 landside/browser.json            the Chromium behind it
 landside/tabs/<id>/page.html     the real document, as Chromium has it
 landside/tabs/<id>/screenshot.webp
+landside/tabs/<id>/screenshot.json  what that picture covers: page or viewport, at what scale
 landside/tabs/<id>/agent.json    what the injected agent believes about itself
 landside/tabs/<id>/fingerprint.json
+landside/tabs/<id>/css-rejected.txt the selectors the used-CSS filter turned down
 landside/tabs/<id>/frames/       the wire frames actually sent, plus an index
 landside/tabs/<id>/expected.html the client's document, replayed from those frames
 planeside/client.json            device, build, shell state
@@ -516,6 +518,7 @@ planeside/worker.json            what the client acknowledged, and its link
 planeside/client.log             the client's own log, including uncaught errors
 planeside/tabs/<id>/mirror.html  the document the reader was actually looking at
 planeside/tabs/<id>/screenshot.webp
+planeside/tabs/<id>/screenshot.json  what *that* picture covers, which is not the same region
 planeside/tabs/<id>/fingerprint.json
 planeside/tabs/<id>/state.json
 ```
@@ -533,11 +536,32 @@ Then the three-way split, which is what makes the bug locatable:
 | `landside/…/expected.html` vs `planeside/…/mirror.html` | The **patcher** did not apply what it was sent — or did not receive it. `frames/index.json` says which frames existed and when. |
 | the two `screenshot.webp` files | Both documents agree and they still look different: CSS. Used-CSS extraction missed a rule, or a substituted element lost the selector that sized it. |
 
+**Read each `screenshot.json` before comparing the pictures.** They are not
+taken the same way and often do not cover the same thing: the landside one is
+the whole scrollable page, or — past `MaxShotHeight` — only the viewport, while
+the plane-side one is the top of the document up to its own limit, at its own
+scale. Two pictures of one tab over two different regions look exactly like a
+rendering bug.
+
+When both documents agree and the styling does not, `css-rejected.txt` is the
+next file. It lists the selectors the used-CSS filter found nothing for on its
+last pass — the rules that were deliberately *not* sent. A rule you expected to
+see is either in there (the filter judged it unused, and the question is why) or
+it is not (nothing on the page ever offered it, and `agent.json`'s
+`blockedSheets` says whether a stylesheet could not be read at all).
+
 `state.json` on each side carries the document hash, and the landside one also
 carries `expectedHash` — the hash of the replay. When all three agree, the DOM
 is not the problem. When `clientHash` differs, diff the two `fingerprint.json`
-files: they list exactly the `(id, kind, value)` triples the hash is computed
-over, so a mismatch becomes a list of the specific nodes responsible.
+files: they list exactly the `(id, kind, value, flags)` quadruples the hash is
+computed over, so a mismatch becomes a list of the specific nodes responsible —
+and the flags say which of those nodes host a shadow root, are editable, or
+stand in for an image or a canvas.
+
+`hashesAgree` is only present when the client had acknowledged the newest frame:
+its hash and the live page's describe the same document only then. When it is
+behind, the bundle says `hashesComparable: false` rather than claiming a
+disagreement between two different instants.
 
 `session/events.json` is the reproduction steps: what the reader clicked and
 typed, in order, with each resync and divergence in place.

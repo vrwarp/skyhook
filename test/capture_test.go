@@ -160,9 +160,54 @@ func TestCaptureBundlesBothHalves(t *testing.T) {
 	if landside["expectedHash"] == nil {
 		t.Error("the bundle does not say what the client's document should hash to")
 	}
-	if landside["hashesAgree"] != true {
+	// A bundle claims agreement only when the client had acknowledged the newest
+	// frame; otherwise the two hashes describe different instants and it says
+	// so rather than reporting a lagging mirror as a broken one.
+	switch {
+	case landside["hashesComparable"] == false:
+		if landside["acked"] == landside["seq"] {
+			t.Errorf("the bundle declined to compare two hashes it could have compared: %v", landside)
+		}
+	case landside["hashesAgree"] != true:
 		t.Errorf("the two halves disagreed during an ordinary capture: landside %v, "+
 			"planeside %v", landside, planeside)
+	}
+
+	// --- the instrumentation that turns "a rule is missing" into an answer
+	rejected := string(files[base+"/css-rejected.txt"])
+	if !strings.Contains(rejected, "never-matches-anything") {
+		t.Errorf("the bundle does not say which rules the used-CSS filter turned down, "+
+			"so a rule dropped in error is indistinguishable from one the page never had: %q",
+			rejected)
+	}
+	if landside["cssSeen"] == nil || landside["cssRejected"] == nil {
+		t.Errorf("the bundle does not say how much CSS the filter considered: %v", landside)
+	}
+	if landside["sheetsBlocked"] == nil {
+		t.Error("the bundle does not say whether a stylesheet could not be read at all")
+	}
+
+	// A picture states what it is a picture of. The two halves photograph
+	// different regions at different scales, and diffing them blind is the
+	// obvious mistake to make. (The plane-side half of this is asserted where a
+	// real browser takes a real screenshot; the Go client rasterises nothing.)
+	var shotMeta map[string]any
+	if err := json.Unmarshal(files[base+"/screenshot.json"], &shotMeta); err != nil {
+		t.Errorf("no landside screenshot metadata: %v (files %v)", err, names(files))
+	} else if shotMeta["covers"] == nil || shotMeta["pageHeight"] == nil {
+		t.Errorf("the landside screenshot does not say what it covers: %v", shotMeta)
+	}
+
+	// The flags are the column the document hash cannot see, and the reason a
+	// component that upgraded landside after it was mirrored is findable.
+	var fp struct {
+		Nodes [][]any `json:"nodes"`
+	}
+	if err := json.Unmarshal(files[base+"/fingerprint.json"], &fp); err != nil {
+		t.Fatalf("no landside fingerprint: %v", err)
+	}
+	if len(fp.Nodes) == 0 || len(fp.Nodes[0]) != 4 {
+		t.Errorf("the fingerprint rows do not carry flags: %v", fp.Nodes[:min(3, len(fp.Nodes))])
 	}
 	for _, want := range []string{"session/session.json", "session/events.json", "NOTES.txt"} {
 		if _, ok := files[want]; !ok {
@@ -284,6 +329,16 @@ func TestPWACaptureSendsARealScreenshot(t *testing.T) {
 	if !hasInk(img) {
 		t.Errorf("the plane-side screenshot is blank (%v): the mirrored document "+
 			"was serialised but nothing rendered", img.Bounds())
+	}
+
+	// What that picture covers, beside it: the plane side crops a long page at
+	// its own limit, and the landside picture of the same tab is a different
+	// region at a different scale.
+	var shotMeta map[string]any
+	if err := json.Unmarshal(files["planeside/tabs/1/screenshot.json"], &shotMeta); err != nil {
+		t.Errorf("the plane-side screenshot says nothing about what it covers: %v", err)
+	} else if shotMeta["covers"] == nil || shotMeta["pageHeight"] == nil {
+		t.Errorf("the plane-side screenshot metadata is incomplete: %v", shotMeta)
 	}
 
 	mirrorHTML := string(files["planeside/tabs/1/mirror.html"])

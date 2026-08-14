@@ -28,7 +28,7 @@ function freeze(tab: number, html: string, over: Partial<MirrorFreeze> = {}): Mi
     scrollX: 0,
     scrollY: 240,
     state: { tab, url: `https://example.test/${tab}`, lastAppliedSeq: 12 },
-    fingerprint: { total: 2, truncated: false, nodes: [[1, 1, 'html'], [2, 3, 'hello']] },
+    fingerprint: { total: 2, truncated: false, nodes: [[1, 1, 'html', 0], [2, 3, 'hello', 0]] },
     ...over,
   };
 }

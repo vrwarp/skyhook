@@ -280,6 +280,36 @@ func TestMinifyCSSPreservesMeaning(t *testing.T) {
 	}
 }
 
+// Nothing plane-side ever upgrades a custom element, so `:defined` has to be
+// asked of the landside document instead — through the mark the agent leaves
+// on the elements that had not upgraded there.
+func TestRewriteDefinedAsksTheLandsideQuestion(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		// The placeholder styling a component wears until its bundle lands.
+		{".nd\\:invisible:not(:defined){visibility:hidden}",
+			".nd\\:invisible[data-sky-undefined]{visibility:hidden}"},
+		// The styling of the upgraded component.
+		{"reddit-search-large:defined{display:block}",
+			"reddit-search-large:not([data-sky-undefined]){display:block}"},
+		{"my-card:defined:not(:focus-within)::after{content:\"\"}",
+			"my-card:not([data-sky-undefined]):not(:focus-within)::after{content:\"\"}"},
+		// An escaped colon is part of a class name, and a longer name that
+		// merely starts the same way is a different pseudo-class.
+		{".x\\:defined{color:red}", ".x\\:defined{color:red}"},
+		{"a:definedish{color:red}", "a:definedish{color:red}"},
+		// `:defined` inside a string is text.
+		{`.a::before{content:":defined"}`, `.a::before{content:":defined"}`},
+		// Rules with nothing to say on the subject come back untouched.
+		{"a:hover{color:red}", "a:hover{color:red}"},
+		{"@media (min-width:10px){x-y:not(:defined){color:red}}",
+			"@media (min-width:10px){x-y[data-sky-undefined]{color:red}}"},
+	} {
+		if got := rewriteDefined(tc.in); got != tc.want {
+			t.Errorf("rewriteDefined(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // braceDepth counts unclosed blocks, ignoring braces inside strings.
 func braceDepth(css string) int {
 	depth := 0
