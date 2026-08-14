@@ -1023,7 +1023,20 @@ is still on. And the URL bar tracks its tab unless it is *edited*
 rather than unless it is *focused* — a new tab focuses it, and the old test
 would have left it stuck showing an address the tab had long since left.
 
-### 22. A click has to be answered before the page can be
+The welcome is not the moment the link comes up. The transport reports itself
+online and *then* sends `Hello`, so the `Welcome` that answers it is a full
+round trip behind — a second and a half of a client that says it is connected,
+with an enabled "+" button. A first draft treated every welcome as grounds for
+discarding tabs the server had not named, on the reasoning that they belonged to
+a connection that was gone. That is right for a reconnect and wrong for the
+connection the request was actually sent on: anyone reaching for "+" in that
+first round trip lost the tab, and whatever they had typed into it, to the
+welcome that followed. Provisional tabs now carry the connection they were asked
+for on, and a welcome only discards the ones from earlier connections. Nothing
+plane-side made this visible — the netem job did, by failing five PWA tests that
+pass at loopback latency.
+
+### 23. A click has to be answered before the page can be
 
 Every affordance a browser shows while a page loads — the bar, the tab spinner,
 the address bar going grey — it shows because it started the navigation itself.

@@ -61,6 +61,15 @@ export class TabModel {
    * reaches a tab the server has already been told to close.
    */
   private closed = new Set<number>();
+  /**
+   * Which connection each provisional tab was asked for on. The link comes up
+   * a round trip before the welcome that follows it, and on this link that
+   * round trip is long enough to open a tab and start typing into it — so a
+   * welcome must be able to tell a tab still waiting for its answer from one
+   * whose answer was lost with a previous connection.
+   */
+  private askedOn = new Map<number, number>();
+  private epoch = 0;
   private nextRef = 1;
   private nextProvisional = -1;
   /** The tab in front. 0 means none. */
@@ -104,6 +113,7 @@ export class TabModel {
     const id = this.nextProvisional--;
     const ref = `r${this.nextRef++}`;
     this.byRef.set(ref, id);
+    this.askedOn.set(id, this.epoch);
     this.tabs.set(id, {
       id, url, title: '', loading: url !== '',
       canBack: false, canForward: false, provisional: true,
@@ -155,18 +165,33 @@ export class TabModel {
   }
 
   /**
-   * Rebuilds from the server's list after a connection is established. The
-   * server's tabs are the truth: a provisional tab that was never adopted was
-   * either never created landside or is in that list under its real id, and
-   * either way keeping the plane-side ghost would show the user a tab that can
-   * never load anything.
+   * Notes that a connection has come up. Anything asked for before this point
+   * belongs to a connection that is gone.
+   */
+  connectionUp(): void {
+    this.epoch++;
+  }
+
+  /**
+   * Rebuilds from the server's list on a welcome. The server's tabs are the
+   * truth for anything asked for on an earlier connection: it was either never
+   * created landside or is in that list under its real id, and either way the
+   * plane-side ghost would be a tab that can never load anything.
+   *
+   * A tab asked for on *this* connection is a different matter — its answer is
+   * still in flight, and this welcome is not it. Dropping those would throw
+   * away the tab, and the URL the user has already typed into it, for anyone
+   * who reaches for "+" inside the first round trip after connecting.
    */
   reset(refs: TabRef[], sameSession = true): void {
     // A different session never had the tabs this side closed, so nothing is
     // in flight for them and the ids it hands out next may reuse those numbers.
     if (!sameSession) this.closed.clear();
     for (const id of this.ids()) {
-      if (this.tabs.get(id)?.provisional) this.remove(id);
+      if (!this.tabs.get(id)?.provisional) continue;
+      if ((this.askedOn.get(id) ?? 0) >= this.epoch) continue;
+      this.forget(id);
+      this.remove(id);
     }
     // Whatever this side holds and the session does not is gone. Not
     // remembered as closed: the server never had it, so nothing is in flight
@@ -175,12 +200,6 @@ export class TabModel {
     for (const id of this.ids()) {
       if (id > 0 && !held.has(id)) this.remove(id);
     }
-    // Every ref was issued on the connection that has just been replaced. A
-    // tab that survived is in the list below under its real id; a command still
-    // waiting on a name it will never get would go to the wrong tab.
-    this.byRef.clear();
-    this.held.clear();
-    this.abandoned.clear();
     for (const r of refs) {
       const known = this.tabs.get(r.tab);
       this.tabs.set(r.tab, {
@@ -253,6 +272,7 @@ export class TabModel {
     const drawn = this.tabs.get(provisional);
     if (!drawn) return;
     this.tabs.delete(provisional);
+    this.askedOn.delete(provisional);
     drawn.id = id;
     drawn.provisional = false;
     this.tabs.set(id, drawn);
@@ -267,12 +287,29 @@ export class TabModel {
     for (const cmd of queue) this.events.send(cmd.name, { ...cmd.args, tab: id });
   }
 
+  /**
+   * Drops every trace of a provisional tab whose answer can no longer arrive:
+   * its ref, and any command still waiting on the id that ref would have
+   * provided. Replaying those later would aim them at whichever tab the server
+   * happens to have given that id to.
+   */
+  private forget(id: number): void {
+    this.held.delete(id);
+    this.askedOn.delete(id);
+    for (const [ref, prov] of this.byRef) {
+      if (prov !== id) continue;
+      this.byRef.delete(ref);
+      this.abandoned.delete(ref);
+    }
+  }
+
   private remove(id: number): void {
     if (!this.tabs.delete(id)) return;
     // Anything still held for an abandoned tab is deliberately kept: it is
     // waiting for the id that lets it be sent, and the close is usually in it.
     if (!this.hasAbandonedRef(id)) {
       this.held.delete(id);
+      this.askedOn.delete(id);
       for (const [ref, prov] of this.byRef) {
         if (prov === id) this.byRef.delete(ref);
       }

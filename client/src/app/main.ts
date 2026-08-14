@@ -368,6 +368,10 @@ function handle(kind: string, args: Record<string, unknown>): void {
       const online = args.online === true;
       const changed = online !== connected;
       connected = online;
+      // One of these per transport that comes up, and the welcome for it is a
+      // round trip behind. Tabs opened in that window belong to this
+      // connection and must survive the welcome that follows.
+      if (online) tabs.connectionUp();
       // Nothing asked for is on its way during an outage: the worker drops
       // navigate frames while the link is down. Saying a page is coming would
       // be a promise the shell cannot keep, and the HUD's "offline" is the

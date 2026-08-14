@@ -131,8 +131,11 @@ describe('TabModel', () => {
   });
 
   it('gives up unadopted tabs when the connection is replaced', () => {
+    model.connectionUp();
     const stale = model.open();
     model.forTab('navigate', stale, { url: 'https://example.test/' });
+    // A second connection: whatever answer the first was waiting for is gone.
+    model.connectionUp();
     model.reset([
       { tab: 1, url: 'https://a.test/', title: 'A', seq: 4, active: true, loading: false },
     ]);
@@ -143,6 +146,27 @@ describe('TabModel', () => {
     // The held navigation must not be replayed onto whichever tab the server
     // happens to have named 1.
     expect(sent.length).toBe(1);
+  });
+
+  it('keeps a tab opened in the gap between the link coming up and the welcome', () => {
+    // The transport reports itself online a round trip before the welcome
+    // arrives, and on this link that round trip is long enough to press "+"
+    // and type an address. The welcome must not throw either away.
+    model.connectionUp();
+    const id = model.open();
+    model.forTab('navigate', id, { url: 'https://example.test/' });
+    model.reset([]);
+
+    expect(model.size).toBe(1);
+    expect(model.isProvisional(id)).toBe(true);
+    expect(model.active).toBe(id);
+    expect(dropped).toEqual([]);
+
+    // And the answer, when it comes, still adopts the tab and sends the
+    // navigation the user is waiting on.
+    model.applyState(1, state({ ref: refOf(0) }));
+    expect(model.ids()).toEqual([1]);
+    expect(sent[1]).toEqual({ name: 'navigate', args: { url: 'https://example.test/', tab: 1 } });
   });
 
   it('keeps the front tab across a resume that does not name one', () => {
