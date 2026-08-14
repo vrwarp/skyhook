@@ -34,8 +34,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Chromium's own sandbox needs a non-root user; the profile holds real cookies,
-# so it gets its own uid and nothing else shares it.
-RUN useradd --create-home --shell /usr/sbin/nologin skyhook
+# so it gets its own uid and nothing else shares it. The uid is pinned because a
+# bind-mounted data directory has to be chown'd to something, and "10001" is a
+# better answer than "whatever useradd picked this build".
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin skyhook
+# The data directory must exist in the image and be owned by that uid: Docker
+# creates a missing volume mountpoint as root, and the server then cannot write
+# its own profile. A fresh volume inherits this ownership.
+RUN install -d -o skyhook -g skyhook -m 0700 /data
 COPY --from=build /out/skyhookd /usr/local/bin/skyhookd
 COPY --from=build /out/skyhookctl /usr/local/bin/skyhookctl
 COPY --from=client /client/dist /usr/share/skyhook/webapp

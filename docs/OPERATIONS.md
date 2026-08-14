@@ -28,6 +28,10 @@ The image ships Chromium, `avifenc`, `cwebp` and Xvfb. Set `SKYHOOK_HEADFUL=1`
 to run Chromium headful under Xvfb, which is the mitigation for sites with
 aggressive bot detection.
 
+It runs as uid **10001**, and `/data` in the image is owned by it. A named
+volume inherits that; a **bind mount does not**, so a host directory needs
+`chown 10001:10001` or the server cannot write its own profile.
+
 ### systemd on bare metal
 
 ```sh
