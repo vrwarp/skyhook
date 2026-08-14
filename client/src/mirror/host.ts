@@ -141,6 +141,12 @@ export class MirrorHost {
   /** Hashes already looked for in the local cache, so a redraw does not ask
    *  again for bytes that have not crossed the link yet. */
   private probed = new Set<string>();
+  /** Hashes a stylesheet references, which have no element to hang from. */
+  private pendingCSS = new Set<string>();
+  /** Hashes already asked of the server. */
+  private requested = new Set<string>();
+  private cssRefresh: ReturnType<typeof setTimeout> | null = null;
+  private imageRequest: ReturnType<typeof setTimeout> | null = null;
   private ready: Promise<void>;
   private scrollTimer: ReturnType<typeof setTimeout> | null = null;
   /** URL of the document currently rendered, so a resync is distinguishable
@@ -207,6 +213,7 @@ export class MirrorHost {
     this.patcher = new Patcher(doc, {
       isOwned: (node: Node): boolean => this.echo?.isOwned(node) ?? false,
       onImage: (el, meta, hash) => this.applyImage(el, meta, hash),
+      rewriteCSS: (rule) => this.resolveCSSImages(rule),
       onFocus: (node) => {
         if (this.echo?.ownedId) return;
         // preventScroll matters more here than it looks: focusing an element
@@ -712,13 +719,51 @@ export class MirrorHost {
 
   /** Called when the store has bytes for a hash: show them. */
   imageArrived(hash: string): void {
-    if (!this.pendingImages.has(hash)) return;
+    if (!this.pendingImages.has(hash) && !this.pendingCSS.has(hash)) return;
     void this.blobFor(hash).then((url) => {
+      if (!url) return;
       const waiting = this.pendingImages.get(hash);
-      if (!url || !waiting) return;
-      this.pendingImages.delete(hash);
-      for (const el of waiting) this.showImage(el, url);
+      if (waiting) {
+        this.pendingImages.delete(hash);
+        for (const el of waiting) this.showImage(el, url);
+      }
+      if (this.pendingCSS.delete(hash)) this.refreshCSSSoon();
     });
+  }
+
+  /**
+   * Resolves the image references the server left in a CSS rule.
+   *
+   * The server rewrites `url(...)` to a content hash, because it has no idea
+   * where the client will keep the bytes; `skyhook://img/...` left as written
+   * is a scheme no browser knows, so every backgrounded logo, icon and hero
+   * image renders as nothing at all. Until the bytes land the reference points
+   * at a transparent pixel, which at least lets the box keep its own colour.
+   */
+  private resolveCSSImages(rule: string): string {
+    if (!rule.includes('skyhook://img/')) return rule;
+    return rule.replace(/skyhook:\/\/img\/([0-9a-f]+)/gi, (_m, hash: string) => {
+      const known = this.blobs.get(hash);
+      if (known) return known;
+      if (!this.pendingCSS.has(hash)) {
+        this.pendingCSS.add(hash);
+        this.requestImagesSoon();
+        if (!this.probed.has(hash)) {
+          this.probed.add(hash);
+          this.imageArrived(hash);
+        }
+      }
+      return PENDING_PIXEL;
+    });
+  }
+
+  /** Re-renders the stylesheet once, however many images just landed. */
+  private refreshCSSSoon(): void {
+    if (this.cssRefresh) return;
+    this.cssRefresh = setTimeout(() => {
+      this.cssRefresh = null;
+      this.patcher?.refreshCSS();
+    }, 120);
   }
 
   /**
@@ -787,9 +832,34 @@ export class MirrorHost {
     }
   }
 
+  /**
+   * Asks for the bytes of every image still missing, once per hash.
+   *
+   * Only images above the fold are pushed unasked; everything else — and every
+   * image a stylesheet names, which the server cannot see a viewport position
+   * for — waits to be asked for. Asking twice costs a round trip on a link
+   * where round trips are the whole problem, so each hash goes once.
+   */
   private requestPendingImages(): void {
-    if (!this.pendingImages.size) return;
-    this.events.wantImages(this.tab, Array.from(this.pendingImages.keys()));
+    const want: string[] = [];
+    for (const hash of this.pendingImages.keys()) {
+      if (!this.requested.has(hash)) want.push(hash);
+    }
+    for (const hash of this.pendingCSS) {
+      if (!this.requested.has(hash)) want.push(hash);
+    }
+    if (!want.length) return;
+    for (const hash of want) this.requested.add(hash);
+    this.events.wantImages(this.tab, want);
+  }
+
+  /** Batches the requests a burst of patches would otherwise make one at a time. */
+  private requestImagesSoon(): void {
+    if (this.imageRequest) return;
+    this.imageRequest = setTimeout(() => {
+      this.imageRequest = null;
+      this.requestPendingImages();
+    }, 120);
   }
 
   private reconcileAttr(op: MutationOp): void {
@@ -844,10 +914,14 @@ export class MirrorHost {
     for (const url of this.blobs.values()) URL.revokeObjectURL(url);
     this.blobs.clear();
     this.probed.clear();
+    this.pendingCSS.clear();
+    this.requested.clear();
   }
 
   destroy(): void {
     this.frame.remove();
+    if (this.cssRefresh) clearTimeout(this.cssRefresh);
+    if (this.imageRequest) clearTimeout(this.imageRequest);
     this.releaseBlobs();
     this.pendingImages.clear();
     this.patcher = null;

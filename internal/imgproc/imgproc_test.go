@@ -242,3 +242,41 @@ func onePixelPNG(t *testing.T) []byte {
 	}
 	return buf.Bytes()
 }
+
+// A site's logo, its icons and half its illustrations are SVG, and Go decodes
+// none of it — so every one of them used to fail here and never reach the page.
+func TestSVGIsShippedAsItIs(t *testing.T) {
+	src := []byte(`<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><path d="M0 0h24v12H0z"/></svg>`)
+	tc := New(Options{Encoder: EncoderPNG})
+	res, err := tc.Transcode(context.Background(), src, 0, 0)
+	if err != nil {
+		t.Fatalf("transcode svg: %v", err)
+	}
+	if res.Mime != "image/svg+xml" {
+		t.Fatalf("mime = %q, want image/svg+xml", res.Mime)
+	}
+	if !bytes.Equal(res.Data, src) {
+		t.Fatal("the markup was altered; a vector image is already as small as it gets")
+	}
+	// With no laid-out box the viewBox is the only source of an aspect ratio,
+	// and without one the element cannot reserve its space.
+	if res.W != 24 || res.H != 12 {
+		t.Fatalf("size = %dx%d, want 24x12 from the viewBox", res.W, res.H)
+	}
+
+	// A laid-out box wins: that is the size the page actually draws it at.
+	res, err = tc.Transcode(context.Background(), src, 48, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.W != 48 || res.H != 24 {
+		t.Fatalf("size = %dx%d, want the rendered box", res.W, res.H)
+	}
+
+	// And a bitmap must still go through the transcoder.
+	png := onePixelPNG(t)
+	if _, ok := passThroughSVG(png, 0, 0); ok {
+		t.Fatal("a PNG was mistaken for markup")
+	}
+}

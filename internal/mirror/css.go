@@ -277,6 +277,37 @@ func rewriteCSSImages(rules []string, base string, maxDim int) ([]string, []Imag
 	return out, reqs
 }
 
+// absolutizeCSSURLs rewrites every relative url() against the sheet's own
+// address.
+//
+// A stylesheet resolves its references against wherever it was served from, but
+// text lifted out of one and replayed into a constructed sheet resolves against
+// the document instead. For a sheet on a CDN that is a different host entirely,
+// so every background image in it would point at a path on the site that has
+// nothing there. Fragment-only references are left alone: they name an SVG
+// filter or gradient in the document, not a file.
+func absolutizeCSSURLs(text, base string) string {
+	if base == "" || !strings.Contains(text, "url(") {
+		return text
+	}
+	return cssURL.ReplaceAllStringFunc(text, func(m string) string {
+		sub := cssURL.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		raw := strings.TrimSpace(sub[1])
+		if raw == "" || strings.HasPrefix(raw, "#") ||
+			strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "skyhook://") {
+			return m
+		}
+		abs := resolveURL(base, raw)
+		if abs == "" {
+			return m
+		}
+		return "url(" + abs + ")"
+	})
+}
+
 func resolveURL(base, ref string) string {
 	b, err := url.Parse(base)
 	if err != nil {

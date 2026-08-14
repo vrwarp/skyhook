@@ -82,6 +82,8 @@
   var cssTimer = null;
   var emittedCSS = new Map();   // rule text -> index
   var cssOrder = [];
+  var recoveredSheets = new Map(); // href -> constructed sheet the host supplied
+  var blockedSheets = {};          // href -> 1, for sheets nothing can read yet
   var lastText = new Map();     // id -> last text we reported
   var lastScroll = new Map();
   var scrollTimer = null;
@@ -436,8 +438,26 @@
   function collectSheets(doc, sheets, out) {
     if (!sheets) return;
     for (var i = 0; i < sheets.length; i++) {
+      var sheet = sheets[i];
       var rules = null;
-      try { rules = sheets[i].cssRules; } catch (e) { rules = null; } // cross-origin
+      try { rules = sheet.cssRules; } catch (e) { rules = null; } // cross-origin
+      if (!rules) {
+        // A stylesheet served from another origin — which is where a CDN-backed
+        // site keeps all of them — cannot be read through the CSSOM at all. The
+        // host fetches the text over the protocol and hands it back through
+        // addSheet; substituting it here, in the sheet's own place in the
+        // cascade, is what keeps a later rule later.
+        var href = null;
+        try { href = sheet.href; } catch (e) { href = null; }
+        if (href) {
+          var sub = recoveredSheets.get(href);
+          if (sub) {
+            try { rules = sub.cssRules; } catch (e) { rules = null; }
+          } else {
+            blockedSheets[href] = 1;
+          }
+        }
+      }
       if (!rules) continue;
       collectRules(doc, rules, out, 0);
     }
@@ -917,6 +937,41 @@
       globalThis.scrollTo({ top: target, behavior: 'instant' });
       ownScroll(0);
       return { height: h, top: globalThis.scrollY | 0 };
+    },
+    /**
+     * Reports stylesheets the CSSOM will not open.
+     *
+     * Cross-origin sheets throw on `cssRules`, and a site that serves its CSS
+     * from a CDN — which is most of them — has every stylesheet in that state.
+     * The page then arrives with its whole structure and none of its design.
+     * The host can read them over the protocol; this is how it learns which.
+     */
+    blockedSheets: function () {
+      // Walking the sheets is what discovers them, and a caller may ask before
+      // any CSS pass has run.
+      cssDelta();
+      return Object.keys(blockedSheets);
+    },
+    /**
+     * Supplies the text of a sheet blockedSheets named.
+     *
+     * It becomes a constructed stylesheet, which is same-origin whatever it was
+     * built from, so the used-rule filter applies to it exactly as to the rest.
+     * The sheet is never adopted into the document: the page must go on looking
+     * the way it did, or the rules extracted from it would stop matching.
+     */
+    addSheet: function (href, text) {
+      if (!href || !text) return false;
+      try {
+        var s = new CSSStyleSheet();
+        s.replaceSync(text);
+        recoveredSheets.set(href, s);
+        delete blockedSheets[href];
+        scheduleCSS();
+        return true;
+      } catch (e) {
+        return false;
+      }
     },
     stats: function () {
       return { nodes: byId.size, strings: strings.length, css: cssOrder.length, seq: seq };

@@ -496,3 +496,31 @@ func TestHoldPrefersWhatTheReaderDid(t *testing.T) {
 		}
 	}
 }
+
+// A stylesheet lifted off a CDN and replayed into a constructed sheet resolves
+// its references against the document, not against wherever it was served
+// from — so a relative background image would point at a path on the site that
+// has nothing there.
+func TestAbsolutizeCSSURLs(t *testing.T) {
+	const base = "https://cdn.example.com/assets/v2/site.css"
+	got := absolutizeCSSURLs(`.a{background:url("../img/logo.png")}
+		.b{background:url(/root.png)}
+		.c{background:url(data:image/gif;base64,AAA)}
+		.d{filter:url(#blur)}
+		.e{background:url('https://other.example/x.png')}`, base)
+	for _, want := range []string{
+		"url(https://cdn.example.com/assets/img/logo.png)",
+		"url(https://cdn.example.com/root.png)",
+		"url(data:image/gif;base64,AAA)", // an inline image is already resolved
+		"url(#blur)",                     // names a filter in the document, not a file
+		"url(https://other.example/x.png)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// Nothing to do, nothing touched.
+	if in := ".a{color:red}"; absolutizeCSSURLs(in, base) != in {
+		t.Error("rewrote a rule with no url() in it")
+	}
+}

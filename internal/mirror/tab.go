@@ -162,6 +162,9 @@ type Tab struct {
 	// pendingInput is the seq of the most recent input event, tagged onto the
 	// next mutation batch so the client can reconcile local echo.
 	pendingInput uint64
+	// sheetIDs maps a stylesheet's URL to the CSS domain's id for it, which is
+	// how a sheet the page's own CSSOM refuses to open is read anyway.
+	sheetIDs map[string]string
 }
 
 // NewTab attaches the mirror to a CDP session.
@@ -185,6 +188,15 @@ func (t *Tab) install(ctx context.Context) error {
 		if err := s.Do(ctx, m, nil, nil); err != nil {
 			return fmt.Errorf("mirror: %s: %w", m, err)
 		}
+	}
+	// The CSS domain is how a cross-origin stylesheet is read at all: DevTools
+	// is not bound by the same-origin policy the page is. Not fatal if it is
+	// missing — the mirror then looks the way it did before, which is to say
+	// unstyled on any site that serves its CSS from a CDN.
+	if err := s.Do(ctx, "CSS.enable", nil, nil); err != nil {
+		t.log.Debug("css domain unavailable", "err", err)
+	} else {
+		s.Subscribe("CSS.styleSheetAdded", t.onStyleSheetAdded)
 	}
 	if err := s.Do(ctx, "Page.setLifecycleEventsEnabled", map[string]any{"enabled": true}, nil); err != nil {
 		t.log.Debug("lifecycle events unavailable", "err", err)
@@ -354,7 +366,107 @@ func (t *Tab) onLoad() {
 	// The agent snapshots itself on DOMContentLoaded; ask for a CSS pass now
 	// that late stylesheets have landed.
 	_, _ = t.eval(ctx, "__skyhook && __skyhook.flush()")
+	t.recoverBlockedSheets(ctx)
 	t.refreshState(ctx)
+}
+
+/*
+recoverBlockedSheets hands the agent the stylesheets it cannot open itself.
+
+The used-rule extraction walks `document.styleSheets`, and a sheet served from
+another origin throws on `cssRules` — the CSSOM will not show a page its own
+CDN's CSS. A site that keeps every stylesheet on a media domain therefore
+arrives with its whole structure and none of its design, which is most of what
+is wrong with it. DevTools is not bound by the same-origin policy, so the text
+is available here for the asking; the agent turns it into a constructed sheet
+and filters it exactly like the rest.
+
+Relative URLs are resolved first. A constructed stylesheet resolves `url()`
+against the document, not against wherever the sheet came from, so every
+background image in a CDN-hosted sheet would otherwise point at a path on the
+site that has nothing there.
+*/
+func (t *Tab) recoverBlockedSheets(ctx context.Context) {
+	raw, err := t.eval(ctx, "__skyhook ? __skyhook.blockedSheets() : []")
+	if err != nil {
+		return
+	}
+	var hrefs []string
+	if err := json.Unmarshal(raw, &hrefs); err != nil || len(hrefs) == 0 {
+		return
+	}
+	texts := t.styleSheetTexts(ctx, hrefs)
+	for _, href := range hrefs {
+		text, ok := texts[href]
+		if !ok || text == "" {
+			continue
+		}
+		if len(text) > maxRecoveredSheet {
+			t.log.Debug("stylesheet too large to recover", "url", href, "bytes", len(text))
+			continue
+		}
+		args, err := json.Marshal([]string{href, absolutizeCSSURLs(text, href)})
+		if err != nil {
+			continue
+		}
+		if _, err := t.eval(ctx, "__skyhook.addSheet.apply(null, "+string(args)+")"); err != nil {
+			t.log.Debug("stylesheet recovery failed", "url", href, "err", err)
+		}
+	}
+}
+
+// maxRecoveredSheet bounds what one cross-origin sheet may cost in memory here
+// and in the agent. Design systems run to a few hundred kilobytes; past this it
+// is a bundle nothing on the page is going to match anyway.
+const maxRecoveredSheet = 4 << 20
+
+// styleSheetTexts reads stylesheet bodies through the CSS domain, which — being
+// DevTools — is not subject to the same-origin policy the page is.
+func (t *Tab) styleSheetTexts(ctx context.Context, hrefs []string) map[string]string {
+	want := make(map[string]bool, len(hrefs))
+	for _, h := range hrefs {
+		want[h] = true
+	}
+	t.mu.Lock()
+	ids := make(map[string]string, len(hrefs))
+	for url, id := range t.sheetIDs {
+		if want[url] {
+			ids[url] = id
+		}
+	}
+	t.mu.Unlock()
+
+	out := make(map[string]string, len(ids))
+	for url, id := range ids {
+		var res struct {
+			Text string `json:"text"`
+		}
+		if err := t.sess.Do(ctx, "CSS.getStyleSheetText",
+			map[string]any{"styleSheetId": id}, &res); err != nil {
+			t.log.Debug("stylesheet text unavailable", "url", url, "err", err)
+			continue
+		}
+		out[url] = res.Text
+	}
+	return out
+}
+
+func (t *Tab) onStyleSheetAdded(_ string, params json.RawMessage) {
+	var p struct {
+		Header struct {
+			StyleSheetID string `json:"styleSheetId"`
+			SourceURL    string `json:"sourceURL"`
+		} `json:"header"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Header.SourceURL == "" {
+		return
+	}
+	t.mu.Lock()
+	if t.sheetIDs == nil {
+		t.sheetIDs = map[string]string{}
+	}
+	t.sheetIDs[p.Header.SourceURL] = p.Header.StyleSheetID
+	t.mu.Unlock()
 }
 
 // ensureWorld creates (or reuses) the isolated world and installs the agent.

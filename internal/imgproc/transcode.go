@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"sync"
 
 	"golang.org/x/image/draw"
@@ -117,11 +119,65 @@ func (t *Transcoder) probe() {
 // ErrTooLarge means the source exceeded the configured limits.
 var ErrTooLarge = errors.New("imgproc: source image too large")
 
+var svgSize = regexp.MustCompile(`(?is)<svg\b[^>]*?\bviewBox\s*=\s*["']\s*[-\d.eE]+[\s,]+[-\d.eE]+[\s,]+([\d.eE]+)[\s,]+([\d.eE]+)`)
+
+/*
+passThroughSVG ships a vector image as it is.
+
+Go's image package decodes no SVG, so every one of them failed here — and a
+site's logo, its icons and half its illustrations are SVG. Rasterising them
+would need a renderer landside and would cost more bytes than the markup does:
+these are usually a few hundred bytes, already smaller than any bitmap of them
+could be, and they stay sharp at whatever size the page lays them out at.
+
+Passing markup through is safe because of where it lands: the client only ever
+puts these in an `<img>`, and an SVG loaded as an image is an isolated document
+with scripting disabled and no external loads, in a frame that is itself denied
+`allow-scripts`.
+*/
+func passThroughSVG(src []byte, w, h int) (*Result, bool) {
+	if !looksLikeSVG(src) {
+		return nil, false
+	}
+	res := &Result{Data: src, Mime: "image/svg+xml", W: w, H: h}
+	if res.W == 0 || res.H == 0 {
+		// No laid-out box: take the aspect from the viewBox so the element can
+		// still reserve its space.
+		if m := svgSize.FindSubmatch(src); m != nil {
+			res.W, res.H = atoiFloat(m[1]), atoiFloat(m[2])
+		}
+	}
+	return res, true
+}
+
+// looksLikeSVG sniffs the markup, skipping an XML declaration, a doctype, a
+// byte-order mark or comments — none of which an `image/svg+xml` content type
+// would be needed to see past.
+func looksLikeSVG(src []byte) bool {
+	head := src
+	if len(head) > 1024 {
+		head = head[:1024]
+	}
+	head = bytes.TrimPrefix(head, []byte("\xef\xbb\xbf"))
+	return bytes.Contains(bytes.ToLower(head), []byte("<svg"))
+}
+
+func atoiFloat(b []byte) int {
+	f, err := strconv.ParseFloat(string(b), 64)
+	if err != nil || f <= 0 || f > 1e6 {
+		return 0
+	}
+	return int(f + 0.5)
+}
+
 // Transcode decodes src and re-encodes it at (w,h), which is the size the page
 // actually lays the image out at. Zero dimensions mean "keep natural size".
 func (t *Transcoder) Transcode(ctx context.Context, src []byte, w, h int) (*Result, error) {
 	if len(src) > t.opts.MaxBytes {
 		return nil, ErrTooLarge
+	}
+	if res, ok := passThroughSVG(src, w, h); ok {
+		return res, nil
 	}
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(src))
 	if err != nil {

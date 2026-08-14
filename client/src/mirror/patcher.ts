@@ -404,10 +404,28 @@ export class Patcher {
     if (!rules.length) return;
     this.ensureStyleElement();
     if (!this.styleEl) return;
-    for (const r of rules) {
-      this.cssRules.push(this.hooks.rewriteCSS ? this.hooks.rewriteCSS(r) : r);
-    }
-    this.styleEl.textContent = this.cssRules.join('\n');
+    for (const r of rules) this.cssRules.push(r);
+    this.renderCSS();
+  }
+
+  /**
+   * Re-renders the stylesheet from the rules as they arrived.
+   *
+   * Rules are kept in their wire form rather than rewritten on arrival, because
+   * a rule may name an image whose bytes are still crossing the link: what the
+   * reference resolves to changes under it, and only the raw rule can be
+   * resolved again.
+   */
+  refreshCSS(): void {
+    if (this.styleEl) this.renderCSS();
+  }
+
+  private renderCSS(): void {
+    if (!this.styleEl) return;
+    const rewrite = this.hooks.rewriteCSS;
+    this.styleEl.textContent = rewrite
+      ? this.cssRules.map((r) => rewrite(r)).join('\n')
+      : this.cssRules.join('\n');
   }
 
   /** Registers image metadata arriving after the snapshot. */
