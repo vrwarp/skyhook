@@ -93,6 +93,15 @@ export class Patcher {
   /** Element names as the server sent them, which is what the document hash is
    *  computed over — see createNode. */
   private names = new Map<number, string>();
+  /**
+   * Node flags exactly as they arrived, for elements that had any.
+   *
+   * Kept only to be reported: a capture puts these beside the flags the same
+   * elements have landside, and a difference is a node whose copy here is
+   * stale in a way no hash and no HTML diff can show — a custom element that
+   * grew a shadow root after it was mirrored, most of all.
+   */
+  private flags = new Map<number, number>();
   private styleEl: HTMLStyleElement | null = null;
   private cssRules: string[] = [];
   private hooks: PatcherHooks;
@@ -134,6 +143,7 @@ export class Patcher {
     this.nodes = new Map();
     this.ids = new WeakMap();
     this.names = new Map();
+    this.flags = new Map();
     this.images = new Map();
     this.seq = 0;
     for (const im of snap.images) this.images.set(im.hash, im);
@@ -314,6 +324,7 @@ export class Patcher {
         // built: the server compares this document's fingerprint against the
         // agent's, and a substitution is not a divergence.
         this.names.set(n.id, tag);
+        if (n.flags) this.flags.set(n.id, n.flags);
         node = el;
         break;
       }
@@ -386,6 +397,7 @@ export class Patcher {
       this.nodes.delete(id);
       this.ids.delete(node);
       this.names.delete(id);
+      this.flags.delete(id);
     }
     for (let c = node.firstChild; c; c = c.nextSibling) this.forget(c);
   }
@@ -464,18 +476,25 @@ export class Patcher {
   }
 
   /**
-   * The (id, kind, value) triples docHash is computed over, node by node.
+   * The (id, kind, value, flags) rows docHash is computed over, node by node.
    *
    * A hash mismatch says the two documents differ and nothing else. This says
    * which nodes: put it beside the agent's list from the same instant and the
    * diff is the bug. Values are truncated to the 32 characters the hash itself
    * looks at, so a difference here is always a difference the hash saw.
+   *
+   * The flags are the exception, and are here for the case the hash cannot
+   * see: they are not hashed, so an element can agree on id, kind and name and
+   * still be a different element — one that grew a shadow root landside after
+   * this copy of it was made. These are the flags as they arrived; the agent
+   * reports what its elements have now, so a difference means this copy is
+   * stale rather than wrong.
    */
   fingerprint(limit = 20000): {
-    total: number; truncated: boolean; nodes: [number, number, string][];
+    total: number; truncated: boolean; nodes: [number, number, string, number][];
   } {
     const ids = Array.from(this.nodes.keys()).sort((a, b) => a - b);
-    const out: [number, number, string][] = [];
+    const out: [number, number, string, number][] = [];
     for (const id of ids) {
       if (out.length >= limit) break;
       const node = this.nodes.get(id);
@@ -483,7 +502,10 @@ export class Patcher {
       const v = node.nodeType === Node.TEXT_NODE
         ? node.nodeValue ?? ''
         : this.names.get(id) ?? (node as Element).tagName?.toLowerCase() ?? '';
-      out.push([id, node.nodeType, v.slice(0, 32)]);
+      // The image flag is left out on both sides: it marks the act of queueing
+      // an image for transcoding, which the plane side never does, so the two
+      // could never agree on it.
+      out.push([id, node.nodeType, v.slice(0, 32), (this.flags.get(id) ?? 0) & ~NodeFlags.Image]);
     }
     return { total: ids.length, truncated: ids.length > out.length, nodes: out };
   }

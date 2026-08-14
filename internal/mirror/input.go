@@ -572,8 +572,9 @@ func (t *Tab) CaptureRegion(ctx context.Context, node int64) ([]byte, error) {
 	return out.Data, nil
 }
 
-// DocHash asks the agent for a whole-document fingerprint, used by the periodic
-// divergence check.
+// DocHash asks the agent for a whole-document fingerprint of the page as it is
+// this instant. It answers "what does landside look like now", which is the
+// question a capture asks; a divergence check wants Checkpoint instead.
 func (t *Tab) DocHash(ctx context.Context) (uint64, error) {
 	raw, err := t.eval(ctx, "__skyhook.docHash()")
 	if err != nil {
@@ -584,6 +585,34 @@ func (t *Tab) DocHash(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	return h, nil
+}
+
+// Checkpoint is the agent's hash together with the frame it belongs to.
+type Checkpoint struct {
+	Seq  uint64 `json:"seq"`
+	Hash uint64 `json:"hash"`
+}
+
+// EmptyDocHash is the FNV-1a offset basis, and so the hash of a document with
+// nothing in it. A page between navigations reports it for a moment, and a
+// divergence check that reads it has caught the browser mid-stride rather than
+// found a broken mirror.
+const EmptyDocHash uint64 = 0x811c9dc5
+
+// Checkpoint flushes whatever the agent is holding and reports the hash of the
+// document that frame leaves behind, with its sequence number. Comparing a
+// client's hash at that same sequence number is the only comparison that means
+// anything; see the integrity check.
+func (t *Tab) Checkpoint(ctx context.Context) (Checkpoint, error) {
+	var cp Checkpoint
+	raw, err := t.eval(ctx, "__skyhook.checkpoint()")
+	if err != nil {
+		return cp, err
+	}
+	if err := json.Unmarshal(raw, &cp); err != nil {
+		return cp, err
+	}
+	return cp, nil
 }
 
 func (t *Tab) flushSoon(d time.Duration) {

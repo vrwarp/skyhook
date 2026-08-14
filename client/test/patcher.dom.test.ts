@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Patcher, imageHashOf } from '../src/mirror/patcher.js';
-import { NodeKind, OpCode, type Mutation, type Snapshot } from '../src/shared/protocol.js';
+import { NodeFlags, NodeKind, OpCode, type Mutation, type Snapshot } from '../src/shared/protocol.js';
 
 function snapshot(): Snapshot {
   return {
@@ -262,6 +262,25 @@ describe('Patcher', () => {
 
     // The fingerprint still has to match the agent's, which lowercases.
     expect(patcher.docHash()).toBe(agentHash(snap));
+  });
+
+  it('reports the flags it was sent, which the hash does not cover', () => {
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('sky-card');
+    // A custom element the server saw with a shadow root, and one it did not.
+    snap.nodes.push(
+      { id: 10, parent: 2, kind: NodeKind.Element, ref: base, attrs: [], flags: NodeFlags.Shadow },
+      { id: 11, parent: 2, kind: NodeKind.Element, ref: base, attrs: [], flags: 0 },
+    );
+    patcher.applySnapshot(snap);
+
+    const rows = new Map(patcher.fingerprint().nodes.map((n) => [n[0], n]));
+    expect(rows.get(10)![3]).toBe(NodeFlags.Shadow);
+    expect(rows.get(11)![3]).toBe(0);
+    // Two elements identical in every column the hash reads. Without the
+    // flags, a mirror holding the wrong one of them looks perfectly healthy.
+    expect(rows.get(10)!.slice(0, 3)).toEqual(rows.get(11)!.slice(0, 3).map((v, i) => (i === 0 ? 10 : v)));
   });
 
   it('puts HTML back into the HTML namespace inside foreignObject', () => {

@@ -65,6 +65,13 @@ type tabState struct {
 	journal  *Journal
 	acked    uint64
 	lastHash uint64
+	// The integrity check anchors itself to one frame — see integrityLoop.
+	// check is the seq it is waiting for, armed only while it waits; got holds
+	// the client's hash for that seq once the ack carrying it arrives.
+	checkArmed bool
+	checkSeq   uint64
+	checkGot   bool
+	checkHash  uint64
 }
 
 type outbound struct {
@@ -469,6 +476,12 @@ func (s *Session) Ack(tab uint32, seq uint64, hash uint64) {
 	if ts != nil {
 		ts.acked = seq
 		ts.lastHash = hash
+		// The integrity check is waiting for exactly this frame, and acks for
+		// later ones stream past while it waits: catch the hash on its way
+		// through rather than reading whatever is current when it looks.
+		if ts.checkArmed && seq == ts.checkSeq {
+			ts.checkGot, ts.checkHash = true, hash
+		}
 	}
 	s.mu.Unlock()
 	if ts != nil {
@@ -523,11 +536,39 @@ func (s *Session) Resync(ctx context.Context, tab uint32, haveTo uint64, reason 
 	}
 }
 
-// integrityLoop periodically compares the client's document hash with the
-// landside truth. Silent divergence is the failure mode that makes a mirror
-// untrustworthy, so it is worth a frame every 30 seconds.
+// integrityAckWait is how long a check waits for the client to reach the frame
+// it anchored itself to. It is generous because the link is: this project's
+// own target is a 1.2 s round trip with multi-second outages, and a client that
+// is merely slow has not diverged.
+const integrityAckWait = 15 * time.Second
+
+/*
+integrityLoop periodically checks that the client's document is the one the
+frames it was sent add up to. Silent divergence is the failure mode that makes a
+mirror untrustworthy, so it is worth a frame every 30 seconds.
+
+The comparison has to be between the same instants, and that is the whole
+difficulty. The agent's hash describes the page *now*; the client's describes
+whatever the last frame it acknowledged made it. On a page that changes faster
+than the link's round trip — a news ticker, a feed — those are never the same
+document, and comparing them declares a divergence every thirty seconds for as
+long as the tab is open. Each one costs a resync: a replay if the buffer covers
+it, a whole document if it does not. The resync then competes with the traffic
+that made the client late in the first place, so the check makes the condition
+it misreads worse.
+
+So a check anchors itself: the agent flushes what it is holding and reports the
+hash together with the sequence number that frame carries, and the answer is
+the hash the client reports for that same sequence number, caught on its way
+past in Ack. A client that never reaches it has proved nothing, and the check
+says nothing.
+*/
 func (s *Session) integrityLoop() {
-	t := time.NewTicker(30 * time.Second)
+	every := s.mgr.opts.IntegrityInterval
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
@@ -544,33 +585,100 @@ func (s *Session) integrityLoop() {
 			}
 			s.mu.Unlock()
 			for id, ts := range tabs {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				h, err := ts.tab.DocHash(ctx)
-				cancel()
-				if err != nil {
-					continue
-				}
-				s.mu.Lock()
-				clientHash := ts.lastHash
-				s.mu.Unlock()
-				if clientHash == 0 || clientHash == h {
-					continue
-				}
-				s.log.Warn("mirror divergence", "tab", id, "client", clientHash, "server", h)
-				s.events.Add("divergence", id, map[string]any{
-					"clientHash": clientHash, "serverHash": h, "acked": ts.acked,
-				})
-				// The bundle is opened before the resync, not after: a resync
-				// repairs the divergence, and a capture taken afterwards is a
-				// capture of a mirror that is working again. What both halves
-				// looked like while they disagreed is the whole evidence.
-				s.captureDivergence(id)
-				ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Second)
-				s.Resync(ctx2, id, ts.acked, "hash-mismatch")
-				cancel2()
+				s.checkTab(id, ts)
 			}
 		}
 	}
+}
+
+// checkTab runs one tab's integrity check to a conclusion, or to no conclusion.
+func (s *Session) checkTab(id uint32, ts *tabState) {
+	// A tab between documents has no document to hash. The agent reports the
+	// empty-document hash for that moment, and a check that reads it would
+	// throw away a perfectly good client document to fix a page that was
+	// merely mid-navigation.
+	if ts.tab.Loading() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	cp, err := ts.tab.Checkpoint(ctx)
+	cancel()
+	if err != nil {
+		return
+	}
+	if cp.Hash == mirror.EmptyDocHash {
+		s.log.Debug("integrity check skipped: the page has no document right now", "tab", id)
+		return
+	}
+
+	clientHash, ok := s.awaitCheck(ts, cp.Seq)
+	if !ok {
+		// Not a divergence: the client is behind, or offline, or the tab
+		// re-snapshotted and the sequence number it was waiting for will never
+		// arrive. Saying so would be a lie that costs a whole document.
+		s.log.Debug("integrity check inconclusive: the client never reached the frame it was checked against",
+			"tab", id, "seq", cp.Seq, "acked", s.ackedSeq(ts))
+		return
+	}
+	if clientHash == cp.Hash {
+		s.log.Debug("integrity check passed", "tab", id, "seq", cp.Seq)
+		return
+	}
+
+	s.log.Warn("mirror divergence", "tab", id, "seq", cp.Seq, "client", clientHash, "server", cp.Hash)
+	s.events.Add("divergence", id, map[string]any{
+		"clientHash": clientHash, "serverHash": cp.Hash, "seq": cp.Seq, "acked": s.ackedSeq(ts),
+	})
+	// The bundle is opened before the resync, not after: a resync repairs the
+	// divergence, and a capture taken afterwards is a capture of a mirror that
+	// is working again. What both halves looked like while they disagreed is
+	// the whole evidence.
+	s.captureDivergence(id)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Second)
+	s.Resync(ctx2, id, s.ackedSeq(ts), "hash-mismatch")
+	cancel2()
+}
+
+// awaitCheck arms the tab for one sequence number and waits for the ack that
+// carries it. It reports the client's hash, and whether one arrived at all.
+func (s *Session) awaitCheck(ts *tabState, seq uint64) (uint64, bool) {
+	s.mu.Lock()
+	ts.checkArmed, ts.checkSeq, ts.checkGot, ts.checkHash = true, seq, false, 0
+	// A client already at this frame acked it before the check was armed.
+	if ts.acked == seq && ts.lastHash != 0 {
+		ts.checkGot, ts.checkHash = true, ts.lastHash
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		ts.checkArmed = false
+		s.mu.Unlock()
+	}()
+
+	poll := time.NewTicker(100 * time.Millisecond)
+	defer poll.Stop()
+	deadline := time.After(integrityAckWait)
+	for {
+		s.mu.Lock()
+		got, hash := ts.checkGot, ts.checkHash
+		s.mu.Unlock()
+		if got {
+			return hash, true
+		}
+		select {
+		case <-s.closed:
+			return 0, false
+		case <-deadline:
+			return 0, false
+		case <-poll.C:
+		}
+	}
+}
+
+func (s *Session) ackedSeq(ts *tabState) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ts.acked
 }
 
 // ------------------------------------------------------------------ shutdown

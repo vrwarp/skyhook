@@ -99,6 +99,11 @@ export async function gather(input: CaptureInput): Promise<CaptureArtifact[]> {
         if (shot.data) {
           await push(`tabs/${frame.tab}/screenshot.webp`, shot.data);
         }
+        // Beside the picture, and even when there is no picture: what was
+        // attempted is worth as much as what came out.
+        if (shot.meta) {
+          await push(`tabs/${frame.tab}/screenshot.json`, JSON.stringify(shot.meta, null, 2));
+        }
         if (shot.note) notes.push(`tab ${frame.tab}: ${shot.note}`);
       } catch (err) {
         notes.push(`tab ${frame.tab}: the screenshot failed: ${String(err)}`);
@@ -160,6 +165,34 @@ function clientReport(input: CaptureInput): Record<string, unknown> {
 interface Shot {
   data?: Uint8Array;
   note?: string;
+  /**
+   * What the picture is a picture *of*, written into the bundle beside it.
+   *
+   * This one covers the top of the document up to MAX_SHOT_HEIGHT; the
+   * landside one covers the whole scrollable page, or — past its own limit —
+   * only the viewport. Two images of the same tab, at different scales, over
+   * different regions, invite exactly one mistake: diffing them and believing
+   * the result. Each says what it holds so that comparison can be made
+   * honestly, or knowingly not made.
+   */
+  meta?: ShotMeta;
+}
+
+interface ShotMeta {
+  /** "page" when the whole document is in the image, "top" when it is cropped. */
+  covers: 'page' | 'top';
+  format: string;
+  /** The region drawn, in CSS pixels. */
+  width: number;
+  height: number;
+  /** The document's full size, of which the above is what fitted. */
+  pageWidth: number;
+  pageHeight: number;
+  dpr: number;
+  bytes: number;
+  /** Images the rasteriser could not draw, and so are blank in the picture. */
+  imagesMissing: number;
+  imagesSkipped: number;
 }
 
 /**
@@ -232,9 +265,22 @@ async function screenshot(frame: MirrorFreeze): Promise<Shot> {
     canvas.toBlob(resolve, 'image/webp', 0.72);
   });
   if (!blob) return { note: 'the canvas produced no image' };
+  const data = new Uint8Array(await blob.arrayBuffer());
   return {
-    data: new Uint8Array(await blob.arrayBuffer()),
+    data,
     note: notes.length ? notes.join('; ') : undefined,
+    meta: {
+      covers: height < full ? 'top' : 'page',
+      format: 'webp',
+      width,
+      height,
+      pageWidth: frame.width,
+      pageHeight: full,
+      dpr: 1,
+      bytes: data.length,
+      imagesMissing: inlined.missing,
+      imagesSkipped: inlined.skipped,
+    },
   };
 }
 

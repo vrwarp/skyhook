@@ -570,6 +570,66 @@ The general rule this is an instance of: a selector whose truth differs between
 the two sides has to be answered landside and carried, never re-asked
 plane-side. `:defined` is the sharpest case because it always differs.
 
+### 20. A divergence check has to compare two documents, not two instants
+
+§12 fixed the hash. What was left was *when* it is read. The check asked the
+agent for the hash of the page now and compared it against the hash the client
+had reported for the last frame it acknowledged — two different documents on
+anything that changes faster than the link's round trip, which is a news front
+page, a feed, a chat, most of the web. Every thirty seconds the mirror was
+declared diverged and resynced: a replay if the ring covered it, the whole
+document if it did not. The resync then competed with the traffic that had made
+the client late, so the check made the condition it was misreading worse — the
+same unbounded loop as §12, from the opposite end, and invisible for the same
+reason: it looks exactly like a mirror that keeps breaking.
+
+A check now anchors itself. `__skyhook.checkpoint()` drains the observer's
+pending records, flushes what the agent is holding, and returns the hash
+together with the sequence number of the frame that produces it; `Ack` catches
+the client's hash for that same sequence number as it goes past. A client that
+never reaches the frame has proved nothing, and the check says nothing rather
+than something false. A tab between documents is skipped outright: the agent
+hashes an empty document for that moment, and the empty-document hash —
+`0x811c9dc5`, the FNV offset basis, hashing nothing at all — was reaching the
+comparison and costing a cold snapshot every time a page navigated.
+
+The same lie was in the bundles. `hashesAgree` compared the last acked hash
+against a live one and reported "false" for a mirror that was merely a frame
+behind; it is now only present when the client had acknowledged the newest
+frame, and says `hashesComparable: false` otherwise.
+
+### 21. What a capture leaves out is evidence too
+
+Chasing §19 through a real bundle showed the gaps, which were all of one kind:
+the bundle recorded what the system did and not what it decided against.
+
+- **The rejected CSS.** A bundle held the rules that passed the used-rule filter
+  and nothing about the rest, so a rule dropped in error and a rule the site
+  never wrote were the same artifact — nothing. Finding §19 meant inferring the
+  filter's behaviour from which neighbouring utility classes happened to
+  survive. `css-rejected.txt` is now the other half of that record, capped, with
+  the totals in `state.json`.
+- **Stylesheets nothing could read.** The other explanation for a missing rule,
+  and equally invisible: `agent.json` and `state.json` now carry the blocked and
+  recovered counts.
+- **What a screenshot is a picture of.** The landside picture is the whole
+  scrollable page, or past `MaxShotHeight` only the viewport; the plane-side one
+  is the top of the document at its own limit and its own scale. Two pictures of
+  one tab over two different regions, with nothing saying so, look exactly like
+  a rendering bug. Both halves now write a `screenshot.json` beside the image.
+- **Per-node flags.** `fingerprint.json` listed `(id, kind, value)` — precisely
+  what the hash covers, which was the point, and precisely why it could not show
+  §19: an element that grew a shadow root after it was mirrored agrees on all
+  three. The flags are now a fourth column on both sides. Landside they are read
+  live, plane-side they are what was sent, so a difference means the client's
+  copy is stale rather than wrong.
+
+One bug fell out of writing it: `blockedSheets()` called `cssDelta()` for its
+discovery walk and discarded the result — but a walk *records* what it collects
+as emitted, so every rule that walk was the first to see was dropped from the
+page for good. That is the late-arriving stylesheets, on every load. Everything
+that walks the sheets now goes through `emitCSSDelta`.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
