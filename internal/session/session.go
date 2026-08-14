@@ -665,6 +665,11 @@ func (s *Session) awaitCheck(ts *tabState, seq uint64) (uint64, bool) {
 		if got {
 			return hash, true
 		}
+		// A client that left is not a client that disagreed, and waiting out
+		// the deadline for each tab in turn would hold the whole sweep up.
+		if !s.Online() {
+			return 0, false
+		}
 		select {
 		case <-s.closed:
 			return 0, false

@@ -684,11 +684,10 @@
   // through here.
   function emitCSSDelta() {
     var adds = cssDelta();
-    if (adds.length) {
-      pendingOps.push([7, adds]);
-      scheduleFlush(false);
-    }
-    return adds.length;
+    if (!adds.length) return false;
+    pendingOps.push([7, adds]);
+    scheduleFlush(false);
+    return true;
   }
 
   function scheduleCSS() {
