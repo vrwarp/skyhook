@@ -260,6 +260,10 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Second</title></head>
 			<body><h1>the second page</h1></body></html>`)
 	})
+	mux.HandleFunc("/late-upgrade", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, lateUpgradePage)
+	})
 	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)

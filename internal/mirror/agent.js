@@ -41,6 +41,13 @@
   var CSS_DEBOUNCE_MS = 400;
   var SCROLL_THROTTLE_MS = 250;
   var REFRAME_DEBOUNCE_MS = 250;
+  // How often a custom element that has not upgraded yet is looked at again,
+  // and how far that interval backs off while nothing is happening.
+  var UPGRADE_POLL_MS = 500;
+  var UPGRADE_POLL_MAX_MS = 8000;
+  // How many un-upgraded custom elements are worth watching at once. A page
+  // that has more than this has something other than lazy components going on.
+  var UPGRADE_WATCH_MAX = 4096;
 
   var KIND_ELEMENT = 1, KIND_TEXT = 3, KIND_DOCTYPE = 10;
   var FLAG_EDITABLE = 1, FLAG_IMAGE = 2, FLAG_SCROLL = 4, FLAG_SHADOW = 8, FLAG_CANVAS = 16;
@@ -62,6 +69,8 @@
   var URL_ATTRS = { href: 1, src: 1, action: 1, poster: 1, formaction: 1, cite: 1, data: 1 };
   // Attributes that would carry a secret's *contents* back to the client.
   var SENSITIVE_ATTRS = { value: 1, 'data-sky-value': 1 };
+  // Marks a custom element that had not upgraded landside. See serializeAttrs.
+  var UNDEFINED_ATTR = 'data-sky-undefined';
   var SENSITIVE_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i;
 
   var nextId = 1;
@@ -86,6 +95,9 @@
   var blockedSheets = {};          // href -> 1, for sheets nothing can read yet
   var lastText = new Map();     // id -> last text we reported
   var lastScroll = new Map();
+  var awaitingUpgrade = new Set(); // ids of custom elements not yet defined
+  var upgradeTimer = null;
+  var upgradePoll = UPGRADE_POLL_MS;
   var scrollTimer = null;
   var focusedId = 0;
   var started = false;
@@ -171,6 +183,21 @@
     return el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 8;
   }
 
+  // A custom element is one whose name has a dash in it. Only these can be
+  // undefined, and only these upgrade later.
+  function isCustom(el) {
+    var n = el.localName;
+    return typeof n === 'string' && n.indexOf('-') > 0;
+  }
+
+  // isDefined reports whether the page has registered and run this element's
+  // definition. Errs towards "defined": the placeholder styling is the
+  // exception, and claiming it for an element that does not want it is the
+  // more visible mistake.
+  function isDefined(el) {
+    try { return el.matches(':defined'); } catch (e) { return true; }
+  }
+
   // localNameOf gives the name an element must be rebuilt under. For HTML this
   // is the lowercased tagName; for SVG and MathML, where names are
   // case-sensitive, it is the only correct spelling.
@@ -248,6 +275,14 @@
     } else if (tag === 'OPTION' && el.selected) {
       pairs.push(intern('data-sky-selected'), intern('1'));
     }
+    // Whether a custom element has upgraded is a live question landside and a
+    // settled one plane-side, where no definition will ever run: every custom
+    // element there is undefined for ever. A site that dresses its placeholders
+    // with `:not(:defined)` would get the placeholder styling on top of the
+    // upgraded markup, and the upgraded styling — gated on `:defined` — would
+    // match nothing. So the landside answer is recorded here, and the used-CSS
+    // rules are rewritten against it (see rewriteDefined in css.go).
+    if (isCustom(el) && !isDefined(el)) pairs.push(intern(UNDEFINED_ATTR), intern(''));
     if (isEditable(el)) flags |= FLAG_EDITABLE;
     if (CANVAS_TAGS[tag]) flags |= FLAG_CANVAS;
     if (isScrollable(el)) flags |= FLAG_SCROLL;
@@ -336,6 +371,8 @@
       var sk = node.shadowRoot.childNodes;
       for (var s = 0; s < sk.length; s++) n += serializeNode(sk[s], id2, rows);
       observeDocument(node.shadowRoot);
+    } else if (isCustom(node) && !isDefined(node)) {
+      watchUpgrade(id2);
     }
     if (tag === 'IFRAME') {
       hookFrame(node);
@@ -372,6 +409,103 @@
         api.snapshot();
       }, REFRAME_DEBOUNCE_MS);
     }, { passive: true });
+  }
+
+  // ------------------------------------------------------- custom elements
+
+  /*
+   * A custom element upgrades when its definition arrives, which on a
+   * code-split site is long after the element itself was in the document. The
+   * upgrade attaches a shadow root and distributes the light DOM into its
+   * slots — and none of that reaches a MutationObserver, which reports child
+   * lists, attributes and text and has nothing at all to say about
+   * attachShadow. Whatever the mirror saw first, it would keep for ever.
+   *
+   * What the client keeps in that case is the pre-upgrade skeleton: the
+   * component's own markup missing, and the light-DOM children that were
+   * destined for a slot inside some collapsed popup rendered flat and in the
+   * open. A mirrored Reddit showed every sort menu, country list and view
+   * picker on the page at once, stacked over the feed.
+   *
+   * There is no event for this, so it is polled — landside, where cycles are
+   * cheap and nothing reaches the wire unless something actually changed.
+   */
+
+  function watchUpgrade(id) {
+    if (awaitingUpgrade.size >= UPGRADE_WATCH_MAX) return;
+    awaitingUpgrade.add(id);
+    // Something new to look at, so start the interval over: an element usually
+    // upgrades soon after it lands, and a long-backed-off timer would sit on
+    // the change for eight seconds.
+    upgradePoll = UPGRADE_POLL_MS;
+    scheduleUpgradeCheck(upgradePoll);
+  }
+
+  function scheduleUpgradeCheck(delay) {
+    if (upgradeTimer || !awaitingUpgrade.size) return;
+    upgradeTimer = setTimeout(function () {
+      upgradeTimer = null;
+      var before = awaitingUpgrade.size;
+      if (checkUpgrades()) {
+        scheduleFlush(false);
+        // The shadow root that just arrived brings its own stylesheet.
+        scheduleCSS();
+      }
+      // Components load in waves: back off while nothing is happening, and
+      // start over the moment something upgrades.
+      upgradePoll = awaitingUpgrade.size < before
+        ? UPGRADE_POLL_MS
+        : Math.min(upgradePoll * 2, UPGRADE_POLL_MAX_MS);
+      scheduleUpgradeCheck(upgradePoll);
+    }, delay);
+  }
+
+  // checkUpgrades re-reads every watched element that has since upgraded, and
+  // reports whether anything came of it.
+  function checkUpgrades() {
+    if (!awaitingUpgrade.size) return false;
+    var ids = [];
+    awaitingUpgrade.forEach(function (id) { ids.push(id); });
+    var changed = false;
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i];
+      var el = byId.get(id);
+      if (!el || !el.isConnected) {
+        awaitingUpgrade.delete(id);
+        continue;
+      }
+      if (!isDefined(el)) continue;
+      awaitingUpgrade.delete(id);
+      if (el.shadowRoot) {
+        reserialize(el);
+      } else {
+        // Upgraded into its own light DOM, or behind a closed shadow root
+        // nothing can read. The markup stands; only the placeholder styling
+        // has to stop applying to it.
+        pendingOps.push([3, id, intern(UNDEFINED_ATTR), -1]);
+      }
+      changed = true;
+    }
+    return changed;
+  }
+
+  // reserialize replaces one mirrored element with a fresh reading of it. The
+  // element gets a new id, which is what makes this safe: the client drops the
+  // old subtree whole rather than trying to reconcile a document it was never
+  // sent the middle of.
+  function reserialize(el) {
+    var id = idOf.get(el);
+    var pid = knownParentId(el);
+    if (id === undefined || !pid) return;
+    var beforeId = 0;
+    var sib = el.nextSibling;
+    while (sib && idOf.get(sib) === undefined) sib = sib.nextSibling;
+    if (sib) beforeId = idOf.get(sib);
+    pendingOps.push([2, id]);
+    forget(el);
+    var rows = [];
+    serializeNode(el, pid, rows);
+    if (rows.length) pendingOps.push([1, pid, beforeId, rows]);
   }
 
   function serializeSubtree(node) {
@@ -499,11 +633,12 @@
     if (cssTimer) return;
     cssTimer = setTimeout(function () {
       cssTimer = null;
+      // Before the sweep, not after: an element that upgraded brings a shadow
+      // root whose stylesheet this very pass is meant to collect.
+      var upgraded = checkUpgrades();
       var adds = cssDelta();
-      if (adds.length) {
-        pendingOps.push([7, adds]);
-        scheduleFlush(false);
-      }
+      if (adds.length) pendingOps.push([7, adds]);
+      if (adds.length || upgraded) scheduleFlush(false);
     }, CSS_DEBOUNCE_MS);
   }
 
@@ -806,6 +941,10 @@
     emittedCSS = new Map(); cssOrder = [];
     pendingOps = []; pendingImages = [];
     lastText = new Map();
+    // The watch list is rebuilt by the walk below; its old ids may not even be
+    // in the new document.
+    awaitingUpgrade = new Set();
+    upgradePoll = UPGRADE_POLL_MS;
 
     var rows = [];
     serializeNode(document.documentElement, 0, rows);
@@ -997,6 +1136,9 @@
         cssPending: cssTimer !== null,
         observers: observers.length,
         observedDocs: observedDocs.size,
+        // Custom elements still waiting for their definition. A capture taken
+        // while this is large is a capture of a half-built page.
+        awaitingUpgrade: awaitingUpgrade.size,
         focusedId: focusedId,
         messages: msgSeq,
         readyState: document.readyState,

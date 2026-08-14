@@ -73,6 +73,16 @@ Skyhook goes further and drops rules whose selectors do not match the live DOM,
 because rrweb pays a one-off cost per recording where this pays per page over a
 1.2 s link.
 
+rrweb also patches `Element.prototype.attachShadow`, because a shadow root
+attached after the snapshot reaches no `MutationObserver` — the API reports
+child lists, attributes and text and says nothing about shadow roots at all.
+Skyhook had the bug rrweb had already fixed, and could not take the fix: the
+agent runs in an isolated world, and the prototype it can reach is not the one
+the page calls. The elements that were mirrored before their definition arrived
+are polled instead, and re-read when they upgrade. Landside cycles are free;
+only a real change reaches the wire. See
+[IMPLEMENTATION.md §19](IMPLEMENTATION.md).
+
 **Left deliberately.** rrweb's canvas capture (periodic `toDataURL` snapshots or
 a recorded WebGL command stream). Canvas remains out of scope: the honest
 options are a video codec or a lie, and both are worse than telling the user
@@ -191,6 +201,7 @@ becomes a pixel pipeline, it needs the link it was built to survive without.
 | rrweb | Coalesce attribute changes to their final value | Implemented |
 | rrweb | Mask password and one-time-code fields | Implemented |
 | rrweb changelog | Constructed stylesheets are invisible to `document.styleSheets` | Implemented for the document and every shadow root |
+| rrweb | A shadow root attached after the snapshot reaches no observer | Same bug, different fix: patching `attachShadow` is impossible from an isolated world, so un-upgraded custom elements are polled and re-read |
 | Blimp | Mirror the DOM, not the compositor; stay out of the browser tree | Already the design; independently confirmed |
 | Smart DOM | Viewport-first delivery of the document | **Known gap** — see docs/IMPLEMENTATION.md |
 | OBML | Live session beats page snapshot | Already the design |

@@ -529,6 +529,47 @@ are gathered cheapest-and-most-valuable first, so a capture cut short by an
 outage loses its screenshot rather than its DOM. `captureKeep: 0` removes the
 feature, and the frame journals with it.
 
+### 19. A custom element's upgrade is landside truth, not a plane-side event
+
+Plane-side runs no page JavaScript. That is the product, and it means one thing
+the design did not think through: **no custom element in the mirror will ever
+upgrade.** Both halves of the mirror got this wrong, in opposite directions, and
+a mirrored Reddit was the result — four dropdown menus rendered open and stacked
+over the feed, under a collapsed search bar.
+
+**The DOM half.** An element is serialised once, with whatever it had at that
+moment. On a code-split site the definition arrives with a later bundle, and the
+upgrade attaches a shadow root and distributes the light DOM into its slots —
+none of which reaches a `MutationObserver`, which reports child lists,
+attributes and character data and has nothing whatever to say about
+`attachShadow`. The mirror kept the pre-upgrade skeleton for ever: the
+component's own markup missing, and the light-DOM children destined for a slot
+inside some collapsed popup rendered flat and in the open. rrweb closes this by
+patching `Element.prototype.attachShadow`; that is not available here, because
+the agent lives in an isolated world and the prototype it can reach is not the
+one the page calls. So the elements that were mirrored undefined are watched and
+re-read when they upgrade — a poll landside, where cycles are free and nothing
+reaches the wire unless something actually changed. It backs off while nothing
+is happening and stops entirely once every watched element has upgraded.
+
+**The CSS half.** `:defined` is a live question landside and a settled one
+plane-side. The used-CSS filter asks it landside, at a moment of its own
+choosing, and the answer was then shipped to a document where it means the
+opposite: the placeholder styling a site hangs off `:not(:defined)` was dropped
+as unused (every element had upgraded by the time the filter looked) while the
+styling gated on `:defined` was shipped to a client where it could never match.
+Reddit uses both — `.nd\:invisible:not(:defined)` is what keeps a menu's items
+out of sight until the menu exists. So the agent records the landside answer on
+the element as `data-sky-undefined`, and `rewriteDefined` re-points the rules at
+that mark: `:not(:defined)` becomes `[data-sky-undefined]` and `:defined`
+becomes `:not([data-sky-undefined])`. Specificity is unchanged — a pseudo-class
+and an attribute selector count the same — and the mark is cleared by the same
+pass that re-reads the upgraded element, so the two halves cannot drift apart.
+
+The general rule this is an instance of: a selector whose truth differs between
+the two sides has to be answered landside and carried, never re-asked
+plane-side. `:defined` is the sharpest case because it always differs.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
@@ -554,12 +595,10 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   Menlo's Smart DOM and, twenty years earlier, OBML's pagination send what is
   visible first and stream the rest — on a long document over this link that is
   the largest remaining win. See [PRIOR-ART.md](PRIOR-ART.md).
-- **A shadow root attached after the snapshot is only picked up by the settle
-  timers.** The agent observes shadow roots it finds while serialising; one
-  attached later is caught by the 800 ms/2.5 s CSS passes and by any mutation
-  inside the host, but a component that attaches a root minutes later and
-  mutates only inside it would go unnoticed. rrweb patches `attachShadow` to
-  close this; that has not been done here.
+- **A closed shadow root is invisible.** `attachShadow({mode: 'closed'})` cannot
+  be read from an isolated world any more than it can from the page, so such a
+  component mirrors as its light DOM and nothing else. Late-attached *open*
+  roots are handled (§19); closed ones cannot be.
 
 ## Measured results
 

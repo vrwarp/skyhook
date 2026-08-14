@@ -30,13 +30,111 @@ var (
 func minifyCSS(rules []string) []string {
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {
-		r = minifyRule(r)
+		r = rewriteDefined(minifyRule(r))
 		if r == "" || strings.HasSuffix(r, "{}") {
 			continue
 		}
 		out = append(out, r)
 	}
 	return out
+}
+
+// Selector text and the attribute that stands in for the landside answer.
+const (
+	definedNot    = ":not(:defined)"
+	definedPseudo = ":defined"
+	undefinedAttr = "[data-sky-undefined]"
+	definedAttr   = ":not([data-sky-undefined])"
+)
+
+/*
+rewriteDefined re-points `:defined` at what the mirror actually knows.
+
+`:defined` asks whether a custom element's definition has been registered and
+run. Landside that is a live question and the answer changes as bundles load;
+plane-side it is settled before it is asked, because no definition will ever
+run there — every custom element in the mirror is undefined for ever.
+
+Left alone, both halves of the pair go wrong at once. The placeholder styling a
+site hangs off `:not(:defined)` — sizes, `visibility:hidden` over a menu that
+has not been built yet — applies to components the mirror is showing fully
+upgraded. The styling that dresses the upgraded component, gated on `:defined`,
+matches nothing at all. Reddit uses both, which is how one mirrored page came
+to show four dropdown menus open at once over a collapsed search bar.
+
+The agent marks the elements that had not upgraded landside (see
+serializeAttrs), and these rules ask for that mark instead. Specificity is
+unchanged: an attribute selector and a pseudo-class both count the same.
+*/
+func rewriteDefined(rule string) string {
+	if !strings.Contains(rule, ":") {
+		return rule
+	}
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(rule); i++ {
+		c := rule[i]
+		switch {
+		case c == '"' || c == '\'':
+			j := scanCSSString(rule, i)
+			b.WriteString(rule[i:j])
+			i = j - 1
+			continue
+		case c == '\\' && i+1 < len(rule):
+			// An escaped character stands for itself: `.nd\:invisible` is a
+			// class name with a colon in it, not a pseudo-class.
+			b.WriteString(rule[i : i+2])
+			i++
+			continue
+		case c != ':' || (i > 0 && rule[i-1] == ':'):
+			// Not a pseudo-class, or the second colon of a pseudo-element.
+		case matchFold(rule, i, definedNot):
+			b.WriteString(undefinedAttr)
+			i += len(definedNot) - 1
+			changed = true
+			continue
+		case matchFold(rule, i, definedPseudo) && !isSelectorIdent(rule, i+len(definedPseudo)):
+			b.WriteString(definedAttr)
+			i += len(definedPseudo) - 1
+			changed = true
+			continue
+		}
+		b.WriteByte(c)
+	}
+	if !changed {
+		return rule
+	}
+	return b.String()
+}
+
+// matchFold reports whether s continues at i with lit, which must be lowercase.
+// Pseudo-class names are ASCII case-insensitive.
+func matchFold(s string, i int, lit string) bool {
+	if i+len(lit) > len(s) {
+		return false
+	}
+	for j := 0; j < len(lit); j++ {
+		c := s[i+j]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lit[j] {
+			return false
+		}
+	}
+	return true
+}
+
+// isSelectorIdent reports whether position i continues an identifier — which is
+// what tells `:defined` from the start of some longer name, and from a
+// functional pseudo-class that merely begins the same way.
+func isSelectorIdent(s string, i int) bool {
+	if i >= len(s) {
+		return false
+	}
+	c := s[i]
+	return c == '-' || c == '_' || c == '\\' || c == '(' ||
+		(c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
 }
 
 func minifyRule(rule string) string {
