@@ -345,30 +345,6 @@ func (t *Tab) CaptureRegion(ctx context.Context, node int64) ([]byte, error) {
 	return out.Data, nil
 }
 
-// VisibleLinks reports same-origin links near the viewport, ranked in reading
-// order. Speculative prefetch consumes this.
-func (t *Tab) VisibleLinks(ctx context.Context, limit int) ([]LinkHint, error) {
-	raw, err := t.eval(ctx, fmt.Sprintf("__skyhook.links(%d)", limit))
-	if err != nil {
-		return nil, err
-	}
-	var out []LinkHint
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// LinkHint is a candidate for speculative prefetch.
-type LinkHint struct {
-	ID   int64   `json:"id"`
-	Href string  `json:"href"`
-	Y    float64 `json:"y"`
-}
-
 // DocHash asks the agent for a whole-document fingerprint, used by the periodic
 // divergence check.
 func (t *Tab) DocHash(ctx context.Context) (uint64, error) {

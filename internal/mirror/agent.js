@@ -902,21 +902,6 @@
       ownScroll(0);
       return { height: h, top: globalThis.scrollY | 0 };
     },
-    links: function (limit) {
-      var out = [];
-      var as = document.querySelectorAll('a[href]');
-      var vh = globalThis.innerHeight || 900;
-      for (var i = 0; i < as.length && out.length < (limit || 10); i++) {
-        var a = as[i];
-        var r = a.getBoundingClientRect();
-        if (r.bottom < 0 || r.top > vh * 1.2 || r.width === 0) continue;
-        if (a.origin && a.origin !== location.origin) continue;
-        if (/^javascript:|^#/.test(a.getAttribute('href') || '')) continue;
-        out.push({ id: idFor(a), href: a.href, y: r.top });
-      }
-      out.sort(function (p, q) { return p.y - q.y; });
-      return out;
-    },
     stats: function () {
       return { nodes: byId.size, strings: strings.length, css: cssOrder.length, seq: seq };
     },

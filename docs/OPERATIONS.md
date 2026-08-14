@@ -63,7 +63,6 @@ default; this is the whole surface:
   "headless": true,
   "sessionTtl": "12h",
   "compression": true,
-  "prefetch": true,
   "maxTabs": 8,
   "imageQuality": 40,
   "imageCacheBytes": 536870912,

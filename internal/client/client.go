@@ -212,7 +212,7 @@ func (c *Client) handle(f *protocol.Frame) {
 				protocol.Resync{Tab: tab, HaveTo: 0, Reason: "cold"})
 		}
 		c.emit(Event{Kind: "welcome"})
-	case protocol.TypeSnapshot, protocol.TypeSpeculative:
+	case protocol.TypeSnapshot:
 		var s protocol.Snapshot
 		if err := f.DecodeBody(&s); err != nil {
 			c.emit(Event{Kind: "error", Err: err})
@@ -221,11 +221,6 @@ func (c *Client) handle(f *protocol.Frame) {
 		m := mirror.NewModel()
 		if err := m.ApplySnapshot(&s); err != nil {
 			c.emit(Event{Kind: "error", Err: err})
-			return
-		}
-		if f.Type == protocol.TypeSpeculative {
-			// Speculations are cached, not displayed.
-			c.emit(Event{Kind: "speculative", Tab: f.Tab})
 			return
 		}
 		c.mu.Lock()

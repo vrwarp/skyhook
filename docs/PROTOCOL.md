@@ -47,7 +47,7 @@ are already compressed.
 | `input` | 1 | 0 | semantic input events |
 | `dom` | 2 | 1 | snapshots, mutation batches, style updates |
 | `media` | 3 | 2 | images and favicons, one stream per object |
-| `bulk` | 4 | 3 | dictionaries, adapter backlog, speculative snapshots |
+| `bulk` | 4 | 3 | dictionaries, adapter backlog |
 | `telemetry` | 5 | 0 | scroll and viewport telemetry (datagrams, latest wins) |
 
 Priority is enforced by the server's outbound scheduler: a burst of image bytes

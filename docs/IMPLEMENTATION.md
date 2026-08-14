@@ -13,7 +13,7 @@ this is what survived contact.
 | **M2 — Feel** | Local echo, ghost-send, scroll telemetry, images with blurhash, used-CSS | **Done.** Echo and reconciliation are unit-tested; used-CSS filtering and image transcoding are covered end-to-end. |
 | **M3 — Survive** | Reconnect, resync, offline mode | **Done for reconnect/resync/offline queueing.** 0-RTT resumption is enabled in the QUIC config; it is not separately asserted by a test. FEC is not implemented — see below. |
 | **M4 — Chat adapter** | Warm open ≤ 3 s, offline history, outbox | **Framework and adapter are built** (append-log, outbox, backlog replay, client archive and UI). The Google Chat selectors are a starting point, not a validated set: they need a session against the real app to tune. |
-| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Prefetch, tabs, bookmarks and the HUD are built.** Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
+| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 16. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
 
 The client is a Chrome-targeted PWA served by the server itself; the Electron
 shell the design called for was built first and then pivoted away from
@@ -357,6 +357,30 @@ calling `Browser.close`, which would quit the browser out from under whoever is
 using it. `test/attach_test.go` drives a second real browser as "the user" and
 asserts each of these, including that the user activating their own window
 mid-run does not divert the next tab.
+### 16. Speculative prefetch was built, and then removed
+
+The design's §2.8 asked for it and it worked: a hidden pooled tab walked the
+top five same-origin links on the page, and a link-follow that hit a
+speculation cost zero perceived round trips. It is gone anyway.
+
+What it looked like from the origin's side is the problem. A logged-in session
+requesting five permalinks every four seconds, each from `about:blank` with no
+referer, no user activation and no interaction between them, is not a reading
+pattern — it is a crawl, and it is the pattern rate limiters and bot scoring
+exist to catch. Skyhook is not a scraper, but the traffic it generated could
+not be told apart from one, and the account paying for that was the user's own.
+
+The trade was bad on its merits too. Speculation spent landside bandwidth and
+origin goodwill on pages the user mostly did not open, to save one round trip
+on the ones they did. On a 1.2 s link that round trip is worth something, but
+not an account.
+
+Removed with it: `TypeSpeculative` (frame 23) and `Snapshot.speculative`
+(field 10), the client's speculation cache, the agent's `links()` collector,
+and `InputEvent.URL` — the anchor href the client attached to every click,
+which only speculation ever read. The frame and field numbers are retired
+rather than reused, so a stale client cannot be silently misread by a new
+server.
 
 ## Known gaps
 

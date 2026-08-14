@@ -204,7 +204,6 @@ export function decodeSnapshot(body: unknown): Snapshot {
     images: arr<Fields>(f, F.snapshot.images).map(decodeImage),
     scrollX: num(f, F.snapshot.scrollX),
     scrollY: num(f, F.snapshot.scrollY),
-    speculative: bool(f, F.snapshot.speculative),
     viewport: {
       w: num(vp, F.viewport.w),
       h: num(vp, F.viewport.h),
@@ -390,7 +389,6 @@ export interface InputEventInit {
   ts?: number;
   start?: number;
   end?: number;
-  url?: string;
   repeat?: number;
 }
 
@@ -410,7 +408,6 @@ export function inputBody(ev: InputEventInit): Map<number, unknown> {
   if (ev.ts) m.set(F.input.ts, safeInt(ev.ts));
   if (ev.start) m.set(F.input.start, safeInt(ev.start));
   if (ev.end) m.set(F.input.end, safeInt(ev.end));
-  if (ev.url) m.set(F.input.url, ev.url);
   if (ev.repeat) m.set(F.input.repeat, safeInt(ev.repeat));
   return m;
 }

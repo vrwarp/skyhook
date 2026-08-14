@@ -257,7 +257,6 @@ export class MirrorHost {
         node,
         modifiers: modifierMask(ev),
         button: ev.button,
-        url: anchor?.getAttribute('href') ?? undefined,
       });
       // The frame has no allow-forms, so a submit control never produces a
       // native submit event; recognise it here instead.
@@ -407,8 +406,8 @@ export class MirrorHost {
   /**
    * The link a node sits inside, resolved and filtered down to what the shell
    * can actually act on. The agent absolutises URL attributes landside, but a
-   * speculative snapshot or a `<base>`-less fragment can still arrive relative,
-   * so the page's own URL is the fallback base.
+   * `<base>`-less fragment can still arrive relative, so the page's own URL is
+   * the fallback base.
    */
   private linkAt(target: EventTarget | Node | null): { url: string; text: string } | undefined {
     const el = target as HTMLElement | null;

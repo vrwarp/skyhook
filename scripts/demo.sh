@@ -34,7 +34,7 @@ export SKYHOOK_TOKEN="${SKYHOOK_TOKEN:-demo-token}"
 export SKYHOOK_LOG_LEVEL="${SKYHOOK_LOG_LEVEL:-info}"
 
 cat >"$DATA_DIR/demo.json" <<JSON
-{ "homeUrl": "$HOME_URL", "headless": true, "prefetch": true }
+{ "homeUrl": "$HOME_URL", "headless": true }
 JSON
 
 go run ./cmd/skyhookd -demo -demo-for "$DURATION" -config "$DATA_DIR/demo.json" 2>&1 |

@@ -185,9 +185,6 @@ function handleMessage(msg: Uint8Array): void {
       progress.set(frame.tab, { seq: 0, hash: 0 });
       post('snapshot', { tab: frame.tab, snapshot: decodeSnapshot(frame.body) });
       break;
-    case FrameType.Speculative:
-      post('speculative', { tab: frame.tab, snapshot: decodeSnapshot(frame.body) });
-      break;
     case FrameType.Mutation: {
       const have = progress.get(frame.tab);
       if (!have) {

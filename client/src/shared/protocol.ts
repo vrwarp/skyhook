@@ -40,7 +40,8 @@ export enum FrameType {
   AdapterEvent = 20,
   AdapterCmd = 21,
   Dict = 22,
-  Speculative = 23,
+  // 23 was Speculative, a prefetched snapshot. Prefetch is gone; the number
+  // stays retired rather than reused.
   Kill = 24,
   Integrity = 25,
   Viewport = 26,
@@ -147,7 +148,6 @@ export interface Snapshot {
   images: ImageMeta[];
   scrollX: number;
   scrollY: number;
-  speculative: boolean;
 }
 
 export interface MutationOp {
@@ -267,7 +267,7 @@ export const F = {
   node: { id: 1, parent: 2, kind: 3, ref: 4, attrs: 5, flags: 6 },
   snapshot: {
     strings: 1, nodes: 2, css: 3, url: 4, title: 5, viewport: 6,
-    images: 7, scrollX: 8, scrollY: 9, speculative: 10, docHash: 11, baseUrl: 12,
+    images: 7, scrollX: 8, scrollY: 9, docHash: 11, baseUrl: 12,
   },
   op: {
     op: 1, node: 2, parent: 3, before: 4, ref: 5, ref2: 6, nodes: 7,
@@ -279,7 +279,7 @@ export const F = {
   imageWant: { hashes: 1, have: 2 },
   input: {
     kind: 1, node: 2, seq: 3, text: 4, key: 5, modifiers: 6, button: 7,
-    x: 8, y: 9, fields: 10, expectSeq: 11, ts: 12, start: 13, end: 14, url: 15, repeat: 16,
+    x: 8, y: 9, fields: 10, expectSeq: 11, ts: 12, start: 13, end: 14, repeat: 16,
   },
   scroll: { tab: 1, x: 2, y: 3, h: 4, docH: 5, node: 6, seq: 7, visible: 8 },
   adapterRecord: {

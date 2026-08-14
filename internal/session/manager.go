@@ -39,8 +39,6 @@ type ManagerOptions struct {
 	UserAgent string
 	// MaxTabs caps concurrent tabs.
 	MaxTabs int
-	// Prefetch enables speculative same-origin link prefetch.
-	Prefetch bool
 	// Adapters builds the adapters started for each session.
 	Adapters []adapter.Factory
 	// HomeURL is opened in the first tab of a fresh session.

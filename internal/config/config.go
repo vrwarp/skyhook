@@ -64,8 +64,6 @@ type Config struct {
 	ImageQuality int `json:"imageQuality"`
 	// ImageWorkers is the transcoder pool size.
 	ImageWorkers int `json:"imageWorkers"`
-	// Prefetch enables speculative same-origin link prefetch.
-	Prefetch bool `json:"prefetch"`
 	// MaxTabs caps concurrent mirrored tabs.
 	MaxTabs int `json:"maxTabs"`
 	// HomeURL is opened in a new session's first tab.
@@ -153,7 +151,6 @@ func Default() Config {
 		ImageCacheBytes:   512 << 20,
 		ImageQuality:      40,
 		ImageWorkers:      4,
-		Prefetch:          true,
 		MaxTabs:           8,
 		HomeURL:           "",
 		LogLevel:          "info",

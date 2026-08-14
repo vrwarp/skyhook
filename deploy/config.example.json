@@ -12,7 +12,6 @@
   "imageCacheBytes": 536870912,
   "imageQuality": 40,
   "imageWorkers": 4,
-  "prefetch": true,
   "maxTabs": 8,
   "homeUrl": "",
   "adapters": [],

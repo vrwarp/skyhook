@@ -18,7 +18,6 @@ const hosts = new Map<number, MirrorHost>();
 const tabs = new Map<number, TabView>();
 const archive: AdapterRecord[] = [];
 const spaces = new Map<string, { name: string; unread: number }>();
-const speculations = new Map<string, Snapshot>();
 let worker: Worker | null = null;
 let active = 0;
 let currentSpace = '';
@@ -162,18 +161,6 @@ function handle(kind: string, args: Record<string, unknown>): void {
     case 'snapshot':
       void applySnapshot(Number(args.tab), args.snapshot as Snapshot);
       break;
-    case 'speculative': {
-      const snap = args.snapshot as Snapshot;
-      if (snap?.url) {
-        speculations.set(snap.url, snap);
-        // Bounded: speculation must never crowd out real state.
-        if (speculations.size > 8) {
-          const oldest = speculations.keys().next().value;
-          if (oldest) speculations.delete(oldest);
-        }
-      }
-      break;
-    }
     case 'mutation':
       void applyMutation(Number(args.tab), args.mutation as Mutation, Number(args.seq));
       break;
@@ -395,13 +382,6 @@ function navigateTo(tab: number, url: string): void {
   if (!tab) {
     send('openTab', { url });
     return;
-  }
-  const spec = speculations.get(url);
-  if (spec) {
-    // The speculation is already here: paint it now and let the real
-    // navigation reconcile. This is the zero-round-trip link follow.
-    speculations.delete(url);
-    void applySnapshot(tab, spec);
   }
   send('navigate', { tab, url });
 }

@@ -55,7 +55,7 @@ describe('client frames encode integers as CBOR integers', () => {
     input: encodeFrame(FrameType.Input, 1, inputBody({
       kind: 'click', node: 42, seq: 7, modifiers: 8, button: 0,
       // A caller passing wall-clock time must not be able to break the frame.
-      ts: Date.now(), expectSeq: 3, url: '/next',
+      ts: Date.now(), expectSeq: 3,
     })),
     text: encodeFrame(FrameType.Input, 1, inputBody({
       kind: 'text', node: 42, seq: 8, text: 'hello', ts: 1234,

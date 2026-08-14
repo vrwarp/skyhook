@@ -117,7 +117,6 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		ProfileDir:  cfg.ProfileDir(),
 		UserAgent:   cfg.UserAgent,
 		MaxTabs:     cfg.MaxTabs,
-		Prefetch:    cfg.Prefetch,
 		Adapters:    factories,
 		HomeURL:     cfg.HomeURL,
 	}
