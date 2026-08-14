@@ -592,20 +592,6 @@ func (b *Browser) Version(ctx context.Context) (string, error) {
 	return out.Product, nil
 }
 
-// Cookies returns cookies for a URL, used by the image fetcher so transcoded
-// assets come from the same authenticated context as the page.
-func (b *Browser) Cookies(ctx context.Context, urls []string) ([]map[string]any, error) {
-	var out struct {
-		Cookies []map[string]any `json:"cookies"`
-	}
-	// Browser-wide, which when attached is the running browser's own jar: our
-	// tabs share its profile, so the image fetcher must share its cookies too.
-	if err := b.Call(ctx, "", "Storage.getCookies", nil, &out); err != nil {
-		return nil, err
-	}
-	return out.Cookies, nil
-}
-
 // RawJSON is a helper for callers that want the raw event payload.
 func RawJSON(v json.RawMessage) string { return string(v) }
 

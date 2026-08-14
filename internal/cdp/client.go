@@ -6,6 +6,7 @@ package cdp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -296,4 +297,91 @@ func (s *Session) Do(ctx context.Context, method string, params, out any) error 
 // Subscribe registers a handler scoped to this session.
 func (s *Session) Subscribe(method string, h EventHandler) {
 	s.On(s.ID, method, h)
+}
+
+// ioReadChunk bounds a single IO.read. Chromium base64-encodes the payload, so
+// the reply is a third larger again; a megabyte a call keeps both sides small.
+const ioReadChunk = 1 << 20
+
+// FetchResource loads a URL through the browser's own network stack, on behalf
+// of a frame, and returns the bytes.
+//
+// This exists so that nothing Skyhook fetches leaves the machine from anywhere
+// but Chromium. A Go http.Client fetching the same URL alongside the browser
+// presents a different TLS fingerprint, a different header order, no client
+// hints and no cookie jar — and if it is given the page's cookies to make
+// authenticated assets work, it presents the user's session from a client that
+// is visibly not the browser that opened it. Asking the browser to do the fetch
+// makes all of that moot: same connection reuse, same headers, same jar.
+//
+// limit bounds the read; a resource larger than it is an error rather than a
+// truncation, because a half-decoded image is worse than a missing one.
+func (s *Session) FetchResource(ctx context.Context, frameID, url string, limit int) ([]byte, error) {
+	params := map[string]any{
+		"url": url,
+		"options": map[string]any{
+			"disableCache":       false,
+			"includeCredentials": true,
+		},
+	}
+	if frameID != "" {
+		params["frameId"] = frameID
+	}
+	var out struct {
+		Resource struct {
+			Success      bool   `json:"success"`
+			NetError     int    `json:"netError"`
+			NetErrorName string `json:"netErrorName"`
+			HTTPStatus   int    `json:"httpStatusCode"`
+			Stream       string `json:"stream"`
+		} `json:"resource"`
+	}
+	if err := s.Do(ctx, "Network.loadNetworkResource", params, &out); err != nil {
+		return nil, err
+	}
+	r := out.Resource
+	if !r.Success {
+		if r.NetErrorName != "" {
+			return nil, fmt.Errorf("cdp: fetch %s: %s", url, r.NetErrorName)
+		}
+		return nil, fmt.Errorf("cdp: fetch %s: http %d", url, r.HTTPStatus)
+	}
+	if r.Stream == "" {
+		// A successful load with nothing to read is an empty resource.
+		return nil, nil
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.Do(closeCtx, "IO.close", map[string]any{"handle": r.Stream}, nil)
+	}()
+
+	var buf []byte
+	for {
+		var chunk struct {
+			Data          string `json:"data"`
+			Base64Encoded bool   `json:"base64Encoded"`
+			EOF           bool   `json:"eof"`
+		}
+		if err := s.Do(ctx, "IO.read", map[string]any{
+			"handle": r.Stream, "size": ioReadChunk,
+		}, &chunk); err != nil {
+			return nil, err
+		}
+		part := []byte(chunk.Data)
+		if chunk.Base64Encoded {
+			decoded, err := base64.StdEncoding.DecodeString(chunk.Data)
+			if err != nil {
+				return nil, fmt.Errorf("cdp: fetch %s: %w", url, err)
+			}
+			part = decoded
+		}
+		buf = append(buf, part...)
+		if limit > 0 && len(buf) > limit {
+			return nil, fmt.Errorf("cdp: fetch %s: larger than %d bytes", url, limit)
+		}
+		if chunk.EOF {
+			return buf, nil
+		}
+	}
 }

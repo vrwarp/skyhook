@@ -60,7 +60,6 @@ type ImageRequest struct {
 	Priority int
 	Node     int64
 	Referer  string
-	Cookies  string
 }
 
 // Options configures a mirrored tab.
@@ -101,9 +100,6 @@ type Tab struct {
 	canForward bool
 	chunks     map[int][]string
 	chunkN     map[int]int
-	// cookies is the Cookie header the image fetcher reuses, so authenticated
-	// avatars and attachments resolve the way they do for the page.
-	cookies string
 	// pendingInput is the seq of the most recent input event, tagged onto the
 	// next mutation batch so the client can reconcile local echo.
 	pendingInput uint64
@@ -596,13 +592,22 @@ func (t *Tab) emitMutation(m *agentMutation) {
 	}
 }
 
+// FetchResource loads a URL through this tab's own browser, with the tab's
+// frame as the initiator. The image pipeline uses it so that assets are
+// fetched by the client that rendered the page, not beside it.
+func (t *Tab) FetchResource(ctx context.Context, url string, limit int) ([]byte, error) {
+	t.mu.Lock()
+	frame := t.frameID
+	t.mu.Unlock()
+	return t.sess.FetchResource(ctx, frame, url, limit)
+}
+
 func (t *Tab) requestImages(imgs []agentImage) {
 	if len(imgs) == 0 {
 		return
 	}
 	t.mu.Lock()
 	ref := t.url
-	cookies := t.cookies
 	t.mu.Unlock()
 	for _, im := range imgs {
 		if im.URL == "" || im.Key == "" {
@@ -610,7 +615,7 @@ func (t *Tab) requestImages(imgs []agentImage) {
 		}
 		t.out.WantImage(t.ID, ImageRequest{
 			Key: im.Key, URL: im.URL, W: im.W, H: im.H, Alt: im.Alt,
-			Priority: im.Pri, Node: im.N, Referer: ref, Cookies: cookies,
+			Priority: im.Pri, Node: im.N, Referer: ref,
 		})
 	}
 }

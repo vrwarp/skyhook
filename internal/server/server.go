@@ -129,6 +129,8 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		CacheDir:  cfg.ImageCacheDir(),
 		CacheSize: cfg.ImageCacheBytes,
 		Logger:    log,
+		Fetcher:   router,
+		UserAgent: cfg.UserAgent,
 		Transcode: imgproc.Options{
 			Encoder:      imgproc.EncoderAuto,
 			PhotoQuality: cfg.ImageQuality,
@@ -174,6 +176,25 @@ func (d *deliveryRouter) ImageBytes(tab uint32, data protocol.ImageData) {
 		}
 	}
 }
+
+// FetchImage implements imgproc.Fetcher: the tab that wants the image is the
+// tab that fetches it, so the request carries the browser's own connection,
+// cookies and headers instead of a second client's.
+func (d *deliveryRouter) FetchImage(ctx context.Context, tab uint32, url string, limit int) ([]byte, error) {
+	if d.mgr == nil {
+		return nil, errNoTabForImage
+	}
+	for _, s := range d.mgr.Sessions() {
+		if t := s.Tab(tab); t != nil {
+			return t.FetchResource(ctx, url, limit)
+		}
+	}
+	return nil, errNoTabForImage
+}
+
+// errNoTabForImage means the tab that asked has since closed; the pipeline
+// falls back to an uncredentialed direct fetch.
+var errNoTabForImage = errors.New("server: no live tab for image fetch")
 
 // Start binds the listeners and serves until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {

@@ -9,6 +9,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -162,6 +163,15 @@ func (r *router) ImageBytes(tab uint32, data protocol.ImageData) {
 	}
 }
 
+func (r *router) FetchImage(ctx context.Context, tab uint32, url string, limit int) ([]byte, error) {
+	for _, s := range r.mgr.Sessions() {
+		if t := s.Tab(tab); t != nil {
+			return t.FetchResource(ctx, url, limit)
+		}
+	}
+	return nil, errors.New("no live tab for image fetch")
+}
+
 // shapedAddr is the address the link emulator shapes. The netem filter targets
 // exactly this port, so the CDP socket and the fixture web server keep running
 // at landside speed — which is what they do in reality.
@@ -199,6 +209,23 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 			<body><h1>the second page</h1></body></html>`)
 	})
 	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pixelPNG)
+	})
+	// A "logged in" page and an asset only its cookie can reach. Nothing but the
+	// browser holds that cookie, so an image arriving here proves the fetch went
+	// through the browser rather than around it.
+	mux.HandleFunc("/private", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "landside-only", Path: "/"})
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Private</title></head>
+			<body><h1>members only</h1><img id="secret" src="/private.png" width="8" height="8"></body></html>`)
+	})
+	mux.HandleFunc("/private.png", func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie("session"); err != nil || c.Value != "landside-only" {
+			http.Error(w, "no cookie, no picture", http.StatusForbidden)
+			return
+		}
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
 	})
@@ -281,6 +308,7 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 	r := &router{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{
 		Workers: 2, CacheDir: t.TempDir(), CacheSize: 8 << 20, Logger: log,
+		Fetcher:   r,
 		Transcode: imgproc.Options{Encoder: imgproc.EncoderPNG},
 	}, r)
 	if err != nil {
@@ -734,6 +762,43 @@ func TestImagesArriveTranscodedWithBlurhash(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("image %q never arrived; known keys: %v", key, keysOf(cl.Images()))
+}
+
+// An image behind a login only resolves if the fetch carried the browser's
+// cookie jar. The pipeline's fallback path deliberately sends no credentials,
+// so this passes only when the browser itself did the fetching.
+func TestAuthenticatedImagesAreFetchedByTheBrowser(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/private"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "members only", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) {
+		img := cl.Model(tab).Find("img", "id", "secret")
+		if img != nil {
+			key := strings.TrimPrefix(img.Attrs["src"], "skyhook://img/")
+			if key != "" && key != img.Attrs["src"] {
+				if _, ok := cl.ImageBytes(key); ok {
+					return
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("the cookie-protected image never arrived; the fetch did not go through the browser")
 }
 
 func TestReconnectResumesSessionAndPage(t *testing.T) {

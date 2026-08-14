@@ -297,7 +297,7 @@ func (s *Session) WantImage(tab uint32, req mirror.ImageRequest) {
 	}
 	s.mgr.images.Submit(imgproc.Request{
 		Tab: tab, Key: req.Key, URL: req.URL, W: req.W, H: req.H, Alt: req.Alt,
-		Priority: pri, Node: req.Node, Referer: req.Referer, Cookies: req.Cookies,
+		Priority: pri, Node: req.Node, Referer: req.Referer,
 	})
 }
 
