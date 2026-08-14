@@ -245,7 +245,7 @@ export class Patcher {
   }
 
   private createNode(n: MirrorNode): Node | null {
-    let node: Node | null = null;
+    let node: Node;
     switch (n.kind) {
       case NodeKind.Text:
         node = this.doc.createTextNode(this.str(n.ref));
@@ -286,10 +286,8 @@ export class Patcher {
       default:
         return null;
     }
-    if (node) {
-      this.nodes.set(n.id, node);
-      this.ids.set(node, n.id);
-    }
+    this.nodes.set(n.id, node);
+    this.ids.set(node, n.id);
     return node;
   }
 
