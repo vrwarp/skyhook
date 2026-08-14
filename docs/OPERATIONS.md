@@ -173,6 +173,12 @@ What the implementation does about it:
   by construction rather than by policy. The frame also has no `allow-forms`,
   `allow-popups` or `allow-top-navigation`, so a mirrored page cannot navigate
   or submit anything on its own.
+- **Password fields are never mirrored back.** The agent sends live field values
+  so a resync restores what you typed, but not for `type="password"`, not for
+  fields whose `autocomplete` says `current-password`, `new-password`,
+  `one-time-code`, `cc-number` or `cc-csc`, and not for anything carrying
+  `data-sky-mask`. Those characters are already plane-side; echoing them would
+  only add copies in the replay ring and in every resync.
 - **The client archive is encrypted at rest** with a non-extractable AES-GCM
   WebCrypto key held in IndexedDB; it contains real message content. This is
   weaker than an OS keychain — anything that can run script on the app's origin

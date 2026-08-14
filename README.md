@@ -15,6 +15,8 @@ Fidelity is traded for usability, deliberately. See [docs/DESIGN.md](docs/DESIGN
 for the full product requirements and technical design, and
 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for what is built, what is
 partial, and where the implementation diverges from the design (with reasons).
+[docs/PRIOR-ART.md](docs/PRIOR-ART.md) is what rrweb, Blimp, OBML and the rest
+knew that this did not, and which of their lessons changed the code.
 
 ```
 PLANE SIDE (a browser)                    LANDSIDE (VPS)

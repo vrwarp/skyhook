@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/client"
 	"github.com/vrwarp/skyhook/internal/imgproc"
+	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/protocol"
 	"github.com/vrwarp/skyhook/internal/session"
 	"github.com/vrwarp/skyhook/internal/transport"
@@ -46,8 +48,28 @@ const fixturePage = `<!DOCTYPE html>
   <input id="box" type="text" value="">
   <button id="add">add</button>
   <button id="swap">swap</button>
+  <button id="churn">churn</button>
+  <button id="hoist">hoist</button>
+  <div id="block"></div>
   <img id="pic" src="/pixel.png" width="40" height="40" alt="a pixel">
   <div class="used">styled</div>
+  <form id="login"><input id="secret" type="password" value=""></form>
+  <sky-card id="card"></sky-card>
+<script>
+  // A web component whose styles live in a constructed stylesheet, which is
+  // how every Lit-based component ships CSS. These never appear in
+  // document.styleSheets.
+  class SkyCard extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync('.card { color: rgb(4, 5, 6); }');
+      root.adoptedStyleSheets = [sheet];
+      root.innerHTML = '<div class="card">inside the shadow</div>';
+    }
+  }
+  customElements.define('sky-card', SkyCard);
+</script>
 <script>
   let n = 2;
   document.getElementById('add').addEventListener('click', () => {
@@ -55,6 +77,32 @@ const fixturePage = `<!DOCTYPE html>
     const li = document.createElement('li');
     li.textContent = 'message number ' + n;
     document.getElementById('log').appendChild(li);
+  });
+  // A block big enough that re-sending it, rather than moving it, is obvious
+  // on the wire — the shape of a real keyed-list reorder.
+  const block = document.getElementById('block');
+  for (let i = 0; i < 30; i++) {
+    const p = document.createElement('p');
+    p.className = 'used';
+    p.textContent = 'block row ' + i + ' ' + 'y'.repeat(120);
+    block.appendChild(p);
+  }
+  document.getElementById('hoist').addEventListener('click', () => {
+    document.body.insertBefore(block, document.body.firstChild);
+  });
+  // Adds forty nodes and drops them again before the browser ever paints:
+  // work no client should hear about.
+  document.getElementById('churn').addEventListener('click', () => {
+    const log = document.getElementById('log');
+    const made = [];
+    for (let i = 0; i < 40; i++) {
+      const li = document.createElement('li');
+      li.textContent = 'churn ' + i + ' ' + 'x'.repeat(200);
+      log.appendChild(li);
+      made.push(li);
+    }
+    for (const li of made) li.remove();
+    document.getElementById('intro').textContent = 'churned';
   });
   document.getElementById('swap').addEventListener('click', () => {
     const log = document.getElementById('log');
@@ -353,6 +401,222 @@ func TestReorderArrivesAsMove(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("reorder never arrived; text = %q", cl.Model(tab).Text())
+}
+
+// findText returns the id of the text node containing a substring, which is
+// the only handle on node *identity* the client has. A move preserves it; a
+// remove-and-reinsert does not.
+func findText(m *mirror.Model, want string) int64 {
+	ids := make([]int64, 0, len(m.Nodes))
+	for id := range m.Nodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		if n := m.Nodes[id]; n.Kind == 3 && strings.Contains(n.Text, want) {
+			return id
+		}
+	}
+	return 0
+}
+
+// A reorder must move the node, not rebuild it. Node count alone does not show
+// this: a remove-and-reinsert lands on the same count with new identities, and
+// costs the whole subtree on the wire. rrweb solves it by deferring the
+// decision until the whole mutation batch is in hand.
+func TestReorderKeepsNodeIdentity(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	before := findText(cl.Model(tab), "second message")
+	if before == 0 {
+		t.Fatal("fixture text not mirrored")
+	}
+
+	btn, err := cl.FindNode(tab, "button", "id", "swap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Click(tab, btn.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) {
+		m := cl.Model(tab)
+		txt := m.Text()
+		if strings.Index(txt, "second message") < strings.Index(txt, "first message") {
+			if got := findText(m, "second message"); got != before {
+				t.Fatalf("moved node was rebuilt: id %d -> %d", before, got)
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("reorder never arrived; text = %q", cl.Model(tab).Text())
+}
+
+// Moving a big subtree must cost a move, not the subtree. This is the shape of
+// a keyed-list reorder in any framework, and the difference between a few bytes
+// and a few kilobytes on a link where kilobytes are seconds.
+func TestMovingASubtreeCostsAMove(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	if err := cl.WaitForText(ctx, tab, "block row 29", budget(30*time.Second)); err != nil {
+		t.Fatalf("the block never arrived: %v", err)
+	}
+	time.Sleep(budget(2 * time.Second))
+	rowBefore := findText(cl.Model(tab), "block row 7")
+	_, before := cl.BytesTransferred()
+
+	btn, err := cl.FindNode(tab, "button", "id", "hoist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Click(tab, btn.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) {
+		txt := cl.Model(tab).Text()
+		if strings.Index(txt, "block row 0") < strings.Index(txt, "Fixture Page") {
+			_, after := cl.BytesTransferred()
+			t.Logf("hoisting a 30-row block cost %d bytes on the wire", after-before)
+			if got := findText(cl.Model(tab), "block row 7"); got != rowBefore {
+				t.Errorf("the block was rebuilt, not moved: row id %d -> %d",
+					rowBefore, got)
+			}
+			// The block's text alone is 4 KB.
+			if spent := after - before; spent > 1500 {
+				t.Errorf("the move cost %d bytes; the subtree was re-sent", spent)
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("the hoist never arrived")
+}
+
+// Nodes added and removed within one task must never reach the client. rrweb
+// calls them dropped nodes; on this link they are the difference between a
+// spinner costing nothing and costing a page.
+func TestChurnedNodesNeverCrossTheWire(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	time.Sleep(budget(2 * time.Second)) // let the page settle
+	nodesBefore := len(cl.Model(tab).Nodes)
+	_, before := cl.BytesTransferred()
+
+	btn, err := cl.FindNode(tab, "button", "id", "churn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Click(tab, btn.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The handler's last act is the only thing worth sending.
+	if err := cl.WaitForText(ctx, tab, "churned", budget(30*time.Second)); err != nil {
+		t.Fatalf("the churn never landed: %v", err)
+	}
+	time.Sleep(budget(2 * time.Second))
+
+	_, after := cl.BytesTransferred()
+	spent := after - before
+	t.Logf("forty added-and-removed nodes cost %d bytes on the wire", spent)
+
+	if got := len(cl.Model(tab).Nodes); got != nodesBefore {
+		t.Errorf("node count moved %d -> %d: churn leaked into the replica",
+			nodesBefore, got)
+	}
+	// The churned text alone is 8 KB. Anything of that order means the adds
+	// were serialised and then deleted.
+	if spent > 2000 {
+		t.Errorf("churn cost %d bytes; the dropped nodes were sent", spent)
+	}
+	if strings.Contains(cl.Model(tab).Text(), "churn 0") {
+		t.Error("a churned node is still in the replica")
+	}
+}
+
+// Constructed stylesheets are how web components ship CSS, and they are not in
+// document.styleSheets. Missing them means a Lit-based site arrives unstyled.
+func TestConstructedStylesheetsReachTheClient(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	if err := cl.WaitForText(ctx, tab, "inside the shadow", budget(30*time.Second)); err != nil {
+		t.Fatalf("shadow content never arrived: %v", err)
+	}
+	// Rules arrive minified, so match the minified form rather than the source.
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		for _, rule := range cl.Model(tab).CSS {
+			if strings.Contains(rule, "rgb(4,5,6)") {
+				return
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("the component's adopted stylesheet never reached the client; CSS = %q",
+		strings.Join(cl.Model(tab).CSS, " "))
+}
+
+// A password is the one thing on a page that must not be mirrored. The value
+// is already on the client — the user typed it — so echoing it back buys
+// nothing and puts it in the replay ring, the archive and every resync.
+func TestPasswordValuesNeverCrossTheWire(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	secret, err := cl.FindNode(tab, "input", "id", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Type(tab, secret.ID, "hunter2"); err != nil {
+		t.Fatal(err)
+	}
+	// Let the input event, the mutation flush and any resync settle.
+	time.Sleep(budget(3 * time.Second))
+
+	m := cl.Model(tab)
+	for id, n := range m.Nodes {
+		for name, v := range n.Attrs {
+			if strings.Contains(v, "hunter2") {
+				t.Fatalf("password reached the client on node %d attribute %q", id, name)
+			}
+		}
+	}
+	if strings.Contains(m.Text(), "hunter2") {
+		t.Fatal("password reached the client as text")
+	}
+	// The field must still exist, and still be a password field: masking is
+	// not the same as dropping the element.
+	if n := m.Nodes[secret.ID]; n == nil || n.Attrs["type"] != "password" {
+		t.Fatalf("password field itself went missing: %+v", n)
+	}
 }
 
 func TestTypingReachesTheRealPage(t *testing.T) {
