@@ -103,6 +103,9 @@ async function pairingFromURL(): Promise<Pairing | undefined> {
 }
 
 function configure(pairing: Pairing): void {
+  // After the pairing fragment has been stripped, so the entries the trap keeps
+  // are the address the reader should be left on if they leave after all.
+  claimHistoryGestures();
   const urls = transportUrls(pairing, location);
   send('configure', {
     pairing: {
@@ -353,6 +356,9 @@ function syncToolbar(): void {
   if (document.activeElement !== el.urlbar) el.urlbar.value = tab?.url ?? '';
   el.back.disabled = !tab?.canBack;
   el.forward.disabled = !tab?.canForward;
+  // A back gesture let through earlier spent the trap. Now that there is a page
+  // to go back to, it is worth keeping again.
+  if (!centred && tab?.canBack) claimHistoryGestures();
 }
 
 function layout(): void {
@@ -398,6 +404,22 @@ function navigateTo(tab: number, url: string): void {
     void applySnapshot(tab, spec);
   }
   send('navigate', { tab, url });
+}
+
+/**
+ * Moves a tab through its own history, from wherever the gesture came from: the
+ * toolbar, the mouse's side buttons, Alt+←, the browser's back button.
+ *
+ * Reports whether it asked for anything. A tab at the start of its history has
+ * nowhere to go, and the answer matters to the caller — it is what tells the
+ * back gesture below that this one is not ours to keep.
+ */
+function goHistory(tab: number, action: 'back' | 'forward'): boolean {
+  const view = tabs.get(tab);
+  if (!connected || !tab || !view) return false;
+  if (!(action === 'back' ? view.canBack : view.canForward)) return false;
+  send('navigate', { tab, action });
+  return true;
 }
 
 function addBookmark(title: string, url: string): void {
@@ -616,12 +638,72 @@ el.urlbar.addEventListener('keydown', (ev) => {
   navigateTo(active, url);
 });
 
-el.back.addEventListener('click', () => send('navigate', { tab: active, action: 'back' }));
-el.forward.addEventListener('click', () => send('navigate', { tab: active, action: 'forward' }));
+el.back.addEventListener('click', () => goHistory(active, 'back'));
+el.forward.addEventListener('click', () => goHistory(active, 'forward'));
 el.reload.addEventListener('click', () => send('navigate', { tab: active, action: 'reload' }));
 el.bookmark.addEventListener('click', () => {
   const tab = tabs.get(active);
   if (tab) addBookmark(tab.title, tab.url);
+});
+
+// ------------------------------------------- the browser's own back and forward
+//
+// Every gesture a reader has for "the page before this one" — the browser's own
+// buttons, the mouse's side buttons, Alt+←, ⌘+[, the two-finger swipe, Android's
+// system back — acts on the shell's history. The shell has one entry: the app.
+// So the most ordinary instinct in browsing throws away the session and every
+// page it paid for over a link where pages cost seconds, and the page the reader
+// actually wanted is still a round trip away, never asked for.
+//
+// The browser resolves all of them to the same thing — a step through session
+// history — long before any of them is an event a page can see, so that step is
+// what gets caught, once, here. Recognising the gestures individually would mean
+// re-implementing a keymap that differs per platform, and being wrong in the
+// expensive direction: a chord the browser acts on *and* the shell answers goes
+// back two pages, which on this link is a page fetched to be thrown away.
+//
+// Catching a step means having somewhere for it to go: the shell keeps an entry
+// on either side of itself and lives in the middle one. A pop to either side is
+// the gesture, spent on the tab's history instead, with the middle put back
+// under the reader before they can see it move.
+//
+// A back gesture the tab cannot answer — the first page of a tab, or a session
+// with no tab at all — is deliberately let through. It lands on the entry
+// behind, where the app looks unchanged and a second press leaves for real: a
+// browser that cannot be closed by the gesture that closes browsers is worse
+// than one that has to be told twice.
+const HISTORY_STATES = { back: 'skyhook:back', here: 'skyhook:here', forward: 'skyhook:forward' };
+/** Whether the shell still occupies the middle entry, i.e. the trap is armed. */
+let centred = false;
+
+function claimHistoryGestures(): void {
+  history.replaceState({ skyhook: HISTORY_STATES.back }, '');
+  history.pushState({ skyhook: HISTORY_STATES.here }, '');
+  history.pushState({ skyhook: HISTORY_STATES.forward }, '');
+  centred = true;
+  history.back();
+}
+
+window.addEventListener('popstate', (ev) => {
+  const state = (ev.state as { skyhook?: string } | null)?.skyhook;
+  if (state === HISTORY_STATES.back) {
+    // Only a gesture let through spends the trap. Clearing it here as well
+    // would rearm on the next tab state — in the window before the restore
+    // lands — pushing a fresh pair of entries under a step already on its way
+    // back to the middle.
+    if (goHistory(active, 'back')) history.forward();
+    else centred = false;
+    return;
+  }
+  if (state === HISTORY_STATES.forward) {
+    goHistory(active, 'forward');
+    // Restored either way: an unanswerable forward gesture is inert, and
+    // leaving the shell parked at the end would cost the next back gesture.
+    history.back();
+    return;
+  }
+  // The middle, arrived at from one side or the other: the restore landing.
+  centred = true;
 });
 
 // ------------------------------------------------------------------- the HUD
