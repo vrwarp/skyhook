@@ -195,12 +195,33 @@ func (p *Pipeline) Submit(req Request) {
 }
 
 // Want handles a client cache miss: ship bytes for keys it does not have.
+//
+// Whether a key is finished is decided by the metadata table and not by
+// looking in the cache, because the two questions race. A request that read
+// the cache a moment before the bytes landed there, and joined the waiting
+// list a moment after the worker had already read that list, would be answered
+// by neither — and nothing here is ever asked for twice, so that asset would be
+// missing from the page for the rest of the session.
+//
+// The window is microseconds wide and was found by reading rather than by
+// reproducing it; what prompted the reading was one full-suite run where an
+// icon font never arrived, on a machine running ten browsers, which has never
+// happened again. That is evidence of nothing in particular and a good enough
+// reason to close a hole that is free to close.
+//
+// Under the lock, meta and wanted are consistent with each other: the worker
+// writes the cache before it publishes the metadata, so a key in meta is a key
+// whose bytes are there to send.
 func (p *Pipeline) Want(tab uint32, keys []string) {
 	for _, k := range keys {
-		if !p.sendCached(tab, k) {
-			p.mu.Lock()
+		p.mu.Lock()
+		_, done := p.meta[k]
+		if !done {
 			p.wanted[k] = append(p.wanted[k], tab)
-			p.mu.Unlock()
+		}
+		p.mu.Unlock()
+		if done {
+			p.sendCached(tab, k)
 		}
 	}
 }
@@ -262,13 +283,16 @@ func (p *Pipeline) process(req Request) {
 	meta := res.Meta(req.Key, req.Node, req.Priority)
 	meta.Alt = req.Alt
 	meta.Box = req.Box
+	// The cache first, then the metadata, and both before the waiting list is
+	// taken: a client asking for this key sees it as finished only once the
+	// bytes it would be answered with are actually there. See Want.
+	p.cache.put(req.Key, res.Data, res.Mime)
 	p.mu.Lock()
 	p.remember(req.Key, meta)
 	waiting := p.wanted[req.Key]
 	delete(p.wanted, req.Key)
 	p.mu.Unlock()
 
-	p.cache.put(req.Key, res.Data, res.Mime)
 	p.deliver.ImageReady(req.Tab, meta)
 	if req.Priority == 0 {
 		p.deliver.ImageBytes(req.Tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
@@ -516,4 +540,32 @@ func Sniff(data []byte) string {
 		return "image/gif"
 	}
 	return "application/octet-stream"
+}
+
+// SniffFont names a font's container, or "" for anything that is not one.
+//
+// The magic numbers are the whole test: a font reaches the image pipeline
+// because it was named by a url() in a stylesheet, exactly as a background
+// image is, and by then nothing but the bytes says which it was. The content
+// type is worth carrying because it rides all the way to the blob the mirror
+// frame loads the font from.
+func SniffFont(data []byte) string {
+	if len(data) < 4 {
+		return ""
+	}
+	switch string(data[0:4]) {
+	case "wOFF":
+		return "font/woff"
+	case "wOF2":
+		return "font/woff2"
+	case "OTTO":
+		return "font/otf"
+	case "ttcf":
+		return "font/collection"
+	case "true", "typ1":
+		return "font/ttf"
+	case "\x00\x01\x00\x00":
+		return "font/ttf"
+	}
+	return ""
 }

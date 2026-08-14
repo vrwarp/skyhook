@@ -71,6 +71,17 @@ type Config struct {
 	//
 	//	"blockUrls": { "*": ["*://*.doubleclick.net/*"], "reddit.com": [] }
 	BlockURLs map[string][]string `json:"blockUrls"`
+	// CanvasStreamEvery keeps photographing a canvas that animates with nobody
+	// touching it — a clock face, an idle game loop — at this interval. Empty
+	// or "0", the default, means a canvas is photographed when the page loads
+	// and after the reader does something, and not otherwise.
+	//
+	// This is the one setting that spends the link on a page nobody is
+	// interacting with, so it is off until an operator decides the trade is
+	// worth it. The design's figure is "2s" (0.5 fps). Below about a second the
+	// frames will not fit down a bad link anyway, and the follow-up pass will
+	// keep skipping them.
+	CanvasStreamEvery Duration `json:"canvasStreamEvery"`
 	// SessionTTL is how long a session lives without a client.
 	SessionTTL Duration `json:"sessionTtl"`
 	// RingBytes bounds the per-tab replay buffer.

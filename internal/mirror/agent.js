@@ -103,6 +103,7 @@
   var cssSeen = 0;                 // style rules the last pass considered
   var cssRejected = 0;             // of those, how many matched nothing
   var cssRejectedList = [];        // and which, up to CSS_REJECTED_MAX
+  var fontsWanted = {};            // family -> 1, for fonts nothing can substitute
   var lastText = new Map();     // id -> last text we reported
   var lastScroll = new Map();
   var awaitingUpgrade = new Set(); // ids of custom elements not yet defined
@@ -602,7 +603,18 @@
           case 7: // keyframes: small, and cheap insurance for CSS animations
             out.push(rule.cssText);
             break;
-          case 5: // font-face: fonts are blocked landside; system substitution
+          case 5: // font-face
+            // Substituting from the system is the right trade for a font that
+            // carries text and the wrong one for a font that carries pictures.
+            // See fontsWithoutSubstitute: only a family the page is drawing
+            // private-use codepoints in is kept, and the server then ships the
+            // file the way it ships any other url() in a stylesheet.
+            var fam = firstFamily(rule.style && rule.style.fontFamily);
+            if (fam && fontsWanted[fam]) {
+              out.push(rule.cssText);
+            } else {
+              noteRejected('@font-face ' + (fam || '?'));
+            }
             break;
           default:
             if (rule.cssText && rule.cssText.charAt(0) === '@' &&
@@ -654,6 +666,76 @@
     return out;
   }
 
+  /*
+  Which webfonts a page cannot be read without.
+
+  Dropping @font-face and letting the system substitute is the right trade for
+  a font that carries text: the reader gets the page in a font they already
+  have, loses the typeface, and loses nothing they came for. It is the wrong
+  trade for an icon font. Those glyphs live in the Unicode private use area —
+  codepoints deliberately assigned no meaning, so every font on the reader's
+  device is entitled to have nothing there, and the substitute draws a row of
+  empty boxes where the toolbar was. The Google Maps capture that prompted
+  this has thirty of them: U+E8B6, U+E52E, U+E56C, one per control.
+
+  So a private-use codepoint on screen is the signal, and a precise one: it
+  says this font is the only copy of what it draws, and no substitution can
+  stand in. Nothing else is kept, which is what holds the cost to the pages
+  that have no alternative — a page whose body font is a webfont still gets
+  the reader's own, and still pays nothing for it.
+  */
+
+  // The private use areas: the BMP block, and the two supplementary planes as
+  // the surrogate pairs a JavaScript string actually holds.
+  var PUA_RE = /[\uE000-\uF8FF]|[\uDB80-\uDBBF][\uDC00-\uDFFF]/;
+
+  // Bounds on the walk. Reading a computed style forces style resolution, so
+  // the second is the one that matters; a page has a handful of icon families
+  // at most, and sixty hits have found all of them long before this stops.
+  var FONT_SCAN_NODES = 20000, FONT_SCAN_HITS = 64;
+
+  // firstFamily takes the name a font-family list leads with, unquoted and
+  // lowercased. The first entry is the one being asked for; the rest are what
+  // to fall back to, which for an icon font is the substitution being avoided.
+  function firstFamily(list) {
+    if (!list) return '';
+    var first = String(list).split(',')[0].trim();
+    var q = first.charAt(0);
+    if ((q === '"' || q === "'") && first.charAt(first.length - 1) === q) {
+      first = first.slice(1, -1);
+    }
+    return first.toLowerCase();
+  }
+
+  function fontsWithoutSubstitute(docs) {
+    var want = {};
+    for (var d = 0; d < docs.length; d++) {
+      var doc = docs[d];
+      var root = doc.body || doc.documentElement || doc;
+      var walker;
+      try {
+        walker = doc.createTreeWalker(root, 4 /* SHOW_TEXT */);
+      } catch (e) { continue; }
+      var nodes = 0, hits = 0, n;
+      while (hits < FONT_SCAN_HITS && nodes++ < FONT_SCAN_NODES) {
+        try { n = walker.nextNode(); } catch (e) { break; }
+        if (!n) break;
+        if (!n.nodeValue || !PUA_RE.test(n.nodeValue)) continue;
+        hits++;
+        var el = n.parentElement;
+        if (!el) continue;
+        // From the element's own window: these documents include the inlined
+        // same-origin iframes, and a style resolved against the wrong one is
+        // not this element's style.
+        var view = doc.defaultView || globalThis;
+        var fam = '';
+        try { fam = firstFamily(view.getComputedStyle(el).fontFamily); } catch (e) { fam = ''; }
+        if (fam) want[fam] = 1;
+      }
+    }
+    return want;
+  }
+
   function cssDelta() {
     var docs = [document];
     // Shadow roots and same-origin iframe documents both carry their own
@@ -661,6 +743,10 @@
     observedDocs.forEach(function (d) {
       if (d !== document && (d.styleSheets || d.adoptedStyleSheets)) docs.push(d);
     });
+    // Recomputed per pass, because a font arriving late is the ordinary case:
+    // the icons are private-use codepoints from the first paint, but the sheet
+    // that declares the family they need often lands after it.
+    fontsWanted = fontsWithoutSubstitute(docs);
     // The rejection tally describes one pass, not the session: a selector that
     // matched nothing an hour ago may match now, and a list that only ever grew
     // would accuse the filter of dropping rules it has since shipped.

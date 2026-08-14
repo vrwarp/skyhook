@@ -168,6 +168,107 @@ const canvasPage = `<!DOCTYPE html><html><head><title>Canvas</title></head>
 </script>
 </body></html>`
 
+// fontPage carries both kinds of webfont at once: one drawing prose, which the
+// reader's own font stands in for perfectly well, and one drawing icons out of
+// the private use area, where no font on the reader's device has anything at
+// all and the substitute renders empty boxes.
+const fontPage = `<!DOCTYPE html><html><head><title>Fonts</title>
+<style>
+  @font-face { font-family: 'Test Icons'; src: url(/icons.woff2) format('woff2'); }
+  @font-face { font-family: 'Test Prose'; src: url(/prose.woff2) format('woff2'); }
+  .icon { font-family: 'Test Icons', sans-serif; }
+  .prose { font-family: 'Test Prose', serif; }
+</style></head>
+<body>
+  <h1 class="prose">a heading set in a webfont</h1>
+  <nav><span class="icon">&#xE8B6;</span><span class="icon">&#xE52E;</span></nav>
+</body></html>`
+
+// fakeFont is a font only as far as the sniffer is concerned, which is as far
+// as anything in the pipeline looks: nothing decodes it, resizes it or renders
+// it here. A real typeface would test the same code paths and put a binary in
+// the repository to do it.
+var fakeFont = append([]byte("wOF2"), make([]byte, 256)...)
+
+// animatedCanvasPage repaints for a while after a click and then stops, which
+// is the shape of everything a reader starts: tiles sliding, a map easing to a
+// halt, a spinner running until the answer lands. One photograph taken shortly
+// after the click catches it mid-flight; without follow-ups it stays there.
+//
+// It reports how far it got as text, so a test can tell "the shot never
+// arrived" apart from "the animation had not finished when it did".
+const animatedCanvasPage = `<!DOCTYPE html><html><head><title>Animated</title></head>
+<body style="margin:0">
+  <h1 id="heading">a moving page</h1>
+  <canvas id="art" width="200" height="120" style="width:200px;height:120px"></canvas>
+  <button id="go">go</button>
+  <p id="step">step: 0</p>
+<script>
+  var step = 0, timer = null;
+  // Ten frames at 120 ms: a little over a second, so it is unambiguously still
+  // running when the first shot is taken and unambiguously over well before a
+  // test would give up on it.
+  var STEPS = 10;
+  function paint() {
+    var ctx = document.getElementById('art').getContext('2d');
+    // Ends on a colour nothing else here paints, so "it finished" is a
+    // different assertion from "it moved at all".
+    ctx.fillStyle = step >= STEPS ? 'rgb(0, 200, 0)' : 'rgb(' + (20 * step) + ', 0, 0)';
+    ctx.fillRect(0, 0, 200, 120);
+    document.getElementById('step').textContent = 'step: ' + step;
+  }
+  paint();
+  document.getElementById('go').addEventListener('click', function () {
+    if (timer) return;
+    step = 0;
+    timer = setInterval(function () {
+      step++;
+      paint();
+      if (step >= STEPS) { clearInterval(timer); timer = null; }
+    }, 120);
+  });
+</script>
+</body></html>`
+
+// draggableCanvasPage is a map in miniature: a canvas that pans with the
+// pointer and has nothing inside it to click. It reports the offset it has been
+// dragged to as text, so a test can read the gesture that arrived rather than
+// having to photograph it.
+// The canvas is placed at a known offset so a test can aim at it in viewport
+// coordinates, which is the only way anything reaches a canvas.
+const draggableCanvasPage = `<!DOCTYPE html><html><head><title>Draggable</title></head>
+<body style="margin:0">
+  <h1 id="heading">a page you can pan</h1>
+  <canvas id="art" width="300" height="200"
+          style="position:absolute;left:100px;top:100px;width:300px;height:200px"></canvas>
+  <p id="offset" style="position:absolute;top:320px">offset: 0,0</p>
+<script>
+  var ox = 0, oy = 0, from = null, down = false;
+  var art = document.getElementById('art');
+  function paint() {
+    var ctx = art.getContext('2d');
+    ctx.fillStyle = 'rgb(230, 230, 230)';
+    ctx.fillRect(0, 0, 300, 200);
+    ctx.fillStyle = 'rgb(0, 90, 200)';
+    ctx.fillRect(20 + ox, 20 + oy, 60, 60);
+    document.getElementById('offset').textContent =
+      'offset: ' + Math.round(ox) + ',' + Math.round(oy);
+  }
+  paint();
+  // Panning from the first move rather than from the press, which is what a
+  // map does and what makes the distance travelled the whole message.
+  art.addEventListener('mousedown', function () { down = true; from = null; });
+  art.addEventListener('mousemove', function (e) {
+    if (!down) return;
+    if (from) { ox += e.clientX - from.x; oy += e.clientY - from.y; }
+    from = { x: e.clientX, y: e.clientY };
+    paint();
+  });
+  // On window, because a drag that ends outside the canvas still ends.
+  window.addEventListener('mouseup', function () { down = false; from = null; });
+</script>
+</body></html>`
+
 // webglPage is the shape of the sites that prompted all of this: a game or a
 // map that draws itself with WebGL and, finding no context, shows its own
 // error instead of its content. It reports which way it went as text, so a
@@ -342,6 +443,24 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			<iframe id="kid" src="/canvas" width="400" height="300" style="border:0"></iframe>
 			</body></html>`)
 	})
+	mux.HandleFunc("/draggable", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, draggableCanvasPage)
+	})
+	mux.HandleFunc("/animated", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, animatedCanvasPage)
+	})
+	mux.HandleFunc("/fonts", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, fontPage)
+	})
+	for _, name := range []string{"/icons.woff2", "/prose.woff2"} {
+		mux.HandleFunc(name, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "font/woff2")
+			_, _ = w.Write(fakeFont)
+		})
+	}
 	mux.HandleFunc("/webgl", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, webglPage)

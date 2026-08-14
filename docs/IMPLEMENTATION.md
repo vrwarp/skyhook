@@ -765,8 +765,38 @@ follow and a poll would spend the whole link on frames nobody asked for. The
 signal used instead is input: the reader pressed a key or dragged the map,
 which is the moment something they caused might have changed. Cost stays
 proportional to interaction, and the client keeps its promise of one round trip
-per interaction and none when idle. An animation running on its own is not
-followed — that is the design's P2 tile stream, and it is not built.
+per interaction and none when idle.
+
+One shot per input is not enough on its own, because the thing the reader
+started takes time to finish: tiles slide, a map eases to a stop, a spinner
+runs until the answer lands. A photograph 350 ms in catches that mid-flight and
+leaves it frozen there until they touch something else, which reads as a mirror
+that stopped updating. So a pass that saw pixels change looks again, and keeps
+looking until two passes running find nothing new. The animation is followed to
+wherever it settles and then costs nothing, and nobody had to say in advance
+how long it was going to take. A run is capped at 24 follow-ups, so a canvas
+that never settles stops being followed rather than owning the link, and a run
+gives up early when the session's send queues are already deep — an unasked-for
+frame of an animation must not delay the thing the reader actually did.
+
+Following a canvas that animates with nobody watching is the one behaviour here
+that spends bandwidth on a page the reader is not touching, so it is off until
+an operator asks (`canvasStreamEvery`, the design's P2 tile stream; "2s" is
+0.5 fps).
+
+**Reaching a canvas at all** is the other half. Every input the mirror replays
+names a node — click this, type into that — and a canvas has nothing inside it
+to name: no element in a map to click, none in a game board to focus. What a
+map understands is a button going down, moving, and coming up, and the distance
+between those points is the entire instruction. `InDrag` was in the protocol
+and implemented nowhere, the third slot in this file's collection of them; it
+now carries a press point in permille of the node's box and a path in permille
+of the viewport, the same units a click's approach already used and the only
+ones that survive two different layouts. Plane-side the gesture is claimed only
+when the press lands on a region — anywhere else a press-move-release is the
+reader selecting text, which the mirror does natively and must not lose — and
+the click that trails it is swallowed, because landside a pan followed by a
+press wherever it ended is two instructions where the reader gave one.
 
 The landside half of the same two reports was a different bug with the same
 symptom. A VPS has no GPU, and Chromium no longer falls back to SwiftShader for
@@ -778,25 +808,54 @@ sandbox cost it names is the one this project already pays everywhere else,
 which is that the landside browser exists to run untrusted code so the plane
 side does not have to.
 
+### 24. An asset nothing pushes is an asset asked for exactly once
+
+Shipping icon fonts (§23) put a new kind of asset on the path that stylesheets
+use, and that path turned out to have a window in it.
+
+Nothing pushes what a stylesheet names. The server can see a viewport position
+for an `<img>` and not for a background image or a webfont, so those wait to be
+asked for — and the client asks once per content hash, because asking twice
+costs a round trip on a link where round trips are the entire problem. One
+request, one answer, or the asset is missing for the rest of the session.
+
+The worker published a finished key into its metadata table, took the list of
+clients waiting for it, and only then wrote the bytes to the cache. A request
+arriving in between read the cache (miss), joined the waiting list (already
+taken) and was answered by neither.
+
+Worth being precise about the evidence: this was found by reading the code
+after one full-suite run where the icon font never arrived, on a machine
+running ten browsers at once. That failure has not recurred, and it was never
+reproduced deliberately — the window is microseconds wide, and closing it is
+cheap enough not to need a better reason. It may or may not have been what went
+wrong that time.
+
+The cache is now written before the key is published, and `Want` decides
+whether a key is finished from the metadata table rather than by looking in the
+cache — so under the one lock, "this key is done" and "its bytes are there to
+send" are the same statement. The narrowness is the lesson worth keeping: an
+asset that is only ever asked for once has no second chance to paper over a
+race, and this path has three of those (background images, webfonts, and now
+region shots when a push is dropped).
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
 
-- **Canvas regions are photographed on interaction, not streamed.** See
-  [§23](#23-a-canvas-is-pixels-and-pixels-have-to-be-photographed): a canvas
-  refreshes when the page loads and after each input, so an animation running
-  on its own is not followed. The design's P2 tile stream (§R11, 0.5 fps) is
-  not built.
+- **A canvas that animates unprompted is not followed by default.** See
+  [§23](#23-a-canvas-is-pixels-and-pixels-have-to-be-photographed): an
+  animation the reader started is followed until it settles, but a clock or an
+  idle game loop needs `canvasStreamEvery` turned on, and that spends the link
+  on a page nobody is touching.
+- **Icon fonts are shipped whole, not subsetted.** §23: a family the page draws
+  private-use codepoints in crosses the link entire, capped at 1 MB, because
+  subsetting it to the codepoints actually used needs a font subsetter and
+  there is none here. The cost is paid once and cached across flights, but a
+  page using six glyphs of a large family pays for all of them. `hb-subset`
+  when present, degrading to this when not, is the obvious next step and would
+  follow the pattern `avifenc`/`cwebp` already set.
 - **A second adapter** (design P2) is not built.
-- **An icon font has no system substitute, and renders as tofu.** The agent
-  drops `@font-face` and the design takes system substitution as the trade
-  (§1.4, §2.1), which is right for text: a page set in a webfont reads fine in
-  the reader's own. It is wrong for an icon font, where the glyphs live in the
-  private use area and the ligature names — `search`, `directions` — mean
-  nothing to any font a device actually has. The Google Maps capture that
-  prompted §23 has thirty `.google-symbols` spans, and every one of them is an
-  empty box plane-side. Shipping a subset of the codepoints a page actually
-  uses is the fix, and it is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
   plane-side, so the cross-tab paste fidelity §2.6 wants from a landside copy is

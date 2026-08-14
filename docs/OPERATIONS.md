@@ -67,6 +67,7 @@ default; this is the whole surface:
   "maxTabs": 8,
   "imageQuality": 40,
   "imageCacheBytes": 536870912,
+  "canvasStreamEvery": "0",
   "homeUrl": "",
   "blockUrls": { "reddit.com": [] },
   "adapters": ["googlechat"],
@@ -398,6 +399,24 @@ list turns blocking off there entirely:
 ```json
 { "blockUrls": { "reddit.com": [], "*": ["*://*.doubleclick.net/*"] } }
 ```
+
+**Following a canvas that animates on its own.** A canvas is photographed
+landside when the page loads and after the reader does something, and the
+photographs continue until the picture stops changing — so a tile slide or a
+map easing to a halt arrives complete without any setting. What that does not
+cover is a canvas that animates with nobody touching it: a clock face, a game
+loop, a chart that ticks. `canvasStreamEvery` keeps photographing one at a
+fixed interval:
+
+```json
+{ "canvasStreamEvery": "2s" }
+```
+
+Off by default, and worth leaving off unless the page needs it: this is the
+only setting here that spends the link on a page nobody is interacting with.
+Below about a second the frames will not fit down a bad link anyway — the
+follow-up pass skips a round whenever the send queues are already deep, so a
+rate the link cannot carry quietly becomes a slower one.
 
 **Adapter selectors.** `adapterConfig` points at a JSON file of per-adapter
 overrides, so a Chat redesign is a config edit rather than a rebuild:

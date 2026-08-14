@@ -170,6 +170,15 @@ func atoiFloat(b []byte) int {
 	return int(f + 0.5)
 }
 
+// fontMaxBytes caps a webfont.
+//
+// This is the one asset here that is neither resized nor recompressed, so it
+// is the one with no way to make a large source small. An icon font is tens of
+// kilobytes; a full variable family with every weight is megabytes, and paying
+// that on this link to render a toolbar is not a trade worth making. Over the
+// cap the page keeps its empty boxes, which is what it had before.
+const fontMaxBytes = 1 << 20
+
 // Transcode decodes src and re-encodes it at (w,h), which is the size the page
 // actually lays the image out at. Zero dimensions mean "keep natural size".
 func (t *Transcoder) Transcode(ctx context.Context, src []byte, w, h int) (*Result, error) {
@@ -178,6 +187,17 @@ func (t *Transcoder) Transcode(ctx context.Context, src []byte, w, h int) (*Resu
 	}
 	if res, ok := passThroughSVG(src, w, h); ok {
 		return res, nil
+	}
+	// A font arrives here because the agent kept an @font-face rule and the
+	// server rewrote its src() like any other url() in a stylesheet. There is
+	// nothing to decode and nothing to resize: what makes it small is shipping
+	// only the fonts a page cannot be read without, which is the agent's call,
+	// not this one's.
+	if mime := SniffFont(src); mime != "" {
+		if len(src) > fontMaxBytes {
+			return nil, fmt.Errorf("imgproc: font is %d bytes: %w", len(src), ErrTooLarge)
+		}
+		return &Result{Data: src, Mime: mime}, nil
 	}
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(src))
 	if err != nil {

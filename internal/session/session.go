@@ -326,6 +326,23 @@ func (s *Session) WantImage(tab uint32, req mirror.ImageRequest) {
 	})
 }
 
+// backloggedFrames is how many queued frames mean the link is behind.
+//
+// Not zero: a queue with a frame or two in it is a queue doing its job. This
+// is the depth at which anything already waiting will be noticeably late, so
+// adding an unasked-for frame of an animation on top makes the reader wait
+// longer for the thing they actually did.
+const backloggedFrames = 8
+
+// Backlogged implements mirror.Emitter.
+func (s *Session) Backlogged() bool {
+	depth := 0
+	for _, q := range s.sendQ {
+		depth += len(q)
+	}
+	return depth >= backloggedFrames
+}
+
 // ImageReady implements imgproc.Delivery.
 func (s *Session) ImageReady(tab uint32, meta protocol.ImageMeta) {
 	s.Send(protocol.ChMedia, protocol.TypeImageMeta, tab, meta)
@@ -364,6 +381,7 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 		Viewport: vp, Logger: s.log, UserAgent: s.mgr.opts.UserAgent,
 		AcceptLanguage: s.mgr.opts.AcceptLanguage,
 		Blocked:        s.mgr.opts.Blocked,
+		StreamEvery:    s.mgr.opts.CanvasStream,
 	})
 	if err != nil {
 		return 0, err

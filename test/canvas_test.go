@@ -3,8 +3,10 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/png"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,6 +162,143 @@ func TestACanvasInsideAFrameIsPhotographedWhereItActuallyIs(t *testing.T) {
 	if !nearColour(r, g, b, 0, 128, 255) {
 		t.Errorf("shot of the framed canvas is rgb(%d, %d, %d), want the blue it painted", r, g, b)
 	}
+}
+
+// An animation the reader started is not over when the input that started it
+// is. One photograph 350ms after the click catches a slide halfway and leaves
+// it there until they touch something else, which reads as a mirror that has
+// stopped updating.
+func TestAnAnimationIsFollowedUntilItSettles(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/animated"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "a moving page", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+	art := cl.Model(tab).Find("canvas", "id", "art")
+	if art == nil {
+		t.Fatal("canvas node missing from the mirror")
+	}
+	waitForShot(t, cl, art.ID, "")
+
+	go2, err := cl.FindNode(tab, "button", "id", "go")
+	if err != nil {
+		t.Fatalf("find button: %v", err)
+	}
+	if err := cl.Click(tab, go2.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The page says when it is done, so the assertion is about the last shot
+	// rather than about a timeout that happened to be long enough.
+	if err := cl.WaitForText(ctx, tab, "step: 10", budget(30*time.Second)); err != nil {
+		t.Fatalf("the animation never finished landside: %v", err)
+	}
+
+	// The colour of the final frame, which only a shot taken after the
+	// animation stopped can be a picture of.
+	deadline := time.Now().Add(budget(30 * time.Second))
+	var r, g, b int
+	for time.Now().Before(deadline) {
+		meta, ok := latestShot(cl, art.ID)
+		if ok {
+			if data, ok := cl.ImageBytes(meta.Hash); ok {
+				r, g, b = middlePixel(t, data)
+				if nearColour(r, g, b, 0, 200, 0) {
+					return
+				}
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("the mirror settled on rgb(%d, %d, %d); the animation was left mid-flight", r, g, b)
+}
+
+// Region shots make a canvas visible. This is what makes it usable.
+//
+// Everything else the mirror replays names a node — click this, type into
+// that — and a canvas has nothing inside it to name. A map understands a
+// button going down, moving and coming up, and the distance between those
+// points is the entire instruction.
+func TestADragPansACanvas(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/draggable"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "a page you can pan", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+	art := cl.Model(tab).Find("canvas", "id", "art")
+	if art == nil {
+		t.Fatal("canvas node missing from the mirror")
+	}
+
+	// The client viewport is 1024x768 and the canvas sits at x 100..400, so
+	// these permille land inside it: 146‰ is x=150px and 244‰ is x=250px, a
+	// hundred pixels apart.
+	const vw = 1024
+	path := []int32{146, 260, 0, 195, 260, 30, 244, 260, 30}
+	if err := cl.Input(tab, protocol.InputEvent{
+		Kind:  protocol.InDrag,
+		Node:  art.ID,
+		Point: []int32{166, 500}, // press at the left of the box, where the path starts
+		Path:  path,
+	}); err != nil {
+		t.Fatalf("send drag: %v", err)
+	}
+
+	want := int(float64(path[6]-path[0]) / 1000 * vw) // the pan the path describes
+	deadline := time.Now().Add(budget(30 * time.Second))
+	var got string
+	for time.Now().Before(deadline) {
+		got = offsetText(cl.Model(tab).Text())
+		if x, y, ok := parseOffset(got); ok && abs(x-want) <= 4 && y == 0 {
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("the page reports %q; the drag should have panned it %d px", got, want)
+}
+
+func offsetText(text string) string {
+	i := strings.Index(text, "offset:")
+	if i < 0 {
+		return ""
+	}
+	rest := text[i:]
+	if j := strings.IndexAny(rest[len("offset:"):], "\n\t "); j > 0 {
+		return rest[:len("offset:")+j+1]
+	}
+	return rest
+}
+
+func parseOffset(s string) (x, y int, ok bool) {
+	i := strings.Index(s, "offset:")
+	if i < 0 {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(strings.TrimSpace(s[i+len("offset:"):]), "%d,%d", &x, &y); err != nil {
+		return 0, 0, false
+	}
+	return x, y, true
 }
 
 func openCanvasPage(t *testing.T, ctx context.Context, h *harness, cl *client.Client) uint32 {

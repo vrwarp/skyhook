@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
 	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -232,6 +235,148 @@ func TestDataURLsAreDecodedRatherThanFetched(t *testing.T) {
 	}
 	if _, ok := dataURL("https://example.com/a.png"); ok {
 		t.Fatal("an http url must still be fetched")
+	}
+}
+
+// Nothing asks twice.
+//
+// An asset a stylesheet names is never pushed — the server can see no viewport
+// position for a background image or a webfont — so it arrives if and only if
+// the single request for it is answered, whenever that request happens to
+// land. Asking while the work is still in flight is the ordinary case and the
+// one this covers; asking in the instant the work completes is the same
+// question, and what the ordering in Want and process exists to answer.
+func TestAnAssetAskedForWhileItLandsIsStillDelivered(t *testing.T) {
+	const keys = 64
+	const fetchTakes = 20 * time.Millisecond
+
+	d := &recorder{ready: make(chan protocol.ImageMeta, keys), bytes: make(chan protocol.ImageData, keys)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 4, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher: slowFetcher{delay: fetchTakes, body: encodePNG(t, sprite(16, 16))},
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < keys; i++ {
+		key := fmt.Sprintf("%08x", i)
+		// Priority 1: nothing is pushed, so the only way these bytes reach a
+		// client is the answer to its one request.
+		p.Submit(Request{
+			Tab: 1, Key: key, Node: int64(i), Priority: 1,
+			URL: "https://example.test/" + key, W: 16, H: 16,
+		})
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			// Staggered across the fetch and past the end of it, so these span
+			// "long before it finished" through "after it already had".
+			time.Sleep(time.Duration(n%32) * fetchTakes / 16)
+			p.Want(1, []string{key})
+		}(i)
+	}
+	wg.Wait()
+
+	got := map[string]bool{}
+	deadline := time.After(60 * time.Second)
+	for len(got) < keys {
+		select {
+		case data := <-d.bytes:
+			got[data.Hash] = true
+		case <-deadline:
+			t.Fatalf("%d of %d assets were asked for and never delivered", keys-len(got), keys)
+		}
+	}
+}
+
+// Nothing is told an asset is ready before its bytes can be read.
+//
+// A client that hears about a key asks for it, and Want answers such a request
+// out of the cache — so metadata that outruns the bytes is metadata that
+// prompts a question with no answer, once, with nothing to ask again.
+func TestNothingIsAnnouncedBeforeItsBytesAreCached(t *testing.T) {
+	d := &recorder{ready: make(chan protocol.ImageMeta, 1), bytes: make(chan protocol.ImageData, 1)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	p.Submit(Request{Tab: 1, Key: "c0ffee", Priority: 1, Src: encodePNG(t, sprite(16, 16)), W: 16, H: 16})
+	select {
+	case <-d.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the image never finished")
+	}
+	// The moment anything can observe the key as done, the bytes must be there.
+	p.mu.Lock()
+	_, published := p.meta["c0ffee"]
+	p.mu.Unlock()
+	if !published {
+		t.Fatal("metadata was delivered for a key the table does not have")
+	}
+	if _, _, ok := p.cache.get("c0ffee"); !ok {
+		t.Fatal("the key was published before its bytes were cached")
+	}
+}
+
+// slowFetcher answers every URL with the same bytes, after a fixed delay.
+type slowFetcher struct {
+	delay time.Duration
+	body  []byte
+}
+
+func (f slowFetcher) FetchImage(_ context.Context, _ uint32, _ string, _ int) ([]byte, error) {
+	time.Sleep(f.delay)
+	return f.body, nil
+}
+
+// A webfont reaches this pipeline because the agent kept an @font-face rule
+// and the server rewrote its src() like any other url() in a stylesheet. There
+// is nothing here that can decode one, so without a way past the codecs every
+// icon font fails as "unknown format" and the page keeps its empty boxes.
+func TestFontsPassThroughUntouched(t *testing.T) {
+	tc := New(Options{Encoder: EncoderPNG})
+	for name, magic := range map[string]struct{ head, mime string }{
+		"woff2":      {"wOF2", "font/woff2"},
+		"woff":       {"wOFF", "font/woff"},
+		"opentype":   {"OTTO", "font/otf"},
+		"truetype":   {"\x00\x01\x00\x00", "font/ttf"},
+		"collection": {"ttcf", "font/collection"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := append([]byte(magic.head), make([]byte, 512)...)
+			res, err := tc.Transcode(context.Background(), src, 512, 0)
+			if err != nil {
+				t.Fatalf("transcode font: %v", err)
+			}
+			if res.Mime != magic.mime {
+				t.Errorf("mime = %q, want %q", res.Mime, magic.mime)
+			}
+			if !bytes.Equal(res.Data, src) {
+				t.Error("the font was altered; there is no smaller version of one here")
+			}
+		})
+	}
+
+	// A whole variable family is megabytes, and paying that on this link to
+	// draw a toolbar is not a trade worth making.
+	big := append([]byte("wOF2"), make([]byte, fontMaxBytes+1)...)
+	if _, err := tc.Transcode(context.Background(), big, 0, 0); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("an oversized font was accepted: %v", err)
+	}
+
+	// And a bitmap must still go through the codecs.
+	if got := SniffFont(onePixelPNG(t)); got != "" {
+		t.Errorf("a PNG was mistaken for a font: %q", got)
+	}
+	if got := SniffFont([]byte("wO")); got != "" {
+		t.Errorf("a two-byte source was sniffed as %q", got)
 	}
 }
 

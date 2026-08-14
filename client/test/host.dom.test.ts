@@ -151,6 +151,122 @@ describe('MirrorHost', () => {
     expect(payload.seq).toBe(1);
   });
 
+  /**
+   * Drags the pointer across an element and returns what the host sent.
+   *
+   * jsdom lays nothing out, so every clientX here is a number the frame's
+   * innerWidth turns into permille and nothing else depends on.
+   */
+  function dragAcross(host: MirrorHost, el: Element, from: number, to: number): void {
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const at = (type: string, x: number) => el.dispatchEvent(
+      new win.MouseEvent(type, { bubbles: true, clientX: x, clientY: 40, button: 0 }),
+    );
+    at('mousedown', from);
+    at('mousemove', Math.round((from + to) / 2));
+    at('mousemove', to);
+    at('mouseup', to);
+    el.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: to, clientY: 40 }));
+  }
+
+  it('turns a drag across a canvas into a pan', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    const canvas = host.frame.contentDocument!.querySelector('canvas')!;
+
+    dragAcross(host, canvas, 100, 400);
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).toContain('drag');
+    // And not also a click: landside the two would be a pan followed by a
+    // press wherever it ended.
+    expect(kinds).not.toContain('click');
+
+    const drag = (ev.input.mock.calls.find(
+      (c) => (c[1] as Record<string, unknown>).kind === 'drag',
+    )![1]) as Record<string, unknown>;
+    expect(drag.node).toBe(10);
+    const path = drag.path as number[];
+    // Triplets, and the first sample is where the button went down — a pan
+    // measured from halfway is a pan of the wrong distance. Two samples is the
+    // floor rather than the expectation: intermediate moves go through the
+    // same 12 ms throttle as a click's approach, and here every event fires in
+    // the same millisecond. The press and the release always survive it, and
+    // between them they are the displacement.
+    expect(path.length % 3).toBe(0);
+    expect(path.length / 3).toBeGreaterThanOrEqual(2);
+    expect(path[0]).toBeLessThan(path[path.length - 3]);
+  });
+
+  it('does not let a drag swallow the click after next', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const canvas = doc.querySelector('canvas')!;
+
+    // A drag whose click never arrives: the pointer left the frame instead.
+    canvas.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, clientX: 100, button: 0 }));
+    canvas.dispatchEvent(new win.MouseEvent('mousemove', { bubbles: true, clientX: 400 }));
+    canvas.dispatchEvent(new win.MouseEvent('mouseleave', { bubbles: true, clientX: 400 }));
+
+    ev.input.mockClear();
+    const li = doc.querySelector('li')!;
+    li.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, clientX: 10, button: 0 }));
+    li.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 10 }));
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).toContain('click');
+  });
+
+  it('leaves a drag over ordinary content to the browser', async () => {
+    // Press, move and release over text is the reader selecting it, which the
+    // mirror does natively. Sending a pan as well would drag something
+    // landside that the reader was only highlighting.
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    const li = host.frame.contentDocument!.querySelector('li')!;
+
+    dragAcross(host, li, 100, 400);
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).not.toContain('drag');
+    expect(kinds).toContain('click');
+  });
+
+  it('does not send a pan for a press that never moved', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    const canvas = host.frame.contentDocument!.querySelector('canvas')!;
+
+    dragAcross(host, canvas, 200, 200);
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    // A map told it was dragged nowhere has been asked to do nothing, and the
+    // click it really was would never arrive.
+    expect(kinds).not.toContain('drag');
+    expect(kinds).toContain('click');
+  });
+
   it('asks for images the frame references', async () => {
     const { host, ev } = await mount();
     const snap = snapshot();

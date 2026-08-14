@@ -142,6 +142,7 @@ export const InputKind = {
   Paste: 'paste',
   SetValue: 'setvalue',
   Wheel: 'wheel',
+  Drag: 'drag',
 } as const;
 
 export interface Frame {

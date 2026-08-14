@@ -31,8 +31,23 @@ to follow and a poll would spend the whole link on frames nobody asked for.
 Input is the signal used instead: the reader pressed a key or dragged the map,
 which is the moment something they caused might have changed. That keeps the
 cost proportional to interaction and holds to the same promise as the rest of
-the client — one round trip per interaction, and none when idle. An animation
-running on its own is not followed, deliberately.
+the client — one round trip per interaction, and none when idle.
+
+One shot per input is not enough on its own, because the thing the reader
+started takes time to finish: tiles slide, a map eases to a stop, a spinner
+runs while the answer loads. A single photograph 350 ms in catches that
+mid-flight and leaves it there, frozen halfway, until the reader touches
+something else. So a pass that saw pixels change looks again, and keeps
+looking until two passes running find nothing new — the animation is followed
+to wherever it settles and then costs nothing, without anyone having to say
+how long it was going to take. A run is capped, so a canvas that never settles
+stops being followed instead of owning the link, and a run gives up early if
+the client is not draining what it already has.
+
+Following a canvas that animates with nobody watching — a clock, an idle
+game loop — is off unless an operator asks for it (Options.StreamEvery). That
+is the design's P2 tile stream, and it is the one behaviour here that spends
+bandwidth on a page the reader is not touching.
 */
 
 const (
@@ -49,6 +64,19 @@ const (
 	shotAfterLoad = 900 * time.Millisecond
 	// shotTimeout bounds one pass: a screenshot of a busy compositor can block.
 	shotTimeout = 15 * time.Second
+	// shotFollowDelay is how soon a pass that saw something change looks again.
+	// Roughly a frame of a CSS transition, and slow enough that a slide arrives
+	// as three or four steps rather than as thirty.
+	shotFollowDelay = 500 * time.Millisecond
+	// shotSettled is how many passes in a row must find nothing new before a
+	// run ends. Two, not one: an animation between keyframes can hold still for
+	// a moment without being over.
+	shotSettled = 2
+	// shotFollowMax bounds one run. A canvas that never settles — a clock, a
+	// game loop — would otherwise be followed for as long as the tab is open,
+	// which is the thing this is careful not to do by accident. Twelve seconds
+	// at the follow rate: long enough for anything a reader started.
+	shotFollowMax = 24
 )
 
 // shotBox is one region the agent says needs photographing. X and Y are page
@@ -63,11 +91,25 @@ type shotBox struct {
 	OY float64 `json:"oy"`
 }
 
-// shotSoon schedules a refresh, coalescing a burst of input into one pass.
+// shotSoon starts a run: one pass now-ish, and however many follow-ups it
+// takes for the pixels to settle.
 //
-// Every keystroke of a held arrow key would otherwise queue its own
-// screenshot, and the reader only ever sees the last of them.
+// Coalescing matters as much as the delay. Every keystroke of a held arrow key
+// would otherwise queue its own screenshot, and the reader only ever sees the
+// last of them.
 func (t *Tab) shotSoon(d time.Duration) {
+	t.mu.Lock()
+	// A new run: whatever the reader just did outranks the tail of the last
+	// animation, and it gets the full follow-up budget rather than what was
+	// left of the previous one.
+	t.shotRun = 0
+	t.shotQuiet = 0
+	t.mu.Unlock()
+	t.shotAgain(d)
+}
+
+// shotAgain schedules one pass without starting a new run.
+func (t *Tab) shotAgain(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
@@ -83,7 +125,8 @@ func (t *Tab) shotSoon(d time.Duration) {
 	})
 }
 
-// refreshShots photographs every canvas-like region the page is showing.
+// refreshShots photographs every canvas-like region the page is showing, and
+// decides whether the run continues.
 func (t *Tab) refreshShots(ctx context.Context) {
 	raw, err := t.eval(ctx, fmt.Sprintf("__skyhook.shots(%d)", shotMax))
 	if err != nil {
@@ -95,9 +138,12 @@ func (t *Tab) refreshShots(ctx context.Context) {
 		return
 	}
 	live := make(map[int64]bool, len(boxes))
+	changed := false
 	for _, b := range boxes {
 		live[b.N] = true
-		t.shootRegion(ctx, b)
+		if t.shootRegion(ctx, b) {
+			changed = true
+		}
 	}
 	// A canvas that scrolled out of view, or one the page removed, leaves a key
 	// behind that would suppress the next shot of whatever takes its node id —
@@ -110,13 +156,49 @@ func (t *Tab) refreshShots(ctx context.Context) {
 		}
 	}
 	t.mu.Unlock()
+	t.scheduleFollowUp(len(boxes) > 0, changed)
 }
 
-func (t *Tab) shootRegion(ctx context.Context, b shotBox) {
+// scheduleFollowUp decides whether to look again, and says why in the counters
+// rather than in a log line nobody reads.
+func (t *Tab) scheduleFollowUp(haveRegions, changed bool) {
+	if !haveRegions {
+		return
+	}
+	t.mu.Lock()
+	if changed {
+		t.shotQuiet = 0
+	} else {
+		t.shotQuiet++
+	}
+	settled := t.shotQuiet >= shotSettled
+	spent := t.shotRun >= shotFollowMax
+	if !settled && !spent {
+		t.shotRun++
+	}
+	stream := t.opts.StreamEvery
+	t.mu.Unlock()
+
+	// Three ways a run ends: the picture stopped changing, it was never going
+	// to, or the client has not drained what it already has and another frame
+	// would arrive behind the one the reader is waiting on. After any of them
+	// the reader's next move is the next reason to look — unless an operator
+	// asked for the idle stream, which starts its own run on a timer.
+	if settled || spent || t.out.Backlogged() {
+		if stream > 0 {
+			t.shotSoon(stream)
+		}
+		return
+	}
+	t.shotAgain(shotFollowDelay)
+}
+
+// shootRegion photographs one region, reporting whether it had changed.
+func (t *Tab) shootRegion(ctx context.Context, b shotBox) bool {
 	shot, err := t.captureClip(ctx, b)
 	if err != nil {
 		t.log.Debug("region shot failed", "tab", t.ID, "node", b.N, "err", err)
-		return
+		return false
 	}
 	// The key is the content hash of what the browser painted, so a canvas the
 	// reader did not change costs nothing at all: same pixels, same key, and
@@ -133,7 +215,7 @@ func (t *Tab) shootRegion(ctx context.Context, b shotBox) {
 	t.lastShot[b.N] = key
 	t.mu.Unlock()
 	if unchanged {
-		return
+		return false
 	}
 
 	t.out.WantImage(t.ID, ImageRequest{
@@ -145,6 +227,7 @@ func (t *Tab) shootRegion(ctx context.Context, b shotBox) {
 		// whole client exists to avoid.
 		Priority: 0,
 	})
+	return true
 }
 
 // captureClip screenshots one rectangle of the page.

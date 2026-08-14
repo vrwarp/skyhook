@@ -35,9 +35,11 @@ const cssImageMaxDim = 512
 // of those bytes ever cross the bad link: they are paid for landside, on the
 // half of the connection that has bandwidth to spare. What they bought instead
 // was a browser that loads a page, renders it, interacts with it and never once
-// reports anything back, which is not a shape a real visitor has. Fonts were
-// the same trade with less upside; the agent drops @font-face rules anyway, so
-// the client never sees a font URL whether or not the server fetched one.
+// reports anything back, which is not a shape a real visitor has. Blocking
+// fonts was the same trade and has since become a worse one: the agent keeps
+// the @font-face rules for a family the page draws private-use codepoints in,
+// so an icon font that never loaded landside is one the client cannot be sent
+// either, and its toolbar arrives as a row of empty boxes.
 //
 // What is left is what earns its place plane-side: ad and creative networks
 // inject iframes and DOM that the mirror would otherwise have to serialise,
@@ -96,6 +98,11 @@ type Emitter interface {
 	EmitFrame(ch protocol.Channel, f *protocol.Frame)
 	// WantImage asks the image pipeline for an asset.
 	WantImage(tab uint32, req ImageRequest)
+	// Backlogged reports that the link is not keeping up with what has already
+	// been queued. Only work that is optional asks: following an animation adds
+	// frames nobody requested, and doing it into a queue that is already deep
+	// delays the ones they did.
+	Backlogged() bool
 }
 
 // ImageRequest describes an image the mirror wants transcoded.
@@ -129,6 +136,12 @@ type Options struct {
 	// IdleSnapshotAfter re-snapshots if the page has been silent this long and
 	// the client asked for a resync. Zero disables.
 	IdleSnapshotAfter time.Duration
+	// StreamEvery keeps photographing a canvas that animates with nobody
+	// touching it — a clock, an idle game loop — at this interval. Zero, the
+	// default, means a canvas is only ever photographed because of something
+	// the reader did. This is the one setting here that spends bandwidth on a
+	// page nobody is interacting with, which is why an operator has to ask.
+	StreamEvery time.Duration
 }
 
 // Tab is one mirrored landside tab.
@@ -179,6 +192,11 @@ type Tab struct {
 	lastShot map[int64]string
 	// shotTimer coalesces a burst of input into one screenshot pass.
 	shotTimer *time.Timer
+	// shotRun counts the follow-up passes spent following one animation, and
+	// shotQuiet the passes in a row that found nothing new. Together they end a
+	// run at whichever comes first: the picture settling, or the budget.
+	shotRun   int
+	shotQuiet int
 }
 
 // NewTab attaches the mirror to a CDP session.
