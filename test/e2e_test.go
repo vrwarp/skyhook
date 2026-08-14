@@ -250,6 +250,19 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		t.Skipf("no chromium available: %v", err)
 	}
 
+	// A second origin, for the assets a real site keeps on a CDN. Same host,
+	// different port: that is a different origin, which is all it takes for the
+	// CSSOM to refuse to open a stylesheet served from here.
+	cdnMux := http.NewServeMux()
+	cdnMux.HandleFunc("/widget.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w, `.tickbox { display: block; box-sizing: border-box; `+
+			`width: 220px; height: 60px; border: 1px solid rgb(11, 22, 33); `+
+			`background: rgb(240, 241, 242); }`)
+	})
+	cdn := httptest.NewServer(cdnMux)
+	t.Cleanup(cdn.Close)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -347,6 +360,39 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			<script>
 			  document.getElementById('reframe').addEventListener('click', () => {
 			    document.getElementById('kid').src = '/framed-inner?take=2';
+			  });
+			</script>
+			</body></html>`)
+	})
+	// The shape of a widget: an iframe inserted after the page has loaded, whose
+	// document dresses itself from a stylesheet on another origin. The frame is
+	// pushed well down and across the page, so a coordinate taken from inside it
+	// and used unmodified lands on the heading rather than on the control.
+	mux.HandleFunc("/late-widget", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Widget</title></head>
+			<body><h1>the page around the widget</h1>
+			<div id="slot" style="margin: 160px 0 0 180px"></div>
+			<script>
+			  addEventListener('load', () => setTimeout(() => {
+			    const f = document.createElement('iframe');
+			    f.id = 'widget';
+			    f.width = 320; f.height = 120; f.style.border = '0';
+			    f.src = '/widget-inner';
+			    document.getElementById('slot').appendChild(f);
+			  }, 200));
+			</script>
+			</body></html>`)
+	})
+	mux.HandleFunc("/widget-inner", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head>
+			<link rel="stylesheet" href="`+cdn.URL+`/widget.css"></head>
+			<body style="margin:0"><span id="tick" class="tickbox" role="checkbox">tick me</span>
+			<p id="state">untouched</p>
+			<script>
+			  document.getElementById('tick').addEventListener('click', () => {
+			    document.getElementById('state').textContent = 'ticked';
 			  });
 			</script>
 			</body></html>`)

@@ -51,6 +51,9 @@
   // How many rejected selectors a capture is worth. A utility-class bundle
   // rejects tens of thousands; the first few thousand answer the question.
   var CSS_REJECTED_MAX = 4000;
+  // How far up a frame chain a coordinate is translated. Ad stacks nest three
+  // or four deep; past this something is looping and a click is not worth it.
+  var FRAME_DEPTH_MAX = 16;
 
   var KIND_ELEMENT = 1, KIND_TEXT = 3, KIND_DOCTYPE = 10;
   var FLAG_EDITABLE = 1, FLAG_IMAGE = 2, FLAG_SCROLL = 4, FLAG_SHADOW = 8, FLAG_CANVAS = 16;
@@ -96,6 +99,7 @@
   var cssOrder = [];
   var recoveredSheets = new Map(); // href -> constructed sheet the host supplied
   var blockedSheets = {};          // href -> 1, for sheets nothing can read yet
+  var blockedNew = false;          // one of those is news the host has not heard
   var cssSeen = 0;                 // style rules the last pass considered
   var cssRejected = 0;             // of those, how many matched nothing
   var cssRejectedList = [];        // and which, up to CSS_REJECTED_MAX
@@ -628,8 +632,9 @@
           var sub = recoveredSheets.get(href);
           if (sub) {
             try { rules = sub.cssRules; } catch (e) { rules = null; }
-          } else {
+          } else if (!blockedSheets[href]) {
             blockedSheets[href] = 1;
+            blockedNew = true;
           }
         }
       }
@@ -676,14 +681,39 @@
     return adds;
   }
 
+  /*
+   * announceBlocked tells the host there is a stylesheet here it could open.
+   *
+   * The host recovers cross-origin sheets on the main frame's load event, which
+   * catches the ones the document was parsed with and none of the ones that
+   * matter most: a widget that inserts its iframe after load brings a whole
+   * stylesheet with it, and so does the next chunk of a client-side route. The
+   * agent cannot read them and never asks again, so they stay blocked for the
+   * life of the document — Google's "unusual traffic" interstitial arrives with
+   * a reCAPTCHA whose checkbox has no styling at all, which renders as an
+   * invisible zero-size span with nothing to click.
+   *
+   * The nudge carries no payload: the host answers it by calling blockedSheets,
+   * which is the list, freshly walked.
+   */
+  function announceBlocked() {
+    if (!blockedNew) return;
+    blockedNew = false;
+    send({ t: 'sheets' });
+  }
+
   // emitCSSDelta collects and *sends* what it collected.
   //
   // Calling cssDelta and dropping the result is not a read: a rule it returns
   // has already been recorded as emitted, so discarding the return value drops
   // that rule from the page for good. Everything that walks the sheets goes
   // through here.
-  function emitCSSDelta() {
+  //
+  // `quiet` is for the host's own walk, which is already holding the answer
+  // announceBlocked would be asking it for.
+  function emitCSSDelta(quiet) {
     var adds = cssDelta();
+    if (!quiet) announceBlocked();
     if (!adds.length) return false;
     pendingOps.push([7, adds]);
     scheduleFlush(false);
@@ -1044,6 +1074,63 @@
     setTimeout(scheduleCSS, 2500);
   }
 
+  // ------------------------------------------------------------- coordinates
+
+  /*
+   * frameOffset is where a document's viewport sits inside the top-level one.
+   *
+   * Same-origin frames are inlined into the mirror, so the ids the client sends
+   * back for input replay routinely belong to a frame's document rather than to
+   * the page's — and `getBoundingClientRect` answers in the coordinates of
+   * whichever document the element is in, measured from that frame's own top
+   * left. The host replays a click by dispatching it at a point in the
+   * top-level viewport, so without this every click inside a frame lands short
+   * by exactly where the frame sits: on the page behind it, or on nothing.
+   *
+   * That failure is invisible from both ends. The mirror is correct, the click
+   * is delivered, the page is fine, and the control simply never responds —
+   * which is what a reCAPTCHA checkbox does when you cannot tick it.
+   */
+  function frameOffset(doc) {
+    var dx = 0, dy = 0;
+    var win = null;
+    try { win = doc && doc.defaultView; } catch (e) { win = null; }
+    for (var depth = 0; win && win !== globalThis && depth < FRAME_DEPTH_MAX; depth++) {
+      var fe = null;
+      // A cross-origin frame throws here, and there is nothing to correct for:
+      // its document was never serialised, so no id inside it exists.
+      try { fe = win.frameElement; } catch (e) { break; }
+      if (!fe) break;
+      var r = fe.getBoundingClientRect();
+      dx += r.left + frameEdge(fe, 'Left');
+      dy += r.top + frameEdge(fe, 'Top');
+      try { win = fe.ownerDocument.defaultView; } catch (e) { break; }
+    }
+    return { x: dx, y: dy };
+  }
+
+  // frameEdge is the border plus padding on one side of a frame element: the
+  // frame's viewport begins inside them, not at its border box.
+  function frameEdge(el, side) {
+    var cs = null;
+    try { cs = el.ownerDocument.defaultView.getComputedStyle(el); } catch (e) { return 0; }
+    if (!cs) return 0;
+    return (parseFloat(cs['border' + side + 'Width']) || 0) + (parseFloat(cs['padding' + side]) || 0);
+  }
+
+  // viewportRect is an element's box in the top-level viewport, whichever
+  // document it belongs to. Same shape as a DOMRect, in the parts read here.
+  function viewportRect(el) {
+    var r = el.getBoundingClientRect();
+    var off = frameOffset(el.ownerDocument);
+    if (!off.x && !off.y) return r;
+    return {
+      left: r.left + off.x, top: r.top + off.y,
+      right: r.right + off.x, bottom: r.bottom + off.y,
+      width: r.width, height: r.height
+    };
+  }
+
   // --------------------------------------------------------------- host API
 
   var api = {
@@ -1057,13 +1144,13 @@
       if (!n) return null;
       var el = n.nodeType === KIND_TEXT ? n.parentElement : n;
       if (!el || !el.getBoundingClientRect) return null;
-      var r = el.getBoundingClientRect();
+      var r = viewportRect(el);
       // Scroll a target into view before reporting: the host clicks by
       // coordinate, and an offscreen element would land on the wrong node.
       if (r.bottom < 0 || r.top > (globalThis.innerHeight || 0) ||
           r.right < 0 || r.left > (globalThis.innerWidth || 0)) {
         try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* older engines */ }
-        r = el.getBoundingClientRect();
+        r = viewportRect(el);
       }
       return {
         x: r.left, y: r.top, w: r.width, h: r.height,
@@ -1077,7 +1164,10 @@
       if (!n) return false;
       var el = n.nodeType === KIND_TEXT ? n.parentElement : n;
       try { el.focus({ preventScroll: false }); } catch (e) { return false; }
-      return document.activeElement === el;
+      // Against the element's own document: focus inside a frame leaves the top
+      // document pointing at the frame element, so asking there of an inlined
+      // frame's field reports a failure that did not happen.
+      return el.ownerDocument.activeElement === el;
     },
     setValue: function (id, value, start, end) {
       var el = byId.get(id);
@@ -1150,7 +1240,10 @@
       // walk collects counts as sent from that moment on, so a bare cssDelta
       // here would quietly cost the page every rule this pass was the first to
       // see — which is the late-arriving stylesheets, every time.
-      emitCSSDelta();
+      emitCSSDelta(true);
+      // Whatever the walk just found is in the list being returned, so there is
+      // nothing left to announce.
+      blockedNew = false;
       return Object.keys(blockedSheets);
     },
     /**
