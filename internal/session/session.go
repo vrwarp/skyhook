@@ -338,6 +338,7 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 	t, err := mirror.NewTab(ctx, id, s.mgr.browser, sess, s, mirror.Options{
 		Viewport: vp, Logger: s.log, UserAgent: s.mgr.opts.UserAgent,
 		AcceptLanguage: s.mgr.opts.AcceptLanguage,
+		Blocked:        s.mgr.opts.Blocked,
 	})
 	if err != nil {
 		return 0, err

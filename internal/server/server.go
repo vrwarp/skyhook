@@ -22,6 +22,7 @@ import (
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/config"
 	"github.com/vrwarp/skyhook/internal/imgproc"
+	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/protocol"
 	"github.com/vrwarp/skyhook/internal/session"
 	"github.com/vrwarp/skyhook/internal/transport"
@@ -118,6 +119,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		ProfileDir:     cfg.ProfileDir(),
 		UserAgent:      userAgent,
 		AcceptLanguage: cfg.Lang,
+		Blocked:        blocklistFrom(cfg.BlockURLs),
 		MaxTabs:        cfg.MaxTabs,
 		Adapters:       factories,
 		HomeURL:        cfg.HomeURL,
@@ -148,6 +150,28 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 	router.mgr = s.mgr
 
 	return s, nil
+}
+
+// blocklistFrom turns the configured map into the per-host structure the mirror
+// wants. "*" is the default; every other key is a host suffix.
+func blocklistFrom(cfg map[string][]string) mirror.Blocklist {
+	var b mirror.Blocklist
+	for host, patterns := range cfg {
+		if host == "*" || host == "" {
+			// Non-nil and empty is meaningfully different from absent: it means
+			// "block nothing", where absent means "use the built-in list".
+			if patterns == nil {
+				patterns = []string{}
+			}
+			b.Default = patterns
+			continue
+		}
+		if b.ByHost == nil {
+			b.ByHost = map[string][]string{}
+		}
+		b.ByHost[strings.ToLower(host)] = patterns
+	}
+	return b
 }
 
 // effectiveUserAgent decides what the browser should claim to be.

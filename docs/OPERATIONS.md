@@ -68,6 +68,7 @@ default; this is the whole surface:
   "imageQuality": 40,
   "imageCacheBytes": 536870912,
   "homeUrl": "",
+  "blockUrls": { "reddit.com": [] },
   "adapters": ["googlechat"],
   "adapterConfig": "/var/lib/skyhook/adapters.json",
   "logLevel": "info"
@@ -336,6 +337,18 @@ state does not.
 `DISPLAY` (systemd + Xvfb). Persisting a real profile is the other half of the
 mitigation. If a site still fights it, use the mirror for reading and do the
 awkward part on the ground.
+
+**What the browser refuses to fetch.** `blockUrls` is keyed by host, with `"*"`
+for the default. The built-in default blocks ad and creative networks, because
+their iframes are DOM the mirror would have to ship over the bad link. It does
+not block analytics or webfonts: those bytes are paid for landside, where there
+is bandwidth to spare, and a browser that renders a page and never reports
+anything back is not a shape a real visitor has. Naming a host with an empty
+list turns blocking off there entirely:
+
+```json
+{ "blockUrls": { "reddit.com": [], "*": ["*://*.doubleclick.net/*"] } }
+```
 
 **Adapter selectors.** `adapterConfig` points at a JSON file of per-adapter
 overrides, so a Chat redesign is a config edit rather than a rebuild:

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -27,20 +28,66 @@ const worldName = "skyhook"
 // cssImageMaxDim caps background images, which have no layout box to measure.
 const cssImageMaxDim = 512
 
-// Blocked request patterns. Blocking landside saves server work, removes mirror
-// noise, and means ad frames never generate mutations we would have to ship.
+// Blocked request patterns.
+//
+// This list used to include the measurement endpoints — analytics, tag
+// managers, session recorders — and webfonts. Both were false economies. None
+// of those bytes ever cross the bad link: they are paid for landside, on the
+// half of the connection that has bandwidth to spare. What they bought instead
+// was a browser that loads a page, renders it, interacts with it and never once
+// reports anything back, which is not a shape a real visitor has. Fonts were
+// the same trade with less upside; the agent drops @font-face rules anyway, so
+// the client never sees a font URL whether or not the server fetched one.
+//
+// What is left is what earns its place plane-side: ad and creative networks
+// inject iframes and DOM that the mirror would otherwise have to serialise,
+// diff and ship, on a link where every kilobyte is a second.
 var defaultBlockedURLs = []string{
 	"*://*.doubleclick.net/*",
 	"*://*.googlesyndication.com/*",
-	"*://*.googletagmanager.com/*",
-	"*://*.google-analytics.com/*",
-	"*://*.scorecardresearch.com/*",
-	"*://*.hotjar.com/*",
-	"*://*.segment.io/*",
-	"*://*.amplitude.com/*",
-	"*://*.mixpanel.com/*",
 	"*://*.adservice.google.com/*",
-	"*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot",
+	"*://*.amazon-adsystem.com/*",
+	"*://*.adnxs.com/*",
+	"*://*.criteo.com/*",
+	"*://*.taboola.com/*",
+	"*://*.outbrain.com/*",
+}
+
+// Blocklist is what the landside browser refuses to fetch, per host.
+//
+// Per-host because the trade differs by site. An ad-heavy news page is worth
+// stripping; a site that scores its visitors will notice the same stripping and
+// hold it against a session that is not a bot. Naming a host with an empty list
+// turns blocking off there entirely, which is the escape hatch that matters.
+type Blocklist struct {
+	// Default applies to any host with no entry of its own. A nil Default means
+	// defaultBlockedURLs; an empty non-nil one means block nothing.
+	Default []string
+	// ByHost is keyed by registrable-ish domain: "reddit.com" also covers
+	// "www.reddit.com" and "old.reddit.com".
+	ByHost map[string][]string
+}
+
+// For returns the patterns to block while showing a URL.
+func (b Blocklist) For(rawURL string) []string {
+	host := hostOf(rawURL)
+	for suffix, patterns := range b.ByHost {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return patterns
+		}
+	}
+	if b.Default == nil {
+		return defaultBlockedURLs
+	}
+	return b.Default
+}
+
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // Emitter receives frames produced by a tab.
@@ -66,8 +113,8 @@ type ImageRequest struct {
 type Options struct {
 	Viewport protocol.Viewport
 	Logger   *slog.Logger
-	// BlockURLs overrides the landside request denylist.
-	BlockURLs []string
+	// Blocked is the landside request denylist, per host.
+	Blocked Blocklist
 	// UserAgent overrides the browser default (kept realistic on purpose).
 	// Client-hint metadata is derived from it, so the two agree.
 	UserAgent string
@@ -97,6 +144,9 @@ type Tab struct {
 	title   string
 	loading bool
 	closed  bool
+	// blockedFor is the denylist currently installed, so a navigation within a
+	// host does not re-send it.
+	blockedFor []string
 	// canBack and canForward are held here for the same reason url and title
 	// are: most state frames are partial, and a partial frame that left these
 	// out would read on the client as "there is no history", disabling the back
@@ -135,13 +185,7 @@ func (t *Tab) install(ctx context.Context) error {
 	if err := s.Do(ctx, "Page.setLifecycleEventsEnabled", map[string]any{"enabled": true}, nil); err != nil {
 		t.log.Debug("lifecycle events unavailable", "err", err)
 	}
-	blocked := t.opts.BlockURLs
-	if blocked == nil {
-		blocked = defaultBlockedURLs
-	}
-	if err := s.Do(ctx, "Network.setBlockedURLs", map[string]any{"urls": blocked}, nil); err != nil {
-		t.log.Debug("blocked urls unsupported", "err", err)
-	}
+	t.applyBlocklist(ctx, "")
 	if err := t.overrideUserAgent(ctx); err != nil {
 		t.log.Debug("user agent override failed", "err", err)
 	}
@@ -246,6 +290,7 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		t.applyBlocklist(ctx, p.Frame.URL)
 		if err := t.ensureWorld(ctx); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
 		}
@@ -861,4 +906,32 @@ func (t *Tab) overrideUserAgent(ctx context.Context) error {
 		params["acceptLanguage"] = lang
 	}
 	return t.sess.Do(ctx, "Emulation.setUserAgentOverride", params, nil)
+}
+
+// applyBlocklist tells the browser what not to fetch while it is showing this
+// URL. It is re-applied on navigation, because the answer is per host.
+func (t *Tab) applyBlocklist(ctx context.Context, pageURL string) {
+	urls := t.opts.Blocked.For(pageURL)
+	t.mu.Lock()
+	unchanged := t.blockedFor != nil && equalStrings(t.blockedFor, urls)
+	t.blockedFor = urls
+	t.mu.Unlock()
+	if unchanged {
+		return
+	}
+	if err := t.sess.Do(ctx, "Network.setBlockedURLs", map[string]any{"urls": urls}, nil); err != nil {
+		t.log.Debug("blocked urls unsupported", "err", err)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

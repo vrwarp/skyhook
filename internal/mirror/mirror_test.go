@@ -275,3 +275,68 @@ func rawRow(parts ...string) []json.RawMessage {
 	}
 	return out
 }
+
+func TestBlocklistIsPerHost(t *testing.T) {
+	b := Blocklist{
+		Default: []string{"*://*.ads.example/*"},
+		ByHost: map[string][]string{
+			"reddit.com": {},
+			"news.test":  {"*://*.tracker.test/*"},
+		},
+	}
+	cases := []struct {
+		url  string
+		want []string
+	}{
+		{"https://www.reddit.com/r/flying", []string{}},
+		{"https://old.reddit.com/r/flying", []string{}},
+		{"https://reddit.com/", []string{}},
+		// A host that merely ends in the same letters is not the same host.
+		{"https://notreddit.com/", []string{"*://*.ads.example/*"}},
+		{"https://news.test/story", []string{"*://*.tracker.test/*"}},
+		{"https://elsewhere.test/", []string{"*://*.ads.example/*"}},
+	}
+	for _, tc := range cases {
+		got := b.For(tc.url)
+		if len(got) != len(tc.want) {
+			t.Errorf("For(%q) = %v, want %v", tc.url, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("For(%q) = %v, want %v", tc.url, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+// A nil Default means "the built-in list"; an empty one means "block nothing".
+// Conflating them would make "block nothing" impossible to ask for.
+func TestBlocklistDistinguishesUnsetFromEmpty(t *testing.T) {
+	if got := (Blocklist{}).For("https://example.test/"); len(got) != len(defaultBlockedURLs) {
+		t.Errorf("unset default = %v, want the built-in list", got)
+	}
+	if got := (Blocklist{Default: []string{}}).For("https://example.test/"); len(got) != 0 {
+		t.Errorf("empty default = %v, want nothing blocked", got)
+	}
+}
+
+// The measurement endpoints were removed on purpose: a session that never
+// beacons is not a shape a real visitor has, and none of those bytes ever
+// crossed the link.
+func TestDefaultBlocklistLeavesAnalyticsAlone(t *testing.T) {
+	for _, pattern := range defaultBlockedURLs {
+		for _, tracker := range []string{
+			"google-analytics", "googletagmanager", "scorecardresearch",
+			"hotjar", "segment", "amplitude", "mixpanel",
+		} {
+			if strings.Contains(pattern, tracker) {
+				t.Errorf("default blocklist still blocks %s: %q", tracker, pattern)
+			}
+		}
+		if strings.Contains(pattern, "woff") || strings.Contains(pattern, "ttf") {
+			t.Errorf("default blocklist still blocks webfonts: %q", pattern)
+		}
+	}
+}

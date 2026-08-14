@@ -16,6 +16,7 @@ import (
 	"github.com/vrwarp/skyhook/internal/adapter"
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/imgproc"
+	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/protocol"
 	"github.com/vrwarp/skyhook/internal/transport"
 )
@@ -39,6 +40,8 @@ type ManagerOptions struct {
 	UserAgent string
 	// AcceptLanguage rides with the user agent override.
 	AcceptLanguage string
+	// Blocked is the landside request denylist, per host.
+	Blocked mirror.Blocklist
 	// MaxTabs caps concurrent tabs.
 	MaxTabs int
 	// Adapters builds the adapters started for each session.

@@ -61,6 +61,16 @@ type Config struct {
 	UserAgent string `json:"userAgent"`
 	// Lang sets Chromium's --lang and the Accept-Language it sends.
 	Lang string `json:"lang"`
+	// BlockURLs is what the landside browser refuses to fetch, keyed by host
+	// with "*" as the default. The built-in default blocks ad and creative
+	// networks, whose iframes the mirror would otherwise have to ship.
+	//
+	// Naming a host with an empty list turns blocking off there, which is the
+	// setting that matters: a site that scores its visitors sees a browser
+	// refusing requests no browser refuses.
+	//
+	//	"blockUrls": { "*": ["*://*.doubleclick.net/*"], "reddit.com": [] }
+	BlockURLs map[string][]string `json:"blockUrls"`
 	// SessionTTL is how long a session lives without a client.
 	SessionTTL Duration `json:"sessionTtl"`
 	// RingBytes bounds the per-tab replay buffer.
