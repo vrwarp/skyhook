@@ -1159,6 +1159,45 @@
         href: el.tagName === 'A' ? (el.href || '') : ''
       };
     },
+    // shots lists the boxes the host has to photograph, because their content
+    // is pixels rather than DOM: canvas, WebGL and video. Sorted largest
+    // first, so a budget spent on one region is spent on the one the reader
+    // came for rather than on a 32px sparkline.
+    //
+    // Deliberately not rect(): that scrolls an offscreen target into view,
+    // which is right for a click and wrong here. Moving the page in order to
+    // photograph a corner of it would show the reader somewhere they are not.
+    shots: function (max) {
+      var vw = globalThis.innerWidth || 0, vh = globalThis.innerHeight || 0;
+      var sx = globalThis.scrollX || 0, sy = globalThis.scrollY || 0;
+      var out = [];
+      byId.forEach(function (node, id) {
+        if (!node || node.nodeType !== KIND_ELEMENT || !CANVAS_TAGS[node.tagName]) return;
+        // viewportRect, not getBoundingClientRect: a canvas inside an inlined
+        // same-origin frame measures against that frame's own viewport, and
+        // the screenshot is of the top-level page — so the raw rectangle names
+        // a place in the wrong document and photographs whatever is there.
+        var r;
+        try { r = viewportRect(node); } catch (e) { return; }
+        // Clipped to the viewport: the host screenshots what the landside
+        // browser has painted, and it has painted nothing outside it.
+        var left = r.left, top = r.top;
+        var x = Math.max(0, left), y = Math.max(0, top);
+        var x2 = Math.min(vw, left + r.width), y2 = Math.min(vh, top + r.height);
+        if (x2 - x < 8 || y2 - y < 8) return;
+        out.push({
+          // x and y are page coordinates, because that is what the screenshot
+          // clip is measured in — a viewport-relative rectangle photographs
+          // whatever happens to be that far down the document instead.
+          n: id, x: x + sx, y: y + sy, w: x2 - x, h: y2 - y,
+          // Where that clipped rectangle sits inside the element's own box, so
+          // the client can put it back exactly where it came from.
+          ox: x - left, oy: y - top
+        });
+      });
+      out.sort(function (a, b) { return b.w * b.h - a.w * a.h; });
+      return out.slice(0, max || 4);
+    },
     focus: function (id) {
       var n = byId.get(id);
       if (!n) return false;

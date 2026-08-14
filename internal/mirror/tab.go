@@ -107,6 +107,10 @@ type ImageRequest struct {
 	Priority int
 	Node     int64
 	Referer  string
+	// Src carries the pixels for a region shot, which has no URL to fetch.
+	Src []byte
+	// Box places a region shot inside its element; see protocol.ImageMeta.Box.
+	Box []int
 }
 
 // Options configures a mirrored tab.
@@ -170,6 +174,11 @@ type Tab struct {
 	// three times; every pass re-reads the list, so waiting for the one ahead
 	// costs nothing and running alongside it would fetch the same sheet twice.
 	sheetMu sync.Mutex
+	// lastShot is the content hash of the last region shot sent for a node, so
+	// a canvas the reader did not change costs nothing to leave on screen.
+	lastShot map[int64]string
+	// shotTimer coalesces a burst of input into one screenshot pass.
+	shotTimer *time.Timer
 }
 
 // NewTab attaches the mirror to a CDP session.
@@ -715,6 +724,11 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	t.seq = 0
 	t.url = s.URL
 	t.title = s.Title
+	// The client is rebuilding its document from nothing, so it is holding no
+	// region shot for any node — including the ones whose ids get reused.
+	// Remembering what it used to have would suppress the shot that fills the
+	// canvas it is about to show empty.
+	t.lastShot = nil
 	vp := t.opts.Viewport
 	t.mu.Unlock()
 
@@ -753,6 +767,9 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	for _, req := range cssImages {
 		t.out.WantImage(t.ID, req)
 	}
+	// A page that draws itself into a canvas has just arrived with that canvas
+	// empty, and nothing it does from here on will be a mutation.
+	t.shotSoon(shotAfterLoad)
 	t.emitState(protocol.TabState{URL: s.URL, Title: s.Title})
 }
 
@@ -933,6 +950,9 @@ func (t *Tab) Close(ctx context.Context) error {
 		return nil
 	}
 	t.closed = true
+	if t.shotTimer != nil {
+		t.shotTimer.Stop()
+	}
 	target := t.sess.Target
 	t.mu.Unlock()
 	return t.browser.CloseTarget(ctx, target)

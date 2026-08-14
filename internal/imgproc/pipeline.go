@@ -28,6 +28,12 @@ type Request struct {
 	Priority int // 0 = above the fold, ship immediately
 	Node     int64
 	Referer  string
+	// Src carries the source bytes when there is nothing to fetch: a canvas or
+	// a video frame exists only as pixels the landside browser was asked to
+	// photograph, and no URL names it. Set, it replaces both fetch paths.
+	Src []byte
+	// Box places a region shot inside its element; see protocol.ImageMeta.Box.
+	Box []int
 }
 
 // Fetcher retrieves image bytes through the landside browser, so an asset is
@@ -66,8 +72,20 @@ type Pipeline struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
 	meta     map[string]protocol.ImageMeta
+	metaAge  *list.List          // keys oldest-first, so meta can be bounded
 	wanted   map[string][]uint32 // key -> tabs waiting for bytes
 }
+
+// metaMax bounds the metadata table.
+//
+// A page of ordinary images adds one entry per distinct asset and then stops.
+// A canvas adds one per frame it was photographed at, for as long as the
+// reader keeps playing — an afternoon of panning a map would otherwise grow
+// this without any limit at all. Dropping the oldest entry costs a
+// re-transcode if that exact image ever comes back, which for the entries
+// this bound exists to drop — a board position from ten minutes ago — it will
+// not.
+const metaMax = 4096
 
 // PipelineOptions configures the pipeline.
 type PipelineOptions struct {
@@ -121,6 +139,7 @@ func NewPipeline(opts PipelineOptions, d Delivery) (*Pipeline, error) {
 		stop:     make(chan struct{}),
 		inFlight: map[string]bool{},
 		meta:     map[string]protocol.ImageMeta{},
+		metaAge:  list.New(),
 		wanted:   map[string][]uint32{},
 	}
 	for i := 0; i < opts.Workers; i++ {
@@ -138,7 +157,7 @@ func (p *Pipeline) Close() {
 
 // Submit queues a request, skipping duplicates and cache hits.
 func (p *Pipeline) Submit(req Request) {
-	if req.Key == "" || req.URL == "" {
+	if req.Key == "" || (req.URL == "" && len(req.Src) == 0) {
 		return
 	}
 	p.mu.Lock()
@@ -146,6 +165,7 @@ func (p *Pipeline) Submit(req Request) {
 		p.mu.Unlock()
 		// Already transcoded: the new node just needs to know the key exists.
 		meta.Node = req.Node
+		meta.Box = req.Box
 		p.deliver.ImageReady(req.Tab, meta)
 		if req.Priority == 0 {
 			p.sendCached(req.Tab, req.Key)
@@ -234,13 +254,16 @@ func (p *Pipeline) process(req Request) {
 	}
 	res, err := p.tc.Transcode(ctx, src, req.W, req.H)
 	if err != nil {
-		p.log.Debug("image transcode failed", "url", req.URL, "err", err)
+		// A region shot has no URL to name it; the key is all there is to say
+		// which image failed.
+		p.log.Debug("image transcode failed", "url", req.URL, "key", req.Key, "err", err)
 		return
 	}
 	meta := res.Meta(req.Key, req.Node, req.Priority)
 	meta.Alt = req.Alt
+	meta.Box = req.Box
 	p.mu.Lock()
-	p.meta[req.Key] = meta
+	p.remember(req.Key, meta)
 	waiting := p.wanted[req.Key]
 	delete(p.wanted, req.Key)
 	p.mu.Unlock()
@@ -252,6 +275,20 @@ func (p *Pipeline) process(req Request) {
 	}
 	for _, tab := range waiting {
 		p.deliver.ImageBytes(tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
+	}
+}
+
+// remember records a key's metadata, dropping the oldest once past metaMax.
+// Callers hold p.mu.
+func (p *Pipeline) remember(key string, meta protocol.ImageMeta) {
+	if _, dup := p.meta[key]; !dup {
+		p.metaAge.PushBack(key)
+	}
+	p.meta[key] = meta
+	for p.metaAge.Len() > metaMax {
+		old := p.metaAge.Front()
+		p.metaAge.Remove(old)
+		delete(p.meta, old.Value.(string))
 	}
 }
 
@@ -304,6 +341,11 @@ func dataURL(raw string) ([]byte, bool) {
 // It sends no credentials, so an asset that needs a login simply fails there
 // rather than leaking one.
 func (p *Pipeline) fetch(ctx context.Context, req Request) ([]byte, error) {
+	// A region shot arrives with its pixels: the landside browser has already
+	// been asked to photograph a canvas that no URL names.
+	if len(req.Src) > 0 {
+		return req.Src, nil
+	}
 	// An inline image is already here. Neither path can do anything with one:
 	// there is no request to make, and both would report that they have never
 	// heard of the scheme.

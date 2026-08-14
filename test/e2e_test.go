@@ -142,6 +142,55 @@ var pixelPNG = func() []byte {
 	return buf.Bytes()
 }()
 
+// canvasPage is a page whose content is pixels rather than markup, which is
+// what a WebGL game or a map is. Nothing about the DOM here says what colour
+// the canvas is, so a mirror that only ships structure delivers a page with an
+// empty box in it — and pressing the button changes the colour without
+// producing a single mutation for anyone to notice.
+const canvasPage = `<!DOCTYPE html><html><head><title>Canvas</title></head>
+<body style="margin:0">
+  <h1 id="heading">a painted page</h1>
+  <canvas id="art" width="200" height="120" style="width:200px;height:120px"></canvas>
+  <button id="repaint">repaint</button>
+<script>
+  var fills = ['rgb(0, 128, 255)', 'rgb(255, 96, 0)'];
+  var at = 0;
+  function paint() {
+    var ctx = document.getElementById('art').getContext('2d');
+    ctx.fillStyle = fills[at % fills.length];
+    ctx.fillRect(0, 0, 200, 120);
+  }
+  paint();
+  document.getElementById('repaint').addEventListener('click', function () {
+    at++;
+    paint();
+  });
+</script>
+</body></html>`
+
+// webglPage is the shape of the sites that prompted all of this: a game or a
+// map that draws itself with WebGL and, finding no context, shows its own
+// error instead of its content. It reports which way it went as text, so a
+// test can tell "the shot never arrived" apart from "there was nothing to
+// photograph because the browser refused the context".
+const webglPage = `<!DOCTYPE html><html><head><title>WebGL</title></head>
+<body style="margin:0">
+  <p id="status">starting</p>
+  <canvas id="gl" width="200" height="120" style="width:200px;height:120px"></canvas>
+<script>
+  var canvas = document.getElementById('gl');
+  var gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+  if (!gl) {
+    document.getElementById('status').textContent = 'something went wrong starting the game';
+  } else {
+    gl.clearColor(0, 0.5, 1, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.finish();
+    document.getElementById('status').textContent = 'running';
+  }
+</script>
+</body></html>`
+
 // pointerPage reports what a click really looked like to the page: the press
 // duration, where in the box it landed, and how much pointer movement preceded
 // it. The mirror ships the results back as ordinary text.
@@ -276,6 +325,26 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	mux.HandleFunc("/ticker", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, tickerPage)
+	})
+	mux.HandleFunc("/canvas", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, canvasPage)
+	})
+	// A canvas one document down. Its box is measured against the frame's own
+	// viewport, and the screenshot is of the top-level page, so this is the
+	// case that photographs a different part of the page if the offset between
+	// the two is not walked.
+	mux.HandleFunc("/framed-canvas", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Framed canvas</title></head>
+			<body style="margin:0">
+			<div style="height:150px;background:rgb(9,9,9)">a tall banner above the frame</div>
+			<iframe id="kid" src="/canvas" width="400" height="300" style="border:0"></iframe>
+			</body></html>`)
+	})
+	mux.HandleFunc("/webgl", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, webglPage)
 	})
 	mux.HandleFunc("/late-upgrade", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

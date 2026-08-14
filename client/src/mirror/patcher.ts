@@ -70,6 +70,10 @@ export interface PatcherHooks {
    *  owns setting the element's src, because only the host knows how content
    *  hashes map onto URLs. */
   onImage?(node: HTMLImageElement, meta: ImageMeta | undefined, hash: string): void;
+  /** Called when a region shot arrives for a canvas or video element: the
+   *  photograph of pixels this side has no way to draw. Same division of
+   *  labour as onImage — only the host knows where the bytes live. */
+  onShot?(node: HTMLElement, meta: ImageMeta): void;
   /** Rewrites a skyhook image reference inside a CSS rule. */
   rewriteCSS?(rule: string): string;
   /** Called when the server reports the landside focus moved. */
@@ -110,6 +114,17 @@ export class Patcher {
   seq = 0;
   /** Images referenced by the current document, keyed by content hash. */
   images = new Map<string, ImageMeta>();
+  /**
+   * The latest region shot for a canvas or video node, keyed by node id.
+   *
+   * Held by node rather than by hash because a shot is not a property of the
+   * document the way an <img> src is — nothing in the markup refers to it, and
+   * the next one replaces it. Held at all because the metadata travels on the
+   * media channel and the node it belongs to travels on the DOM channel: a
+   * shot that overtakes its own canvas would otherwise be dropped, and no
+   * second one would come until the reader did something.
+   */
+  private shots = new Map<number, ImageMeta>();
 
   constructor(doc: Document, hooks: PatcherHooks = {}) {
     this.doc = doc;
@@ -145,6 +160,7 @@ export class Patcher {
     this.names = new Map();
     this.flags = new Map();
     this.images = new Map();
+    this.shots = new Map();
     this.seq = 0;
     for (const im of snap.images) this.images.set(im.hash, im);
 
@@ -316,6 +332,10 @@ export class Patcher {
         }
         if (n.flags & NodeFlags.Canvas) {
           el.setAttribute('data-skyhook-static', '1');
+          // A shot that arrived before its canvas did has been waiting for
+          // exactly this element.
+          const shot = this.shots.get(n.id);
+          if (shot) this.hooks.onShot?.(el as HTMLElement, shot);
         }
         if (n.flags & NodeFlags.Editable) {
           el.setAttribute('data-skyhook-editable', '1');
@@ -398,6 +418,7 @@ export class Patcher {
       this.ids.delete(node);
       this.names.delete(id);
       this.flags.delete(id);
+      this.shots.delete(id);
     }
     for (let c = node.firstChild; c; c = c.nextSibling) this.forget(c);
   }
@@ -442,6 +463,20 @@ export class Patcher {
 
   /** Registers image metadata arriving after the snapshot. */
   setImageMeta(meta: ImageMeta): void {
+    // A region shot names its node, not an element in the markup: it is the
+    // photograph of a canvas, and there is no src anywhere pointing at it.
+    // Either half identifies one — the placement box the server sends with
+    // every shot, or the flag on the node it names — so neither has to be the
+    // single point at which a canvas silently turns back into a blank box.
+    if (meta.node && (meta.box.length === 4
+      || (this.flags.get(meta.node) ?? 0) & NodeFlags.Canvas)) {
+      this.shots.set(meta.node, meta);
+      const el = this.nodes.get(meta.node);
+      if (el && el.nodeType === Node.ELEMENT_NODE) {
+        this.hooks.onShot?.(el as HTMLElement, meta);
+      }
+      return;
+    }
     this.images.set(meta.hash, meta);
     // Match on the hash the host stamped on the element, not on `src`: by the
     // time metadata arrives `src` may be a placeholder or a blob URL, neither

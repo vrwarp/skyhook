@@ -213,6 +213,8 @@ export class MirrorHost {
   private inputSeq = 0;
   private lastSeq = 0;
   private pendingImages = new Map<string, HTMLImageElement[]>();
+  /** Canvas and video elements waiting for the bytes of a region shot. */
+  private pendingShots = new Map<string, { el: HTMLElement; box: number[] }[]>();
   /** Object URLs handed to the frame, by content hash. Revoked with the tab. */
   private blobs = new Map<string, string>();
   /** Hashes already looked for in the local cache, so a redraw does not ask
@@ -290,6 +292,7 @@ export class MirrorHost {
     this.patcher = new Patcher(doc, {
       isOwned: (node: Node): boolean => this.echo?.isOwned(node) ?? false,
       onImage: (el, meta, hash) => this.applyImage(el, meta, hash),
+      onShot: (el, meta) => this.applyShot(el, meta),
       rewriteCSS: (rule) => this.resolveCSSImages(rule),
       onFocus: (node) => {
         if (this.echo?.ownedId) return;
@@ -816,6 +819,10 @@ export class MirrorHost {
     const keep = { x: win?.scrollX ?? 0, y: win?.scrollY ?? 0 };
     this.url = snap.url ?? '';
 
+    // Every element is about to be rebuilt, so a shot still waiting on its
+    // bytes is waiting for an element that will not be in the document when
+    // they land. The server re-photographs against the new document.
+    this.pendingShots.clear();
     this.patcher.applySnapshot(snap);
 
     if (resync) {
@@ -855,13 +862,19 @@ export class MirrorHost {
 
   /** Called when the store has bytes for a hash: show them. */
   imageArrived(hash: string): void {
-    if (!this.pendingImages.has(hash) && !this.pendingCSS.has(hash)) return;
+    if (!this.pendingImages.has(hash) && !this.pendingCSS.has(hash)
+      && !this.pendingShots.has(hash)) return;
     void this.blobFor(hash).then((url) => {
       if (!url) return;
       const waiting = this.pendingImages.get(hash);
       if (waiting) {
         this.pendingImages.delete(hash);
         for (const el of waiting) this.showImage(el, url);
+      }
+      const shots = this.pendingShots.get(hash);
+      if (shots) {
+        this.pendingShots.delete(hash);
+        for (const s of shots) this.showShot(s.el, url, s.box, hash);
       }
       if (this.pendingCSS.delete(hash)) this.refreshCSSSoon();
     });
@@ -941,6 +954,71 @@ export class MirrorHost {
     delete el.dataset.skyhookBlur;
   }
 
+  /**
+   * Paints a region shot onto the element it was taken from.
+   *
+   * A background image rather than a replaced element, because the canvas is
+   * still the page's own canvas: the site's CSS sizes it, positions it and
+   * stacks it, and all of that keeps working around a background where
+   * swapping in an <img> would throw it away. The box places the photograph
+   * where it came from — a canvas half off the bottom of the landside viewport
+   * was photographed as the half that exists, and stretching that half over
+   * the whole element would be a picture of somewhere the reader is not.
+   */
+  private showShot(el: HTMLElement, url: string, box: number[], hash: string): void {
+    // Bytes for a frame the reader has already moved past: the element is
+    // wearing a newer photograph and this one would be a step backwards.
+    if (el.dataset.skyhookShot !== hash) return;
+    el.style.backgroundImage = `url("${url}")`;
+    el.style.backgroundRepeat = 'no-repeat';
+    // The border box, because that is the box the agent measured against.
+    el.style.backgroundOrigin = 'border-box';
+    if (box.length === 4) {
+      const [x, y, w, h] = box;
+      el.style.backgroundPosition = `${x}px ${y}px`;
+      el.style.backgroundSize = `${w}px ${h}px`;
+    } else {
+      // No placement given: the photograph is of the whole element.
+      el.style.backgroundPosition = '0 0';
+      el.style.backgroundSize = '100% 100%';
+    }
+  }
+
+  private applyShot(el: HTMLElement, meta: ImageMeta): void {
+    if (!meta.hash) return;
+    // The frame this element was waiting for is now a frame behind. Left in
+    // the queue it would hold a reference to the element until its bytes
+    // arrived, once per repaint, for as long as the link stayed down.
+    this.forgetShot(el, el.dataset.skyhookShot);
+    el.dataset.skyhookShot = meta.hash;
+    const known = this.blobs.get(meta.hash);
+    if (known) {
+      this.showShot(el, known, meta.box, meta.hash);
+      return;
+    }
+    const list = this.pendingShots.get(meta.hash) ?? [];
+    if (!list.some((p) => p.el === el)) list.push({ el, box: meta.box });
+    this.pendingShots.set(meta.hash, list);
+    // Shots are pushed unasked, being the content rather than an illustration
+    // beside it. Asking anyway covers the push that was dropped while the link
+    // was down, which is the one case where nothing would ever announce them.
+    if (!this.probed.has(meta.hash)) {
+      this.probed.add(meta.hash);
+      this.imageArrived(meta.hash);
+    }
+    this.requestImagesSoon();
+  }
+
+  /** Drops an element from the queue waiting on a superseded shot. */
+  private forgetShot(el: HTMLElement, hash: string | undefined): void {
+    if (!hash) return;
+    const list = this.pendingShots.get(hash);
+    if (!list) return;
+    const rest = list.filter((p) => p.el !== el);
+    if (rest.length) this.pendingShots.set(hash, rest);
+    else this.pendingShots.delete(hash);
+  }
+
   private applyImage(el: HTMLImageElement, meta: ImageMeta | undefined, hash: string): void {
     if (!hash) return;
     el.dataset.skyhookImg = hash;
@@ -985,6 +1063,9 @@ export class MirrorHost {
   private requestPendingImages(): void {
     const want: string[] = [];
     for (const hash of this.pendingImages.keys()) {
+      if (!this.requested.has(hash)) want.push(hash);
+    }
+    for (const hash of this.pendingShots.keys()) {
       if (!this.requested.has(hash)) want.push(hash);
     }
     for (const hash of this.pendingCSS) {
@@ -1098,6 +1179,12 @@ export class MirrorHost {
       inputSeq: this.inputSeq,
       patcher: this.patcher.diag(),
       pendingImages: Array.from(this.pendingImages.keys()),
+      // A canvas is the one element whose emptiness a capture cannot show:
+      // the mirrored markup is identical whether or not its photograph
+      // arrived. These two say which it was.
+      shots: Array.from(doc.querySelectorAll('[data-skyhook-shot]'))
+        .map((el) => (el as HTMLElement).dataset.skyhookShot),
+      pendingShots: Array.from(this.pendingShots.keys()),
       // The reader having taken the scroller over is why the server's scroll
       // positions stop being applied, which looks exactly like a mirror that
       // has stopped updating.
@@ -1144,6 +1231,7 @@ export class MirrorHost {
     if (this.imageRequest) clearTimeout(this.imageRequest);
     this.releaseBlobs();
     this.pendingImages.clear();
+    this.pendingShots.clear();
     this.patcher = null;
     this.echo = null;
     this.doc = null;

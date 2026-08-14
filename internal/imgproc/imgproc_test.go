@@ -11,6 +11,9 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/vrwarp/skyhook/internal/protocol"
 )
 
 func photo(w, h int) image.Image {
@@ -231,6 +234,65 @@ func TestDataURLsAreDecodedRatherThanFetched(t *testing.T) {
 		t.Fatal("an http url must still be fetched")
 	}
 }
+
+// A region shot is pixels the landside browser was asked to photograph, and no
+// URL names it. Both fetch paths would only report that there is nothing to
+// GET, so a canvas would arrive as an empty box however well everything else
+// worked.
+func TestRegionShotsCarryTheirOwnBytes(t *testing.T) {
+	d := &recorder{ready: make(chan protocol.ImageMeta, 4), bytes: make(chan protocol.ImageData, 4)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// No URL and no Fetcher: this can only succeed on the bytes it was handed.
+	p.Submit(Request{
+		Tab: 1, Key: "deadbeef", Node: 42, Priority: 0,
+		Src: encodePNG(t, sprite(64, 64)), W: 64, H: 64,
+		Box: []int{0, 12, 64, 52},
+	})
+
+	select {
+	case meta := <-d.ready:
+		if meta.Node != 42 {
+			t.Errorf("meta.Node = %d, want the canvas it was taken from", meta.Node)
+		}
+		if got, want := meta.Box, []int{0, 12, 64, 52}; len(got) != 4 ||
+			got[0] != want[0] || got[1] != want[1] || got[2] != want[2] || got[3] != want[3] {
+			t.Errorf("meta.Box = %v, want %v — the client places the shot with it", got, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no metadata for a shot that needed no fetching")
+	}
+	select {
+	case data := <-d.bytes:
+		if len(data.Data) == 0 {
+			t.Fatal("shot arrived with no bytes")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a shot is the content, not an illustration beside it: it must be pushed unasked")
+	}
+
+	// A request with neither a URL nor bytes is still nothing to do.
+	p.Submit(Request{Tab: 1, Key: "nothing", Node: 43})
+	select {
+	case meta := <-d.ready:
+		t.Fatalf("an empty request produced %+v", meta)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+type recorder struct {
+	ready chan protocol.ImageMeta
+	bytes chan protocol.ImageData
+}
+
+func (r *recorder) ImageReady(_ uint32, m protocol.ImageMeta) { r.ready <- m }
+func (r *recorder) ImageBytes(_ uint32, d protocol.ImageData) { r.bytes <- d }
 
 func onePixelPNG(t *testing.T) []byte {
 	t.Helper()

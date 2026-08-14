@@ -723,14 +723,80 @@ state, and any outstanding ask is dropped when the link goes.
 `test/loading_test.go` drives it through the real client against a landside page
 that takes three seconds to answer, which is the only way to look at a window
 that is otherwise a few milliseconds wide on loopback.
+### 23. A canvas is pixels, and pixels have to be photographed
+
+Everything else the mirror ships is a description — nodes, text, attributes,
+the CSS that was actually used — and descriptions survive the trip because both
+ends agree what they mean. A canvas has no description. Its content is whatever
+JavaScript painted into it, and page JavaScript is precisely what never runs
+plane-side, so the mirrored DOM of a finished game and of a blank one are
+identical. Two bug reports arrived on the same afternoon saying a game and a
+map "didn't work"; both were canvases, and both mirrored perfectly as an empty
+box.
+
+The design called this out (§R11) and the code had half of it: `CaptureRegion`
+was written, documented as the canvas fallback, and called from nowhere. It
+also had a bug that only running it would have found — the CDP screenshot clip
+is in **page** coordinates and it passed the agent's **viewport**-relative
+rect, so on any scrolled page it would have photographed whatever happened to
+sit that far down the document.
+
+What is built now (`internal/mirror/shot.go`):
+
+- The agent's `shots()` reports the canvas, WebGL and video boxes currently on
+  screen, clipped to the viewport, in page coordinates, largest first, capped
+  at four. Deliberately not `rect()`: that scrolls an offscreen target into
+  view, which is right for a click and would, here, move the page in order to
+  photograph a corner of it.
+- The host screenshots each box and hands the bytes to the ordinary image
+  pipeline (`Request.Src`), which transcodes them like any other picture.
+- The key is the content hash of what was painted, so an unchanged canvas
+  costs nothing: same pixels, same key, and the client already holds the bytes.
+- `ImageMeta.Box` says where the rectangle belongs inside the element, so a
+  canvas half off the bottom of the viewport is painted as the half that
+  exists rather than stretched over the whole box.
+- The client paints it as a `background-image` on the canvas itself, not as a
+  substituted `<img>`: the site's CSS sizes, positions and stacks that element,
+  and all of it keeps working around a background.
+
+**When a shot is taken** is the part with a real trade in it. A canvas can
+repaint sixty times a second without touching the DOM, so there is no signal to
+follow and a poll would spend the whole link on frames nobody asked for. The
+signal used instead is input: the reader pressed a key or dragged the map,
+which is the moment something they caused might have changed. Cost stays
+proportional to interaction, and the client keeps its promise of one round trip
+per interaction and none when idle. An animation running on its own is not
+followed — that is the design's P2 tile stream, and it is not built.
+
+The landside half of the same two reports was a different bug with the same
+symptom. A VPS has no GPU, and Chromium no longer falls back to SwiftShader for
+WebGL on its own: it blocklists the context, `getContext('webgl')` returns
+null, and the site shows its own "something went wrong" — landside, before the
+mirror has been asked for anything. The server's screenshot of that error was
+faithful. `--enable-unsafe-swiftshader` is what lets the fallback happen; the
+sandbox cost it names is the one this project already pays everywhere else,
+which is that the landside browser exists to run untrusted code so the plane
+side does not have to.
 
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
 
-- **P2 items from the design are not built**: the periodic-JPEG tile stream for
-  canvas/video regions (single-frame capture *is* implemented via
-  `Tab.CaptureRegion`, but no client UI triggers it yet), and a second adapter.
+- **Canvas regions are photographed on interaction, not streamed.** See
+  [§23](#23-a-canvas-is-pixels-and-pixels-have-to-be-photographed): a canvas
+  refreshes when the page loads and after each input, so an animation running
+  on its own is not followed. The design's P2 tile stream (§R11, 0.5 fps) is
+  not built.
+- **A second adapter** (design P2) is not built.
+- **An icon font has no system substitute, and renders as tofu.** The agent
+  drops `@font-face` and the design takes system substitution as the trade
+  (§1.4, §2.1), which is right for text: a page set in a webfont reads fine in
+  the reader's own. It is wrong for an icon font, where the glyphs live in the
+  private use area and the ligature names — `search`, `directions` — mean
+  nothing to any font a device actually has. The Google Maps capture that
+  prompted §23 has thirty `.google-symbols` spans, and every one of them is an
+  empty box plane-side. Shipping a subset of the codepoints a page actually
+  uses is the fix, and it is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
   plane-side, so the cross-tab paste fidelity §2.6 wants from a landside copy is

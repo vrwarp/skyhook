@@ -10,7 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MirrorHost, type MenuTarget } from '../src/mirror/host.js';
 import { imageCacheKey } from '../src/shared/caches.js';
-import { NodeKind, OpCode, type Mutation, type Snapshot } from '../src/shared/protocol.js';
+import {
+  NodeFlags, NodeKind, OpCode, type ImageMeta, type Mutation, type Snapshot,
+} from '../src/shared/protocol.js';
 
 function snapshot(): Snapshot {
   return {
@@ -161,7 +163,7 @@ describe('MirrorHost', () => {
     });
     snap.images.push({
       node: 10, hash: 'deadbeef', w: 10, h: 10, blur: '', mime: 'image/png',
-      bytes: 100, priority: 0, alt: '',
+      bytes: 100, priority: 0, alt: '', box: [],
     });
     host.applySnapshot(snap);
 
@@ -239,6 +241,84 @@ describe('MirrorHost', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     // And with nothing to show, the placeholder stands.
     expect(img.getAttribute('src')?.startsWith('data:image/gif')).toBe(true);
+  });
+
+  /**
+   * Mounts a snapshot holding a canvas, which is the one element whose content
+   * no part of a snapshot describes: nothing here says what was painted, and
+   * nothing plane-side will ever paint it.
+   */
+  async function withCanvas(): Promise<{ host: MirrorHost; canvas: HTMLElement }> {
+    const { host } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    return { host, canvas: host.frame.contentDocument!.querySelector('canvas')! };
+  }
+
+  function shotMeta(hash: string, box: number[]): ImageMeta {
+    return {
+      node: 10, hash, w: 200, h: 120, blur: '', mime: 'image/png',
+      bytes: 400, priority: 0, alt: '', box,
+    };
+  }
+
+  it('paints a region shot onto the canvas it was taken from', async () => {
+    const { host, canvas } = await withCanvas();
+    stubCache({ [imageCacheKey('c0ffee')]: new Uint8Array([1, 2, 3]) });
+
+    host.setImageMeta(shotMeta('c0ffee', [0, 20, 200, 100]));
+    await vi.waitFor(() => expect(canvas.style.backgroundImage).toContain('blob:mirror/c0ffee'));
+    // The rectangle goes back where it came from. A canvas photographed as the
+    // part of it that was on screen must not be stretched over the whole box.
+    expect(canvas.style.backgroundPosition).toBe('0px 20px');
+    expect(canvas.style.backgroundSize).toBe('200px 100px');
+    expect(canvas.style.backgroundOrigin).toBe('border-box');
+    expect(canvas.style.backgroundRepeat).toBe('no-repeat');
+  });
+
+  it('does not repaint a canvas with a frame it has already moved past', async () => {
+    const { host, canvas } = await withCanvas();
+    stubCache({
+      [imageCacheKey('older')]: new Uint8Array([1]),
+      [imageCacheKey('newer')]: new Uint8Array([2]),
+    });
+    // Named after the bytes they were minted from, so the assertion can tell
+    // which frame the canvas ended up wearing.
+    let minted = 0;
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(
+      () => ['blob:mirror/older', 'blob:mirror/newer'][minted++] ?? 'blob:mirror/extra',
+    );
+
+    // Two shots in flight, the second superseding the first; the first's bytes
+    // arrive last, which over a lossy link is an ordinary Tuesday.
+    host.setImageMeta(shotMeta('older', [0, 0, 200, 120]));
+    await vi.waitFor(() => expect(canvas.style.backgroundImage).toContain('blob:mirror/older'));
+    host.setImageMeta(shotMeta('newer', [0, 0, 200, 120]));
+    await vi.waitFor(() => expect(canvas.style.backgroundImage).toContain('blob:mirror/newer'));
+
+    host.imageArrived('older');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(canvas.style.backgroundImage).toContain('blob:mirror/newer');
+  });
+
+  it('asks for the bytes of a shot that was never pushed', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    stubCache({});
+
+    host.setImageMeta(shotMeta('c0ffee', [0, 0, 200, 120]));
+    await vi.waitFor(() => expect(ev.wantImages).toHaveBeenCalledWith(1, ['c0ffee']));
   });
 
   it('keeps looking after a miss, rather than freezing on it', async () => {
@@ -330,7 +410,7 @@ describe('MirrorHost', () => {
 
     host.setImageMeta({
       node: 10, hash: 'c0ffee', w: 320, h: 240, blur: '', mime: 'image/png',
-      bytes: 900, priority: 0, alt: '',
+      bytes: 900, priority: 0, alt: '', box: [],
     });
     expect(img.getAttribute('width')).toBe('320');
     expect(img.getAttribute('height')).toBe('240');
@@ -708,7 +788,7 @@ describe('MirrorHost', () => {
       });
       snap.images = [{
         node: 40, hash: 'abc123', w: 10, h: 10, blur: '', mime: 'image/webp',
-        bytes: 1, priority: 0, alt: '',
+        bytes: 1, priority: 0, alt: '', box: [],
       }];
       host.applySnapshot(snap);
 

@@ -57,6 +57,16 @@ func (t *Tab) HandleInput(ctx context.Context, ev *protocol.InputEvent) error {
 	t.pendingInput = ev.Seq
 	t.mu.Unlock()
 
+	err := t.dispatchInput(ctx, ev)
+	// A canvas repaints without touching the DOM, so no mutation will ever
+	// report that the board moved or the map panned. This is the moment we
+	// know something the reader caused might have changed — and the only one,
+	// which is why it is taken whether or not the replay above succeeded.
+	t.shotSoon(shotAfterInput)
+	return err
+}
+
+func (t *Tab) dispatchInput(ctx context.Context, ev *protocol.InputEvent) error {
 	switch ev.Kind {
 	case protocol.InClick, protocol.InDblClick, protocol.InContext:
 		return t.click(ctx, ev)
@@ -478,6 +488,9 @@ func (t *Tab) wheel(ctx context.Context, ev *protocol.InputEvent) error {
 // end of the mirrored document synthesises real scrolling so infinite lists
 // keep producing content.
 func (t *Tab) HandleScroll(ctx context.Context, ev *protocol.ScrollEvent) error {
+	// Scrolling moves a canvas relative to the viewport, so the rectangle the
+	// last shot covered is no longer the rectangle the reader is looking at.
+	defer t.shotSoon(shotAfterInput)
 	if ev.Node != 0 {
 		_, err := t.eval(ctx, fmt.Sprintf("__skyhook.scrollTo(%d,%d,%d)", ev.Node, ev.X, ev.Y))
 		return err
@@ -543,33 +556,6 @@ func (t *Tab) Navigate(ctx context.Context, n protocol.Navigate) error {
 	url := normalizeURL(n.URL)
 	t.setLoading(true)
 	return t.sess.Do(ctx, "Page.navigate", map[string]any{"url": url}, nil)
-}
-
-// CaptureRegion renders one JPEG of a node's box: the fallback for canvas,
-// WebGL and video regions, which the mirror cannot represent.
-func (t *Tab) CaptureRegion(ctx context.Context, node int64) ([]byte, error) {
-	r, err := t.rect(ctx, node)
-	if err != nil {
-		return nil, err
-	}
-	if r.W < 1 || r.H < 1 {
-		return nil, fmt.Errorf("mirror: node %d has no box", node)
-	}
-	var out struct {
-		Data []byte `json:"data"`
-	}
-	err = t.sess.Do(ctx, "Page.captureScreenshot", map[string]any{
-		"format":  "jpeg",
-		"quality": 55,
-		"clip": map[string]any{
-			"x": r.X, "y": r.Y, "width": r.W, "height": r.H, "scale": 1,
-		},
-		"captureBeyondViewport": false,
-	}, &out)
-	if err != nil {
-		return nil, err
-	}
-	return out.Data, nil
 }
 
 // DocHash asks the agent for a whole-document fingerprint of the page as it is
