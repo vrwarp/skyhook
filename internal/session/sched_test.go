@@ -311,10 +311,15 @@ func TestAFrameFromATabStillOpeningIsSent(t *testing.T) {
 	// which is the one thing on the emit path that reads a tab's URL from a
 	// browser this tab has not got.
 	s.mgr.trainer = nil
-	// What OpenTab holds from the moment it takes an id to the moment the
-	// tabState is in the map.
+	// What OpenTab registers the moment it takes an id: a tab with a queue and
+	// no page yet, which is what the next dozen CDP calls are for.
+	life, kill := context.WithCancel(context.Background())
+	t.Cleanup(kill)
 	s.mu.Lock()
-	s.opening[7] = true
+	s.tabs[7] = &tabState{
+		ring: NewRing(1 << 16), journal: NewJournal(0),
+		work: make(chan tabJob, tabDepth), life: life, kill: kill,
+	}
 	s.mu.Unlock()
 
 	s.EmitFrame(protocol.ChDom, snapshotFrame(7))

@@ -296,7 +296,7 @@ func (d *deliveryRouter) ImageReady(tab uint32, meta protocol.ImageMeta) {
 		return
 	}
 	for _, s := range d.mgr.Sessions() {
-		if s.Tab(tab) != nil {
+		if s.HasTab(tab) {
 			s.ImageReady(tab, meta)
 		}
 	}
@@ -307,7 +307,7 @@ func (d *deliveryRouter) ImageBytes(tab uint32, data protocol.ImageData) {
 		return
 	}
 	for _, s := range d.mgr.Sessions() {
-		if s.Tab(tab) != nil {
+		if s.HasTab(tab) {
 			s.ImageBytes(tab, data)
 		}
 	}

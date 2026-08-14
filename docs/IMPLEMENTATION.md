@@ -990,6 +990,38 @@ discovery walk and discarded the result — but a walk *records* what it collect
 as emitted, so every rule that walk was the first to see was dropped from the
 page for good. That is the late-arriving stylesheets, on every load. Everything
 that walks the sheets now goes through `emitCSSDelta`.
+### 22. A new tab is drawn before it exists, and built off the reader
+
+Opening a tab was the one chrome action that still cost a visible round trip in
+both directions, and it was worse than it looked.
+
+Plane-side, pressing "+" only sent a frame. Nothing was drawn until the server's
+`TabState` came back — one round trip, seconds on this link — so the button
+looked broken and got pressed again. The tab is now drawn immediately with a
+provisional (negative) id and a `ref` the server echoes on the frame that names
+it; the URL bar is cleared and focused in the same gesture, because that is
+where the user was going anyway. When the answer arrives the drawn tab *becomes*
+the real one — same strip entry, same mirror frame — and anything the user did
+to it meanwhile is replayed under the real id, in order
+(`client/src/app/tabs.ts`). The tab costs zero round trips to appear and one,
+unavoidably, before its content can start arriving.
+
+Landside, `OpenTab` ran on the connection's single reader: a target creation, a
+dozen sequential CDP calls, and a `Page.navigate` that only resolves when the
+origin commits. Everything else the user did queued behind it — a keystroke in
+another tab, a scroll, an acknowledgement — so opening a tab onto a slow origin
+froze the whole browser for as long as that origin took to answer.
+`TestOpeningATabDoesNotStallTheRestOfTheBrowser` measured six seconds of it. The
+tab is now announced synchronously and built on its own goroutine; frames that
+arrive for a tab whose page does not exist yet are deferred and drained in order
+when it does, and the page is only published once nothing is left waiting, so
+ordering survives.
+
+Two things fell out of the same change. `TabOpen` now carries `background`, so a
+middle-click tab no longer takes image priority away from the page the reader
+is still on. And the URL bar tracks its tab unless it is *edited*
+rather than unless it is *focused* — a new tab focuses it, and the old test
+would have left it stuck showing an address the tab had long since left.
 
 ### 22. A click has to be answered before the page can be
 

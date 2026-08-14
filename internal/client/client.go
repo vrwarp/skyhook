@@ -24,9 +24,13 @@ type Client struct {
 	codec *protocol.Codec
 	log   Logger
 
-	mu        sync.Mutex
-	models    map[uint32]*mirror.Model
-	state     map[uint32]protocol.TabState
+	mu     sync.Mutex
+	models map[uint32]*mirror.Model
+	state  map[uint32]protocol.TabState
+	// opened maps a ref sent with TabOpen to the tab the server named in
+	// answer. A tab is announced before it has any content, and the ref is how
+	// the request and the announcement are tied together.
+	opened    map[string]uint32
 	seqs      map[uint32]uint64
 	images    map[string]protocol.ImageMeta
 	imageData map[string][]byte
@@ -94,7 +98,8 @@ func Attach(ctx context.Context, conn transport.Conn, opts Options) (*Client, er
 	c := &Client{
 		conn: conn, codec: codec, log: opts.Logger,
 		models: map[uint32]*mirror.Model{}, state: map[uint32]protocol.TabState{},
-		seqs: map[uint32]uint64{}, images: map[string]protocol.ImageMeta{},
+		opened: map[string]uint32{},
+		seqs:   map[uint32]uint64{}, images: map[string]protocol.ImageMeta{},
 		imageData: map[string][]byte{},
 		events:    make(chan Event, 256), closed: make(chan struct{}),
 	}
@@ -294,6 +299,9 @@ func (c *Client) handle(f *protocol.Frame) {
 		}
 		c.mu.Lock()
 		c.state[f.Tab] = st
+		if st.Ref != "" {
+			c.opened[st.Ref] = f.Tab
+		}
 		c.mu.Unlock()
 		c.emit(Event{Kind: "tabstate", Tab: f.Tab})
 	case protocol.TypeImageMeta:
@@ -512,6 +520,14 @@ func (c *Client) OpenTab(url string) error {
 	return c.send(protocol.ChCtrl, protocol.TypeTabOpen, 0, protocol.Navigate{URL: url})
 }
 
+// OpenTabRef asks for a new tab and tags the request, the way the real client
+// does so it can match the answer against the tab it has already drawn.
+func (c *Client) OpenTabRef(url, ref string, background bool) error {
+	return c.send(protocol.ChCtrl, protocol.TypeTabOpen, 0, protocol.Navigate{
+		URL: url, Ref: ref, Background: background,
+	})
+}
+
 // Navigate drives a tab.
 func (c *Client) Navigate(tab uint32, url string) error {
 	return c.send(protocol.ChCtrl, protocol.TypeNavigate, tab, protocol.Navigate{URL: url})
@@ -664,6 +680,30 @@ func (c *Client) AdapterRecords() []protocol.AdapterRecord {
 func (c *Client) BytesTransferred() (sent, recv int64) {
 	st := c.conn.Stats()
 	return st.BytesSent, st.BytesRecv
+}
+
+// WaitForOpenedTab blocks until the server announces the tab opened under a
+// ref, and reports the id it gave it. This is what the real client does with
+// the ref: it draws the tab immediately and waits for the name, rather than
+// waiting for content that a tab parked on about:blank never produces.
+func (c *Client) WaitForOpenedTab(ctx context.Context, ref string, timeout time.Duration) (uint32, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		tab, ok := c.opened[ref]
+		c.mu.Unlock()
+		if ok {
+			return tab, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-c.closed:
+			return 0, errors.New("client: closed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return 0, fmt.Errorf("client: no tab announced for ref %q", ref)
 }
 
 // WaitForTab blocks until a tab exists.

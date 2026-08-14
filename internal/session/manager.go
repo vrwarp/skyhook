@@ -292,7 +292,7 @@ func (m *Manager) resolve(ctx context.Context, hello protocol.Hello) (*Session, 
 		}
 	}
 	if m.opts.HomeURL != "" {
-		if _, err := s.OpenTab(ctx, m.opts.HomeURL); err != nil {
+		if _, err := s.OpenTab(ctx, protocol.Navigate{URL: m.opts.HomeURL}); err != nil {
 			m.log.Warn("home tab failed", "err", err)
 		}
 	}

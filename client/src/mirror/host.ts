@@ -330,7 +330,9 @@ export function nearestList(from: HTMLElement): Element | null {
 }
 
 export class MirrorHost {
-  readonly tab: number;
+  /** Not readonly: a tab is drawn before the server has named it, and takes
+   *  its real id later — see `adopt`. */
+  tab: number;
   readonly frame: HTMLIFrameElement;
   private events: HostEvents;
   private patcher: Patcher | null = null;
@@ -423,6 +425,15 @@ export class MirrorHost {
   /** Resolves once the frame's document is patchable. */
   whenReady(): Promise<void> {
     return this.ready;
+  }
+
+  /**
+   * Takes the id the server gave this tab. The frame is opened the instant the
+   * user asks for a tab, which is a round trip before there is an id to open it
+   * under; everything it emits from here on is about the real tab.
+   */
+  adopt(tab: number): void {
+    this.tab = tab;
   }
 
   private attach(doc: Document): void {

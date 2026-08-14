@@ -115,6 +115,9 @@ describe('cross-language conformance', () => {
     const state = decodeTabState(decodeFrame(unframeMessage(decodeB64(fixtures.tabstate)).payload).body);
     expect(state.title).toBe('Example');
     expect(state.canBack).toBe(true);
+    // The ref is what lets the client match a tab it has already drawn against
+    // the tab the server just named. Losing it costs a duplicate tab.
+    expect(state.ref).toBe('t7');
 
     const stats = decodeStats(decodeFrame(unframeMessage(decodeB64(fixtures.stats)).payload).body);
     expect(stats.rttMicros).toBe(1200000);

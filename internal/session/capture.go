@@ -149,14 +149,21 @@ func (s *Session) freezeTabs() []frozenTab {
 		entries, complete := ts.journal.Entries()
 		f := frozenTab{
 			id: id, entries: entries, complete: complete, dropped: ts.journal.Dropped(),
-			seq: ts.tab.Seq(), url: ts.tab.URL(), title: ts.tab.Title(),
 			ringFrames: ts.ring.Len(), ringBytes: ts.ring.Bytes(),
 			journalBound: ts.journal.Enabled(),
 		}
 		s.mu.Lock()
 		f.acked, f.clientHash = ts.acked, ts.lastHash
 		f.resyncDropped = ts.resyncDropped
+		page := ts.tab
+		f.url = ts.openURL
 		s.mu.Unlock()
+		// A tab announced but not yet built has no page to ask. Say where it
+		// was headed and leave the rest empty rather than leaving it out: "a
+		// tab was still opening" is exactly what a capture is taken to find.
+		if page != nil {
+			f.seq, f.url, f.title = page.Seq(), page.URL(), page.Title()
+		}
 		out = append(out, f)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
@@ -387,6 +394,12 @@ func (c *capture) gatherTab(f *frozenTab) {
 	s := c.sess
 	s.mu.Lock()
 	ts := s.tabs[f.id]
+	// The page, not just the tab: one that has been announced but whose page is
+	// still being built has nothing to answer questions with yet.
+	var page *mirror.Tab
+	if ts != nil {
+		page = ts.tab
+	}
 	s.mu.Unlock()
 
 	base := fmt.Sprintf("landside/tabs/%d", f.id)
@@ -408,9 +421,9 @@ func (c *capture) gatherTab(f *frozenTab) {
 	// The live page is asked for its side of the story. A resync running
 	// alongside this does not change what it says: a resync re-serialises the
 	// same document, it does not alter it.
-	if ts != nil {
+	if page != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-		if h, err := ts.tab.DocHash(ctx); err != nil {
+		if h, err := page.DocHash(ctx); err != nil {
 			fail["docHash"] = err.Error()
 		} else {
 			report["serverHash"] = h
@@ -428,14 +441,14 @@ func (c *capture) gatherTab(f *frozenTab) {
 					"the bundle claims no agreement either way", f.id, f.acked, f.seq)
 			}
 		}
-		if d, err := ts.tab.AgentDiag(ctx); err != nil {
+		if d, err := page.AgentDiag(ctx); err != nil {
 			fail["agent"] = err.Error()
 		} else {
 			_ = c.bundle.Add(base+"/agent.json", d)
 		}
 		// The used-CSS filter's other half. Without it a rule dropped in error
 		// and a rule the site never wrote are the same artifact: nothing.
-		if rej, err := ts.tab.RejectedCSS(ctx); err != nil {
+		if rej, err := page.RejectedCSS(ctx); err != nil {
 			fail["rejectedCss"] = err.Error()
 		} else {
 			report["cssSeen"] = rej.Seen
@@ -450,7 +463,7 @@ func (c *capture) gatherTab(f *frozenTab) {
 			_ = c.bundle.AddText(base+"/css-rejected.txt",
 				header+strings.Join(rej.Selectors, "\n")+"\n")
 		}
-		if sheets, err := ts.tab.SheetStatus(ctx); err != nil {
+		if sheets, err := page.SheetStatus(ctx); err != nil {
 			fail["sheets"] = err.Error()
 		} else {
 			report["sheetsRecovered"] = sheets.Recovered
@@ -461,12 +474,12 @@ func (c *capture) gatherTab(f *frozenTab) {
 					"missing from this page may simply never have arrived", f.id, len(sheets.Blocked))
 			}
 		}
-		if fp, err := ts.tab.Fingerprint(ctx, 20000); err != nil {
+		if fp, err := page.Fingerprint(ctx, 20000); err != nil {
 			fail["fingerprint"] = err.Error()
 		} else {
 			_ = c.bundle.Add(base+"/fingerprint.json", fp)
 		}
-		if html, err := ts.tab.PageHTML(ctx); err != nil {
+		if html, err := page.PageHTML(ctx); err != nil {
 			fail["pageHtml"] = err.Error()
 		} else {
 			_ = c.bundle.AddText(base+"/page.html", html)
@@ -475,7 +488,7 @@ func (c *capture) gatherTab(f *frozenTab) {
 
 		if s.mgr.opts.Capture.Screenshots {
 			shotCtx, shotCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			shot, err := ts.tab.Screenshot(shotCtx, "webp", 70)
+			shot, err := page.Screenshot(shotCtx, "webp", 70)
 			shotCancel()
 			switch {
 			case err != nil:

@@ -97,35 +97,34 @@ describe('Progress', () => {
     expect(p.deadline()).toBe(patience(RTT));
   });
 
-  it('keeps a placeholder per tab asked for, oldest first', () => {
+  // A tab is drawn, and can be waiting on a page, a round trip before the
+  // server names it. The wait has to survive being renamed.
+  it('carries an ask onto the id the server gives the tab', () => {
     const p = new Progress();
-    p.askOpen({ verb: 'Opening', url: 'https://example.test/one' }, 0, RTT);
-    p.askOpen({ verb: 'Opening', url: 'https://example.test/two' }, 10, RTT);
-    expect(p.opening.map((o) => o.url))
-      .toEqual(['https://example.test/one', 'https://example.test/two']);
+    p.ask(-1, { verb: 'Opening', url: 'https://example.test/one' }, 0, RTT);
+    p.rekey(-1, 4);
+    expect(p.waiting(-1)).toBeUndefined();
+    expect(p.waiting(4)?.url).toBe('https://example.test/one');
+  });
 
-    expect(p.appeared()).toBe(true);
-    expect(p.opening.map((o) => o.url)).toEqual(['https://example.test/two']);
-    expect(p.appeared()).toBe(true);
-    // A tab arriving that nobody asked for is not an error, and there is
-    // nothing left to retire.
-    expect(p.appeared()).toBe(false);
+  it('has nothing to carry for a tab that was not waiting', () => {
+    const p = new Progress();
+    p.rekey(-1, 4);
+    expect(p.waiting(4)).toBeUndefined();
   });
 
   it('expires a tab the server never opened', () => {
     const p = new Progress();
-    p.askOpen({ verb: 'Opening' }, 0, RTT);
+    p.ask(-1, { verb: 'Opening' }, 0, RTT);
     expect(p.sweep(patience(RTT))).toBe(true);
-    expect(p.opening).toHaveLength(0);
+    expect(p.waiting(-1)).toBeUndefined();
   });
 
   it('drops everything when the link goes down', () => {
     const p = new Progress();
     p.ask(1, { verb: 'Loading' }, 0, RTT);
-    p.askOpen({ verb: 'Opening' }, 0, RTT);
     expect(p.clear()).toBe(true);
     expect(p.waiting(1)).toBeUndefined();
-    expect(p.opening).toHaveLength(0);
     // Idempotent: a second status frame saying the same thing is not a change.
     expect(p.clear()).toBe(false);
   });
