@@ -9,8 +9,6 @@ import (
 )
 
 var (
-	cssComment = regexp.MustCompile(`/\*[^*]*\*+(?:[^/*][^*]*\*+)*/`)
-	cssSpace   = regexp.MustCompile(`\s+`)
 	// RE2 has no backreferences, so the quote style is matched loosely; a
 	// url() token cannot contain an unescaped quote anyway.
 	cssURL = regexp.MustCompile(`url\(\s*['"]?([^'")]+)['"]?\s*\)`)
@@ -20,20 +18,19 @@ var (
 	cssVarUse  = regexp.MustCompile(`var\(\s*(--[A-Za-z0-9_-]+)`)
 )
 
-// minifyCSS squeezes rule text without parsing: comments out, runs of
-// whitespace collapsed, spaces around structural punctuation dropped.
+// minifyCSS squeezes rule text: comments out, runs of whitespace collapsed,
+// spaces after structural punctuation dropped.
+//
+// It scans rather than pattern-matches because strings, comments and url()
+// tokens all hold characters that mean nothing structural — a `content: "a; b"`
+// rewritten by a blind ReplaceAll changes what the page says.
+//
+// Whitespace *before* a colon is deliberately kept: `a :hover` and `a:hover`
+// select different elements.
 func minifyCSS(rules []string) []string {
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {
-		r = cssComment.ReplaceAllString(r, "")
-		r = cssSpace.ReplaceAllString(r, " ")
-		r = strings.ReplaceAll(r, " { ", "{")
-		r = strings.ReplaceAll(r, "{ ", "{")
-		r = strings.ReplaceAll(r, " }", "}")
-		r = strings.ReplaceAll(r, "; ", ";")
-		r = strings.ReplaceAll(r, ": ", ":")
-		r = strings.ReplaceAll(r, ", ", ",")
-		r = strings.TrimSpace(r)
+		r = minifyRule(r)
 		if r == "" || strings.HasSuffix(r, "{}") {
 			continue
 		}
@@ -42,69 +39,206 @@ func minifyCSS(rules []string) []string {
 	return out
 }
 
-// stripUnusedVars removes custom-property declarations no rule in the bundle
-// reads. It runs over the whole bundle, so it is only correct as a
-// whole-snapshot pass, not incrementally.
-func stripUnusedVars(rules []string) []string {
+func minifyRule(rule string) string {
+	var b strings.Builder
+	b.Grow(len(rule))
+	// pendingSpace defers a run of whitespace until we know whether the next
+	// character wants it. depth tells a selector from a declaration body, which
+	// is the whole difference between `a :hover` and `color : red`.
+	pendingSpace, depth := false, 0
+	for i := 0; i < len(rule); i++ {
+		c := rule[i]
+		if c == '/' && i+1 < len(rule) && rule[i+1] == '*' {
+			end := strings.Index(rule[i+2:], "*/")
+			if end < 0 {
+				break // unterminated comment: the rest is comment
+			}
+			i += 2 + end + 1
+			pendingSpace = true
+			continue
+		}
+		if isCSSSpace(c) {
+			pendingSpace = true
+			continue
+		}
+		if pendingSpace {
+			pendingSpace = false
+			// Drop the space if it sits against structural punctuation. In a
+			// selector a colon is not structural — the space in `a :hover` is a
+			// descendant combinator — but inside a declaration body it is.
+			structural := c == '{' || c == '}' || c == ';' || c == ',' || c == ')' ||
+				(c == ':' && depth > 0)
+			if b.Len() > 0 && !structural {
+				if last := b.String()[b.Len()-1]; !isTrailingTrimmable(last) {
+					b.WriteByte(' ')
+				}
+			}
+		}
+		if c == '"' || c == '\'' {
+			j := scanCSSString(rule, i)
+			b.WriteString(rule[i:j])
+			i = j - 1
+			continue
+		}
+		// `--x: ;` declares a custom property whose value is empty, which is how
+		// a theme switches a value off. Collapsed to `--x:;` some parsers read
+		// it as a syntax error, so the one space earns its byte.
+		if (c == ';' || c == '}') && b.Len() > 0 && b.String()[b.Len()-1] == ':' {
+			b.WriteByte(' ')
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// isTrailingTrimmable reports whether a space following this character can go.
+func isTrailingTrimmable(c byte) bool {
+	return c == '{' || c == '}' || c == ';' || c == ',' || c == ':' || c == '('
+}
+
+func isCSSSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+}
+
+// scanCSSString returns the index just past the string literal starting at i.
+func scanCSSString(s string, i int) int {
+	quote := s[i]
+	for j := i + 1; j < len(s); j++ {
+		if s[j] == '\\' {
+			j++
+			continue
+		}
+		if s[j] == quote {
+			return j + 1
+		}
+	}
+	return len(s) // unterminated
+}
+
+// stripUnusedVars removes custom-property declarations that nothing reads.
+//
+// A theme system defines hundreds of properties per palette and a given page
+// reads a handful, so this is worth doing — but only where it can be done
+// without guessing. Two rules keep it honest:
+//
+//   - Only flat style rules are touched. An at-rule with a nested block
+//     (`@media{...}`) is passed through untouched rather than split on
+//     semicolons that do not delimit declarations there.
+//   - A rule whose every declaration is dropped is dropped whole. Emitting the
+//     selector and its opening brace with nothing to close it would swallow
+//     every rule after it into an unterminated block — one stripped rule near
+//     the top of a bundle costs the page all of its styling.
+//
+// extra holds text outside the bundle that may still read a property: inline
+// style attributes travel with the DOM, not with the stylesheet, and a page
+// that sets `style="color:var(--brand)"` reads a property no rule mentions.
+//
+// It runs over a whole bundle, so it is a snapshot pass, not an incremental one.
+func stripUnusedVars(rules []string, extra []string) []string {
 	used := map[string]bool{}
-	for _, r := range rules {
-		for _, m := range cssVarUse.FindAllStringSubmatch(r, -1) {
+	note := func(s string) {
+		if !strings.Contains(s, "var(") {
+			return
+		}
+		for _, m := range cssVarUse.FindAllStringSubmatch(s, -1) {
 			used[m[1]] = true
 		}
 	}
+	for _, r := range rules {
+		note(r)
+	}
+	for _, e := range extra {
+		note(e)
+	}
+
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {
 		if !strings.Contains(r, "--") {
 			out = append(out, r)
 			continue
 		}
-		var b strings.Builder
-		b.Grow(len(r))
-		for _, decl := range splitDecls(r) {
-			m := cssVarDecl.FindStringSubmatch(decl)
-			if m != nil && !used[m[1]] {
-				continue
-			}
-			if b.Len() > 0 && !strings.HasSuffix(b.String(), "{") {
-				b.WriteByte(';')
-			}
-			b.WriteString(decl)
-		}
-		res := b.String()
-		if res == "" || strings.HasSuffix(res, "{}") {
+		head, body, ok := flatRule(r)
+		if !ok {
+			out = append(out, r)
 			continue
 		}
-		out = append(out, res)
+		kept := make([]string, 0, 8)
+		for _, decl := range splitDecls(body) {
+			if m := cssVarDecl.FindStringSubmatch(decl); m != nil && !used[m[1]] {
+				continue
+			}
+			if strings.HasSuffix(decl, ":") {
+				decl += " " // see minifyRule: an empty custom-property value
+			}
+			kept = append(kept, decl)
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		out = append(out, head+"{"+strings.Join(kept, ";")+"}")
 	}
 	return out
 }
 
-// splitDecls splits a rule into its selector-prefix and declarations, keeping
-// the braces attached so the pieces can be rejoined.
-func splitDecls(rule string) []string {
-	open := strings.Index(rule, "{")
+// flatRule splits `sel{decls}` into its selector and body, reporting false for
+// anything whose body holds a nested block — an at-rule wrapper, mostly.
+func flatRule(rule string) (head, body string, ok bool) {
+	open := -1
+	for i := 0; i < len(rule); i++ {
+		switch c := rule[i]; c {
+		case '"', '\'':
+			i = scanCSSString(rule, i) - 1
+		case '{':
+			if open >= 0 {
+				return "", "", false // nested block
+			}
+			open = i
+		case '}':
+			if i != len(rule)-1 {
+				return "", "", false // more than one block
+			}
+		}
+	}
 	if open < 0 || !strings.HasSuffix(rule, "}") {
-		return []string{rule}
+		return "", "", false
 	}
-	head := rule[:open+1]
-	body := rule[open+1 : len(rule)-1]
-	parts := strings.Split(body, ";")
-	out := make([]string, 0, len(parts)+1)
-	out = append(out, head)
-	for i, p := range parts {
-		if strings.TrimSpace(p) == "" {
-			continue
+	return rule[:open], rule[open+1 : len(rule)-1], true
+}
+
+// splitDecls splits a declaration body on the semicolons that actually separate
+// declarations — not those inside a string or a function's argument list.
+func splitDecls(body string) []string {
+	out := make([]string, 0, 8)
+	depth, start := 0, 0
+	for i := 0; i < len(body); i++ {
+		switch c := body[i]; c {
+		case '"', '\'':
+			i = scanCSSString(body, i) - 1
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ';':
+			if depth == 0 {
+				if d := strings.TrimSpace(body[start:i]); d != "" {
+					out = append(out, d)
+				}
+				start = i + 1
+			}
 		}
-		if i == len(parts)-1 {
-			p += "}"
-		}
-		out = append(out, p)
 	}
-	if len(out) == 1 {
-		return []string{rule}
-	}
-	if !strings.HasSuffix(out[len(out)-1], "}") {
-		out[len(out)-1] += "}"
+	if d := strings.TrimSpace(body[start:]); d != "" {
+		out = append(out, d)
 	}
 	return out
 }
@@ -141,6 +275,37 @@ func rewriteCSSImages(rules []string, base string, maxDim int) ([]string, []Imag
 		})
 	}
 	return out, reqs
+}
+
+// absolutizeCSSURLs rewrites every relative url() against the sheet's own
+// address.
+//
+// A stylesheet resolves its references against wherever it was served from, but
+// text lifted out of one and replayed into a constructed sheet resolves against
+// the document instead. For a sheet on a CDN that is a different host entirely,
+// so every background image in it would point at a path on the site that has
+// nothing there. Fragment-only references are left alone: they name an SVG
+// filter or gradient in the document, not a file.
+func absolutizeCSSURLs(text, base string) string {
+	if base == "" || !strings.Contains(text, "url(") {
+		return text
+	}
+	return cssURL.ReplaceAllStringFunc(text, func(m string) string {
+		sub := cssURL.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		raw := strings.TrimSpace(sub[1])
+		if raw == "" || strings.HasPrefix(raw, "#") ||
+			strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "skyhook://") {
+			return m
+		}
+		abs := resolveURL(base, raw)
+		if abs == "" {
+			return m
+		}
+		return "url(" + abs + ")"
+	})
 }
 
 func resolveURL(base, ref string) string {

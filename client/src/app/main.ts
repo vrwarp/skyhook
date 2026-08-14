@@ -5,7 +5,8 @@
  * No framework. The whole client is a patcher and an input serialiser; a
  * runtime would be more bytes than the mirror protocol it exists to carry.
  */
-import { MirrorHost, imageURL, type MenuTarget } from '../mirror/host.js';
+import { MirrorHost, type MenuTarget } from '../mirror/host.js';
+import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { closeMenu, menuIsOpen, showMenu, type MenuGroups } from './menu.js';
 import { pairingFromFragment, transportUrls } from './pairing.js';
 import { Store, type Pairing } from '../store/store.js';
@@ -427,15 +428,20 @@ async function pasteInto(tab: number, field: number): Promise<void> {
 
 /**
  * Saves an image out of the mirror. The bytes are already plane-side — the
- * network worker wrote them into Cache Storage and the service worker serves
- * them — so this costs nothing over the link and works during an outage. The
- * real remote URL is not knowable here, which is why the file is named after
- * the alt text.
+ * network worker wrote them into Cache Storage — so this costs nothing over the
+ * link and works during an outage. The real remote URL is not knowable here,
+ * which is why the file is named after the alt text.
+ *
+ * Read from the cache rather than fetched from the URL the service worker
+ * serves it on: until that worker has claimed this page the same fetch reaches
+ * the network, and the server answers an unknown path with the app shell — so
+ * "save image" would hand the reader an index.html named after the picture.
  */
 async function saveImage(hash: string, alt: string): Promise<void> {
   try {
-    const res = await fetch(imageURL(hash));
-    if (!res.ok) throw new Error(`image ${hash} is not cached`);
+    const cache = await caches.open(IMAGE_CACHE);
+    const res = await cache.match(imageCacheKey(hash));
+    if (!res) throw new Error(`image ${hash} is not cached`);
     const blob = await res.blob();
     const ext = (blob.type.split('/')[1] ?? 'bin').replace(/[^a-z0-9]/gi, '');
     const stem = alt.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);

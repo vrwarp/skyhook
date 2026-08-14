@@ -3,12 +3,15 @@ package imgproc
 import (
 	"container/list"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -252,6 +255,41 @@ func (p *Pipeline) process(req Request) {
 	}
 }
 
+// dataURL decodes an inline image. The agent leaves small ones in the document
+// and sends the large ones here to be transcoded, which is the whole point —
+// but there is nothing to fetch, and an HTTP client asked to GET one only says
+// it has never heard of the scheme.
+func dataURL(raw string) ([]byte, bool) {
+	if !strings.HasPrefix(raw, "data:") {
+		return nil, false
+	}
+	comma := strings.IndexByte(raw, ',')
+	if comma < 0 {
+		return nil, false
+	}
+	meta, payload := raw[len("data:"):comma], raw[comma+1:]
+	if !strings.HasSuffix(meta, ";base64") {
+		// Percent-encoded, which is how inline SVG usually travels.
+		s, err := url.PathUnescape(payload)
+		if err != nil {
+			return nil, false
+		}
+		return []byte(s), true
+	}
+	// Base64 in a URL may be padded or not, and may carry whitespace.
+	b64 := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, payload)
+	dec, err := base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(strings.TrimRight(b64, "="))
+	if err != nil {
+		return nil, false
+	}
+	return dec, true
+}
+
 // fetch gets the source bytes, preferring the browser that asked for them.
 //
 // The browser is not just the more convenient client here, it is the only
@@ -266,6 +304,15 @@ func (p *Pipeline) process(req Request) {
 // It sends no credentials, so an asset that needs a login simply fails there
 // rather than leaking one.
 func (p *Pipeline) fetch(ctx context.Context, req Request) ([]byte, error) {
+	// An inline image is already here. Neither path can do anything with one:
+	// there is no request to make, and both would report that they have never
+	// heard of the scheme.
+	if data, ok := dataURL(req.URL); ok {
+		if len(data) == 0 {
+			return nil, errors.New("imgproc: empty data url")
+		}
+		return data, nil
+	}
 	limit := p.tc.opts.MaxBytes + 1
 	if p.fetcher != nil {
 		data, err := p.fetcher.FetchImage(ctx, req.Tab, req.URL, limit)

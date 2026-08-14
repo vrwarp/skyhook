@@ -3,11 +3,13 @@ package imgproc
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -197,5 +199,84 @@ func TestDiskCacheRecoversFromDisk(t *testing.T) {
 	}
 	if mime != "image/png" {
 		t.Fatalf("recovered mime = %q", mime)
+	}
+}
+
+// The agent leaves small inline images in the document and routes large ones
+// here to be shrunk. There is nothing to fetch: an HTTP client handed a data
+// URL only reports that it has never heard of the scheme, and the image is
+// lost — which on a sprite-heavy page is most of the furniture.
+func TestDataURLsAreDecodedRatherThanFetched(t *testing.T) {
+	png := onePixelPNG(t)
+	for _, tc := range []struct {
+		name, url string
+		want      []byte
+	}{
+		{"base64", "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), png},
+		{"unpadded", "data:image/png;base64," +
+			strings.TrimRight(base64.StdEncoding.EncodeToString(png), "="), png},
+		{"percent-encoded svg", "data:image/svg+xml,%3Csvg%2F%3E", []byte("<svg/>")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := dataURL(tc.url)
+			if !ok {
+				t.Fatal("not recognised as a data url")
+			}
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("decoded %d bytes, want %d", len(got), len(tc.want))
+			}
+		})
+	}
+	if _, ok := dataURL("https://example.com/a.png"); ok {
+		t.Fatal("an http url must still be fetched")
+	}
+}
+
+func onePixelPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 1, G: 2, B: 3, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// A site's logo, its icons and half its illustrations are SVG, and Go decodes
+// none of it — so every one of them used to fail here and never reach the page.
+func TestSVGIsShippedAsItIs(t *testing.T) {
+	src := []byte(`<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><path d="M0 0h24v12H0z"/></svg>`)
+	tc := New(Options{Encoder: EncoderPNG})
+	res, err := tc.Transcode(context.Background(), src, 0, 0)
+	if err != nil {
+		t.Fatalf("transcode svg: %v", err)
+	}
+	if res.Mime != "image/svg+xml" {
+		t.Fatalf("mime = %q, want image/svg+xml", res.Mime)
+	}
+	if !bytes.Equal(res.Data, src) {
+		t.Fatal("the markup was altered; a vector image is already as small as it gets")
+	}
+	// With no laid-out box the viewBox is the only source of an aspect ratio,
+	// and without one the element cannot reserve its space.
+	if res.W != 24 || res.H != 12 {
+		t.Fatalf("size = %dx%d, want 24x12 from the viewBox", res.W, res.H)
+	}
+
+	// A laid-out box wins: that is the size the page actually draws it at.
+	res, err = tc.Transcode(context.Background(), src, 48, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.W != 48 || res.H != 24 {
+		t.Fatalf("size = %dx%d, want the rendered box", res.W, res.H)
+	}
+
+	// And a bitmap must still go through the transcoder.
+	png := onePixelPNG(t)
+	if _, ok := passThroughSVG(png, 0, 0); ok {
+		t.Fatal("a PNG was mistaken for markup")
 	}
 }

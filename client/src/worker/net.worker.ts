@@ -17,6 +17,7 @@ import {
   encodeFrame, frameMessage, helloBody, imageWantBody, inputBody, navigateBody, resyncBody,
   scrollBody, unframeMessage, viewportBody, InputEventInit,
 } from '../shared/codec.js';
+import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { Channel, CloseCode, FrameType, isFatalClose, Viewport } from '../shared/protocol.js';
 import { Transport, TransportConfig } from '../app/transport.js';
 
@@ -25,7 +26,7 @@ export interface Pairing extends TransportConfig {
   token: string;
 }
 
-const IMAGE_CACHE = 'skyhook-img-v1';
+
 
 interface TabProgress {
   seq: number;
@@ -234,7 +235,7 @@ function handleMessage(msg: Uint8Array): void {
   }
 }
 
-/** Puts transcoded bytes where the service worker will find them. */
+/** Puts transcoded bytes where the shell and the service worker will find them. */
 async function storeImage(hash: string, mime: string, data: Uint8Array): Promise<void> {
   if (!hash || !data.length) return;
   try {
@@ -243,7 +244,7 @@ async function storeImage(hash: string, mime: string, data: Uint8Array): Promise
     // is not a valid Response body.
     const body = new Uint8Array(data.byteLength);
     body.set(data);
-    await cache.put(`/img/${hash}`, new Response(body.buffer as ArrayBuffer, {
+    await cache.put(imageCacheKey(hash), new Response(body.buffer as ArrayBuffer, {
       headers: {
         'content-type': mime || 'application/octet-stream',
         'cache-control': 'no-store',
@@ -259,7 +260,7 @@ async function cachedHashes(hashes: string[]): Promise<string[]> {
   const cache = await caches.open(IMAGE_CACHE);
   const found: string[] = [];
   for (const h of hashes) {
-    if (await cache.match(`/img/${h}`)) found.push(h);
+    if (await cache.match(imageCacheKey(h))) found.push(h);
   }
   return found;
 }

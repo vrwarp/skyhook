@@ -200,7 +200,7 @@ func TestStripUnusedVarsKeepsReferenced(t *testing.T) {
 	out := stripUnusedVars([]string{
 		":root{--used:red;--dead:blue;}",
 		".a{color:var(--used);}",
-	})
+	}, nil)
 	joined := strings.Join(out, "")
 	if !strings.Contains(joined, "--used") {
 		t.Fatalf("dropped a referenced variable: %v", out)
@@ -208,6 +208,92 @@ func TestStripUnusedVarsKeepsReferenced(t *testing.T) {
 	if strings.Contains(joined, "--dead") {
 		t.Fatalf("kept an unreferenced variable: %v", out)
 	}
+}
+
+// A rule whose declarations are all pruned must go entirely. Emitting the
+// selector and its opening brace alone leaves an unterminated block, and the
+// CSS parser then swallows every rule after it — one theme rule near the top
+// of a bundle costs the page all of its styling.
+func TestStripUnusedVarsNeverLeavesAnUnclosedRule(t *testing.T) {
+	out := stripUnusedVars([]string{
+		":root{--dead:red;--also-dead:blue;}", // nothing survives: drop it
+		".a{color:red;--dead2:blue;}",         // last decl pruned: keep the brace
+		"@media (min-width:480px){:root{--m:1px;}.b{color:red;}}",
+		".c{color:var(--kept);}",
+		":root{--kept:green;}",
+	}, nil)
+	joined := strings.Join(out, "\n")
+	if depth := braceDepth(joined); depth != 0 {
+		t.Fatalf("unbalanced CSS (depth %d):\n%s", depth, joined)
+	}
+	for _, r := range out {
+		if !strings.HasSuffix(r, "}") {
+			t.Fatalf("rule is not closed: %q", r)
+		}
+	}
+	if strings.Contains(joined, "--dead") {
+		t.Fatalf("kept an unreferenced variable: %v", out)
+	}
+	if !strings.Contains(joined, ".a{color:red}") {
+		t.Fatalf("lost a real declaration alongside the pruned one: %v", out)
+	}
+	// The at-rule wrapper has a nested block, so semicolon-splitting it would be
+	// nonsense; it is passed through whole.
+	if !strings.Contains(joined, "@media (min-width:480px){:root{--m:1px;}.b{color:red;}}") {
+		t.Fatalf("mangled an at-rule: %v", out)
+	}
+}
+
+// Inline style attributes travel with the DOM, never with the stylesheet, so a
+// property read only from one looks unused to a bundle-wide scan.
+func TestStripUnusedVarsKeepsPropertiesReadByInlineStyles(t *testing.T) {
+	out := stripUnusedVars(
+		[]string{":root{--brand:red;--dead:blue;}"},
+		[]string{"style", "color:var(--brand)"},
+	)
+	joined := strings.Join(out, "")
+	if !strings.Contains(joined, "--brand") {
+		t.Fatalf("dropped a property an inline style reads: %v", out)
+	}
+	if strings.Contains(joined, "--dead") {
+		t.Fatalf("kept an unreferenced variable: %v", out)
+	}
+}
+
+func TestMinifyCSSPreservesMeaning(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		// Whitespace before a colon is a descendant combinator, not padding.
+		{"a :hover { color : red }", "a :hover{color:red}"},
+		{"a:hover { color: red }", "a:hover{color:red}"},
+		// Structural punctuation inside a string is text.
+		{`.a::before { content: "a; b: c" }`, `.a::before{content:"a; b: c"}`},
+		// An empty custom-property value is how a theme switches one off.
+		{":root { --light: ; --dark: initial }", ":root{--light: ;--dark:initial}"},
+		// calc() needs the spaces around its operators.
+		{".a { width: calc(100% - 10px) }", ".a{width:calc(100% - 10px)}"},
+		{"/* lead */ .a { color: red } /* trail */", ".a{color:red}"},
+	} {
+		got := minifyCSS([]string{tc.in})
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("minify(%q) = %v, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// braceDepth counts unclosed blocks, ignoring braces inside strings.
+func braceDepth(css string) int {
+	depth := 0
+	for i := 0; i < len(css); i++ {
+		switch c := css[i]; c {
+		case '"', '\'':
+			i = scanCSSString(css, i) - 1
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+	}
+	return depth
 }
 
 func TestRewriteCSSImagesProducesStableKeys(t *testing.T) {
@@ -408,5 +494,33 @@ func TestHoldPrefersWhatTheReaderDid(t *testing.T) {
 			t.Fatalf("synthesised hold = %v, want it within [%v, %v)",
 				got, pressHoldMin, pressHoldMin+pressHoldSpan)
 		}
+	}
+}
+
+// A stylesheet lifted off a CDN and replayed into a constructed sheet resolves
+// its references against the document, not against wherever it was served
+// from — so a relative background image would point at a path on the site that
+// has nothing there.
+func TestAbsolutizeCSSURLs(t *testing.T) {
+	const base = "https://cdn.example.com/assets/v2/site.css"
+	got := absolutizeCSSURLs(`.a{background:url("../img/logo.png")}
+		.b{background:url(/root.png)}
+		.c{background:url(data:image/gif;base64,AAA)}
+		.d{filter:url(#blur)}
+		.e{background:url('https://other.example/x.png')}`, base)
+	for _, want := range []string{
+		"url(https://cdn.example.com/assets/img/logo.png)",
+		"url(https://cdn.example.com/root.png)",
+		"url(data:image/gif;base64,AAA)", // an inline image is already resolved
+		"url(#blur)",                     // names a filter in the document, not a file
+		"url(https://other.example/x.png)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// Nothing to do, nothing touched.
+	if in := ".a{color:red}"; absolutizeCSSURLs(in, base) != in {
+		t.Error("rewrote a rule with no url() in it")
 	}
 }

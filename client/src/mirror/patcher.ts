@@ -35,6 +35,33 @@ const FORBIDDEN_TAGS = new Set([
 /** What a forbidden tag is materialised as instead. */
 const SUBSTITUTE_TAG = 'div';
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const MATHML_NS = 'http://www.w3.org/1998/Math/MathML';
+const XLINK_NS = 'http://www.w3.org/1999/xlink';
+
+/**
+ * The namespace an element belongs in.
+ *
+ * `createElement` builds everything in the HTML namespace, where an `<svg>` is
+ * an unknown inline element with no rendering of its own and `viewBox` gets
+ * folded to `viewbox`. Sites draw their logos, icons and chart furniture in
+ * SVG, so getting this wrong is not an edge case: it is most of the marks on
+ * most pages, silently absent.
+ *
+ * Namespace is inherited from the parent because SVG children (`path`, `g`,
+ * `use`) carry no clue of their own — except across `foreignObject`, which
+ * exists precisely to put HTML back inside a drawing.
+ */
+function namespaceFor(tag: string, parent: Node | undefined): string | null {
+  if (tag === 'svg') return SVG_NS;
+  if (tag === 'math') return MATHML_NS;
+  const el = parent as Element | undefined;
+  const ns = el?.namespaceURI;
+  if (ns === SVG_NS) return el?.localName === 'foreignObject' ? null : SVG_NS;
+  if (ns === MATHML_NS) return el?.localName === 'annotation-xml' ? null : MATHML_NS;
+  return null;
+}
+
 /** Attributes dropped on arrival: nothing in a mirror needs to run code. */
 const FORBIDDEN_ATTR_PREFIX = 'on';
 
@@ -258,11 +285,18 @@ export class Patcher {
         this.names.set(n.id, '');
         break;
       case NodeKind.Element: {
-        const tag = (this.str(n.ref) || 'div').toLowerCase();
+        // SVG element names are case-sensitive (`clipPath`, `linearGradient`),
+        // so the name is built from as the server sent it; the lowercased form
+        // is only for deciding what it is, and for the fingerprint.
+        const name = this.str(n.ref) || 'div';
+        const tag = name.toLowerCase();
         const forbidden = FORBIDDEN_TAGS.has(tag);
+        const ns = forbidden ? null : namespaceFor(tag, this.nodes.get(n.parent));
         let el: Element;
         try {
-          el = this.doc.createElement(forbidden ? SUBSTITUTE_TAG : tag);
+          el = ns
+            ? this.doc.createElementNS(ns, name)
+            : this.doc.createElement(forbidden ? SUBSTITUTE_TAG : tag);
         } catch {
           el = this.doc.createElement(SUBSTITUTE_TAG);
         }
@@ -313,7 +347,14 @@ export class Patcher {
       }
     }
     try {
-      el.setAttribute(name, value);
+      // `xlink:href` is a namespaced attribute, and an SVG <use> resolves
+      // nothing from a plain attribute that merely has a colon in its name —
+      // which is every icon in a sprite sheet.
+      if (lower.startsWith('xlink:')) {
+        el.setAttributeNS(XLINK_NS, name, value);
+      } else {
+        el.setAttribute(name, value);
+      }
     } catch {
       return;
     }
@@ -363,19 +404,39 @@ export class Patcher {
     if (!rules.length) return;
     this.ensureStyleElement();
     if (!this.styleEl) return;
-    for (const r of rules) {
-      this.cssRules.push(this.hooks.rewriteCSS ? this.hooks.rewriteCSS(r) : r);
-    }
-    this.styleEl.textContent = this.cssRules.join('\n');
+    for (const r of rules) this.cssRules.push(r);
+    this.renderCSS();
+  }
+
+  /**
+   * Re-renders the stylesheet from the rules as they arrived.
+   *
+   * Rules are kept in their wire form rather than rewritten on arrival, because
+   * a rule may name an image whose bytes are still crossing the link: what the
+   * reference resolves to changes under it, and only the raw rule can be
+   * resolved again.
+   */
+  refreshCSS(): void {
+    if (this.styleEl) this.renderCSS();
+  }
+
+  private renderCSS(): void {
+    if (!this.styleEl) return;
+    const rewrite = this.hooks.rewriteCSS;
+    this.styleEl.textContent = rewrite
+      ? this.cssRules.map((r) => rewrite(r)).join('\n')
+      : this.cssRules.join('\n');
   }
 
   /** Registers image metadata arriving after the snapshot. */
   setImageMeta(meta: ImageMeta): void {
     this.images.set(meta.hash, meta);
-    // The src already carries the resolved URL, so match on that.
+    // Match on the hash the host stamped on the element, not on `src`: by the
+    // time metadata arrives `src` may be a placeholder or a blob URL, neither
+    // of which says anything about what the image is.
     for (const el of Array.from(this.doc.querySelectorAll('img'))) {
       const img = el as HTMLImageElement;
-      if (img.getAttribute('src')?.includes(meta.hash)) {
+      if (img.dataset.skyhookImg === meta.hash) {
         this.hooks.onImage?.(img, meta, meta.hash);
       }
     }

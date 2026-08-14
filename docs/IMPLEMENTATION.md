@@ -93,6 +93,19 @@ different trees is precisely how silent divergence gets introduced.
 The agent runs in an **isolated world**, so page script can neither see nor
 tamper with it — a property CDP's DOM domain does not offer either.
 
+CDP's **CSS domain** *is* used, for one thing the agent cannot do. Used-rule
+extraction walks `document.styleSheets`, and a stylesheet served from another
+origin throws on `cssRules`: the CSSOM will not show a page its own CDN's CSS.
+On a site that keeps every stylesheet on a media domain — Amazon is one — that
+is the entire design system, and the page arrives with all of its structure and
+none of its appearance. DevTools is not bound by the same-origin policy, so the
+host reads the text with `CSS.getStyleSheetText` and hands it back to the agent,
+which replays it into a constructed stylesheet and filters it exactly like the
+rest. Relative `url()`s are resolved against the sheet's own address on the way
+past, because a constructed sheet would otherwise resolve them against the
+document. The recovered rules take the blocked sheet's place in the walk rather
+than being appended, so the cascade order is the one the page had.
+
 ### 5. The Google Chat adapter scrapes rather than using the Chat API
 
 The design allows this explicitly ("or, pragmatically, puppeteers a dedicated
@@ -132,9 +145,14 @@ app's CSP allows `connect-src` to exactly one server. The mirror transport is
 not a fetch, so it is unaffected by either.
 
 **The local store.** The design says SQLite; the Electron client used files.
-Both are now IndexedDB plus Cache Storage. Image bytes live in Cache Storage so
-the service worker serves them straight to the mirror frame with no hop through
-the page.
+Both are now IndexedDB plus Cache Storage. Image bytes live in Cache Storage,
+where the service worker serves them from — but *not* straight to the mirror
+frame, which was the original plan and does not work: a sandboxed frame is not
+a service worker client, so `/img/<hash>` requested from inside it goes to the
+network and comes back as whatever the server says about an unknown path. The
+shell is a client, so it reads the bytes and hands the frame a blob URL, which
+needs no fetch at all. The same blob resolves the `url()` references in
+recovered stylesheets.
 
 The costs are real and worth naming: the archive is encrypted with a
 non-extractable WebCrypto key in IndexedDB rather than an OS-keychain-wrapped

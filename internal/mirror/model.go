@@ -330,17 +330,24 @@ func (m *Model) Hash() uint64 {
 	for _, id := range ids {
 		n := m.Nodes[id]
 		v := n.Name
+		lower := true // the agent hashes tagName.toLowerCase()
 		switch n.Kind {
 		case protocol.KindText:
-			v = n.Text
+			v, lower = n.Text, false
 		case protocol.KindDoctype:
-			v = "" // the agent has no tagName for a doctype either
+			v, lower = "", false // the agent has no tagName for a doctype either
 		}
 		h ^= uint32(id & 0xff)
 		h *= 16777619
 		for i, r := range v {
 			if i >= 32 {
 				break
+			}
+			// Element names travel in the case the DOM uses — `clipPath` is not
+			// `clippath` in SVG — but the agent's fingerprint lowercases them,
+			// and a fingerprint that disagrees resyncs the page forever.
+			if lower && r >= 'A' && r <= 'Z' {
+				r += 'a' - 'A'
 			}
 			h ^= uint32(r) & 0xff
 			h *= 16777619

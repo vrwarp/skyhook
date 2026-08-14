@@ -6,9 +6,10 @@
  * If someone ever adds `allow-scripts` to make something convenient work, this
  * fails loudly.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MirrorHost, imageURL, type MenuTarget } from '../src/mirror/host.js';
+import { MirrorHost, type MenuTarget } from '../src/mirror/host.js';
+import { imageCacheKey } from '../src/shared/caches.js';
 import { NodeKind, OpCode, type Mutation, type Snapshot } from '../src/shared/protocol.js';
 
 function snapshot(): Snapshot {
@@ -80,6 +81,15 @@ describe('MirrorHost', () => {
     document.body.innerHTML = '';
   });
 
+  // Unconditionally, not at the end of the tests that stub: an assertion that
+  // fails never reaches its own cleanup, and a leaked global URL takes every
+  // test after it down with it — which reads as six broken features rather
+  // than one broken test.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
   it('sandboxes the mirror frame without allowing scripts', async () => {
     const { host } = await mount();
     const sandbox = host.frame.getAttribute('sandbox') ?? '';
@@ -146,7 +156,90 @@ describe('MirrorHost', () => {
     expect(ev.wantImages).toHaveBeenCalledWith(1, ['deadbeef']);
     // The wire form never reaches the DOM: it would be an unfetchable scheme.
     const img = host.frame.contentDocument!.querySelector('img')!;
-    expect(img.getAttribute('src')).toBe(imageURL('deadbeef'));
+    expect(img.getAttribute('src')?.startsWith('data:image/gif')).toBe(true);
+    // Nor does /img/<hash>: the frame is sandboxed, so it is not a service
+    // worker client, and that URL would go to the network — which is the one
+    // thing the frame must never do.
+    expect(img.getAttribute('src')).not.toContain('/img/');
+    // The hash rides on the element instead, so metadata and bytes arriving
+    // later can still find it.
+    expect(img.dataset.skyhookImg).toBe('deadbeef');
+  });
+
+  /** Mounts a snapshot holding one image, and returns the element. */
+  async function withImage(): Promise<{ host: MirrorHost; img: HTMLImageElement }> {
+    const { host } = await mount();
+    const snap = snapshot();
+    snap.strings.push('img', 'skyhook://img/c0ffee', 'src');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('img'),
+      attrs: [snap.strings.indexOf('src'), snap.strings.indexOf('skyhook://img/c0ffee')],
+      flags: 2,
+    });
+    host.applySnapshot(snap);
+    return { host, img: host.frame.contentDocument!.querySelector('img')! };
+  }
+
+  /**
+   * Stubs Cache Storage with the given entries, and names any blob minted from
+   * one. Only the two statics are replaced — swapping the whole URL global
+   * would leave link resolution, which is `new URL(href, base)`, unable to
+   * construct anything.
+   */
+  function stubCache(entries: Record<string, BodyInit>): { match: ReturnType<typeof vi.fn> } {
+    const match = vi.fn(async (key: string) => {
+      const body = entries[key];
+      return body === undefined ? undefined : new Response(body);
+    });
+    vi.stubGlobal('caches', { open: async () => ({ match }) });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mirror/c0ffee');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    return { match };
+  }
+
+  it('shows an image out of a blob the shell minted for it', async () => {
+    // The bytes reach the frame as a blob URL because the shell can read them
+    // and the sandboxed frame cannot.
+    const { host, img } = await withImage();
+    const { match } = stubCache({ [imageCacheKey('c0ffee')]: new Uint8Array([1, 2, 3]) });
+
+    host.imageArrived('c0ffee');
+    await vi.waitFor(() => expect(img.getAttribute('src')).toBe('blob:mirror/c0ffee'));
+    expect(match).toHaveBeenCalledWith(imageCacheKey('c0ffee'));
+  });
+
+  // The bytes are read out of Cache Storage rather than fetched from the URL
+  // the service worker serves them on. The shell is only a client of that
+  // worker once it has been claimed, and until then the same fetch reaches the
+  // network, where the server answers an unknown path with the app shell —
+  // leaving the element on a blob of index.html for the rest of the session.
+  it('never goes to the network for an image', async () => {
+    const { host, img } = await withImage();
+    const fetchMock = vi.fn(async () => new Response('<!doctype html><title>app</title>', {
+      headers: { 'content-type': 'text/html' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    stubCache({}); // nothing cached yet
+
+    host.imageArrived('c0ffee');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchMock).not.toHaveBeenCalled();
+    // And with nothing to show, the placeholder stands.
+    expect(img.getAttribute('src')?.startsWith('data:image/gif')).toBe(true);
+  });
+
+  it('keeps looking after a miss, rather than freezing on it', async () => {
+    // Bytes that have not crossed the link yet are simply absent from the
+    // cache; caching that absence would mean the image never appeared.
+    const { host, img } = await withImage();
+    stubCache({});
+    host.imageArrived('c0ffee');
+    await new Promise((r) => setTimeout(r, 0));
+
+    stubCache({ [imageCacheKey('c0ffee')]: new Uint8Array([1, 2, 3]) });
+    host.imageArrived('c0ffee');
+    await vi.waitFor(() => expect(img.getAttribute('src')).toBe('blob:mirror/c0ffee'));
   });
 
   it('sends a form submission when a submit control is clicked', async () => {

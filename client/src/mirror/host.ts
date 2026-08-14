@@ -16,6 +16,7 @@ import { ImageMeta, InputKind, Mutation, MutationOp, OpCode, Snapshot } from '..
 import {
   EchoEngine, asEditable, caretOf, modifierMask, setCaret, setValue, valueOf,
 } from './echo.js';
+import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { Patcher } from './patcher.js';
 
 /** Base styles for a mirrored document, injected into each frame. */
@@ -71,16 +72,26 @@ export interface HostEvents {
   dismiss(tab: number): boolean;
 }
 
-/** Resolves a content hash to the URL the service worker serves it from. */
-export function imageURL(hash: string): string {
-  return `/img/${hash}`;
+/**
+ * The hash behind an image the frame is showing.
+ *
+ * It is read from an attribute rather than from `src`, because what `src`
+ * holds is a blob URL that says nothing about its content — see `blobFor`.
+ */
+export function hashFromImage(img: Element | null | undefined): string | undefined {
+  const hash = (img as HTMLElement | null)?.dataset?.skyhookImg;
+  return hash || undefined;
 }
 
-/** The inverse: the content hash behind an image the frame is showing. */
-export function hashFromImageURL(src: string | null | undefined): string | undefined {
-  const match = /^\/img\/([^?#]+)/.exec(src ?? '');
-  return match ? match[1] : undefined;
-}
+/**
+ * A 1x1 transparent GIF, held by every image whose bytes have not landed.
+ *
+ * An <img> with no `src` — or one whose `src` does not load — draws its alt
+ * text and a broken-image marker, which is worse than the blurhash the element
+ * is already wearing. This loads instantly, from nothing, and shows nothing.
+ */
+const PENDING_PIXEL =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
 /**
  * Gives an image its box before its bytes exist.
@@ -121,6 +132,17 @@ export class MirrorHost {
   private inputSeq = 0;
   private lastSeq = 0;
   private pendingImages = new Map<string, HTMLImageElement[]>();
+  /** Object URLs handed to the frame, by content hash. Revoked with the tab. */
+  private blobs = new Map<string, string>();
+  /** Hashes already looked for in the local cache, so a redraw does not ask
+   *  again for bytes that have not crossed the link yet. */
+  private probed = new Set<string>();
+  /** Hashes a stylesheet references, which have no element to hang from. */
+  private pendingCSS = new Set<string>();
+  /** Hashes already asked of the server. */
+  private requested = new Set<string>();
+  private cssRefresh: ReturnType<typeof setTimeout> | null = null;
+  private imageRequest: ReturnType<typeof setTimeout> | null = null;
   private ready: Promise<void>;
   private scrollTimer: ReturnType<typeof setTimeout> | null = null;
   /** URL of the document currently rendered, so a resync is distinguishable
@@ -187,6 +209,7 @@ export class MirrorHost {
     this.patcher = new Patcher(doc, {
       isOwned: (node: Node): boolean => this.echo?.isOwned(node) ?? false,
       onImage: (el, meta, hash) => this.applyImage(el, meta, hash),
+      rewriteCSS: (rule) => this.resolveCSSImages(rule),
       onFocus: (node) => {
         if (this.echo?.ownedId) return;
         // preventScroll matters more here than it looks: focusing an element
@@ -539,7 +562,7 @@ export class MirrorHost {
       y: rect.top + ev.clientY,
       link: link?.url,
       linkText: link?.text,
-      image: hashFromImageURL(img?.getAttribute('src')),
+      image: hashFromImage(img),
       imageAlt: img?.getAttribute('alt') ?? undefined,
       selection: this.selectionIn(field),
     };
@@ -662,6 +685,11 @@ export class MirrorHost {
       this.readerMoved = new WeakSet();
       this.adopted = new WeakMap();
       this.scrollDocTo(snap.scrollX, snap.scrollY);
+      // A navigation drops every image the old document was showing. The bytes
+      // stay in Cache Storage, so re-minting a blob for one that comes back
+      // costs nothing over the link; holding them all until the tab closes is
+      // what an afternoon of reading would cost in memory.
+      this.releaseBlobs();
     }
     this.requestPendingImages();
   }
@@ -685,43 +713,155 @@ export class MirrorHost {
     this.patcher?.setImageMeta(meta);
   }
 
-  /** Called when the store has bytes for a hash: force the frame to re-fetch. */
+  /** Called when the store has bytes for a hash: show them. */
   imageArrived(hash: string): void {
-    const waiting = this.pendingImages.get(hash);
-    if (!waiting) return;
-    this.pendingImages.delete(hash);
-    const url = imageURL(hash);
-    for (const el of waiting) {
-      // Straight to the busted URL: clearing src first would leave the element
-      // with no image for a frame, and an image with no image is a hole the
-      // page closes up and then reopens.
-      el.setAttribute('src', `${url}?v=1`);
-      el.style.backgroundImage = '';
+    if (!this.pendingImages.has(hash) && !this.pendingCSS.has(hash)) return;
+    void this.blobFor(hash).then((url) => {
+      if (!url) return;
+      const waiting = this.pendingImages.get(hash);
+      if (waiting) {
+        this.pendingImages.delete(hash);
+        for (const el of waiting) this.showImage(el, url);
+      }
+      if (this.pendingCSS.delete(hash)) this.refreshCSSSoon();
+    });
+  }
+
+  /**
+   * Resolves the image references the server left in a CSS rule.
+   *
+   * The server rewrites `url(...)` to a content hash, because it has no idea
+   * where the client will keep the bytes; `skyhook://img/...` left as written
+   * is a scheme no browser knows, so every backgrounded logo, icon and hero
+   * image renders as nothing at all. Until the bytes land the reference points
+   * at a transparent pixel, which at least lets the box keep its own colour.
+   */
+  private resolveCSSImages(rule: string): string {
+    if (!rule.includes('skyhook://img/')) return rule;
+    return rule.replace(/skyhook:\/\/img\/([0-9a-f]+)/gi, (_m, hash: string) => {
+      const known = this.blobs.get(hash);
+      if (known) return known;
+      if (!this.pendingCSS.has(hash)) {
+        this.pendingCSS.add(hash);
+        this.requestImagesSoon();
+        if (!this.probed.has(hash)) {
+          this.probed.add(hash);
+          this.imageArrived(hash);
+        }
+      }
+      return PENDING_PIXEL;
+    });
+  }
+
+  /** Re-renders the stylesheet once, however many images just landed. */
+  private refreshCSSSoon(): void {
+    if (this.cssRefresh) return;
+    this.cssRefresh = setTimeout(() => {
+      this.cssRefresh = null;
+      this.patcher?.refreshCSS();
+    }, 120);
+  }
+
+  /**
+   * Turns a hash into a URL the mirror frame can actually load.
+   *
+   * A sandboxed frame is not a service worker client, so `/img/<hash>` from
+   * inside it reaches the network — and on this link there is no network. The
+   * shell reads the bytes and hands the frame a blob URL, which needs no fetch
+   * at all.
+   *
+   * It reads Cache Storage directly rather than fetching that URL itself. The
+   * shell *is* a service worker client, but only once the worker has claimed
+   * it, and until then the same fetch goes to the network, where the server
+   * answers an unknown path with the app shell. Minting a blob out of that
+   * would leave the element pointing at an `index.html` that decodes to no
+   * image, for the rest of the session — the failure the network cannot
+   * produce is the one worth designing out.
+   */
+  private async blobFor(hash: string): Promise<string | null> {
+    const known = this.blobs.get(hash);
+    if (known) return known;
+    try {
+      const cache = await caches.open(IMAGE_CACHE);
+      const hit = await cache.match(imageCacheKey(hash));
+      if (!hit) return null;
+      const blob = await hit.blob();
+      if (!blob.size) return null;
+      const url = URL.createObjectURL(blob);
+      this.blobs.set(hash, url);
+      return url;
+    } catch {
+      return null;
     }
+  }
+
+  private showImage(el: HTMLImageElement, url: string): void {
+    el.setAttribute('src', url);
+    el.style.backgroundImage = '';
+    delete el.dataset.skyhookBlur;
   }
 
   private applyImage(el: HTMLImageElement, meta: ImageMeta | undefined, hash: string): void {
     if (!hash) return;
+    el.dataset.skyhookImg = hash;
     reserveSpace(el, meta);
+    const known = this.blobs.get(hash);
+    if (known) {
+      this.showImage(el, known);
+      return;
+    }
     if (meta?.blur && !el.dataset.skyhookBlur) {
       el.dataset.skyhookBlur = '1';
       // A page of grey boxes is what a mirror feels like without this, and the
       // placeholder costs about thirty bytes.
       void import('../shared/blurhash.js').then(({ decodeBlurhashToCSS }) => {
+        if (el.dataset.skyhookBlur !== '1') return; // bytes won the race
         el.style.backgroundImage = decodeBlurhashToCSS(meta.blur, 8, 8);
         el.style.backgroundSize = 'cover';
       });
     }
-    const url = imageURL(hash);
-    if (el.getAttribute('src') !== url) el.setAttribute('src', url);
+    if (el.getAttribute('src') !== PENDING_PIXEL) el.setAttribute('src', PENDING_PIXEL);
     const list = this.pendingImages.get(hash) ?? [];
     if (!list.includes(el)) list.push(el);
     this.pendingImages.set(hash, list);
+    // The bytes may already be in the cache from an earlier flight, in which
+    // case nothing will ever announce them. Once per hash: a page of 125
+    // images redrawn on every mutation batch would otherwise ask 125 times a
+    // second for bytes that are not there yet.
+    if (!this.probed.has(hash)) {
+      this.probed.add(hash);
+      this.imageArrived(hash);
+    }
   }
 
+  /**
+   * Asks for the bytes of every image still missing, once per hash.
+   *
+   * Only images above the fold are pushed unasked; everything else — and every
+   * image a stylesheet names, which the server cannot see a viewport position
+   * for — waits to be asked for. Asking twice costs a round trip on a link
+   * where round trips are the whole problem, so each hash goes once.
+   */
   private requestPendingImages(): void {
-    if (!this.pendingImages.size) return;
-    this.events.wantImages(this.tab, Array.from(this.pendingImages.keys()));
+    const want: string[] = [];
+    for (const hash of this.pendingImages.keys()) {
+      if (!this.requested.has(hash)) want.push(hash);
+    }
+    for (const hash of this.pendingCSS) {
+      if (!this.requested.has(hash)) want.push(hash);
+    }
+    if (!want.length) return;
+    for (const hash of want) this.requested.add(hash);
+    this.events.wantImages(this.tab, want);
+  }
+
+  /** Batches the requests a burst of patches would otherwise make one at a time. */
+  private requestImagesSoon(): void {
+    if (this.imageRequest) return;
+    this.imageRequest = setTimeout(() => {
+      this.imageRequest = null;
+      this.requestPendingImages();
+    }, 120);
   }
 
   private reconcileAttr(op: MutationOp): void {
@@ -772,8 +912,20 @@ export class MirrorHost {
     return this.patcher?.size ?? 0;
   }
 
+  private releaseBlobs(): void {
+    for (const url of this.blobs.values()) URL.revokeObjectURL(url);
+    this.blobs.clear();
+    this.probed.clear();
+    this.pendingCSS.clear();
+    this.requested.clear();
+  }
+
   destroy(): void {
     this.frame.remove();
+    if (this.cssRefresh) clearTimeout(this.cssRefresh);
+    if (this.imageRequest) clearTimeout(this.imageRequest);
+    this.releaseBlobs();
+    this.pendingImages.clear();
     this.patcher = null;
     this.echo = null;
     this.doc = null;
