@@ -319,6 +319,35 @@ the entry behind, where the app looks unchanged and a second press leaves for
 real. The trap is armed again as soon as a tab has somewhere to go back to. A
 browser that cannot be left by the gesture that leaves browsers is worse than
 one that has to be told twice.
+### 15. Attaching to a running browser needs `window.open`, not `Target.createTarget`
+
+The design assumes the server launches Chromium and owns it. `chromeAttach`
+adds the other case — a browser already running, whose profile and logins are
+shared — and there the landside browser is somebody's, so Skyhook has to keep
+its tabs in a window of its own.
+
+CDP offers no way to say that. `Target.createTarget` takes no window id; left
+alone it puts the tab in whichever window the user touched last (measured: it
+goes to their window even with `background: true`, and even right after we
+opened and activated one of our own), and `newWindow` opens a *fresh* window
+per tab rather than reusing ours. The one placement rule that does hold is the
+web's: `window.open` puts a tab in its opener's window and keeps doing so no
+matter which window has focus.
+
+So attach mode opens one window with `newWindow`, keeps a blank anchor tab in
+it, and creates every later tab by evaluating `window.open` there —
+`userGesture` set so the popup blocker allows it, `noopener` set so a mirrored
+page gets no handle on the anchor, and a per-tab nonce in the `about:blank`
+fragment so concurrent callers can each recognise the tab their own call made.
+The tab is opened blank and navigated afterwards, so no page URL is ever
+spliced into JavaScript source.
+
+The rest is restraint: targets that existed before we attached are never
+attached to, closed or listed, and shutdown closes our own tabs instead of
+calling `Browser.close`, which would quit the browser out from under whoever is
+using it. `test/attach_test.go` drives a second real browser as "the user" and
+asserts each of these, including that the user activating their own window
+mid-run does not divert the next tab.
 
 ## Known gaps
 

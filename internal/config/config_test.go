@@ -255,3 +255,61 @@ func TestConfiguredTokenWins(t *testing.T) {
 		t.Fatalf("token = %q", cfg.Token)
 	}
 }
+
+func TestChromeAttachRejectsWhatCannotBeAttachedTo(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "a bare host and port is not a devtools endpoint",
+			body: `{"dataDir":"/tmp/skyhook","chromeAttach":"127.0.0.1:9222"}`,
+			want: "devtools endpoint",
+		},
+		{
+			// Silently ignoring the binary would read as "it attached to the
+			// wrong browser" rather than "it never launched one".
+			name: "a binary to launch and a browser to attach to",
+			body: `{"dataDir":"/tmp/skyhook","chromeAttach":"http://127.0.0.1:9222",
+			        "chrome":"/usr/bin/google-chrome"}`,
+			want: "exclusive",
+		},
+		{
+			name: "command line flags for a browser we do not start",
+			body: `{"dataDir":"/tmp/skyhook","chromeAttach":"http://127.0.0.1:9222",
+			        "chromeArgs":["--no-sandbox"]}`,
+			want: "chromeArgs",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := Load(write(t, c.body)); err == nil {
+				t.Fatal("accepted a chromeAttach configuration that cannot work")
+			} else if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error does not mention %q: %v", c.want, err)
+			}
+		})
+	}
+}
+
+func TestChromeAttachFromTheEnvironment(t *testing.T) {
+	t.Setenv("SKYHOOK_CHROME_ATTACH", "http://127.0.0.1:9222")
+	t.Setenv("SKYHOOK_DATA_DIR", t.TempDir())
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ChromeAttach != "http://127.0.0.1:9222" {
+		t.Errorf("SKYHOOK_CHROME_ATTACH was ignored: %q", cfg.ChromeAttach)
+	}
+}

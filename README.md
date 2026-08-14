@@ -70,6 +70,15 @@ go build -o skyhookd ./cmd/skyhookd
 SKYHOOK_DATA_DIR=~/.skyhook ./skyhookd
 ```
 
+To drive a browser that is already running instead of launching one, point the
+server at its DevTools endpoint. It shares that profile's logins, works in a
+window of its own, and never touches a tab it did not open:
+
+```sh
+google-chrome --remote-debugging-port=9222 --remote-allow-origins='*'   # yours
+SKYHOOK_CHROME_ATTACH=http://127.0.0.1:9222 ./skyhookd
+```
+
 On first run the server generates a pairing token and a short-lived,
 self-signed ECDSA certificate, and writes `pairing.json` into its data
 directory. That file is what the client needs: host, port, token, and the

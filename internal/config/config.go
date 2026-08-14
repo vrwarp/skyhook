@@ -34,6 +34,12 @@ type Config struct {
 	TLSKey  string `json:"tlsKey"`
 	// Chrome overrides the browser binary.
 	Chrome string `json:"chrome"`
+	// ChromeAttach is the DevTools endpoint of an already-running browser
+	// ("http://127.0.0.1:9222"). When set, no browser is launched: Skyhook
+	// drives that one instead, keeping its tabs in a window of its own and
+	// never touching a tab it did not open. The profile is shared, so its
+	// logins are the logins mirrored pages see.
+	ChromeAttach string `json:"chromeAttach"`
 	// ChromeArgs are appended to Chromium's command line. Sandboxing is the
 	// reason this exists: a container runtime that blocks user namespaces
 	// leaves Chromium unable to start at all, and `--no-sandbox` is the
@@ -213,6 +219,23 @@ func (c *Config) validate() error {
 		return errors.New("config: insecureLoopback is for this machine only; " +
 			"drop publicUrl/behindProxy or drop -demo")
 	}
+	if c.ChromeAttach != "" {
+		u, err := url.Parse(c.ChromeAttach)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("config: chromeAttach %q is not a devtools endpoint "+
+				"like http://127.0.0.1:9222", c.ChromeAttach)
+		}
+		// These only describe a browser we start, and silently ignoring them
+		// would look like the attach target was misconfigured.
+		if c.Chrome != "" {
+			return errors.New("config: chrome and chromeAttach are exclusive; " +
+				"attaching drives a browser that is already running")
+		}
+		if len(c.ChromeArgs) > 0 {
+			return errors.New("config: chromeArgs cannot apply to chromeAttach; " +
+				"pass them to the browser you start yourself")
+		}
+	}
 	return nil
 }
 
@@ -322,6 +345,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SKYHOOK_CHROME_ARGS"); v != "" {
 		cfg.ChromeArgs = strings.Fields(v)
+	}
+	if v := os.Getenv("SKYHOOK_CHROME_ATTACH"); v != "" {
+		cfg.ChromeAttach = v
 	}
 	if v := os.Getenv("SKYHOOK_HOSTS"); v != "" {
 		cfg.Hosts = strings.Split(v, ",")
