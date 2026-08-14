@@ -44,13 +44,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Run it
+      - name: It prepares a data directory
         run: |
-          # Building proves the Dockerfile parses. Running proves Chromium, the
-          # image encoders and the client build all actually landed in it.
-          docker run --rm --shm-size=1g \
-            -e SKYHOOK_DATA_DIR=/tmp/skyhook \
-            skyhook:pr -init
+          # -init mints a token and a certificate and exits. It must not need a
+          # browser: preparing a data directory has no business depending on
+          # whether Chromium can launch.
+          docker run --rm -e SKYHOOK_DATA_DIR=/tmp/skyhook skyhook:pr -init
           docker run --rm skyhook:pr -version | grep -q skyhookd
 
       - name: The client is in the image
@@ -58,8 +57,37 @@ jobs:
           # The PWA is served from the image; a missing build would only show
           # up as an unhelpful page at runtime.
           docker run --rm --entrypoint sh skyhook:pr \
-            -c 'test -f /usr/share/skyhook/webapp/index.html && \
+            -c 'test -f /usr/share/skyhook/webapp/index.html &&
                 test -f /usr/share/skyhook/webapp/sw.js'
+
+      - name: It serves
+        run: |
+          # The real test: Chromium starts, the listeners come up, and the
+          # server answers. An image whose browser cannot launch is exactly the
+          # failure a dry run exists to catch.
+          docker run -d --name smoke --shm-size=1g -p 4434:4434 \
+            -e SKYHOOK_HOSTS=127.0.0.1 -e SKYHOOK_LOG_LEVEL=debug \
+            skyhook:pr
+          ok=false
+          for _ in $(seq 1 45); do
+            if curl -fsk https://127.0.0.1:4434/healthz >/dev/null 2>&1; then
+              ok=true
+              break
+            fi
+            if [ -z "$(docker ps -q -f name=smoke)" ]; then
+              echo "::error::the container exited before it served anything"
+              break
+            fi
+            sleep 2
+          done
+          echo "--- container log ---"
+          docker logs smoke 2>&1 | tail -40
+          docker rm -f smoke >/dev/null
+          if [ "$ok" != true ]; then
+            echo "::error::the image never answered /healthz"
+            exit 1
+          fi
+          echo "the image serves"
 
   publish:
     name: Build and publish the landside image
@@ -140,8 +168,20 @@ jobs:
 
       - name: Smoke-test the published image
         run: |
-          # The server must come up, mint a token and a certificate, and exit.
-          docker run --rm --shm-size=1g \
-            -e SKYHOOK_DATA_DIR=/tmp/skyhook \
-            ghcr.io/${{ github.repository }}:sha-$(git rev-parse --short HEAD) \
-            -init
+          # The published image must mint its own credentials and then actually
+          # serve, browser and all.
+          image=ghcr.io/${{ github.repository }}:sha-$(git rev-parse --short HEAD)
+          docker run --rm -e SKYHOOK_DATA_DIR=/tmp/skyhook "$image" -init
+          docker run -d --name smoke --shm-size=1g -p 4434:4434 \
+            -e SKYHOOK_HOSTS=127.0.0.1 "$image"
+          ok=false
+          for _ in $(seq 1 45); do
+            if curl -fsk https://127.0.0.1:4434/healthz >/dev/null 2>&1; then
+              ok=true
+              break
+            fi
+            sleep 2
+          done
+          docker logs smoke 2>&1 | tail -20
+          docker rm -f smoke >/dev/null
+          [ "$ok" = true ]

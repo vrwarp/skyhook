@@ -41,12 +41,40 @@ type Server struct {
 	errs chan error
 }
 
-// New builds the server without starting listeners.
-func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, error) {
+// Prepare creates the data directory, the certificate and the pairing file,
+// and nothing else. It deliberately does not start Chromium: preparing a data
+// directory has no business failing because a browser cannot launch, which is
+// exactly what it used to do inside a container.
+//
+// It returns the certificate so a caller can report the fingerprint.
+func Prepare(cfg config.Config, log *slog.Logger) (*transport.CertBundle, error) {
+	if err := makeDirs(cfg); err != nil {
+		return nil, err
+	}
+	cert, err := loadOrCreateCert(cfg, log)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{cfg: cfg, log: log, cert: cert}
+	if err := s.WritePairingFile(); err != nil {
+		return nil, err
+	}
+	return cert, nil
+}
+
+func makeDirs(cfg config.Config) error {
 	for _, dir := range []string{cfg.DataDir, cfg.ProfileDir(), cfg.CertDir(), cfg.ImageCacheDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, err
+			return err
 		}
+	}
+	return nil
+}
+
+// New builds the server without starting listeners.
+func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, error) {
+	if err := makeDirs(cfg); err != nil {
+		return nil, err
 	}
 	s := &Server{cfg: cfg, log: log, errs: make(chan error, 4)}
 
@@ -63,6 +91,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		Display:     cfg.Display,
 		Logger:      log,
 		Lang:        "en-US",
+		ExtraArgs:   cfg.ChromeArgs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("server: chromium: %w", err)

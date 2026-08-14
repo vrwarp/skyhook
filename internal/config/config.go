@@ -32,6 +32,11 @@ type Config struct {
 	TLSKey  string `json:"tlsKey"`
 	// Chrome overrides the browser binary.
 	Chrome string `json:"chrome"`
+	// ChromeArgs are appended to Chromium's command line. Sandboxing is the
+	// reason this exists: a container runtime that blocks user namespaces
+	// leaves Chromium unable to start at all, and `--no-sandbox` is the
+	// operator's decision to make, not ours.
+	ChromeArgs []string `json:"chromeArgs"`
 	// Headless runs Chromium headless. Sites with aggressive bot detection want
 	// this false plus an Xvfb display.
 	Headless bool `json:"headless"`
@@ -177,6 +182,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SKYHOOK_CHROME"); v != "" {
 		cfg.Chrome = v
+	}
+	if v := os.Getenv("SKYHOOK_CHROME_ARGS"); v != "" {
+		cfg.ChromeArgs = strings.Fields(v)
 	}
 	if v := os.Getenv("SKYHOOK_HOSTS"); v != "" {
 		cfg.Hosts = strings.Split(v, ",")

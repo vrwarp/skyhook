@@ -68,20 +68,23 @@ func main() {
 		log.Info("demo will stop on its own", "after", demoFor.String())
 	}
 
-	srv, err := server.New(ctx, cfg, log)
-	if err != nil {
-		fatal("startup", err)
-	}
 	if *initOnly {
-		if err := srv.WritePairingFile(); err != nil {
-			log.Error("could not write the pairing file", "err", err)
+		// No browser: this only has to leave behind a data directory, a
+		// certificate and a pairing file.
+		cert, err := server.Prepare(cfg, log)
+		if err != nil {
+			fatal("init", err)
 		}
 		log.Info("initialised",
 			"dataDir", cfg.DataDir,
 			"pairing", cfg.PairingPath(),
-			"fingerprint", srv.Cert().FingerprintHex())
-		_ = srv.Shutdown()
+			"fingerprint", cert.FingerprintHex())
 		return
+	}
+
+	srv, err := server.New(ctx, cfg, log)
+	if err != nil {
+		fatal("startup", err)
 	}
 	if *showPair {
 		p, err := config.ReadPairing(cfg.PairingPath())

@@ -73,7 +73,14 @@ default; this is the whole surface:
 Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_DATA_DIR`, `SKYHOOK_TOKEN`, `SKYHOOK_CHROME`, `SKYHOOK_HOSTS`,
 `SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`,
-`SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_LOG_LEVEL`.
+`SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`.
+
+`chromeArgs` (or `SKYHOOK_CHROME_ARGS`, space separated) is appended to
+Chromium's command line. It exists for sandboxing: Chromium isolates itself with
+user namespaces, some container runtimes refuse those, and then Chromium does
+not start at all. The container image probes for this at startup and falls back
+to `--no-sandbox` with a loud log line; set the variable yourself to override
+the probe either way.
 
 `webRoot` is the built client (`client/dist`). The container image builds it and
 sets `SKYHOOK_WEB_ROOT` already; a bare-metal install should either set the path
