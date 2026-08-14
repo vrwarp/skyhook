@@ -14,14 +14,12 @@
  *     fetch, so it is unaffected by anything here.
  */
 /// <reference lib="webworker" />
-
 import { IMAGE_CACHE } from '../shared/caches.js';
 
 declare const self: ServiceWorkerGlobalScope;
 
 const VERSION = 'v1';
 const SHELL_CACHE = `skyhook-shell-${VERSION}`;
-
 
 /** Files that must be present for a cold, offline start. */
 const SHELL = [

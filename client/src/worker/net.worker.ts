@@ -12,20 +12,21 @@
  * page.
  */
 import {
-  ackBody, adapterCommandBody, decodeAdapterBatch, decodeError, decodeFrame, decodeImageData,
+  ackBody, adapterCommandBody, capturePartBody, captureRequestBody, decodeAdapterBatch,
+  decodeCaptureDone, decodeCaptureRequest, decodeError, decodeFrame, decodeImageData,
   decodeImageMeta, decodeMutation, decodeSnapshot, decodeStats, decodeTabState, decodeWelcome,
   encodeFrame, frameMessage, helloBody, imageWantBody, inputBody, navigateBody, resyncBody,
   scrollBody, unframeMessage, viewportBody, InputEventInit,
 } from '../shared/codec.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { Channel, CloseCode, FrameType, isFatalClose, Viewport } from '../shared/protocol.js';
+
 import { Transport, TransportConfig } from '../app/transport.js';
 
 /** Everything the worker needs to reach the server. */
 export interface Pairing extends TransportConfig {
   token: string;
 }
-
 
 
 interface TabProgress {
@@ -227,12 +228,113 @@ function handleMessage(msg: Uint8Array): void {
       serverStats = decodeStats(frame.body) as unknown as Record<string, unknown>;
       publishStats();
       break;
+    case FrameType.Capture: {
+      const req = decodeCaptureRequest(frame.body);
+      // Straight through to the shell, and nothing awaited on the way: the
+      // shell has to freeze its mirror frames before the resync that usually
+      // follows a capture request lands on the dom channel behind this one.
+      post('capture', { request: req as unknown as Record<string, unknown> });
+      // The worker's own state goes up from here rather than through the shell,
+      // because this is the half that knows it: what has been acknowledged, how
+      // the reconnect loop is doing, and what the transport thinks of the link.
+      queueCapturePart({
+        id: req.id,
+        name: 'worker.json',
+        data: new TextEncoder().encode(JSON.stringify(workerReport(), null, 2)),
+      });
+      break;
+    }
+    case FrameType.CaptureDone:
+      post('captureDone', decodeCaptureDone(frame.body) as unknown as Record<string, unknown>);
+      break;
     case FrameType.Error:
       post('log', { message: `server error: ${JSON.stringify(decodeError(frame.body))}` });
       break;
     default:
       break;
   }
+}
+
+// ------------------------------------------------------------------- capture
+
+/**
+ * How much of one artifact rides in a single frame.
+ *
+ * The bulk channel is a message stream, so a 400 kB screenshot sent whole sits
+ * in front of everything behind it until the link has cleared all of it. At
+ * 250 kbps that is thirteen seconds during which an acknowledgement cannot get
+ * out. Chunked, the capture yields between pieces.
+ */
+const CAPTURE_CHUNK = 32 * 1024;
+
+/**
+ * Capture parts are sent strictly in order.
+ *
+ * Everywhere else in this worker a frame is fired off with `void send(...)`,
+ * which is fine for frames that stand alone. These do not: a chunk that
+ * overtakes its predecessor reassembles into a corrupt artifact landside, and
+ * the artifact is a screenshot, so the corruption would look like a rendering
+ * bug — in a bundle taken to diagnose a rendering bug.
+ */
+let captureQueue: Promise<void> = Promise.resolve();
+
+interface CapturePartInput {
+  id: string;
+  name?: string;
+  data?: Uint8Array;
+  done?: boolean;
+  error?: string;
+}
+
+function queueCapturePart(part: CapturePartInput): void {
+  captureQueue = captureQueue.then(() => sendCapturePart(part)).catch((err: unknown) => {
+    post('log', { message: `capture part failed: ${String(err)}` });
+  });
+}
+
+async function sendCapturePart(part: CapturePartInput): Promise<void> {
+  const data = part.data ?? new Uint8Array(0);
+  if (part.name && data.length > CAPTURE_CHUNK) {
+    for (let off = 0; off < data.length; off += CAPTURE_CHUNK) {
+      // slice, not subarray: a view carries its whole backing buffer into the
+      // encoder, and a chunk that ships the entire artifact behind it defeats
+      // the point of chunking.
+      const slice = data.slice(off, Math.min(off + CAPTURE_CHUNK, data.length));
+      const more = off + CAPTURE_CHUNK < data.length;
+      await send(Channel.Bulk, encodeFrame(FrameType.CapturePart, 0, capturePartBody({
+        id: part.id, name: part.name, data: slice, more,
+      })));
+    }
+  } else if (part.name || part.error || part.done) {
+    await send(Channel.Bulk, encodeFrame(FrameType.CapturePart, 0, capturePartBody({
+      id: part.id, name: part.name, data, error: part.error,
+    })));
+  }
+  if (part.done) {
+    await send(Channel.Bulk, encodeFrame(FrameType.CapturePart, 0,
+      capturePartBody({ id: part.id, done: true })));
+  }
+}
+
+/** What this worker knows that neither the shell nor the server does. */
+function workerReport(): Record<string, unknown> {
+  return {
+    sessionId,
+    online,
+    refused,
+    reconnectDelayMs: reconnectDelay,
+    queuedInputFrames: outbox.length,
+    transport: transport?.kind ?? 'none',
+    transportStats: transport?.stats() ?? null,
+    serverStats,
+    viewport,
+    // Per tab: the sequence this client has acknowledged and the document hash
+    // it reported for it. Put beside the server's view of the same two numbers,
+    // this is where a divergence is either explained or narrowed.
+    progress: Array.from(progress.entries()).map(([tab, p]) => ({
+      tab, appliedSeq: p.seq, docHash: p.hash,
+    })),
+  };
 }
 
 /** Puts transcoded bytes where the shell and the service worker will find them. */
@@ -336,6 +438,15 @@ self.addEventListener('message', (event: MessageEvent) => {
     case 'adapter':
       void send(Channel.Bulk, encodeFrame(FrameType.AdapterCmd, 0,
         adapterCommandBody(cmd.args as unknown as { adapter: string; cmd: string })));
+      break;
+    case 'capture':
+      void send(Channel.Ctrl, encodeFrame(FrameType.Capture, 0, captureRequestBody({
+        reason: String(cmd.args.reason ?? 'manual'),
+        note: String(cmd.args.note ?? ''),
+      })));
+      break;
+    case 'capturePart':
+      queueCapturePart(cmd.args as unknown as CapturePartInput);
       break;
     case 'kill':
       void send(Channel.Ctrl, encodeFrame(FrameType.Kill, 0));

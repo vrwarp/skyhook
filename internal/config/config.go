@@ -97,6 +97,41 @@ type Config struct {
 	WebRoot string `json:"webRoot"`
 	// LogLevel is debug|info|warn|error.
 	LogLevel string `json:"logLevel"`
+	// CaptureKeep is how many diagnostic bundles are kept in <dataDir>/captures
+	// before the oldest is deleted. Zero turns captures off: no bundles, no
+	// journals, and a client asking for one is told no.
+	CaptureKeep int `json:"captureKeep"`
+	// CaptureMaxBytes caps one bundle. An over-budget artifact is dropped with
+	// a note rather than allowed to fill the disk.
+	CaptureMaxBytes int64 `json:"captureMaxBytes"`
+	// CaptureClientBytes caps what the plane side is asked to send up. It is
+	// the one number in this group the reader pays for directly: every byte of
+	// it crosses the link the whole project exists to conserve.
+	CaptureClientBytes int `json:"captureClientBytes"`
+	// CaptureScreenshots includes a picture from each side. They are most of a
+	// bundle's size and most of its value.
+	CaptureScreenshots bool `json:"captureScreenshots"`
+	// CaptureText writes what the reader typed into bundles verbatim. Off by
+	// default: input is recorded either way, but as a length and a digest, so a
+	// bundle can be handed to somebody without handing them a password.
+	CaptureText bool `json:"captureText"`
+	// CaptureOnDivergence takes a capture when the integrity check finds the two
+	// halves holding different documents. That moment is the one worth having,
+	// and it is over before anybody can ask for it by hand — but it writes the
+	// contents of whatever page was on screen to disk without anybody asking,
+	// so it is off until an operator turns it on. Turn it on while chasing a
+	// mirror bug; leave it off the rest of the time.
+	CaptureOnDivergence bool `json:"captureOnDivergence"`
+	// CaptureInterval is the shortest gap between automatic captures. A page
+	// that diverges once usually diverges repeatedly.
+	CaptureInterval Duration `json:"captureInterval"`
+	// JournalBytes bounds the per-tab record of frames already sent and
+	// acknowledged — the ones the replay ring has thrown away, and the only
+	// ones that can explain a mirror that applied everything and still went
+	// wrong.
+	JournalBytes int `json:"journalBytes"`
+	// LogLines is how many recent server log lines a capture carries.
+	LogLines int `json:"logLines"`
 	// InsecureLoopback serves the client app and the mirror connection over
 	// plain HTTP on a loopback address, with no TLS and no QUIC. It exists for
 	// demos and local development: Chrome treats 127.0.0.1 as a secure origin,
@@ -176,6 +211,16 @@ func Default() Config {
 		LogLevel:          "info",
 		WebSocketFallback: true,
 		FallbackListen:    ":4434",
+
+		CaptureKeep:         20,
+		CaptureMaxBytes:     64 << 20,
+		CaptureClientBytes:  4 << 20,
+		CaptureScreenshots:  true,
+		CaptureText:         false,
+		CaptureOnDivergence: false,
+		CaptureInterval:     Duration(5 * time.Minute),
+		JournalBytes:        2 << 20,
+		LogLines:            2000,
 	}
 }
 
@@ -396,6 +441,17 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SKYHOOK_BEHIND_PROXY"); v != "" {
 		cfg.BehindProxy = v == "1" || strings.EqualFold(v, "true")
 	}
+	if v := os.Getenv("SKYHOOK_CAPTURE_KEEP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.CaptureKeep = n
+		}
+	}
+	if v := os.Getenv("SKYHOOK_CAPTURE_TEXT"); v != "" {
+		cfg.CaptureText = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("SKYHOOK_CAPTURE_ON_DIVERGENCE"); v != "" {
+		cfg.CaptureOnDivergence = v == "1" || strings.EqualFold(v, "true")
+	}
 }
 
 func expand(p string) (string, error) {
@@ -417,6 +473,15 @@ func (c Config) CertDir() string { return filepath.Join(c.DataDir, "certs") }
 
 // ImageCacheDir holds transcoded images.
 func (c Config) ImageCacheDir() string { return filepath.Join(c.DataDir, "images") }
+
+// CaptureDir holds diagnostic bundles. They live in the data directory rather
+// than somewhere temporary because the point of a capture is that somebody
+// reads it later, possibly after the aircraft has landed and the session that
+// produced it has long expired.
+func (c Config) CaptureDir() string { return filepath.Join(c.DataDir, "captures") }
+
+// CapturesEnabled reports whether this server will take captures at all.
+func (c Config) CapturesEnabled() bool { return c.CaptureKeep > 0 }
 
 // PairingPath is where the pairing file is written.
 func (c Config) PairingPath() string { return filepath.Join(c.DataDir, "pairing.json") }

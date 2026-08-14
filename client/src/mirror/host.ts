@@ -52,6 +52,28 @@ export interface MenuTarget {
   selection: string;
 }
 
+/**
+ * One mirror frame, frozen at an instant, for a diagnostic capture. Everything
+ * here is a copy: nothing in it refers back to a live document, so the slow
+ * half of a capture can work from it long after the frame has moved on.
+ */
+export interface MirrorFreeze {
+  tab: number;
+  /** The mirrored document as HTML — what the reader is actually looking at. */
+  html: string;
+  /** Content hashes of every image the document references. */
+  images: string[];
+  width: number;
+  height: number;
+  docHeight: number;
+  scrollX: number;
+  scrollY: number;
+  /** What the host and patcher believe, for planeside/tabs/<id>/state.json. */
+  state: Record<string, unknown>;
+  fingerprint: { total: number; truncated: boolean; nodes: [number, number, string][] };
+  error?: string;
+}
+
 /** Emitted by the host, forwarded to the server by the app shell. */
 export interface HostEvents {
   input(tab: number, ev: Record<string, unknown>): void;
@@ -900,6 +922,79 @@ export class MirrorHost {
       // has done its job.
       if (text && body.split(text).length > 2) el.remove();
     }
+  }
+
+  /**
+   * Takes everything a diagnostic capture needs from this frame, synchronously.
+   *
+   * Synchronously is the whole contract. The capture worth having is the one
+   * taken at a divergence, and the server's next act after finding one is to
+   * resync the tab — which replaces this document with a correct one. The
+   * resync arrives on the dom channel, the capture request on ctrl, and the
+   * shell reads them on the same thread; so as long as nothing here awaits, the
+   * diverged document is already in hand before the replacement can be applied.
+   * Everything slow — rasterising, compressing, sending — happens afterwards,
+   * from this frozen copy rather than from the live frame.
+   */
+  freeze(): MirrorFreeze {
+    const win = this.frame.contentWindow;
+    const doc = this.doc;
+    const rect = this.frame.getBoundingClientRect();
+    const base: MirrorFreeze = {
+      tab: this.tab,
+      html: '',
+      images: [],
+      width: Math.max(1, Math.round(rect.width || win?.innerWidth || 0)),
+      height: Math.max(1, Math.round(rect.height || win?.innerHeight || 0)),
+      docHeight: doc?.documentElement.scrollHeight ?? 0,
+      scrollX: win?.scrollX ?? 0,
+      scrollY: win?.scrollY ?? 0,
+      state: {},
+      fingerprint: { total: 0, truncated: false, nodes: [] },
+    };
+    if (!doc || !this.patcher) {
+      base.error = 'this tab has no patchable document (the frame never attached)';
+      return base;
+    }
+    try {
+      base.html = doc.documentElement.outerHTML;
+    } catch (err) {
+      base.error = `could not serialise the mirrored document: ${String(err)}`;
+    }
+    try {
+      base.fingerprint = this.patcher.fingerprint();
+    } catch (err) {
+      base.error = `${base.error ?? ''} fingerprint failed: ${String(err)}`.trim();
+    }
+    // From the attribute, not from `src`: `src` is a blob URL, which says
+    // nothing about its content and cannot be resolved anywhere else.
+    for (const el of Array.from(doc.querySelectorAll('img'))) {
+      const hash = hashFromImage(el);
+      if (hash && !base.images.includes(hash)) base.images.push(hash);
+    }
+    base.state = {
+      tab: this.tab,
+      url: this.url,
+      pageUrl: this.pageUrl,
+      lastAppliedSeq: this.lastSeq,
+      inputSeq: this.inputSeq,
+      patcher: this.patcher.diag(),
+      pendingImages: Array.from(this.pendingImages.keys()),
+      // The reader having taken the scroller over is why the server's scroll
+      // positions stop being applied, which looks exactly like a mirror that
+      // has stopped updating.
+      readerMovedDocument: this.readerMovedDoc,
+      adoptedScroll: { ...this.adoptedDoc },
+      scroll: { x: base.scrollX, y: base.scrollY },
+      frame: {
+        width: base.width, height: base.height, docHeight: base.docHeight,
+        offline: doc.documentElement.classList.contains('skyhook-offline'),
+      },
+      imageHashes: base.images.length,
+      ghosts: doc.querySelectorAll('[data-skyhook-ghost]').length,
+      substituted: doc.querySelectorAll('[data-skyhook-tag]').length,
+    };
+    return base;
   }
 
   /** Marks the mirror as showing stale content during an outage. */

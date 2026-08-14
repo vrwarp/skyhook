@@ -6,8 +6,10 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +35,8 @@ type Client struct {
 	stats     protocol.Stats
 	sessionID string
 	welcome   *protocol.Welcome
+	// lastCapture is the most recent bundle the server said it had written.
+	lastCapture *protocol.CaptureDone
 
 	inputSeq uint64
 	events   chan Event
@@ -315,12 +319,176 @@ func (c *Client) handle(f *protocol.Frame) {
 		c.mu.Lock()
 		c.stats = s
 		c.mu.Unlock()
+	case protocol.TypeCapture:
+		var req protocol.CaptureRequest
+		if err := f.DecodeBody(&req); err != nil {
+			return
+		}
+		// Frozen here, on the goroutine that owns the replica, and sent from
+		// another. Reading the replica anywhere else would be reading it while
+		// this loop is still applying frames to it — the same discipline the
+		// browser client follows for the same reason, and here it is also the
+		// difference between a correct artifact and a torn one.
+		go c.sendCapture(req, c.freezeCapture(req))
+	case protocol.TypeCaptureDone:
+		var done protocol.CaptureDone
+		if err := f.DecodeBody(&done); err != nil {
+			return
+		}
+		c.mu.Lock()
+		c.lastCapture = &done
+		c.mu.Unlock()
+		if done.Error != "" {
+			c.log.Printf("capture %s failed: %s", done.ID, done.Error)
+		} else {
+			c.log.Printf("capture %s written: %s (%d bytes)", done.ID, done.Path, done.Bytes)
+		}
+		c.emit(Event{Kind: "capture"})
 	case protocol.TypeError:
 		var e protocol.ErrorBody
 		_ = f.DecodeBody(&e)
 		c.log.Printf("server error: %s: %s", e.Code, e.Message)
 		c.emit(Event{Kind: "error", Err: fmt.Errorf("%s: %s", e.Code, e.Message)})
 	}
+}
+
+// Capture asks the server for a diagnostic bundle.
+func (c *Client) Capture(reason, note string) error {
+	if reason == "" {
+		reason = protocol.CaptureManual
+	}
+	return c.send(protocol.ChCtrl, protocol.TypeCapture, 0,
+		protocol.CaptureRequest{Reason: reason, Note: note})
+}
+
+// LastCapture reports the most recent capture the server finished, if any.
+func (c *Client) LastCapture() (protocol.CaptureDone, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastCapture == nil {
+		return protocol.CaptureDone{}, false
+	}
+	return *c.lastCapture, true
+}
+
+// WaitForCapture blocks until the server reports a finished bundle.
+func (c *Client) WaitForCapture(ctx context.Context, timeout time.Duration) (protocol.CaptureDone, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if done, ok := c.LastCapture(); ok {
+			return done, nil
+		}
+		select {
+		case <-ctx.Done():
+			return protocol.CaptureDone{}, ctx.Err()
+		case <-c.closed:
+			return protocol.CaptureDone{}, errors.New("client: connection closed")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return protocol.CaptureDone{}, errors.New("client: no capture completed in time")
+}
+
+// captureArtifact is one finished file, already serialised, waiting only to be
+// sent. Nothing in it refers back to the replica.
+type captureArtifact struct {
+	name string
+	data []byte
+}
+
+// freezeCapture serialises this client's half of a bundle.
+//
+// A headless client is a strange thing to screenshot, and it does not try: what
+// it has instead is the replica, which is the same algorithm the real patcher
+// runs. That makes this the reproduction path — a divergence that shows up here
+// is a divergence in the frames rather than in the browser, and the bundle says
+// which by carrying both.
+//
+// It must be called from the goroutine that applies frames. Everything it
+// touches — the replica's nodes, its strings, its CSS — is being written by
+// that loop, so reading it anywhere else is a torn read of a live map, and the
+// artifact would describe a document that never existed.
+func (c *Client) freezeCapture(req protocol.CaptureRequest) []captureArtifact {
+	tabs := req.Tabs
+	if len(tabs) == 0 {
+		tabs = c.Tabs()
+	}
+	out := make([]captureArtifact, 0, 1+3*len(tabs))
+	add := func(name string, v any) {
+		data, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			return
+		}
+		out = append(out, captureArtifact{name: name, data: data})
+	}
+
+	add("client.json", map[string]any{
+		"client":    "skyhookctl",
+		"sessionId": c.SessionID(),
+		"note": "this half came from the headless Go client, which keeps a replica " +
+			"rather than a real DOM: there is no screenshot to take",
+	})
+	for _, tab := range tabs {
+		m := c.Model(tab)
+		if m == nil {
+			continue
+		}
+		base := fmt.Sprintf("tabs/%d", tab)
+		out = append(out, captureArtifact{name: base + "/mirror.html", data: []byte(m.HTML())})
+		add(base+"/state.json", map[string]any{
+			"tab": tab, "url": m.URL, "title": m.Title, "seq": m.Seq,
+			"nodes": len(m.Nodes), "cssRules": len(m.CSS), "docHash": m.Hash(),
+		})
+		add(base+"/fingerprint.json", modelFingerprint(m))
+	}
+	return out
+}
+
+// sendCapture pushes frozen artifacts up, chunked. It runs off the frame loop
+// because it blocks on the link, and it reads nothing but its own argument.
+func (c *Client) sendCapture(req protocol.CaptureRequest, artifacts []captureArtifact) {
+	const chunk = 32 << 10
+	for _, a := range artifacts {
+		if len(a.data) == 0 {
+			_ = c.send(protocol.ChBulk, protocol.TypeCapturePart, 0,
+				protocol.CapturePart{ID: req.ID, Name: a.name})
+			continue
+		}
+		for off := 0; off < len(a.data); off += chunk {
+			end := min(off+chunk, len(a.data))
+			_ = c.send(protocol.ChBulk, protocol.TypeCapturePart, 0, protocol.CapturePart{
+				ID: req.ID, Name: a.name, Data: a.data[off:end], More: end < len(a.data),
+			})
+		}
+	}
+	_ = c.send(protocol.ChBulk, protocol.TypeCapturePart, 0,
+		protocol.CapturePart{ID: req.ID, Done: true})
+}
+
+// modelFingerprint lists what the replica's hash is computed over, in the same
+// shape the agent and the browser patcher produce, so all three are diffable.
+func modelFingerprint(m *mirror.Model) map[string]any {
+	ids := make([]int64, 0, len(m.Nodes))
+	for id := range m.Nodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	nodes := make([][]any, 0, len(ids))
+	for _, id := range ids {
+		n := m.Nodes[id]
+		v := n.Name
+		switch n.Kind {
+		case protocol.KindText:
+			v = n.Text
+		case protocol.KindDoctype:
+			v = ""
+		}
+		if len([]rune(v)) > 32 {
+			v = string([]rune(v)[:32])
+		}
+		nodes = append(nodes, []any{id, n.Kind, v})
+	}
+	return map[string]any{"total": len(ids), "truncated": false, "nodes": nodes}
 }
 
 func (c *Client) ack(tab uint32, seq, hash uint64) {

@@ -120,9 +120,12 @@ const (
 	// 23 was TypeSpeculative, a prefetched snapshot. Speculation is gone: it
 	// crawled links the user never opened, which is what a scraper looks like
 	// from the origin's side. The number stays retired rather than reused.
-	TypeKill      Type = 24 // client -> server, wipe landside session + profile
-	TypeIntegrity Type = 25 // server -> client subtree hashes; client replies on ctrl
-	TypeViewport  Type = 26 // client -> server, window size / dpr changed
+	TypeKill        Type = 24 // client -> server, wipe landside session + profile
+	TypeIntegrity   Type = 25 // server -> client subtree hashes; client replies on ctrl
+	TypeViewport    Type = 26 // client -> server, window size / dpr changed
+	TypeCapture     Type = 27 // both ways: ask for a diagnostic capture / for the client's half
+	TypeCapturePart Type = 28 // client -> server, one plane-side artifact (or a chunk of one)
+	TypeCaptureDone Type = 29 // server -> client, the bundle is written (or it failed)
 )
 
 // Frame is the envelope. Body is a CBOR-encoded, type-specific payload; keeping
@@ -472,4 +475,67 @@ type DictUpdate struct {
 type Integrity struct {
 	Roots map[int64]uint64 `cbor:"1,keyasint"` // subtree root node id -> hash
 	Full  uint64           `cbor:"2,keyasint,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// capture bodies
+//
+// A capture is one diagnostic bundle: everything both halves know about a tab
+// at one instant, zipped up landside. It is the only frame family that
+// deliberately spends the link — a screenshot is worth more bytes than any
+// mirror update ever is — so it happens when somebody asks for it, or when the
+// server has caught the two halves disagreeing.
+
+// Capture reasons. Free-form on the wire; these are the ones both ends know.
+const (
+	// CaptureManual is a reader saying "this looks wrong".
+	CaptureManual = "manual"
+	// CaptureDivergence is the integrity check finding two different documents.
+	CaptureDivergence = "divergence"
+	// CaptureResync is a resync the server could not close with diffs.
+	CaptureResync = "resync"
+)
+
+// CaptureRequest travels in both directions, which is what makes one round of
+// it a capture: the client asks for one with no ID, and the server answers with
+// the ID it allocated and the list of tabs it wants the client's half of.
+type CaptureRequest struct {
+	ID     string `cbor:"1,keyasint,omitempty"` // set server -> client
+	Reason string `cbor:"2,keyasint,omitempty"`
+	// Note is whatever the reader typed about what looked wrong. It is the one
+	// field in a bundle no amount of instrumentation can reconstruct.
+	Note string   `cbor:"3,keyasint,omitempty"`
+	Tabs []uint32 `cbor:"4,keyasint,omitempty"` // server -> client: gather these
+	// MaxBytes caps what the client should send up, so a capture over a 250 kbps
+	// link cannot turn into a multi-megabyte upload nobody asked for.
+	MaxBytes int `cbor:"5,keyasint,omitempty"`
+	// Screenshots is false when the server wants the cheap half only.
+	Screenshots bool `cbor:"6,keyasint,omitempty"`
+}
+
+// CapturePart is one plane-side artifact on its way up, or a chunk of one.
+// Chunking is by hand rather than by transport because the bulk channel is a
+// message stream: a 900 kB screenshot as one message would sit in front of
+// everything behind it for as long as it takes to clear the link.
+type CapturePart struct {
+	ID   string `cbor:"1,keyasint"`
+	Name string `cbor:"2,keyasint,omitempty"` // path inside the zip
+	Data []byte `cbor:"3,keyasint,omitempty"`
+	// More marks a chunk with siblings following, appended to the same Name.
+	More bool `cbor:"4,keyasint,omitempty"`
+	// Done marks the last part of the capture: the server seals the zip.
+	Done bool `cbor:"5,keyasint,omitempty"`
+	// Error records something the client could not gather. It is written into
+	// the bundle rather than dropped, because a missing artifact and an
+	// artifact that failed to be produced are different diagnoses.
+	Error string `cbor:"6,keyasint,omitempty"`
+}
+
+// CaptureDone reports where the bundle landed, so the reader who asked for one
+// can quote a filename at whoever is going to read it.
+type CaptureDone struct {
+	ID    string `cbor:"1,keyasint"`
+	Path  string `cbor:"2,keyasint,omitempty"`
+	Bytes int64  `cbor:"3,keyasint,omitempty"`
+	Error string `cbor:"4,keyasint,omitempty"`
 }

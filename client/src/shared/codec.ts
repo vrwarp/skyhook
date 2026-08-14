@@ -15,8 +15,9 @@ import { decode as cborDecode, Encoder } from 'cbor-x';
 import { decompress as zstdDecompress } from 'fzstd';
 
 import {
-  Channel, F, Frame, FrameType, ImageMeta, MirrorNode, Mutation, MutationOp,
-  NodeKind, OpCode, Snapshot, Stats, TabState, Viewport, Welcome, AdapterRecord, TabRef,
+  CaptureDone, CaptureRequest, Channel, F, Frame, FrameType, ImageMeta, MirrorNode, Mutation,
+  MutationOp, NodeKind, OpCode, Snapshot, Stats, TabState, Viewport, Welcome, AdapterRecord,
+  TabRef,
 } from './protocol.js';
 
 export const CODEC_RAW = 0;
@@ -308,6 +309,28 @@ export function decodeError(body: unknown): { code: string; message: string; fat
   };
 }
 
+export function decodeCaptureRequest(body: unknown): CaptureRequest {
+  const f = bodyFields(body);
+  return {
+    id: str(f, F.captureRequest.id),
+    reason: str(f, F.captureRequest.reason),
+    note: str(f, F.captureRequest.note),
+    tabs: arr<number>(f, F.captureRequest.tabs).map((t) => Number(t)),
+    maxBytes: num(f, F.captureRequest.maxBytes),
+    screenshots: bool(f, F.captureRequest.screenshots),
+  };
+}
+
+export function decodeCaptureDone(body: unknown): CaptureDone {
+  const f = bodyFields(body);
+  return {
+    id: str(f, F.captureDone.id),
+    path: str(f, F.captureDone.path),
+    bytes: num(f, F.captureDone.bytes),
+    error: str(f, F.captureDone.error),
+  };
+}
+
 // --------------------------------------------------------------- body builders
 
 export function helloBody(opts: {
@@ -454,5 +477,33 @@ export function adapterCommandBody(o: {
   if (o.text) m.set(F.adapterCommand.text, o.text);
   if (o.localId) m.set(F.adapterCommand.localId, o.localId);
   if (o.since) m.set(F.adapterCommand.since, safeInt(o.since));
+  return m;
+}
+
+/** Asks the server for a diagnostic capture. The ID comes back in its reply. */
+export function captureRequestBody(o: { reason: string; note?: string }): Map<number, unknown> {
+  const m = new Map<number, unknown>();
+  m.set(F.captureRequest.reason, o.reason);
+  if (o.note) m.set(F.captureRequest.note, o.note);
+  return m;
+}
+
+/**
+ * One plane-side artifact on its way up, or a chunk of one.
+ *
+ * `data` is a byte string on the wire. cbor-x is configured with
+ * `tagUint8Array: false`, so a Uint8Array encodes as a plain CBOR byte string,
+ * which is what the Go decoder expects for a `[]byte` field.
+ */
+export function capturePartBody(o: {
+  id: string; name?: string; data?: Uint8Array; more?: boolean; done?: boolean; error?: string;
+}): Map<number, unknown> {
+  const m = new Map<number, unknown>();
+  m.set(F.capturePart.id, o.id);
+  if (o.name) m.set(F.capturePart.name, o.name);
+  if (o.data?.length) m.set(F.capturePart.data, o.data);
+  if (o.more) m.set(F.capturePart.more, true);
+  if (o.done) m.set(F.capturePart.done, true);
+  if (o.error) m.set(F.capturePart.error, o.error);
   return m;
 }

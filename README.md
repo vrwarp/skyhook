@@ -153,18 +153,52 @@ sudo scripts/netem.sh down
 `sudo scripts/netem.sh outage 60` drops the link entirely for a minute, which
 is how the reconnect-and-resync path is exercised.
 
+## When the mirror looks wrong
+
+The split renderer's awkward failure mode is that both halves look fine on their
+own: Chromium rendered the page and the agent serialised it, the patcher applied
+every frame and reported no error, and the difference between them is on a
+device you cannot reach, in a tab that has since moved on.
+
+So Skyhook can take a **capture**: both halves frozen at the same instant and
+zipped up landside, in `<dataDir>/captures`. Right-click a mirrored page and
+choose *Report a rendering problem…*, or press Ctrl/⌘+Shift+D.
+
+Nothing is captured unless somebody asks. While chasing a bug, `captureOnDivergence`
+lets the server take one by itself the moment its integrity check catches the
+two sides holding different documents — which is the moment nobody is ever
+present for, and also a page written to disk that nobody chose to write, so it
+is off until you turn it on.
+
+A bundle holds the real page and the mirrored one, a screenshot from each side,
+the wire frames actually sent, the document those frames add up to, both halves'
+document hashes and the node-by-node fingerprints behind them, the session's
+timeline, and both logs. Which pair you diff says where the bug is — the agent,
+the frames, the patcher, or the CSS.
+
+```sh
+skyhookctl capture -pairing ~/.skyhook/pairing.json \
+  -url https://news.ycombinator.com/ -note "the comment tree renders empty"
+```
+
+Typed text is redacted to a length and a digest by default: the keystrokes are
+the reproduction steps and worth keeping, but they are also sometimes a
+password. [docs/OPERATIONS.md](docs/OPERATIONS.md#diagnosing-the-mirror) has the
+full contents of a bundle and how to read one.
+
 ## Repository layout
 
 | Path | What lives there |
 |---|---|
 | `cmd/skyhookd` | The landside server binary |
-| `cmd/skyhookctl` | Headless client: probe, pairing, kill switch, chat |
+| `cmd/skyhookctl` | Headless client: probe, pairing, kill switch, chat, capture |
 | `internal/protocol` | Wire format: CBOR frames, zstd codec, dictionaries |
 | `internal/transport` | WebTransport/QUIC and the WebSocket fallback |
 | `internal/cdp` | A small Chrome DevTools Protocol client; launches or attaches |
 | `internal/mirror` | The injected agent, snapshot/mutation pipeline, input replay |
 | `internal/imgproc` | Image transcoding, blurhash, the landside cache |
-| `internal/session` | Sessions, replay ring, resync |
+| `internal/session` | Sessions, replay ring, resync, captures |
+| `internal/diag` | Diagnostic bundles: the zip writer and the server's log ring |
 | `internal/adapter` | Adapter framework and the Google Chat adapter |
 | `internal/client` | A headless Go client, used by tests and `skyhookctl` |
 | `client/` | The PWA: app shell, sandboxed mirror host, patcher, local echo |
@@ -187,9 +221,11 @@ directions: Go writes `conformance.json` and the client's test suite decodes it;
 the client writes `client-frames.json` and the Go suite decodes that. CI fails if
 the two ever disagree.
 
-The end-to-end suite includes four tests that drive the real PWA in a real
-browser against the real server — service worker, sandboxed frame, input path
-and all.
+The end-to-end suite includes tests that drive the real PWA in a real browser
+against the real server — service worker, sandboxed frame, input path and all.
+One of them takes a capture through the client's own UI and asserts the
+screenshot that comes back up decodes and is not a blank rectangle, which is
+what every failure of the SVG rasterisation path otherwise looks like.
 
 ## Security posture
 

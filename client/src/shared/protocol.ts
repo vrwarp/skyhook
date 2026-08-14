@@ -45,7 +45,17 @@ export enum FrameType {
   Kill = 24,
   Integrity = 25,
   Viewport = 26,
+  Capture = 27,
+  CapturePart = 28,
+  CaptureDone = 29,
 }
+
+/** Why a diagnostic capture was taken. Matches the server's constants. */
+export const CaptureReason = {
+  Manual: 'manual',
+  Divergence: 'divergence',
+  Resync: 'resync',
+} as const;
 
 /**
  * Why the server hung up. Mirrors the close codes in internal/protocol.
@@ -248,6 +258,29 @@ export interface AdapterRecord {
   extra: Record<string, string>;
 }
 
+/**
+ * The server asking for this client's half of a diagnostic capture: the
+ * mirrored DOM, what the patcher believes about it, and a picture of what the
+ * reader is actually looking at.
+ */
+export interface CaptureRequest {
+  id: string;
+  reason: string;
+  note: string;
+  tabs: number[];
+  /** Ceiling on what this client should send up, in bytes. */
+  maxBytes: number;
+  screenshots: boolean;
+}
+
+/** Where the bundle landed, once the server has sealed it. */
+export interface CaptureDone {
+  id: string;
+  path: string;
+  bytes: number;
+  error: string;
+}
+
 /** Field numbers, kept next to the decoders that use them. */
 export const F = {
   frame: { type: 1, tab: 2, seq: 3, base: 4, body: 5, cause: 6 },
@@ -288,4 +321,7 @@ export const F = {
   },
   adapterBatch: { records: 1, backlog: 2 },
   adapterCommand: { adapter: 1, cmd: 2, space: 3, text: 4, localId: 5, since: 6 },
+  captureRequest: { id: 1, reason: 2, note: 3, tabs: 4, maxBytes: 5, screenshots: 6 },
+  capturePart: { id: 1, name: 2, data: 3, more: 4, done: 5, error: 6 },
+  captureDone: { id: 1, path: 2, bytes: 3, error: 4 },
 } as const;

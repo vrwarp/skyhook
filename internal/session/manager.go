@@ -48,6 +48,8 @@ type ManagerOptions struct {
 	Adapters []adapter.Factory
 	// HomeURL is opened in the first tab of a fresh session.
 	HomeURL string
+	// Capture configures the diagnostic bundles this server writes.
+	Capture CaptureOptions
 }
 
 // Manager owns the browser and the set of sessions.
@@ -61,6 +63,12 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	closed   bool
+
+	// captureMu guards the rate limit on automatic captures, which is a
+	// property of the server rather than of any one session: the disk they
+	// would fill is shared.
+	captureMu       sync.Mutex
+	lastAutoCapture time.Time
 }
 
 // NewManager builds the manager around an already-launched browser.

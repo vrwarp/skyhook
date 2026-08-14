@@ -976,6 +976,64 @@
     stats: function () {
       return { nodes: byId.size, strings: strings.length, css: cssOrder.length, seq: seq };
     },
+    // diag reports everything the agent knows about itself, for a capture. It
+    // is the landside half of "why do the two documents disagree": the client
+    // reports the same shape, and the two are read side by side.
+    diag: function () {
+      var doc = document.documentElement;
+      return {
+        version: 1,
+        nodes: byId.size,
+        nextId: nextId,
+        strings: strings.length,
+        pendingStrings: pendingStrings.length,
+        css: cssOrder.length,
+        seq: seq,
+        started: started,
+        snapshotDone: snapshotDone,
+        pendingOps: pendingOps.length,
+        pendingImages: pendingImages.length,
+        flushPending: flushTimer !== null,
+        cssPending: cssTimer !== null,
+        observers: observers.length,
+        observedDocs: observedDocs.size,
+        focusedId: focusedId,
+        messages: msgSeq,
+        readyState: document.readyState,
+        url: location.href,
+        title: document.title,
+        scrollX: globalThis.scrollX | 0,
+        scrollY: globalThis.scrollY | 0,
+        vw: globalThis.innerWidth | 0,
+        vh: globalThis.innerHeight | 0,
+        dpr: globalThis.devicePixelRatio || 1,
+        docHeight: Math.max(doc ? doc.scrollHeight : 0, document.body ? document.body.scrollHeight : 0),
+        // Nodes the page holds that the mirror never serialised. A number that
+        // climbs while the mirror looks stale is the whole diagnosis.
+        liveElements: document.getElementsByTagName('*').length,
+        frames: document.getElementsByTagName('iframe').length,
+        docHash: api.docHash()
+      };
+    },
+    // fingerprint lists exactly what docHash is computed over, node by node, so
+    // a hash mismatch can be turned into a list of the nodes responsible.
+    // Values are truncated to the 32 characters the hash itself looks at, and
+    // the whole list is capped: a pathological document must not turn a capture
+    // into an out-of-memory.
+    fingerprint: function (limit) {
+      var max = limit || 20000;
+      var ids = Array.from(byId.keys()).sort(function (a, b) { return a - b; });
+      var out = [];
+      for (var k = 0; k < ids.length && out.length < max; k++) {
+        var id = ids[k];
+        var node = byId.get(id);
+        if (!node) continue;
+        var v = node.nodeType === KIND_TEXT ? (node.nodeValue || '')
+          : (node.tagName ? node.tagName.toLowerCase() : '');
+        out.push([id, node.nodeType, v.slice(0, 32)]);
+      }
+      return { total: ids.length, truncated: ids.length > out.length, nodes: out };
+    },
     docHash: function () {
       // Cheap whole-document fingerprint for divergence checks. Two details
       // decide whether this is worth anything at all, because the Go replica
