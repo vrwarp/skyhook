@@ -75,8 +75,8 @@ default; this is the whole surface:
 ```
 
 Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
-`SKYHOOK_DATA_DIR`, `SKYHOOK_TOKEN`, `SKYHOOK_CHROME`, `SKYHOOK_HOSTS`,
-`SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`,
+`SKYHOOK_DATA_DIR`, `SKYHOOK_TOKEN`, `SKYHOOK_CHROME`, `SKYHOOK_CHROME_ATTACH`,
+`SKYHOOK_HOSTS`, `SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`,
 `SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`,
 `SKYHOOK_PUBLIC_URL`, `SKYHOOK_BEHIND_PROXY`.
 
@@ -104,6 +104,39 @@ back to the config file as well when one was supplied. Set `token` (or
 Deleting `<dataDir>/token` re-pairs the deployment: the next start generates a
 new token and logs a new pairing link, and every client paired with the old one
 is refused until it opens that link.
+
+### Driving a browser that is already running
+
+By default the server launches Chromium itself and owns it. Point
+`chromeAttach` (or `SKYHOOK_CHROME_ATTACH`) at the DevTools endpoint of a
+browser that is already up, and it drives that one instead:
+
+```sh
+# the browser, started however you like — this is the important flag
+google-chrome --remote-debugging-port=9222 --remote-allow-origins='*'
+
+SKYHOOK_CHROME_ATTACH=http://127.0.0.1:9222 skyhookd
+```
+
+The profile is shared, so whatever that browser is logged into is what mirrored
+pages see; there is no second profile and no second login. Because it is
+somebody's browser and not ours, Skyhook keeps to itself:
+
+- **Its own window.** The first tab opens a new window titled *Skyhook*, and
+  every later tab joins it. Nothing is ever added to a window you had open —
+  including while you are working in that window, which is when Chromium would
+  otherwise put the new tab there.
+- **Its own tabs only.** Tabs that were open when it attached are never
+  attached to, driven, navigated, closed or listed. Mirrored pages get no
+  `window.opener`, so a page cannot reach back at Skyhook's window either.
+- **Its own shutdown.** Stopping the server closes the Skyhook window and
+  leaves the browser running. It never calls `Browser.close`.
+
+`chrome` and `chromeArgs` describe a browser the server starts, so they are
+refused alongside `chromeAttach` rather than silently ignored. Two caveats:
+the debugging port is an unauthenticated full-control channel over loopback, so
+do not open it to a network; and if the server is killed rather than stopped,
+the Skyhook window is left behind for you to close.
 
 ### Loopback demo mode
 

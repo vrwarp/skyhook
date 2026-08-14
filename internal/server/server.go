@@ -93,6 +93,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Server, err
 		Logger:      log,
 		Lang:        "en-US",
 		ExtraArgs:   cfg.ChromeArgs,
+		Attach:      cfg.ChromeAttach,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("server: chromium: %w", err)

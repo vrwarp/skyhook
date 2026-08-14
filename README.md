@@ -70,6 +70,23 @@ go build -o skyhookd ./cmd/skyhookd
 SKYHOOK_DATA_DIR=~/.skyhook ./skyhookd
 ```
 
+By default the server launches Chromium itself and owns it. To drive a browser
+that is already running instead, point the server at its DevTools endpoint:
+
+```sh
+google-chrome --remote-debugging-port=9222 --remote-allow-origins='*'   # yours
+SKYHOOK_CHROME_ATTACH=http://127.0.0.1:9222 ./skyhookd
+```
+
+That browser's profile is shared, so whatever it is logged into is what
+mirrored pages see. Because it is your browser and not the server's, Skyhook
+keeps to itself: its tabs go in a window of its own, it never attaches to,
+navigates, closes or lists a tab it did not open, and stopping the server
+closes that window and leaves the browser running. Keep the debugging port on
+loopback — it is unauthenticated control of the whole browser.
+[docs/OPERATIONS.md](docs/OPERATIONS.md#driving-a-browser-that-is-already-running)
+has the rest.
+
 On first run the server generates a pairing token and a short-lived,
 self-signed ECDSA certificate, and writes `pairing.json` into its data
 directory. That file is what the client needs: host, port, token, and the
@@ -144,7 +161,7 @@ is how the reconnect-and-resync path is exercised.
 | `cmd/skyhookctl` | Headless client: probe, pairing, kill switch, chat |
 | `internal/protocol` | Wire format: CBOR frames, zstd codec, dictionaries |
 | `internal/transport` | WebTransport/QUIC and the WebSocket fallback |
-| `internal/cdp` | A small Chrome DevTools Protocol client and launcher |
+| `internal/cdp` | A small Chrome DevTools Protocol client; launches or attaches |
 | `internal/mirror` | The injected agent, snapshot/mutation pipeline, input replay |
 | `internal/imgproc` | Image transcoding, blurhash, the landside cache |
 | `internal/session` | Sessions, replay ring, resync, speculative prefetch |
