@@ -146,12 +146,34 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
 
 ## Measured results
 
-From the end-to-end suite (loopback, no emulated link):
+From the end-to-end suite. The design asks for every milestone to be measured
+against an emulated link rather than a LAN, so both columns are reported: a
+plain loopback run, and a CI run with `tc netem` shaping the Skyhook port to
+1.2 s RTT, 250 kbps and 2% loss.
 
-- Appending one message to a mirrored list costs **73 bytes** on the wire —
-  well inside the design's few-hundred-byte budget for G6.
-- A page click produces its resulting mutation without a resnapshot; a keyed
-  list reorder arrives as a `move` op with the node count unchanged, which is
-  the React-reorder mitigation from §2.15 working as intended.
-- Used-CSS extraction ships matching rules and drops non-matching ones, verified
-  against a fixture with both.
+| | Loopback | Emulated 1.2 s / 250 kbps / 2% |
+|---|---|---|
+| Whole suite (8 tests, each with its own Chromium) | 10 s | 158 s |
+| Mirror delivers document and styles | 0.6 s | 23.3 s |
+| Click → resulting mutation applied | 0.6 s | 20.6 s |
+| Reconnect → resumed page state | 2.7 s | 27.5 s |
+| Image with blurhash placeholder → bytes | 0.6 s | 15.5 s |
+| **One appended chat-style message on the wire** | **73 bytes** | **73 bytes** |
+
+Per-test figures include launching a browser and loading the fixture page, so
+they are an upper bound on the interaction cost rather than a measure of it.
+The number that matters for G6 is the last row, and it does not move with the
+link: a new message costs 73 bytes because the intern table and the `splice`
+op mean nothing structural is re-sent.
+
+Other behaviours the suite pins down:
+
+- A keyed list reorder arrives as a `move` op with the node count unchanged,
+  which is the React-reorder mitigation from §2.15 working as intended.
+- Used-CSS extraction ships matching rules and drops non-matching ones,
+  verified against a fixture containing both.
+- Page script never reaches the client: the mirrored document contains no
+  `<script>` element and no inline handler, asserted directly.
+- Typing reaches real page JavaScript landside (the fixture's own input
+  handler rewrites a paragraph), and the live field value comes back as an
+  attribute so a resync restores what was typed.
