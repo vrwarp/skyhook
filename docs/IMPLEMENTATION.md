@@ -257,6 +257,38 @@ document every thirty seconds for as long as it was open.
 `test/integrity_test.go` now pins agent against replica, and the real client's
 reported hash against the agent, on a plain page and on one with a frame.
 
+### 13. The mirror's context menu is the shell's, not the browser's
+
+The design leans on inheriting Blink's behaviour for free (§2.3): layout, text
+shaping, selection, find-in-page. The context menu is where that stops. Every
+native entry is computed from the sandboxed frame rather than from the page the
+frame is showing, so "Open link in new tab" opens `about:blank` (the sandbox
+withholds `allow-popups` anyway), "Reload" reloads a document with no origin,
+"Save image" saves a file named after a content hash, and "Back" walks the
+shell's history instead of the tab's. Nothing on it is right.
+
+The menu is now drawn by the shell (`client/src/app/menu.ts`) from what the
+mirror host reports about the node under the pointer: link entries, image
+entries, clipboard entries for an editable field, and the tab's own
+back/forward/reload/bookmark/duplicate. Two consequences are worth naming.
+Forwarding the right click landside — which pages with their own menus answer,
+the reply arriving in the mirror as ordinary DOM — used to be automatic and is
+now an entry on the menu, because it costs a round trip and most right clicks do
+not want one. And the clipboard entries for a mirrored field apply their edit to
+the local DOM first and send the whole field value, so a paste is visible
+immediately and reconciles through the echo engine's existing path (§2.7)
+instead of waiting out the link.
+
+Middle click is the same story in miniature: the sandbox swallows it, so the
+host claims the gesture and asks the shell for a background tab. Ctrl/⌘-click on
+a link is treated identically. Replaying either landside would open a tab on the
+VPS that the client has no handle on — the session only tracks tabs it opened.
+
+Right-click keeps the native menu in exactly two places: the shell's own text
+fields and the chat panel. Those are real local documents, so the browser's
+clipboard entries do the right thing there, and the URL bar is where people
+paste.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
@@ -264,8 +296,10 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
 - **P2 items from the design are not built**: the periodic-JPEG tile stream for
   canvas/video regions (single-frame capture *is* implemented via
   `Tab.CaptureRegion`, but no client UI triggers it yet), and a second adapter.
-- **File upload** (R10) is not implemented; clipboard integration is limited to
-  what the mirror's native selection gives you.
+- **File upload** (R10) is not implemented. Clipboard integration is the mirror's
+  native selection plus cut/copy/paste on the context menu; copy still executes
+  plane-side, so the cross-tab paste fidelity §2.6 wants from a landside copy is
+  not there.
 - **Find-in-page** works through Blink natively in the mirror, but there is no
   chrome-UI affordance for it yet.
 - **The chat adapter's selectors are unvalidated** against the live app.

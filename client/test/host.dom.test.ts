@@ -8,7 +8,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MirrorHost, imageURL } from '../src/mirror/host.js';
+import { MirrorHost, imageURL, type MenuTarget } from '../src/mirror/host.js';
 import { NodeKind, OpCode, type Mutation, type Snapshot } from '../src/shared/protocol.js';
 
 function snapshot(): Snapshot {
@@ -42,12 +42,29 @@ function scrollOp(node: number, x: number, y: number): Mutation {
   };
 }
 
+/** Adds a link inside the fixture's <li>, with the href the agent would send. */
+function withLink(snap: Snapshot, href = 'https://example.test/next'): Snapshot {
+  const base = snap.strings.length;
+  snap.strings.push('a', 'href', href, 'Next page');
+  snap.nodes.push(
+    {
+      id: 30, parent: 3, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2], flags: 0,
+    },
+    { id: 31, parent: 30, kind: NodeKind.Text, ref: base + 3, attrs: [], flags: 0 },
+  );
+  return snap;
+}
+
 function events() {
   return {
     input: vi.fn(),
     scroll: vi.fn(),
     applied: vi.fn(),
     wantImages: vi.fn(),
+    openLink: vi.fn(),
+    menu: vi.fn(),
+    dismiss: vi.fn(() => false),
   };
 }
 
@@ -264,6 +281,134 @@ describe('MirrorHost', () => {
     list.dispatchEvent(new Event('scroll'));
     host.applyMutation(scrollOp(2, 0, 500), 5);
     expect(list.scrollTop).toBe(40);
+  });
+
+  it('opens a link in a new tab on middle click', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withLink(snapshot()));
+    const doc = host.frame.contentDocument!;
+    const view = doc.defaultView!;
+    const aux = new view.MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 });
+    doc.querySelector('a')!.dispatchEvent(aux);
+
+    expect(ev.openLink).toHaveBeenCalledWith(1, 'https://example.test/next');
+    // Nothing goes landside: a new tab is a tab this side asks for, not a click
+    // replayed into a page that would open a tab the client has no handle on.
+    expect(ev.input).not.toHaveBeenCalled();
+    expect(aux.defaultPrevented).toBe(true);
+  });
+
+  it('ignores a middle click that is not on a link', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    const doc = host.frame.contentDocument!;
+    doc.querySelector('li')!.dispatchEvent(
+      new doc.defaultView!.MouseEvent('auxclick', { bubbles: true, button: 1 }),
+    );
+    expect(ev.openLink).not.toHaveBeenCalled();
+  });
+
+  it('treats ctrl-click on a link as open-in-new-tab', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withLink(snapshot()));
+    const doc = host.frame.contentDocument!;
+    doc.querySelector('a')!.dispatchEvent(
+      new doc.defaultView!.MouseEvent('click', { bubbles: true, ctrlKey: true }),
+    );
+    expect(ev.openLink).toHaveBeenCalledWith(1, 'https://example.test/next');
+    expect(ev.input).not.toHaveBeenCalled();
+  });
+
+  it('resolves a relative link against the page URL', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withLink(snapshot(), '/deeper/page?q=1'));
+    const doc = host.frame.contentDocument!;
+    doc.querySelector('a')!.dispatchEvent(
+      new doc.defaultView!.MouseEvent('auxclick', { bubbles: true, button: 1 }),
+    );
+    expect(ev.openLink).toHaveBeenCalledWith(1, 'https://example.test/deeper/page?q=1');
+  });
+
+  it('answers a right click with a menu target instead of the native menu', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withLink(snapshot()));
+    const doc = host.frame.contentDocument!;
+    const menu = new doc.defaultView!.MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 40, clientY: 60,
+    });
+    doc.querySelector('a')!.dispatchEvent(menu);
+
+    expect(menu.defaultPrevented).toBe(true);
+    // Forwarding the right click landside is now an entry on the menu, not the
+    // automatic behaviour: it costs a round trip.
+    expect(ev.input).not.toHaveBeenCalled();
+    const [tab, target] = ev.menu.mock.calls[0] as [number, MenuTarget];
+    expect(tab).toBe(1);
+    expect(target.link).toBe('https://example.test/next');
+    expect(target.linkText).toBe('Next page');
+    expect(target.node).toBe(30);
+    expect(target.field).toBe(0);
+    expect(target.x).toBe(40);
+    expect(target.y).toBe(60);
+  });
+
+  it('tells the shell to dismiss when the user acts inside the frame', async () => {
+    // Events inside the frame never reach the shell's document, so a menu
+    // floating over the mirror would otherwise survive a click on the page.
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    const doc = host.frame.contentDocument!;
+    const view = doc.defaultView!;
+    doc.querySelector('li')!.dispatchEvent(new view.MouseEvent('mousedown', { bubbles: true }));
+    expect(ev.dismiss).toHaveBeenCalledWith(1);
+
+    // Escape stops at the menu when there is one, and reaches the page when
+    // there is not.
+    ev.dismiss.mockReturnValueOnce(true);
+    const swallowed = new view.KeyboardEvent('keydown', {
+      key: 'Escape', bubbles: true, cancelable: true,
+    });
+    doc.querySelector('li')!.dispatchEvent(swallowed);
+    expect(swallowed.defaultPrevented).toBe(true);
+    expect(ev.input).not.toHaveBeenCalled();
+  });
+
+  it('forwards a right click landside only when the menu asks for it', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    host.sendContextMenu(3);
+    const payload = ev.input.mock.calls[0][1] as Record<string, unknown>;
+    expect(payload.kind).toBe('contextmenu');
+    expect(payload.node).toBe(3);
+  });
+
+  it('replaces a field selection locally and sends the whole value', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('form', 'input', 'data-sky-value', 'hello');
+    snap.nodes.push(
+      { id: 20, parent: 2, kind: NodeKind.Element, ref: base, attrs: [], flags: 0 },
+      {
+        id: 21, parent: 20, kind: NodeKind.Element, ref: base + 1,
+        attrs: [base + 2, base + 3], flags: 1,
+      },
+    );
+    host.applySnapshot(snap);
+
+    const input = host.frame.contentDocument!.querySelector('input')!;
+    input.setSelectionRange(0, 'hello'.length);
+    host.replaceSelection(21, 'goodbye');
+
+    // Locally instant, because waiting a round trip to see your own paste is
+    // exactly what the echo engine exists to avoid.
+    expect(input.value).toBe('goodbye');
+    const set = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .find((p) => p.kind === 'setvalue');
+    expect(set).toBeDefined();
+    expect(set!.node).toBe(21);
+    expect(set!.text).toBe('goodbye');
   });
 
   it('applies mutations and keeps the sequence for acknowledgement', async () => {
