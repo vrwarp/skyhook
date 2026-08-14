@@ -6,6 +6,7 @@
  * runtime would be more bytes than the mirror protocol it exists to carry.
  */
 import { MirrorHost } from '../mirror/host.js';
+import { pairingFromFragment, transportUrls } from './pairing.js';
 import { Store, type Pairing } from '../store/store.js';
 import type {
   AdapterRecord, ImageMeta, Mutation, Snapshot, Stats, TabState, Welcome,
@@ -92,36 +93,23 @@ function registerServiceWorker(): void {
  * the address bar as soon as it is stored.
  */
 async function pairingFromURL(): Promise<Pairing | undefined> {
-  const hash = location.hash.replace(/^#/, '');
-  if (!hash) return undefined;
-  const params = new URLSearchParams(hash);
-  const token = params.get('token');
-  if (!token) return undefined;
-  const pairing: Pairing = {
-    host: params.get('host') || location.hostname,
-    port: Number(params.get('port') || 4433),
-    path: params.get('path') || '/skyhook',
-    token,
-    certSha256: params.get('cert') || undefined,
-    fallbackUrl: params.get('fallback') || undefined,
-  };
-  await store.writePairing(pairing);
+  if (!location.hash) return undefined;
+  const pairing = pairingFromFragment(location.hash, location);
+  if (!pairing) return undefined;
+  await store.writePairing(pairing as Pairing);
   history.replaceState(null, '', location.pathname + location.search);
-  return pairing;
+  return pairing as Pairing;
 }
 
 function configure(pairing: Pairing): void {
-  const url = `https://${pairing.host}:${pairing.port}${pairing.path}`;
+  const urls = transportUrls(pairing, location);
   send('configure', {
     pairing: {
-      url,
-      fallbackUrl: pairing.fallbackUrl,
-      certHash: pairing.certSha256,
+      url: urls.url,
+      fallbackUrl: urls.fallbackUrl,
+      certHash: urls.certHash,
       token: pairing.token,
-      // WebTransport requires a secure origin. Served over plain HTTP — which
-      // only happens on localhost during development — go straight to the
-      // fallback instead of waiting out a handshake that cannot succeed.
-      preferFallback: location.protocol !== 'https:',
+      preferFallback: urls.preferFallback,
     },
     viewport: viewport(),
   });

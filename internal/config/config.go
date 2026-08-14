@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -83,6 +85,22 @@ type Config struct {
 	WebSocketFallback bool `json:"webSocketFallback"`
 	// FallbackListen is the fallback listener address (TCP).
 	FallbackListen string `json:"fallbackListen"`
+	// PublicURL is where the client actually reaches this server when that is
+	// not where the server binds: behind a reverse proxy, a tunnel, or a
+	// container port mapping. Everything the server hands the client — the
+	// pairing link, the pairing file, the content security policy — is built
+	// from this instead of from Hosts and the listen ports.
+	//
+	// It must be an origin ("https://skyhook.example.com"), not a sub-path:
+	// the PWA owns the root of its origin, because its service worker has to.
+	PublicURL string `json:"publicUrl"`
+	// BehindProxy says TLS is terminated in front of this process. The fallback
+	// listener then serves plain HTTP — a proxy that will not trust a
+	// self-signed upstream is the common case — and no QUIC listener is started,
+	// because WebTransport cannot be proxied by anything that speaks HTTP/1.1
+	// to its upstream. It requires PublicURL: the whole point is that where the
+	// client connects is not where this process listens.
+	BehindProxy bool `json:"behindProxy"`
 }
 
 // Duration is a JSON-friendly time.Duration ("90s", "12h").
@@ -164,7 +182,126 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	cfg.DataDir = expanded
+	if err := cfg.validate(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// validate rejects combinations that would start a server which cannot be
+// paired with. A pairing link that points at a port nothing answers on is the
+// hardest kind of failure to diagnose from the client, so it is refused here.
+func (c *Config) validate() error {
+	if c.PublicURL != "" {
+		ep, err := ParsePublicURL(c.PublicURL)
+		if err != nil {
+			return err
+		}
+		c.PublicURL = ep.String()
+	}
+	if c.BehindProxy {
+		if c.PublicURL == "" {
+			return errors.New("config: behindProxy needs publicUrl: " +
+				"the server cannot guess the address the proxy answers on")
+		}
+		if !c.WebSocketFallback {
+			return errors.New("config: behindProxy needs webSocketFallback: " +
+				"a reverse proxy cannot carry WebTransport, so the socket is the only transport left")
+		}
+	}
+	if c.InsecureLoopback && (c.PublicURL != "" || c.BehindProxy) {
+		return errors.New("config: insecureLoopback is for this machine only; " +
+			"drop publicUrl/behindProxy or drop -demo")
+	}
+	return nil
+}
+
+// PublicEndpoint is where the client reaches the server, which behind a proxy
+// is not where the server listens.
+type PublicEndpoint struct {
+	Scheme string // http or https
+	Host   string // hostname, no port
+	Port   int    // 443 or 80 when the URL carries none
+}
+
+// Secure reports whether the browser will consider the origin secure, which is
+// what decides whether service workers and WebTransport are available at all.
+func (e PublicEndpoint) Secure() bool { return e.Scheme == "https" }
+
+// String renders the origin, omitting the port when it is the scheme default.
+func (e PublicEndpoint) String() string {
+	if (e.Scheme == "https" && e.Port == 443) || (e.Scheme == "http" && e.Port == 80) {
+		return fmt.Sprintf("%s://%s", e.Scheme, e.Host)
+	}
+	return fmt.Sprintf("%s://%s:%d", e.Scheme, e.Host, e.Port)
+}
+
+// SocketURL renders the WebSocket URL for a path on this origin.
+func (e PublicEndpoint) SocketURL(path string) string {
+	scheme := "wss"
+	if !e.Secure() {
+		scheme = "ws"
+	}
+	host := e.Host
+	if (e.Secure() && e.Port != 443) || (!e.Secure() && e.Port != 80) {
+		host = net.JoinHostPort(e.Host, strconv.Itoa(e.Port))
+	}
+	return fmt.Sprintf("%s://%s%s", scheme, host, path)
+}
+
+// SocketOrigin renders the ws/wss origin, for a content security policy.
+func (e PublicEndpoint) SocketOrigin() string { return e.SocketURL("") }
+
+// ParsePublicURL parses and checks a publicUrl setting.
+func ParsePublicURL(raw string) (PublicEndpoint, error) {
+	var ep PublicEndpoint
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ep, fmt.Errorf("config: publicUrl %q: %w", raw, err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+	case "":
+		return ep, fmt.Errorf("config: publicUrl %q needs a scheme, e.g. https://%s", raw, raw)
+	default:
+		return ep, fmt.Errorf("config: publicUrl %q: scheme must be http or https", raw)
+	}
+	if u.Hostname() == "" {
+		return ep, fmt.Errorf("config: publicUrl %q has no host", raw)
+	}
+	if p := strings.Trim(u.Path, "/"); p != "" {
+		// The client registers its service worker at "/" and asks for "/sw.js"
+		// and "/net.worker.js" by absolute path. Mounting it under a sub-path
+		// would half-work, which is worse than refusing.
+		return ep, fmt.Errorf("config: publicUrl %q must be an origin, not a sub-path: "+
+			"the client app owns the root of its origin", raw)
+	}
+	ep.Scheme = u.Scheme
+	ep.Host = u.Hostname()
+	ep.Port = 80
+	if u.Scheme == "https" {
+		ep.Port = 443
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n <= 0 || n > 65535 {
+			return ep, fmt.Errorf("config: publicUrl %q: bad port %q", raw, p)
+		}
+		ep.Port = n
+	}
+	return ep, nil
+}
+
+// Public returns the configured public endpoint, and whether there is one.
+func (c Config) Public() (PublicEndpoint, bool) {
+	if c.PublicURL == "" {
+		return PublicEndpoint{}, false
+	}
+	ep, err := ParsePublicURL(c.PublicURL)
+	if err != nil {
+		return PublicEndpoint{}, false
+	}
+	return ep, true
 }
 
 func applyEnv(cfg *Config) {
@@ -206,6 +343,12 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SKYHOOK_INSECURE_LOOPBACK"); v != "" {
 		cfg.InsecureLoopback = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("SKYHOOK_PUBLIC_URL"); v != "" {
+		cfg.PublicURL = v
+	}
+	if v := os.Getenv("SKYHOOK_BEHIND_PROXY"); v != "" {
+		cfg.BehindProxy = v == "1" || strings.EqualFold(v, "true")
 	}
 }
 
@@ -258,7 +401,110 @@ type Pairing struct {
 	CertExpires string   `json:"certExpires"`
 	Fallback    string   `json:"fallbackUrl,omitempty"`
 	Hosts       []string `json:"hosts,omitempty"`
-	Version     int      `json:"version"`
+	// PreferFallback tells the client not to try WebTransport at all. Behind a
+	// reverse proxy there is no QUIC listener to reach and no certificate the
+	// client could pin, so attempting it only costs a timeout per connect.
+	PreferFallback bool `json:"preferFallback,omitempty"`
+	Version        int  `json:"version"`
+}
+
+// PairingFor builds the pairing this configuration describes: where the client
+// should look for the server, and what it should trust when it gets there.
+//
+// The pairing file and the pairing link are both built from this, so the two
+// can never describe different servers.
+func (c Config) PairingFor(certSHA256, certExpires string) Pairing {
+	// Something in front of us answers for us: hand out its address, and no
+	// certificate pin — the certificate the browser validates is the proxy's.
+	if ep, ok := c.Public(); ok {
+		return Pairing{
+			Host:           ep.Host,
+			Port:           ep.Port,
+			Path:           c.Path,
+			Token:          c.Token,
+			Fallback:       ep.SocketURL(c.Path),
+			Hosts:          c.Hosts,
+			PreferFallback: true,
+			Version:        1,
+		}
+	}
+
+	host, portStr, err := net.SplitHostPort(c.Listen)
+	if err != nil {
+		host, portStr = "", "0"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = firstHost(c.Hosts)
+	}
+	port, _ := strconv.Atoi(portStr)
+	p := Pairing{
+		Host:        host,
+		Port:        port,
+		Path:        c.Path,
+		Token:       c.Token,
+		CertSHA256:  certSHA256,
+		CertExpires: certExpires,
+		Hosts:       c.Hosts,
+		Version:     1,
+	}
+	sockScheme := "wss"
+	if c.InsecureLoopback {
+		// There is no TLS in loopback mode, so a wss:// socket and a pinned
+		// certificate would both be promises nothing keeps.
+		sockScheme = "ws"
+		p.CertSHA256, p.CertExpires = "", ""
+		p.PreferFallback = true
+	}
+	if c.WebSocketFallback {
+		if _, fport, err := net.SplitHostPort(c.FallbackListen); err == nil {
+			p.Fallback = fmt.Sprintf("%s://%s%s", sockScheme, net.JoinHostPort(host, fport), c.Path)
+		}
+	}
+	return p
+}
+
+func firstHost(hosts []string) string {
+	if len(hosts) > 0 && hosts[0] != "" {
+		return hosts[0]
+	}
+	return "localhost"
+}
+
+// Link renders the one-time pairing link: the page to open, with the token and
+// the server's coordinates in the fragment. Browsers never send a fragment to a
+// server, which is what makes it the right place for a credential.
+func (p Pairing) Link() string {
+	frag := url.Values{}
+	frag.Set("token", p.Token)
+	frag.Set("host", p.Host)
+	frag.Set("port", strconv.Itoa(p.Port))
+	frag.Set("path", p.Path)
+	if p.CertSHA256 != "" {
+		frag.Set("cert", p.CertSHA256)
+	}
+	if p.Fallback != "" {
+		frag.Set("fallback", p.Fallback)
+	}
+	if p.PreferFallback {
+		frag.Set("preferFallback", "1")
+	}
+	return fmt.Sprintf("%s/#%s", p.appOrigin(), frag.Encode())
+}
+
+// appOrigin is where the client app itself is served. That is the socket's
+// origin whenever there is one — behind a proxy it is the proxy's port, and
+// directly it is the fallback listener's, which serves the app as well.
+func (p Pairing) appOrigin() string {
+	if p.Fallback != "" {
+		if u, err := url.Parse(p.Fallback); err == nil && u.Host != "" {
+			scheme := "https"
+			if u.Scheme == "ws" {
+				scheme = "http"
+			}
+			return fmt.Sprintf("%s://%s", scheme, u.Host)
+		}
+	}
+	return fmt.Sprintf("https://%s", net.JoinHostPort(p.Host, strconv.Itoa(p.Port)))
 }
 
 // WritePairing persists the pairing file with owner-only permissions.

@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -186,23 +187,38 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startLoopback(ctx, host, port)
 	}
 
-	s.wt = transport.NewWTServer(transport.WTConfig{
-		Addr:      s.cfg.Listen,
-		TLSConfig: s.cert.TLS,
-		Path:      s.cfg.Path,
-		Logger:    s.log,
-	}, s.mgr.Serve)
-	go func() {
-		if err := s.wt.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			s.errs <- fmt.Errorf("webtransport: %w", err)
-		}
-	}()
-	s.log.Info("quic listener up", "addr", s.cfg.Listen, "path", s.cfg.Path)
+	// A reverse proxy speaks HTTP/1.1 to its upstream and cannot carry
+	// WebTransport, so binding QUIC here would only advertise a transport
+	// nothing can reach. The socket carries everything in that deployment.
+	if s.cfg.BehindProxy {
+		s.log.Info("behind a reverse proxy: QUIC disabled, the socket carries everything",
+			"publicUrl", s.cfg.PublicURL)
+	} else {
+		s.wt = transport.NewWTServer(transport.WTConfig{
+			Addr:      s.cfg.Listen,
+			TLSConfig: s.cert.TLS,
+			Path:      s.cfg.Path,
+			Logger:    s.log,
+		}, s.mgr.Serve)
+		go func() {
+			if err := s.wt.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				s.errs <- fmt.Errorf("webtransport: %w", err)
+			}
+		}()
+		s.log.Info("quic listener up", "addr", s.cfg.Listen, "path", s.cfg.Path)
+	}
 
 	if s.cfg.WebSocketFallback {
+		// Behind a proxy the proxy terminates TLS. Serving our self-signed
+		// certificate upstream too would make every proxy in the world need
+		// `proxy_ssl_verify off` before it would talk to us.
+		var wsTLS *tls.Config
+		if !s.cfg.BehindProxy {
+			wsTLS = s.cert.TLSForWS()
+		}
 		s.ws = transport.NewWSServer(transport.WSConfig{
 			Addr:      s.cfg.FallbackListen,
-			TLSConfig: s.cert.TLSForWS(),
+			TLSConfig: wsTLS,
 			Path:      s.cfg.Path,
 			Logger:    s.log,
 		}, s.mgr.Serve)
@@ -232,12 +248,17 @@ func (s *Server) Start(ctx context.Context) error {
 		} else {
 			s.log.Info("client app served", "root", root)
 		}
-		s.log.Info("https listener up", "addr", s.cfg.FallbackListen)
+		if s.cfg.BehindProxy {
+			s.log.Info("http listener up (TLS terminates at the proxy)",
+				"addr", s.cfg.FallbackListen, "path", s.cfg.Path)
+		} else {
+			s.log.Info("https listener up", "addr", s.cfg.FallbackListen)
+		}
 		s.log.Info("pair the client by opening this link once",
 			"url", PairingLink(s.cfg, s.cert.FingerprintB64()))
 	}
 
-	if err := s.writePairing(host, port); err != nil {
+	if err := s.writePairing(); err != nil {
 		s.log.Warn("pairing file not written", "err", err)
 	}
 	go s.certRotationLoop(ctx)
@@ -300,7 +321,7 @@ func (s *Server) startLoopback(ctx context.Context, host string, port int) error
 		"addr", s.cfg.FallbackListen)
 	s.log.Info("open this link to start", "url", PairingLink(s.cfg, ""))
 
-	if err := s.writePairing(host, port); err != nil {
+	if err := s.writePairing(); err != nil {
 		s.log.Warn("pairing file not written", "err", err)
 	}
 	select {
@@ -347,14 +368,7 @@ func (s *Server) Shutdown() error {
 // WritePairingFile writes the pairing file without starting the listeners.
 // `skyhookd -init` uses it: preparing the data directory is only useful if it
 // leaves behind the file the client is bootstrapped from.
-func (s *Server) WritePairingFile() error {
-	host, portStr, err := net.SplitHostPort(s.cfg.Listen)
-	if err != nil {
-		return err
-	}
-	port, _ := strconv.Atoi(portStr)
-	return s.writePairing(host, port)
-}
+func (s *Server) WritePairingFile() error { return s.writePairing() }
 
 // Manager exposes the session manager (used by tests and the control CLI).
 func (s *Server) Manager() *session.Manager { return s.mgr }
@@ -362,33 +376,17 @@ func (s *Server) Manager() *session.Manager { return s.mgr }
 // Cert exposes the certificate bundle.
 func (s *Server) Cert() *transport.CertBundle { return s.cert }
 
-func (s *Server) writePairing(host string, port int) error {
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = firstHost(s.cfg.Hosts)
-	}
-	p := config.Pairing{
-		Host:        host,
-		Port:        port,
-		Path:        s.cfg.Path,
-		Token:       s.cfg.Token,
-		CertSHA256:  s.cert.FingerprintB64(),
-		CertExpires: s.cert.NotAfter.UTC().Format(time.RFC3339),
-		Hosts:       s.cfg.Hosts,
-		Version:     1,
-	}
-	if s.cfg.WebSocketFallback {
-		_, fport, err := net.SplitHostPort(s.cfg.FallbackListen)
-		if err == nil {
-			p.Fallback = fmt.Sprintf("wss://%s:%s%s", host, fport, s.cfg.Path)
-		}
-	}
+func (s *Server) writePairing() error {
+	p := s.cfg.PairingFor(s.cert.FingerprintB64(), s.cert.NotAfter.UTC().Format(time.RFC3339))
 	return config.WritePairing(s.cfg.PairingPath(), p)
 }
 
 // certRotationLoop mints a new self-signed certificate before the old one ages
 // out of what Chromium will accept via serverCertificateHashes (14 days).
 func (s *Server) certRotationLoop(ctx context.Context) {
-	if !s.cert.SelfSigned {
+	// Behind a proxy nothing here serves TLS, so the certificate is never seen
+	// and rotating it would only produce a restart notice every fortnight.
+	if !s.cert.SelfSigned || s.cfg.BehindProxy {
 		return
 	}
 	t := time.NewTicker(6 * time.Hour)
@@ -408,9 +406,7 @@ func (s *Server) certRotationLoop(ctx context.Context) {
 				continue
 			}
 			s.cert = cert
-			host, portStr, _ := net.SplitHostPort(s.cfg.Listen)
-			port, _ := strconv.Atoi(portStr)
-			if err := s.writePairing(host, port); err != nil {
+			if err := s.writePairing(); err != nil {
 				s.log.Warn("pairing rewrite failed", "err", err)
 			}
 			// The listener keeps the old certificate until restart; a rotation

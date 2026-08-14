@@ -49,7 +49,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `skyhookctl - Skyhook control and diagnostics
 
   probe    open a URL through the mirror and report what arrived
-  pairing  print the pairing file the client needs
+  pairing  print the pairing file the client needs (-link for the pairing URL)
   kill     wipe the landside session and browser profile
   chat     drive the chat adapter (list, send)
 
@@ -214,10 +214,18 @@ func probe(args []string) {
 func pairing(args []string) {
 	fs := flag.NewFlagSet("pairing", flag.ExitOnError)
 	path := fs.String("file", defaultPairingPath(), "pairing file")
+	// The server logs the link once at startup. Behind a reverse proxy — or on
+	// any long-running deployment — that line has usually scrolled away by the
+	// time a new device needs pairing.
+	link := fs.Bool("link", false, "print the pairing link instead of the file")
 	_ = fs.Parse(args)
 	p, err := config.ReadPairing(*path)
 	if err != nil {
 		log.Fatalf("pairing: %v", err)
+	}
+	if *link {
+		fmt.Println(p.Link())
+		return
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

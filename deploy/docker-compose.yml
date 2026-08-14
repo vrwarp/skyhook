@@ -17,6 +17,11 @@ services:
       SKYHOOK_HOSTS: ${SKYHOOK_HOSTS:-localhost}
       SKYHOOK_LOG_LEVEL: ${SKYHOOK_LOG_LEVEL:-info}
       SKYHOOK_HEADFUL: ${SKYHOOK_HEADFUL:-0}
+      # Behind a reverse proxy, use docker-compose.proxy.yml instead: the
+      # server has to be told the address the proxy answers on, because
+      # everything it hands the client is built from it.
+      SKYHOOK_PUBLIC_URL: ${SKYHOOK_PUBLIC_URL:-}
+      SKYHOOK_BEHIND_PROXY: ${SKYHOOK_BEHIND_PROXY:-0}
     # Chromium wants more shared memory than the container default.
     shm_size: 1gb
     security_opt:

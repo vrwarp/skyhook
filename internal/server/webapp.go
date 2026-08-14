@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,21 +27,27 @@ type webapp struct {
 // The client makes exactly one network connection — the WebTransport session —
 // and everything else it needs is local. The policy says so.
 func (w *webapp) csp() string {
-	host := firstHost(w.cfg.Hosts)
-	wt := fmt.Sprintf("https://%s:%d", host, portOf(w.cfg.Listen))
-	sockScheme := "wss"
-	if w.cfg.InsecureLoopback {
-		// No QUIC listener exists in loopback mode, and the socket is plain.
-		wt = ""
-		sockScheme = "ws"
-	}
 	connect := []string{"connect-src", "'self'"}
-	if wt != "" {
-		connect = append(connect, wt)
-	}
-	if w.cfg.WebSocketFallback {
-		connect = append(connect,
-			fmt.Sprintf("%s://%s:%d", sockScheme, host, portOf(w.cfg.FallbackListen)))
+	if ep, ok := w.cfg.Public(); ok {
+		// Behind a proxy the only address the browser can use is the public
+		// one, and the only transport that survives a proxy is the socket.
+		connect = append(connect, ep.SocketOrigin())
+	} else {
+		host := firstHost(w.cfg.Hosts)
+		wt := fmt.Sprintf("https://%s:%d", host, portOf(w.cfg.Listen))
+		sockScheme := "wss"
+		if w.cfg.InsecureLoopback {
+			// No QUIC listener exists in loopback mode, and the socket is plain.
+			wt = ""
+			sockScheme = "ws"
+		}
+		if wt != "" {
+			connect = append(connect, wt)
+		}
+		if w.cfg.WebSocketFallback {
+			connect = append(connect,
+				fmt.Sprintf("%s://%s:%d", sockScheme, host, portOf(w.cfg.FallbackListen)))
+		}
 	}
 	return strings.Join([]string{
 		"default-src 'none'",
@@ -146,25 +151,11 @@ or copy the build into <code>&lt;dataDir&gt;/webapp</code>, and restart.</p>
 
 // PairingLink builds the one-time link that hands the client its credential.
 // The token rides in the fragment, which browsers never send to a server.
+//
+// It is the pairing file rendered as a URL, deliberately: the link an operator
+// clicks and the file they can paste have to describe the same server.
 func PairingLink(cfg config.Config, certHash string) string {
-	host := firstHost(cfg.Hosts)
-	scheme, sockScheme := "https", "wss"
-	if cfg.InsecureLoopback {
-		scheme, sockScheme, certHash = "http", "ws", ""
-	}
-	frag := url.Values{}
-	frag.Set("token", cfg.Token)
-	frag.Set("host", host)
-	frag.Set("port", fmt.Sprint(portOf(cfg.Listen)))
-	frag.Set("path", cfg.Path)
-	if certHash != "" {
-		frag.Set("cert", certHash)
-	}
-	if cfg.WebSocketFallback {
-		frag.Set("fallback",
-			fmt.Sprintf("%s://%s:%d%s", sockScheme, host, portOf(cfg.FallbackListen), cfg.Path))
-	}
-	return fmt.Sprintf("%s://%s:%d/#%s", scheme, host, portOf(cfg.FallbackListen), frag.Encode())
+	return cfg.PairingFor(certHash, "").Link()
 }
 
 func path(p string) string {

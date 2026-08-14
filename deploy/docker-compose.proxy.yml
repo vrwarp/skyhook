@@ -1,0 +1,61 @@
+# Skyhook behind a reverse proxy (nginx, Caddy, Traefik, a tunnel).
+#
+#   SKYHOOK_PUBLIC_URL=https://skyhook.example.com \
+#     docker compose -f deploy/docker-compose.proxy.yml up -d
+#   docker compose -f deploy/docker-compose.proxy.yml exec skyhook \
+#     skyhookctl pairing -file /data/pairing.json -link
+#
+# Two things differ from the direct deployment, and both follow from the proxy
+# terminating TLS:
+#
+#   * No QUIC. WebTransport rides HTTP/3 over UDP and no HTTP reverse proxy
+#     forwards it to an upstream, so there is no 4433 here and the server does
+#     not bind one. Everything rides the WebSocket instead — same wire format,
+#     one TCP connection, without the stream independence and 0-RTT resume that
+#     make a bad link bearable. On a link that drops every few minutes you will
+#     feel that; it is the price of terminating TLS somewhere else.
+#   * No certificate pin. The client validates the proxy's certificate the
+#     ordinary way, so the proxy needs a real one — Let's Encrypt is fine, and
+#     it also means the PWA installs and the service worker registers, which a
+#     self-signed certificate never allows.
+#
+# The data volume holds the browser profile — real cookies, real logins — so
+# put it on an encrypted disk (see docs/OPERATIONS.md).
+services:
+  skyhook:
+    image: ghcr.io/vrwarp/skyhook:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    # Published on loopback only: the proxy is the way in. If the proxy runs in
+    # Docker too, drop this and put both on the same network instead.
+    ports:
+      - "127.0.0.1:4434:4434/tcp"
+    volumes:
+      - skyhook-data:/data
+    environment:
+      SKYHOOK_CONFIG: /data/config.json
+      # The address the browser uses. Everything the server hands the client —
+      # the pairing link, the pairing file, the connect-src policy — is built
+      # from this, which is exactly what a proxied deployment gets wrong when
+      # it is not set: the client is told to dial a container port.
+      SKYHOOK_PUBLIC_URL: ${SKYHOOK_PUBLIC_URL:?set it to the URL the proxy serves, e.g. https://skyhook.example.com}
+      # Serve plain HTTP upstream and skip the QUIC listener. Without this the
+      # proxy has to be told to trust a self-signed upstream certificate.
+      SKYHOOK_BEHIND_PROXY: "1"
+      SKYHOOK_LOG_LEVEL: ${SKYHOOK_LOG_LEVEL:-info}
+      SKYHOOK_HEADFUL: ${SKYHOOK_HEADFUL:-0}
+    # Chromium wants more shared memory than the container default.
+    shm_size: 1gb
+    security_opt:
+      - seccomp:unconfined
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/skyhookctl", "pairing", "-file", "/data/pairing.json"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  skyhook-data:
