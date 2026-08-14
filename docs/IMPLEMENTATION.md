@@ -202,6 +202,17 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
 - **Installability is untested against a real install prompt**: the manifest,
   icons and service worker are all in place and the worker registers in a real
   browser under test, but nobody has clicked "Install" on a device yet.
+- **The document is delivered whole, not viewport-first.** A snapshot serialises
+  the entire DOM, and only images are prioritised by viewport position. Both
+  Menlo's Smart DOM and, twenty years earlier, OBML's pagination send what is
+  visible first and stream the rest — on a long document over this link that is
+  the largest remaining win. See [PRIOR-ART.md](PRIOR-ART.md).
+- **A shadow root attached after the snapshot is only picked up by the settle
+  timers.** The agent observes shadow roots it finds while serialising; one
+  attached later is caught by the 800 ms/2.5 s CSS passes and by any mutation
+  inside the host, but a component that attaches a root minutes later and
+  mutates only inside it would go unnoticed. rrweb patches `attachShadow` to
+  close this; that has not been done here.
 
 ## Measured results
 
@@ -218,6 +229,13 @@ plain loopback run, and a CI run with `tc netem` shaping the Skyhook port to
 | Reconnect → resumed page state | 2.7 s | 27.5 s |
 | Image with blurhash placeholder → bytes | 0.6 s | 15.5 s |
 | **One appended chat-style message on the wire** | **73 bytes** | **73 bytes** |
+| Hoisting a 30-row block (a keyed reorder) | 33 bytes | — |
+| 40 nodes added and dropped in one task | 59 bytes | — |
+
+The last two rows are the mutation-batch work described in
+[PRIOR-ART.md](PRIOR-ART.md). The reorder cost 365 bytes and destroyed node
+identity before it; the churn figure is unchanged, and is there to keep it that
+way.
 
 Per-test figures include launching a browser and loading the fixture page, so
 they are an upper bound on the interaction cost rather than a measure of it.

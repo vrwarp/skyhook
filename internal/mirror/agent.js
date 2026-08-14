@@ -47,6 +47,9 @@
     'http-equiv': 1, manifest: 1
   };
   var URL_ATTRS = { href: 1, src: 1, action: 1, poster: 1, formaction: 1, cite: 1, data: 1 };
+  // Attributes that would carry a secret's *contents* back to the client.
+  var SENSITIVE_ATTRS = { value: 1, 'data-sky-value': 1 };
+  var SENSITIVE_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i;
 
   var nextId = 1;
   var idOf = new WeakMap();     // node -> id
@@ -162,6 +165,27 @@
 
   // ------------------------------------------------------------ serialisation
 
+  /**
+   * isSensitive marks fields whose contents must never travel to the client.
+   *
+   * The user already has these characters — they typed them — so mirroring the
+   * value back buys nothing and costs a great deal: it would sit in the replay
+   * ring, in every resync, and in whatever the client persists. rrweb learned
+   * this as a privacy feature; here it is simply the only defensible default.
+   *
+   * The test is narrow and predictable on purpose. A field wrongly judged
+   * sensitive would lose what the user typed on a resync, so guessing from
+   * names like "pass" is worse than useless.
+   */
+  function isSensitive(el) {
+    if (!el || el.tagName !== 'INPUT') return false;
+    var type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'password') return true;
+    var auto = el.getAttribute('autocomplete') || '';
+    if (SENSITIVE_AUTOCOMPLETE.test(auto)) return true;
+    return el.hasAttribute('data-sky-mask');
+  }
+
   function serializeAttrs(el, out) {
     var attrs = el.attributes;
     var base = docBase(el);
@@ -174,6 +198,7 @@
         if (/^on[a-z]/.test(name)) continue; // inline handlers never cross
       }
       if (SKIP_ATTRS[name]) continue;
+      if (SENSITIVE_ATTRS[name] && isSensitive(el)) continue;
       var value = a.value;
       if (URL_ATTRS[name]) {
         value = absolute(base, value);
@@ -185,7 +210,9 @@
     // form loses everything the user (or the page) already typed.
     var tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
-      pairs.push(intern('data-sky-value'), intern(el.value == null ? '' : el.value));
+      if (!isSensitive(el)) {
+        pairs.push(intern('data-sky-value'), intern(el.value == null ? '' : el.value));
+      }
       if (el.checked) pairs.push(intern('data-sky-checked'), intern('1'));
     } else if (tag === 'OPTION' && el.selected) {
       pairs.push(intern('data-sky-selected'), intern('1'));
@@ -340,22 +367,34 @@
     }
   }
 
-  function collectUsedCSS(doc) {
-    var out = [];
-    var sheets;
-    try { sheets = doc.styleSheets; } catch (e) { return out; }
+  function collectSheets(doc, sheets, out) {
+    if (!sheets) return;
     for (var i = 0; i < sheets.length; i++) {
       var rules = null;
-      try { rules = sheets[i].cssRules; } catch (e) { rules = null; }
+      try { rules = sheets[i].cssRules; } catch (e) { rules = null; } // cross-origin
       if (!rules) continue;
       collectRules(doc, rules, out, 0);
     }
+  }
+
+  function collectUsedCSS(doc) {
+    var out = [];
+    try { collectSheets(doc, doc.styleSheets, out); } catch (e) { /* detached */ }
+    // Constructed stylesheets are invisible to document.styleSheets, and they
+    // are how every Lit-based web component ships its CSS. Without these a
+    // component-heavy page arrives with its structure intact and no styling at
+    // all, which looks far more broken than a missing rule.
+    try { collectSheets(doc, doc.adoptedStyleSheets, out); } catch (e) { /* unsupported */ }
     return out;
   }
 
   function cssDelta() {
     var docs = [document];
-    observedDocs.forEach(function (d) { if (d !== document && d.styleSheets) docs.push(d); });
+    // Shadow roots and same-origin iframe documents both carry their own
+    // styles; either kind may hold them in a constructed sheet instead.
+    observedDocs.forEach(function (d) {
+      if (d !== document && (d.styleSheets || d.adoptedStyleSheets)) docs.push(d);
+    });
     var adds = [];
     for (var d = 0; d < docs.length; d++) {
       var rules = collectUsedCSS(docs[d]);
@@ -397,79 +436,140 @@
     return idOf.get(p) || 0;
   }
 
+  // hasIn walks up the flat tree looking for an ancestor in a set. Shadow hosts
+  // count as parents, because the mirror flattens shadow trees.
+  function hasIn(node, set) {
+    var p = node.parentNode;
+    for (var depth = 0; p && depth < 256; depth++) {
+      if (set.has(p)) return true;
+      p = p.nodeType === 11 && p.host ? p.host : p.parentNode;
+    }
+    return false;
+  }
+
+  /**
+   * handleMutations decides what a batch of records means *after* reading all
+   * of them, not while reading them.
+   *
+   * MutationObserver reports history, not outcome. A node moved between two
+   * parents arrives as a removal and an addition; a node added and dropped
+   * within the same task arrives as an addition and a removal. Acting on each
+   * record in turn gets both wrong: the move re-sends a subtree that the client
+   * already has, and the dropped node is serialised, sent and immediately
+   * deleted. rrweb hit both and solved them by deferring the decision to the
+   * end of the batch, which is what this does.
+   *
+   * The state of the DOM at this point is the outcome, so `isConnected` is the
+   * arbiter: still attached means it moved, detached means it is gone.
+   */
   function handleMutations(records) {
+    var removed = new Set();
+    var addedSet = new Set();
+    var added = [];
+    var attrNames = new Map(); // node -> Set of attribute names
+    var texts = new Set();
+
     for (var i = 0; i < records.length; i++) {
       var m = records[i];
       if (m.type === 'attributes') {
-        var id = idOf.get(m.target);
-        if (id === undefined) continue;
         if (/^on[a-z]/.test(m.attributeName) || SKIP_ATTRS[m.attributeName]) continue;
-        var el = m.target;
-        var val = el.getAttribute(m.attributeName);
-        if (val === null) {
-          pendingOps.push([3, id, intern(m.attributeName), -1]);
-        } else {
-          if (URL_ATTRS[m.attributeName]) val = absolute(docBase(el), val);
-          if (m.attributeName === 'src' && VOID_IMAGE_TAGS[el.tagName]) {
-            var img = describeImage(el, docBase(el));
-            if (img) {
-              pendingImages.push(img);
-              val = 'skyhook://img/' + img.key;
-            }
-          }
-          pendingOps.push([3, id, intern(m.attributeName), intern(val)]);
-        }
+        var names = attrNames.get(m.target);
+        if (!names) attrNames.set(m.target, names = new Set());
+        // The name, not the value: the live value at flush time is the only one
+        // worth sending, and a class toggled ten times a frame becomes one op.
+        names.add(m.attributeName);
         continue;
       }
       if (m.type === 'characterData') {
-        var tid = idOf.get(m.target);
-        if (tid === undefined) continue;
-        var next = m.target.nodeValue || '';
-        var prev = lastText.get(tid);
-        lastText.set(tid, next);
-        if (prev === undefined || prev === next) {
-          if (prev === undefined) pendingOps.push([4, tid, intern(next)]);
-          continue;
-        }
-        var sp = spliceOf(prev, next);
-        if (sp && sp.ins.length + 8 < next.length) {
-          pendingOps.push([6, tid, sp.off, sp.del, intern(sp.ins)]);
-        } else {
-          pendingOps.push([4, tid, intern(next)]);
-        }
+        texts.add(m.target);
         continue;
       }
-      // childList
-      var removed = m.removedNodes;
-      for (var r = 0; r < removed.length; r++) {
-        var rid = idOf.get(removed[r]);
-        if (rid === undefined) continue;
-        pendingOps.push([2, rid]);
-        forget(removed[r]);
-      }
-      var added = m.addedNodes;
-      for (var a = 0; a < added.length; a++) {
-        var node = added[a];
-        if (!isMirrored(node)) continue;
-        if (!node.parentNode) continue;
-        var pid = knownParentId(node);
-        if (!pid) continue; // parent not mirrored (or itself just added)
-        var existing = idOf.get(node);
-        var beforeId = 0;
-        var sib = node.nextSibling;
-        while (sib && idOf.get(sib) === undefined) sib = sib.nextSibling;
-        if (sib) beforeId = idOf.get(sib);
-        if (existing !== undefined && byId.has(existing)) {
-          // Keyed-list reorders arrive as remove+insert of the same node;
-          // emitting a move keeps React-driven lists from re-sending subtrees.
-          pendingOps.push([5, existing, pid, beforeId]);
-          continue;
+      var rm = m.removedNodes;
+      for (var r = 0; r < rm.length; r++) removed.add(rm[r]);
+      var ad = m.addedNodes;
+      for (var a = 0; a < ad.length; a++) {
+        if (!addedSet.has(ad[a])) {
+          addedSet.add(ad[a]);
+          added.push(ad[a]);
         }
-        var rows = [];
-        serializeNode(node, pid, rows);
-        if (rows.length) pendingOps.push([1, pid, beforeId, rows]);
       }
     }
+
+    removed.forEach(function (node) {
+      if (node.isConnected) return; // it moved; the addition below carries it
+      var id = idOf.get(node);
+      if (id === undefined) return;
+      // A removed subtree costs one op: the client drops descendants with it.
+      if (!hasIn(node, removed)) pendingOps.push([2, id]);
+      forget(node);
+    });
+
+    for (var j = 0; j < added.length; j++) {
+      var node = added[j];
+      // Never mirrored, or gone again before we looked: rrweb calls these
+      // dropped nodes, and they are pure waste on a link like this one.
+      if (!node.isConnected || !isMirrored(node)) continue;
+      if (hasIn(node, addedSet)) continue; // an ancestor's rows carry it
+      var pid = knownParentId(node);
+      if (!pid) continue; // parent not mirrored
+      var existing = idOf.get(node);
+      var beforeId = 0;
+      var sib = node.nextSibling;
+      while (sib && idOf.get(sib) === undefined) sib = sib.nextSibling;
+      if (sib) beforeId = idOf.get(sib);
+      if (existing !== undefined && byId.has(existing)) {
+        // Keyed-list reorders arrive as remove+insert of the same node;
+        // emitting a move keeps React-driven lists from re-sending subtrees.
+        pendingOps.push([5, existing, pid, beforeId]);
+        continue;
+      }
+      var rows = [];
+      serializeNode(node, pid, rows);
+      if (rows.length) pendingOps.push([1, pid, beforeId, rows]);
+    }
+
+    attrNames.forEach(function (names, el) {
+      var id = idOf.get(el);
+      if (id === undefined || !el.isConnected) return;
+      names.forEach(function (name) {
+        var val = el.getAttribute(name);
+        if (val === null) {
+          pendingOps.push([3, id, intern(name), -1]);
+          return;
+        }
+        if (isSensitive(el) && SENSITIVE_ATTRS[name]) return;
+        if (URL_ATTRS[name]) val = absolute(docBase(el), val);
+        if (name === 'src' && VOID_IMAGE_TAGS[el.tagName]) {
+          var img = describeImage(el, docBase(el));
+          if (img) {
+            pendingImages.push(img);
+            val = 'skyhook://img/' + img.key;
+          }
+        }
+        pendingOps.push([3, id, intern(name), intern(val)]);
+      });
+    });
+
+    texts.forEach(function (node) {
+      var tid = idOf.get(node);
+      if (tid === undefined || !node.isConnected) return;
+      if (addedSet.has(node) || hasIn(node, addedSet)) return; // just serialised
+      var next = node.nodeValue || '';
+      var prev = lastText.get(tid);
+      lastText.set(tid, next);
+      if (prev === next) return;
+      if (prev === undefined) {
+        pendingOps.push([4, tid, intern(next)]);
+        return;
+      }
+      var sp = spliceOf(prev, next);
+      if (sp && sp.ins.length + 8 < next.length) {
+        pendingOps.push([6, tid, sp.off, sp.del, intern(sp.ins)]);
+      } else {
+        pendingOps.push([4, tid, intern(next)]);
+      }
+    });
+
     if (pendingOps.length) {
       scheduleFlush(false);
       scheduleCSS();
@@ -512,7 +612,7 @@
     if (!el || !el.tagName) return;
     var id = idOf.get(el);
     if (id === undefined) return;
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+    if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !isSensitive(el)) {
       pendingOps.push([3, id, intern('data-sky-value'), intern(el.value == null ? '' : el.value)]);
       scheduleFlush(false);
     }
