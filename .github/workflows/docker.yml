@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -15,14 +16,86 @@ permissions:
   packages: write
 
 jobs:
-  image:
+  # A pull request builds the image and runs it, but publishes nothing. The
+  # point is to find out that the image is broken before it is the image
+  # everyone pulls — a Dockerfile only breaks when someone builds it.
+  dry-run:
+    name: Build the image without publishing it
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          # One architecture here: a dry run is about whether it builds and
+          # runs, and amd64 is the only one this runner can execute natively.
+          # The multi-arch build happens on the publish path.
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: skyhook:pr
+          build-args: |
+            VERSION=pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run it
+        run: |
+          # Building proves the Dockerfile parses. Running proves Chromium, the
+          # image encoders and the client build all actually landed in it.
+          docker run --rm --shm-size=1g \
+            -e SKYHOOK_DATA_DIR=/tmp/skyhook \
+            skyhook:pr -init
+          docker run --rm skyhook:pr -version | grep -q skyhookd
+
+      - name: The client is in the image
+        run: |
+          # The PWA is served from the image; a missing build would only show
+          # up as an unhelpful page at runtime.
+          docker run --rm --entrypoint sh skyhook:pr \
+            -c 'test -f /usr/share/skyhook/webapp/index.html && \
+                test -f /usr/share/skyhook/webapp/sw.js'
+
+  publish:
     name: Build and publish the landside image
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+
+      # Docker Hub is optional: a fork, or this repository before anyone sets
+      # the secrets, should still publish to GHCR rather than failing at the
+      # login step. `secrets` is not available to a job-level `if`, so the
+      # decision is made here and carried in an output.
+      - name: Which registries can we reach
+        id: registries
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO || github.repository }}
+        run: |
+          images="ghcr.io/${GITHUB_REPOSITORY}"
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+            images="${images}"$'\n'"docker.io/${DOCKERHUB_REPO}"
+            echo "::notice::Publishing to Docker Hub as ${DOCKERHUB_REPO}"
+          else
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN unset; GHCR only"
+          fi
+          {
+            echo "images<<EOF"
+            echo "$images"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -31,11 +104,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: steps.registries.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ steps.registries.outputs.images }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -50,7 +130,7 @@ jobs:
           file: deploy/Dockerfile
           # A VPS is amd64; a home-lab arm box is a reasonable second target.
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -58,8 +138,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke-test the image
-        if: github.event_name != 'pull_request'
+      - name: Smoke-test the published image
         run: |
           # The server must come up, mint a token and a certificate, and exit.
           docker run --rm --shm-size=1g \

@@ -199,6 +199,29 @@ overrides, so a Chat redesign is a config edit rather than a rebuild:
 { "googlechat": { "messageItem": "[data-new-selector]", "pollMs": 8000 } }
 ```
 
+## Publishing the image
+
+`.github/workflows/docker.yml` builds `deploy/Dockerfile` on every pull request
+and publishes it on every push to `main` and every `v*` tag.
+
+A pull request is a **dry run**: it builds for amd64, loads the image, runs
+`skyhookd -init` inside it, and checks the client build is actually present.
+Nothing is pushed. A Dockerfile only breaks when someone builds it, and finding
+that out on the pull request is the whole point.
+
+A push publishes multi-arch (amd64 + arm64) to GHCR always, and to Docker Hub
+when these are set:
+
+| Secret or variable | Purpose |
+|---|---|
+| `DOCKERHUB_USERNAME` (secret) | Docker Hub account |
+| `DOCKERHUB_TOKEN` (secret) | Access token, not the password |
+| `DOCKERHUB_REPO` (variable) | Optional; defaults to `<owner>/<repo>` |
+
+With the secrets unset the job still runs and publishes to GHCR, and says in
+the log that it skipped Docker Hub. A fork should not fail because it has no
+credentials to a registry it does not own.
+
 ## Deploying from CI
 
 `.github/workflows/deploy.yml` is a manual (`workflow_dispatch`) deploy over
