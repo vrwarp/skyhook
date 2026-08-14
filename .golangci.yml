@@ -1,0 +1,38 @@
+# Lint configuration. The set is deliberately modest: this is a personal tool
+# where an unhelpfully strict linter costs more than it catches.
+version: "2"
+
+run:
+  timeout: 6m
+  tests: true
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+  # misspell runs with no locale on purpose: catching real typos is useful,
+  # forcing one side of colour/color across CSS strings and the image/color
+  # import is not.
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+  exclusions:
+    rules:
+      # Tests exercise error paths deliberately and read fixtures by path.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
+
+formatters:
+  enable:
+    - gofmt

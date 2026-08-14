@@ -1,0 +1,214 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.25'
+  NODE_VERSION: '22'
+
+jobs:
+  go:
+    name: Go build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - name: Verify modules are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        # The e2e package needs a browser and runs in its own job.
+        run: go test -race -count=1 $(go list ./... | grep -v '/test$')
+
+      - name: Conformance fixtures are current
+        # A drifted wire format must fail here, not on an aircraft.
+        run: go test -count=1 ./internal/protocol -run Conformance -v
+
+  golangci:
+    name: Go lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # v8 of the action pairs with golangci-lint v2, which is the schema
+      # .golangci.yml is written against.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          args: --timeout=6m
+
+  client:
+    name: Client typecheck, lint, tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests (includes cross-language conformance)
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload built client
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-dist
+          path: client/dist
+          retention-days: 7
+
+  e2e:
+    name: End-to-end against real Chromium
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Build the client
+        # The end-to-end suite drives the real PWA in a real browser, so the
+        # client has to exist before the Go tests run.
+        run: |
+          cd client
+          npm ci
+          npm run build
+
+      - name: Install the image encoders
+        # Chrome is preinstalled on the runner; these give the transcoder its
+        # good codecs instead of the stdlib fallbacks.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libavif-bin webp
+
+      - name: Locate a browser
+        id: browser
+        run: |
+          for candidate in google-chrome chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null; then
+              echo "path=$(command -v $candidate)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "::error::no browser on the runner"
+          exit 1
+
+      - name: End-to-end tests
+        env:
+          # Skipping for want of a browser is a failure in CI, not a pass.
+          SKYHOOK_E2E: '1'
+          SKYHOOK_CHROME: ${{ steps.browser.outputs.path }}
+        run: go test -count=1 -timeout 20m -v ./test
+
+  netem:
+    name: End-to-end over an emulated 1.2s / 250kbps link
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Build the client
+        # The end-to-end suite drives the real PWA in a real browser, so the
+        # client has to exist before the Go tests run.
+        run: |
+          cd client
+          npm ci
+          npm run build
+
+      - name: Install tc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends iproute2
+
+      - name: Locate a browser
+        id: browser
+        run: |
+          for candidate in google-chrome chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null; then
+              echo "path=$(command -v $candidate)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "::error::no browser on the runner"
+          exit 1
+
+      - name: Apply the link profile from the design document
+        # 1.2s RTT, 250 kbps, 2% loss on loopback: the link every milestone is
+        # measured against.
+        run: sudo scripts/netem.sh port 45123 1200 250 2
+
+      - name: End-to-end tests over the bad link
+        env:
+          SKYHOOK_E2E: '1'
+          SKYHOOK_SLOW_LINK: '1'
+          SKYHOOK_TEST_PORT: '45123'
+          SKYHOOK_CHROME: ${{ steps.browser.outputs.path }}
+        run: go test -count=1 -timeout 25m -v ./test
+
+      - name: Remove the link profile
+        if: always()
+        run: sudo scripts/netem.sh down
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh deploy/entrypoint.sh

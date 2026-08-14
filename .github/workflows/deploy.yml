@@ -1,0 +1,83 @@
+name: Deploy to VPS
+
+# Deployment is manual on purpose: the landside profile holds live logins, and
+# restarting the server drops every open tab's page state.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref (tag or branch) to deploy
+        required: true
+        default: main
+      restart:
+        description: Restart the service after pulling
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Pull and restart landside
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Check required secrets
+        run: |
+          for name in SKYHOOK_SSH_HOST SKYHOOK_SSH_USER SKYHOOK_SSH_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::secret $name is not set; see docs/OPERATIONS.md"
+              exit 1
+            fi
+          done
+        env:
+          SKYHOOK_SSH_HOST: ${{ secrets.SKYHOOK_SSH_HOST }}
+          SKYHOOK_SSH_USER: ${{ secrets.SKYHOOK_SSH_USER }}
+          SKYHOOK_SSH_KEY: ${{ secrets.SKYHOOK_SSH_KEY }}
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SKYHOOK_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ -n "${{ secrets.SKYHOOK_SSH_KNOWN_HOSTS }}" ]; then
+            echo "${{ secrets.SKYHOOK_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "${{ secrets.SKYHOOK_SSH_HOST }}" >> ~/.ssh/known_hosts
+          fi
+
+      - name: Pull the new image and restart
+        env:
+          HOST: ${{ secrets.SKYHOOK_SSH_HOST }}
+          USER: ${{ secrets.SKYHOOK_SSH_USER }}
+          DIR: ${{ secrets.SKYHOOK_REMOTE_DIR }}
+          RESTART: ${{ github.event.inputs.restart }}
+        run: |
+          REMOTE_DIR="${DIR:-/opt/skyhook}"
+          ssh -o BatchMode=yes "$USER@$HOST" bash -s <<REMOTE
+          set -euo pipefail
+          cd "$REMOTE_DIR"
+          docker compose pull
+          if [ "$RESTART" = "true" ]; then
+            docker compose up -d
+            # Give Chromium time to start before reporting success.
+            sleep 10
+            docker compose ps
+          fi
+          REMOTE
+
+      - name: Report the pairing fingerprint
+        env:
+          HOST: ${{ secrets.SKYHOOK_SSH_HOST }}
+          USER: ${{ secrets.SKYHOOK_SSH_USER }}
+        run: |
+          # The client pins the certificate, so a rotation means re-pairing.
+          ssh -o BatchMode=yes "$USER@$HOST" \
+            'docker compose -f ${SKYHOOK_REMOTE_DIR:-/opt/skyhook}/docker-compose.yml exec -T skyhook skyhookctl pairing -file /data/pairing.json' \
+            || echo "could not read the pairing file; check the service"

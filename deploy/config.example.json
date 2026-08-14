@@ -1,0 +1,22 @@
+{
+  "listen": ":4433",
+  "fallbackListen": ":4434",
+  "path": "/skyhook",
+  "dataDir": "/var/lib/skyhook",
+  "hosts": ["vps.example.com"],
+  "token": "",
+  "headless": true,
+  "sessionTtl": "12h",
+  "ringBytes": 4194304,
+  "compression": true,
+  "imageCacheBytes": 536870912,
+  "imageQuality": 40,
+  "imageWorkers": 4,
+  "prefetch": true,
+  "maxTabs": 8,
+  "homeUrl": "",
+  "adapters": [],
+  "adapterConfig": "",
+  "logLevel": "info",
+  "webSocketFallback": true
+}

@@ -1,0 +1,7 @@
+{
+  "googlechat": {
+    "url": "https://mail.google.com/chat/u/0/#chat/home",
+    "pollMs": 6000,
+    "comment": "Chat's DOM is minified and changes without notice; these are selectors, not contracts. Every miss degrades to 'found nothing' and the generic mirror keeps working."
+  }
+}
