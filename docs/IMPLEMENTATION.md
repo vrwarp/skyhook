@@ -13,7 +13,7 @@ this is what survived contact.
 | **M2 — Feel** | Local echo, ghost-send, scroll telemetry, images with blurhash, used-CSS | **Done.** Echo and reconciliation are unit-tested; used-CSS filtering and image transcoding are covered end-to-end. |
 | **M3 — Survive** | Reconnect, resync, offline mode | **Done for reconnect/resync/offline queueing.** 0-RTT resumption is enabled in the QUIC config; it is not separately asserted by a test. FEC is not implemented — see below. |
 | **M4 — Chat adapter** | Warm open ≤ 3 s, offline history, outbox | **Framework and adapter are built** (append-log, outbox, backlog replay, client archive and UI). The Google Chat selectors are a starting point, not a validated set: they need a session against the real app to tune. |
-| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 16. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
+| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 17. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
 
 The client is a Chrome-targeted PWA served by the server itself; the Electron
 shell the design called for was built first and then pivoted away from
@@ -319,7 +319,31 @@ the entry behind, where the app looks unchanged and a second press leaves for
 real. The trap is armed again as soon as a tab has somewhere to go back to. A
 browser that cannot be left by the gesture that leaves browsers is worse than
 one that has to be told twice.
-### 15. Attaching to a running browser needs `window.open`, not `Target.createTarget`
+### 15. A navigation's URL and its history flags travel together
+
+Every tab-state frame is stamped with the tab's cached `canBack` and
+`canForward`, and a navigation is exactly the moment those change. The frame
+announcing a new URL was sent before asking the browser what the history now
+looked like, so it carried the *previous* page's flags: "you are on the index"
+and "there is nothing forward of here", the second of which stopped being true
+the instant the first became true. A corrected frame followed once the page had
+settled.
+
+Landside that gap is 11 ms and nobody notices. On the link this project exists
+for, the correction queues behind the new page's snapshot at 250 kbps, and the
+two frames are seconds apart. Every back or forward gesture the reader makes in
+that window is dropped on the floor — `goHistory` refuses to spend a gesture the
+tab says it cannot answer, so the press does nothing at all and the reader
+presses again.
+
+The history is now read before the URL is announced, in the same frame. It costs
+one landside CDP call ahead of the URL bar updating, against the second that
+frame then spends in the air.
+
+`test/navigation_test.go` catches this only over the emulated link, where it
+appears as a forward gesture that never arrives.
+
+### 16. Attaching to a running browser needs `window.open`, not `Target.createTarget`
 
 The design assumes the server launches Chromium and owns it. `chromeAttach`
 adds the other case — a browser already running, whose profile and logins are
@@ -357,7 +381,7 @@ calling `Browser.close`, which would quit the browser out from under whoever is
 using it. `test/attach_test.go` drives a second real browser as "the user" and
 asserts each of these, including that the user activating their own window
 mid-run does not divert the next tab.
-### 16. Speculative prefetch was built, and then removed
+### 17. Speculative prefetch was built, and then removed
 
 The design's §2.8 asked for it and it worked: a hidden pooled tab walked the
 top five same-origin links on the page, and a link-follow that hit a
@@ -382,7 +406,7 @@ which only speculation ever read. The frame and field numbers are retired
 rather than reused, so a stale client cannot be silently misread by a new
 server.
 
-### 17. The landside browser is used as a browser, not as an instrument
+### 18. The landside browser is used as a browser, not as an instrument
 
 Skyhook is not a scraper, but almost everything about how it drove Chromium
 looked like one to an origin, and the account paying for that was the user's.

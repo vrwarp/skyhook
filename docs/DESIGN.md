@@ -56,7 +56,7 @@ Single user (you), technical, owns both endpoints. Primary tasks, in priority or
 - R7. Per-app adapter for Google Chat delivering G1's warm-open target.
 
 **P1 (fast follow)**
-- R8. Speculative interaction prefetch (§2.8). **Withdrawn** — built, then removed; see IMPLEMENTATION.md deviation 16.
+- R8. Speculative interaction prefetch (§2.8). **Withdrawn** — built, then removed; see IMPLEMENTATION.md deviation 17.
 - R9. Persistent cross-flight client cache (compression dictionaries, styles, images, adapter data).
 - R10. Clipboard integration, basic file upload (≤ 5 MB, resumable).
 
@@ -220,7 +220,7 @@ Popup-dependent widgets (mention pickers, autocomplete dropdowns) inherently lag
 > This was built as described and then removed. Fetching links the user never
 > asked for is the traffic pattern origins bot-block on, and it was spending a
 > logged-in session's reputation to save a round trip. See IMPLEMENTATION.md
-> deviation 16.
+> deviation 17.
 
 Server-side heuristic ranks likely next interactions: visible links in reading order, elements with cursor-proximity from scroll telemetry, app-specific hints from adapters (e.g., "conversation list items"). For the top N=5, the server clones the tab's state cheaply where possible — for same-origin `<a href>` navigations it *actually navigates* a hidden pooled tab and pre-computes the snapshot diff vs. current page; for JS-driven clicks it does nothing (cloning arbitrary SPA state is unreliable — cut from scope).
 

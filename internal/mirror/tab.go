@@ -289,11 +289,28 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 	t.url = p.Frame.URL
 	t.ctxID = 0
 	t.mu.Unlock()
-	t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// The history flags have to leave with the URL, in the same frame.
+		//
+		// Every state frame is stamped with the tab's cached canBack and
+		// canForward, and a navigation is exactly the moment those change.
+		// Announcing the new URL before asking the browser what its history
+		// now looks like sends the client a frame that says "you are on the
+		// index" and "there is nothing forward of here" — the second of which
+		// was true a moment ago and is not any more. The correction follows in
+		// a later frame, so on a landside link nobody notices; on the link this
+		// project exists for the two are seconds apart, and every back or
+		// forward gesture the reader makes in that window is dropped on the
+		// floor, because the shell believes the tab has nowhere to go.
+		//
+		// Asking first costs one landside CDP call before the URL bar updates,
+		// which is nothing next to the second that frame then spends in the air.
+		t.syncHistory(ctx)
+		t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})
+
 		t.applyBlocklist(ctx, p.Frame.URL)
 		if err := t.ensureWorld(ctx); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
@@ -301,8 +318,8 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		if _, err := t.eval(ctx, resnapshotIfSettled); err != nil {
 			t.log.Debug("post-navigation snapshot check failed", "tab", t.ID, "err", err)
 		}
-		// History moves at navigation time, not at load time; refreshing here
-		// means the back button is right while the page is still arriving.
+		// Again once the page has settled: a redirect or a client-side route
+		// change moves the history under a URL that has already been announced.
 		t.refreshState(ctx)
 	}()
 }
@@ -693,7 +710,11 @@ func (t *Tab) emitState(st protocol.TabState) {
 	t.out.EmitFrame(protocol.ChCtrl, f)
 }
 
-func (t *Tab) refreshState(ctx context.Context) {
+// syncHistory asks the browser where the tab sits in its own history and caches
+// the answer. It emits nothing: callers that want the client told use
+// refreshState, and callers that are about to emit for their own reasons — a
+// navigation announcing its URL — want the cache correct before they do.
+func (t *Tab) syncHistory(ctx context.Context) (url, title string) {
 	var hist struct {
 		CurrentIndex int `json:"currentIndex"`
 		Entries      []struct {
@@ -702,18 +723,21 @@ func (t *Tab) refreshState(ctx context.Context) {
 		} `json:"entries"`
 	}
 	if err := t.sess.Do(ctx, "Page.getNavigationHistory", nil, &hist); err != nil {
-		return
+		return "", ""
 	}
 	t.mu.Lock()
 	t.canBack = hist.CurrentIndex > 0
 	t.canForward = hist.CurrentIndex < len(hist.Entries)-1
 	t.mu.Unlock()
-	var st protocol.TabState
 	if hist.CurrentIndex >= 0 && hist.CurrentIndex < len(hist.Entries) {
-		st.URL = hist.Entries[hist.CurrentIndex].URL
-		st.Title = hist.Entries[hist.CurrentIndex].Title
+		return hist.Entries[hist.CurrentIndex].URL, hist.Entries[hist.CurrentIndex].Title
 	}
-	t.emitState(st)
+	return "", ""
+}
+
+func (t *Tab) refreshState(ctx context.Context) {
+	url, title := t.syncHistory(ctx)
+	t.emitState(protocol.TabState{URL: url, Title: title})
 }
 
 // Seq reports the last emitted mutation sequence.
