@@ -347,6 +347,16 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 	s.mu.Unlock()
 	s.activeTab.Store(id)
 
+	// Announce the tab the moment it exists. Every other TabState rides on a
+	// page lifecycle event, and a tab parked on about:blank may never produce
+	// one — which left a client that asked for a tab with no way to learn it
+	// got one, and no id to navigate.
+	opened := protocol.TabState{URL: "about:blank"}
+	if url != "" && url != "about:blank" {
+		opened.URL, opened.Loading = url, true
+	}
+	s.Send(protocol.ChCtrl, protocol.TypeTabState, id, opened)
+
 	if url != "" && url != "about:blank" {
 		if err := t.Navigate(ctx, protocol.Navigate{URL: url}); err != nil {
 			s.log.Warn("navigate failed", "url", url, "err", err)

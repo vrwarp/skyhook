@@ -173,12 +173,35 @@ func (s *Server) Start(ctx context.Context) error {
 			Path:      s.cfg.Path,
 			Logger:    s.log,
 		}, s.mgr.Serve)
+
+		// The same TLS listener serves the client app. One origin keeps the
+		// app's content security policy narrow, and means the pairing link and
+		// the server it points at can never drift apart.
+		root := resolveWebRoot(s.cfg)
+		app := &webapp{root: root, log: s.log, cfg: s.cfg}
+		mux := http.NewServeMux()
+		mux.Handle(s.cfg.Path, s.ws)
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
+		mux.Handle("/", app)
+		s.ws.SetHandler(mux)
+
 		go func() {
 			if err := s.ws.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				s.errs <- fmt.Errorf("websocket: %w", err)
 			}
 		}()
-		s.log.Info("websocket fallback up", "addr", s.cfg.FallbackListen)
+		if root == "" {
+			s.log.Warn("client app not found; build client/ and set webRoot",
+				"looked", filepath.Join(s.cfg.DataDir, "webapp"))
+		} else {
+			s.log.Info("client app served", "root", root)
+		}
+		s.log.Info("https listener up", "addr", s.cfg.FallbackListen)
+		s.log.Info("pair the client by opening this link once",
+			"url", PairingLink(s.cfg, s.cert.FingerprintB64()))
 	}
 
 	if err := s.writePairing(host, port); err != nil {
@@ -324,6 +347,16 @@ func (s *Server) dictTrainerLoop(ctx context.Context) {
 func sanitize(s string) string {
 	r := strings.NewReplacer("://", "-", "/", "-", ":", "-", ".", "_")
 	return r.Replace(s)
+}
+
+// portOf extracts the port from a listen address.
+func portOf(addr string) int {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(port)
+	return n
 }
 
 func firstHost(hosts []string) string {

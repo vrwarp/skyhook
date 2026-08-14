@@ -54,12 +54,8 @@ jobs:
           path: dist/*.tar.gz*
 
   client:
-    name: Client packages
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    name: Client bundle
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: client
@@ -72,23 +68,24 @@ jobs:
           cache-dependency-path: client/package-lock.json
 
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
       - run: npm run build
 
       - name: Package
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --publish never
+        # The client is a PWA: the deliverable is a directory of static files
+        # the server hands to the browser, not a per-platform installer.
+        run: |
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          OUT="skyhook-client-${VERSION}"
+          mkdir -p "../dist"
+          tar -C dist -czf "../dist/$OUT.tar.gz" .
+          (cd ../dist && sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256")
 
       - uses: actions/upload-artifact@v4
         with:
-          name: client-${{ matrix.os }}
-          path: |
-            client/release/*.AppImage
-            client/release/*.dmg
-            client/release/*.exe
-            client/release/*.zip
-            client/release/*.tar.gz
-          if-no-files-found: warn
+          name: client-bundle
+          path: dist/*
 
   publish:
     name: Publish the release

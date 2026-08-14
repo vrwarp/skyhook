@@ -61,6 +61,10 @@ type Config struct {
 	Adapters []string `json:"adapters"`
 	// AdapterConfig points at a JSON file of per-adapter selector overrides.
 	AdapterConfig string `json:"adapterConfig"`
+	// WebRoot is the directory the plane-side PWA is served from. Empty means
+	// "<dataDir>/webapp if it exists"; the server explains itself when neither
+	// is present rather than serving nothing.
+	WebRoot string `json:"webRoot"`
 	// LogLevel is debug|info|warn|error.
 	LogLevel string `json:"logLevel"`
 	// WebSocketFallback enables the TCP fallback listener.
@@ -181,6 +185,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SKYHOOK_ADAPTERS"); v != "" {
 		cfg.Adapters = strings.Split(v, ",")
+	}
+	if v := os.Getenv("SKYHOOK_WEB_ROOT"); v != "" {
+		cfg.WebRoot = v
 	}
 }
 

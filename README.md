@@ -17,17 +17,23 @@ for the full product requirements and technical design, and
 partial, and where the implementation diverges from the design (with reasons).
 
 ```
-PLANE SIDE                                LANDSIDE (VPS)
+PLANE SIDE (a browser)                    LANDSIDE (VPS)
 ┌────────────────────────┐                ┌──────────────────────────────┐
-│ Electron shell         │                │ skyhookd (Go)                │
+│ Skyhook PWA            │                │ skyhookd (Go)                │
 │  ├ chrome UI + HUD     │   one QUIC /   │  ├ headless Chromium via CDP │
-│  ├ mirror tabs         │◄──WebTransport─┤  ├ injected mirror agent     │
-│  │   (patcher + echo)  │   connection   │  ├ used-CSS extraction       │
+│  ├ sandboxed mirror    │◄──WebTransport─┤  ├ injected mirror agent     │
+│  │   frames (no JS)    │   connection   │  ├ used-CSS extraction       │
 │  ├ network worker      │                │  ├ image transcoder          │
-│  └ local store         │                │  ├ session manager (12h TTL) │
-└────────────────────────┘                │  └ per-app adapters          │
+│  ├ service worker      │                │  ├ session manager (12h TTL) │
+│  └ IndexedDB + caches  │                │  ├ per-app adapters          │
+└────────────────────────┘                │  └ serves the client app     │
                                           └──────────────────────────────┘
 ```
+
+The client is a Chrome-targeted progressive web app, served by the server
+itself. Mirrored pages render inside iframes carrying `sandbox="allow-same-origin"`
+and no `allow-scripts`, so the browser itself guarantees that page JavaScript
+never runs plane-side.
 
 ## Quick start
 
@@ -51,17 +57,27 @@ certificate fingerprint it will pin.
 
 ### Plane side (the laptop)
 
+The server serves the client. Build it once, point the server at it, and open
+the pairing link the server logs on startup:
+
 ```sh
 cd client
 npm ci
-npm run build
-npm start          # development
-npm run dist       # AppImage / dmg / nsis for a real install
+npm run build      # -> client/dist
 ```
 
-Paste the contents of `pairing.json` into the client's pairing dialog (or drop
-it at the client's data directory as `state.json`'s `pairing` field). The
-client connects, opens a tab, and mirrors.
+Set `"webRoot": "/path/to/client/dist"` in the server config (the container
+image builds and ships it already), then open the link from the server's log:
+
+```
+level=INFO msg="pair the client by opening this link once" url="https://vps:4434/#token=…"
+```
+
+The token rides in the URL fragment, which browsers never send to a server. The
+app stores it, strips it from the address bar, connects, and offers itself for
+install. After that it starts from its own cache with no network at all — which
+is the point, since you will be opening it at 35,000 feet. You can also paste
+`pairing.json` into the app's pairing dialog if you would rather not use a link.
 
 ### Diagnostics from anywhere
 
@@ -101,7 +117,10 @@ is how the reconnect-and-resync path is exercised.
 | `internal/session` | Sessions, replay ring, resync, speculative prefetch |
 | `internal/adapter` | Adapter framework and the Google Chat adapter |
 | `internal/client` | A headless Go client, used by tests and `skyhookctl` |
-| `client/` | The Electron client: patcher, local echo, chrome UI |
+| `client/` | The PWA: app shell, sandboxed mirror host, patcher, local echo |
+| `client/src/mirror` | Patcher, echo engine and the sandboxed-frame host |
+| `client/src/worker` | The network worker that owns the connection |
+| `client/src/sw` | Service worker: offline shell, image cache, egress denial |
 | `test/` | End-to-end tests against a real Chromium |
 | `deploy/`, `scripts/` | Container, systemd unit, link emulation |
 
@@ -110,12 +129,17 @@ is how the reconnect-and-resync path is exercised.
 ```sh
 go test ./...                    # unit tests; e2e skips without a browser
 SKYHOOK_E2E=1 go test ./test -v  # end-to-end against real Chromium
-cd client && npm test            # patcher, echo, codec, conformance
+cd client && npm test            # patcher, echo, codec, encoding, conformance
 ```
 
-The wire format is pinned by cross-language fixtures in `testdata/`: Go writes
-them, the TypeScript client's test suite decodes them, and CI fails if the two
-ever disagree.
+The wire format is pinned by cross-language fixtures in `testdata/`, in both
+directions: Go writes `conformance.json` and the client's test suite decodes it;
+the client writes `client-frames.json` and the Go suite decodes that. CI fails if
+the two ever disagree.
+
+The end-to-end suite includes four tests that drive the real PWA in a real
+browser against the real server — service worker, sandboxed frame, input path
+and all.
 
 ## Security posture
 

@@ -1,10 +1,15 @@
 /**
- * The network worker: a hidden renderer that owns the single connection to the
- * server and relays decoded frames to the main process.
+ * The network worker: owns the single connection to the server and does all
+ * frame decoding off the UI thread.
  *
- * It lives in a renderer because WebTransport is a browser API; Electron's main
- * process has no implementation. Everything it does is protocol work — no UI,
- * no DOM.
+ * In the Electron client this was a hidden BrowserWindow, because WebTransport
+ * is unavailable in Node. A dedicated worker is the natural fit in a PWA and
+ * costs less: no second renderer, and CBOR plus zstd decoding never competes
+ * with painting the mirror.
+ *
+ * Image bytes are written straight into Cache Storage from here, so the service
+ * worker can serve them to the mirror frame without another hop through the
+ * page.
  */
 import {
   ackBody, adapterCommandBody, decodeAdapterBatch, decodeError, decodeFrame, decodeImageData,
@@ -13,30 +18,35 @@ import {
   scrollBody, unframeMessage, viewportBody, InputEventInit,
 } from '../shared/codec.js';
 import { Channel, FrameType, Viewport } from '../shared/protocol.js';
-import { Transport, TransportConfig } from './transport.js';
+import { Transport, TransportConfig } from '../app/transport.js';
 
-interface Pairing extends TransportConfig {
+/** Everything the worker needs to reach the server. */
+export interface Pairing extends TransportConfig {
   token: string;
 }
+
+const IMAGE_CACHE = 'skyhook-img-v1';
 
 interface TabProgress {
   seq: number;
   hash: number;
 }
 
-const api = window.skyhookNet;
-
 let transport: Transport | null = null;
 let pairing: Pairing | null = null;
 let sessionId = '';
 let viewport: Viewport = { w: 1280, h: 800, dpr: 1, mobile: false };
 const progress = new Map<number, TabProgress>();
-/** Input frames sent while offline, replayed in the next Hello. */
+/** Input frames captured while offline, replayed in the next Hello. */
 const outbox: Map<number, unknown>[] = [];
 let online = false;
 let keepalive: ReturnType<typeof setInterval> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = 500;
+
+function post(kind: string, args: Record<string, unknown>, transfer: Transferable[] = []): void {
+  (self as unknown as Worker).postMessage({ kind, args }, transfer);
+}
 
 async function connect(): Promise<void> {
   if (!pairing) return;
@@ -44,21 +54,21 @@ async function connect(): Promise<void> {
     onOpen: (kind) => {
       online = true;
       reconnectDelay = 500;
-      api.status({ online: true, kind });
+      post('status', { online: true, kind });
       sendHello();
     },
     onClose: (reason) => {
       if (!online) return;
       online = false;
-      api.status({ online: false, kind: 'none', reason });
+      post('status', { online: false, kind: 'none', reason });
       scheduleReconnect();
     },
-    onMessage: (channel, msg) => handleMessage(channel, msg),
+    onMessage: (_channel, msg) => handleMessage(msg),
   });
   try {
     await transport.connect();
   } catch (err) {
-    api.status({ online: false, kind: 'none', reason: String(err) });
+    post('status', { online: false, kind: 'none', reason: String(err) });
     scheduleReconnect();
   }
 }
@@ -75,41 +85,37 @@ function scheduleReconnect(): void {
 }
 
 function sendHello(): void {
-  if (!pairing || !transport) return;
+  if (!pairing) return;
   const resume = Array.from(progress.entries()).map(([tab, p]) => ({
     tab, seq: p.seq, hash: p.hash,
   }));
   const queued = outbox.splice(0, outbox.length);
-  const body = helloBody({
+  void send(Channel.Ctrl, encodeFrame(FrameType.Hello, 0, helloBody({
     token: pairing.token,
     sessionId: sessionId || undefined,
     caps: ['zstd'],
     viewport,
     resume,
     queued,
-    client: 'skyhook-electron',
-  });
-  void send(Channel.Ctrl, encodeFrame(FrameType.Hello, 0, body));
+    client: 'skyhook-pwa',
+  })));
 }
 
 async function send(channel: Channel, payload: Uint8Array): Promise<void> {
-  const msg = frameMessage(channel, payload);
-  if (!transport || !online) {
-    return;
-  }
+  if (!transport || !online) return;
   try {
-    await transport.send(channel, msg);
+    await transport.send(channel, frameMessage(channel, payload));
   } catch (err) {
-    api.status({ online: false, kind: 'none', reason: String(err) });
+    post('status', { online: false, kind: 'none', reason: String(err) });
   }
 }
 
-function handleMessage(_channel: Channel, msg: Uint8Array): void {
+function handleMessage(msg: Uint8Array): void {
   let payload: Uint8Array;
   try {
     payload = unframeMessage(msg).payload;
   } catch (err) {
-    api.log(`undecodable message: ${String(err)}`);
+    post('log', { message: `undecodable message: ${String(err)}` });
     return;
   }
   const frame = decodeFrame(payload);
@@ -117,11 +123,13 @@ function handleMessage(_channel: Channel, msg: Uint8Array): void {
     case FrameType.Welcome: {
       const w = decodeWelcome(frame.body);
       sessionId = w.sessionId;
-      api.welcome(w);
-      // Tabs that survived the outage need whatever we do not already hold.
+      post('welcome', w as unknown as Record<string, unknown>);
+      // A resumed session hands back tabs that kept running while we were
+      // gone; ask for whatever we do not already hold.
       for (const t of w.tabs) {
         if (!progress.has(t.tab)) {
-          void send(Channel.Ctrl, encodeFrame(FrameType.Resync, t.tab, resyncBody(t.tab, 0, 'cold')));
+          void send(Channel.Ctrl,
+            encodeFrame(FrameType.Resync, t.tab, resyncBody(t.tab, 0, 'cold')));
         }
       }
       if (keepalive) clearInterval(keepalive);
@@ -131,16 +139,17 @@ function handleMessage(_channel: Channel, msg: Uint8Array): void {
       break;
     }
     case FrameType.Snapshot:
-      api.snapshot(frame.tab, decodeSnapshot(frame.body));
       progress.set(frame.tab, { seq: 0, hash: 0 });
+      post('snapshot', { tab: frame.tab, snapshot: decodeSnapshot(frame.body) });
       break;
     case FrameType.Speculative:
-      api.speculative(frame.tab, decodeSnapshot(frame.body));
+      post('speculative', { tab: frame.tab, snapshot: decodeSnapshot(frame.body) });
       break;
     case FrameType.Mutation: {
       const have = progress.get(frame.tab);
       if (!have) {
-        void send(Channel.Ctrl, encodeFrame(FrameType.Resync, frame.tab, resyncBody(frame.tab, 0, 'cold')));
+        void send(Channel.Ctrl,
+          encodeFrame(FrameType.Resync, frame.tab, resyncBody(frame.tab, 0, 'cold')));
         break;
       }
       if (frame.base && frame.base > have.seq) {
@@ -149,41 +158,75 @@ function handleMessage(_channel: Channel, msg: Uint8Array): void {
         break;
       }
       if (frame.seq <= have.seq) break; // duplicate from a replay
-      api.mutation(frame.tab, frame.seq, frame.cause, decodeMutation(frame.body));
+      post('mutation', {
+        tab: frame.tab, seq: frame.seq, cause: frame.cause,
+        mutation: decodeMutation(frame.body),
+      });
       break;
     }
     case FrameType.TabState:
-      api.tabState(frame.tab, decodeTabState(frame.body));
+      post('tabState', { tab: frame.tab, state: decodeTabState(frame.body) });
       break;
     case FrameType.ImageMeta:
-      api.imageMeta(frame.tab, decodeImageMeta(frame.body));
+      post('imageMeta', { tab: frame.tab, meta: decodeImageMeta(frame.body) });
       break;
     case FrameType.ImageData: {
       const d = decodeImageData(frame.body);
-      api.imageData(frame.tab, d.hash, d.mime, d.data);
+      void storeImage(d.hash, d.mime, d.data).then(() => {
+        post('imageData', { tab: frame.tab, hash: d.hash });
+      });
       break;
     }
     case FrameType.AdapterEvent: {
       const b = decodeAdapterBatch(frame.body);
-      api.adapter(b.records, b.backlog);
+      post('adapter', { records: b.records, backlog: b.backlog });
       break;
     }
     case FrameType.Stats:
-      api.stats({ ...decodeStats(frame.body), ...transport?.stats() });
+      post('stats', { ...decodeStats(frame.body), ...transport?.stats() });
       break;
     case FrameType.Error:
-      api.log(`server error: ${JSON.stringify(decodeError(frame.body))}`);
-      break;
-    case FrameType.Pong:
+      post('log', { message: `server error: ${JSON.stringify(decodeError(frame.body))}` });
       break;
     default:
       break;
   }
 }
 
-// ------------------------------------------------------- main-process commands
+/** Puts transcoded bytes where the service worker will find them. */
+async function storeImage(hash: string, mime: string, data: Uint8Array): Promise<void> {
+  if (!hash || !data.length) return;
+  try {
+    const cache = await caches.open(IMAGE_CACHE);
+    // Copy into a plain ArrayBuffer: a view over the worker's transfer buffer
+    // is not a valid Response body.
+    const body = new Uint8Array(data.byteLength);
+    body.set(data);
+    await cache.put(`/img/${hash}`, new Response(body.buffer as ArrayBuffer, {
+      headers: {
+        'content-type': mime || 'application/octet-stream',
+        'cache-control': 'no-store',
+      },
+    }));
+  } catch (err) {
+    post('log', { message: `image cache write failed: ${String(err)}` });
+  }
+}
 
-api.onCommand((cmd: { name: string; args: Record<string, unknown> }) => {
+/** Reports which of a set of hashes are already cached across flights. */
+async function cachedHashes(hashes: string[]): Promise<string[]> {
+  const cache = await caches.open(IMAGE_CACHE);
+  const found: string[] = [];
+  for (const h of hashes) {
+    if (await cache.match(`/img/${h}`)) found.push(h);
+  }
+  return found;
+}
+
+// ------------------------------------------------------- commands from the app
+
+self.addEventListener('message', (event: MessageEvent) => {
+  const cmd = event.data as { name: string; args: Record<string, unknown> };
   switch (cmd.name) {
     case 'configure':
       pairing = cmd.args.pairing as Pairing;
@@ -195,6 +238,7 @@ api.onCommand((cmd: { name: string; args: Record<string, unknown> }) => {
         encodeFrame(FrameType.TabOpen, 0, navigateBody(String(cmd.args.url ?? ''))));
       break;
     case 'closeTab':
+      progress.delete(Number(cmd.args.tab));
       void send(Channel.Ctrl, encodeFrame(FrameType.TabClose, Number(cmd.args.tab)));
       break;
     case 'navigate':
@@ -203,14 +247,12 @@ api.onCommand((cmd: { name: string; args: Record<string, unknown> }) => {
       break;
     case 'input': {
       const ev = cmd.args as unknown as InputEventInit & { tab: number };
-      const frame = encodeFrame(FrameType.Input, ev.tab, inputBody(ev));
       if (!online) {
         // Queue rather than drop: typing during an outage must survive it.
         outbox.push(inputFrameMap(ev));
-        api.log('queued input while offline');
         break;
       }
-      void send(Channel.Input, frame);
+      void send(Channel.Input, encodeFrame(FrameType.Input, ev.tab, inputBody(ev)));
       break;
     }
     case 'scroll':
@@ -221,16 +263,26 @@ api.onCommand((cmd: { name: string; args: Record<string, unknown> }) => {
       break;
     case 'ack': {
       const tab = Number(cmd.args.tab);
-      const seq = Number(cmd.args.seq);
-      const hash = Number(cmd.args.hash);
-      progress.set(tab, { seq, hash });
-      void send(Channel.Ctrl, encodeFrame(FrameType.Ack, tab, ackBody(tab, seq, hash)));
+      progress.set(tab, { seq: Number(cmd.args.seq), hash: Number(cmd.args.hash) });
+      void send(Channel.Ctrl, encodeFrame(FrameType.Ack, tab,
+        ackBody(tab, Number(cmd.args.seq), Number(cmd.args.hash))));
       break;
     }
-    case 'wantImage':
-      void send(Channel.Ctrl, encodeFrame(FrameType.ImageWant, Number(cmd.args.tab),
-        imageWantBody(cmd.args.hashes as string[])));
+    case 'wantImage': {
+      const tab = Number(cmd.args.tab);
+      const hashes = cmd.args.hashes as string[];
+      void cachedHashes(hashes).then((have) => {
+        // Anything the cross-flight cache already holds is free; tell the page
+        // so it can paint, and only ask the server for the rest.
+        for (const h of have) post('imageData', { tab, hash: h });
+        const missing = hashes.filter((h) => !have.includes(h));
+        if (missing.length) {
+          void send(Channel.Ctrl,
+            encodeFrame(FrameType.ImageWant, tab, imageWantBody(missing, have)));
+        }
+      });
       break;
+    }
     case 'viewport':
       viewport = cmd.args.viewport as Viewport;
       void send(Channel.Ctrl, encodeFrame(FrameType.Viewport, 0, viewportBody(viewport)));
@@ -242,11 +294,15 @@ api.onCommand((cmd: { name: string; args: Record<string, unknown> }) => {
     case 'kill':
       void send(Channel.Ctrl, encodeFrame(FrameType.Kill, 0));
       break;
+    case 'reconnect':
+      transport?.close();
+      void connect();
+      break;
     case 'disconnect':
       transport?.close();
       break;
     default:
-      api.log(`unknown command ${cmd.name}`);
+      post('log', { message: `unknown command ${cmd.name}` });
   }
 });
 
@@ -259,4 +315,4 @@ function inputFrameMap(ev: InputEventInit & { tab: number }): Map<number, unknow
   return m;
 }
 
-api.ready();
+post('ready', {});

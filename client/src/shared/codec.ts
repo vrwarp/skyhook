@@ -38,6 +38,22 @@ const encoder = new Encoder({
 /** Raw CBOR map with integer keys, as decoded from the wire. */
 type Fields = Record<number, unknown>;
 
+/**
+ * Clamps a number into the range cbor-x encodes as a CBOR *integer*.
+ *
+ * Above 2^32-1 it switches to float64, and the server's decoder refuses to put
+ * a float into an int64 field — which silently drops the whole frame. Every
+ * integer field on the wire goes through here, and callers keep their values
+ * small on purpose (timestamps are monotonic milliseconds, not wall clock).
+ */
+export function safeInt(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  const n = Math.trunc(v);
+  if (n > 0xffffffff) return 0xffffffff;
+  if (n < -0x80000000) return -0x80000000;
+  return n;
+}
+
 function num(f: Fields | undefined, key: number, dflt = 0): number {
   const v = f?.[key];
   if (typeof v === 'number') return v;
@@ -100,10 +116,10 @@ export function encodeFrame(
 ): Uint8Array {
   const m = new Map<number, unknown>();
   m.set(F.frame.type, type);
-  if (tab) m.set(F.frame.tab, tab);
-  if (extra?.seq) m.set(F.frame.seq, extra.seq);
-  if (extra?.base) m.set(F.frame.base, extra.base);
-  if (extra?.cause) m.set(F.frame.cause, extra.cause);
+  if (tab) m.set(F.frame.tab, safeInt(tab));
+  if (extra?.seq) m.set(F.frame.seq, safeInt(extra.seq));
+  if (extra?.base) m.set(F.frame.base, safeInt(extra.base));
+  if (extra?.cause) m.set(F.frame.cause, safeInt(extra.cause));
   // The server decodes the body as cbor.RawMessage: the body item is spliced
   // into the envelope directly, not wrapped in a byte string.
   if (body && body.size > 0) m.set(F.frame.body, body);
@@ -313,9 +329,9 @@ export function helloBody(opts: {
   if (opts.resume?.length) {
     m.set(F.hello.resume, opts.resume.map((r) => {
       const t = new Map<number, unknown>();
-      t.set(F.tabAck.tab, r.tab);
-      t.set(F.tabAck.seq, r.seq);
-      if (r.hash) t.set(F.tabAck.hash, r.hash);
+      t.set(F.tabAck.tab, safeInt(r.tab));
+      t.set(F.tabAck.seq, safeInt(r.seq));
+      if (r.hash) t.set(F.tabAck.hash, safeInt(r.hash));
       return t;
     }));
   }
@@ -329,8 +345,8 @@ export function helloBody(opts: {
 
 export function viewportBody(v: Viewport): Map<number, unknown> {
   const m = new Map<number, unknown>();
-  m.set(F.viewport.w, v.w);
-  m.set(F.viewport.h, v.h);
+  m.set(F.viewport.w, safeInt(v.w));
+  m.set(F.viewport.h, safeInt(v.h));
   m.set(F.viewport.dpr, v.dpr);
   if (v.mobile) m.set(F.viewport.mobile, true);
   return m;
@@ -338,16 +354,16 @@ export function viewportBody(v: Viewport): Map<number, unknown> {
 
 export function ackBody(tab: number, seq: number, hash: number): Map<number, unknown> {
   const m = new Map<number, unknown>();
-  m.set(F.tabAck.tab, tab);
-  m.set(F.tabAck.seq, seq);
-  if (hash) m.set(F.tabAck.hash, hash >>> 0);
+  m.set(F.tabAck.tab, safeInt(tab));
+  m.set(F.tabAck.seq, safeInt(seq));
+  if (hash) m.set(F.tabAck.hash, safeInt(hash >>> 0));
   return m;
 }
 
 export function resyncBody(tab: number, haveTo: number, reason: string): Map<number, unknown> {
   const m = new Map<number, unknown>();
-  m.set(F.resync.tab, tab);
-  m.set(F.resync.haveTo, haveTo);
+  m.set(F.resync.tab, safeInt(tab));
+  m.set(F.resync.haveTo, safeInt(haveTo));
   m.set(F.resync.reason, reason);
   return m;
 }
@@ -381,21 +397,21 @@ export interface InputEventInit {
 export function inputBody(ev: InputEventInit): Map<number, unknown> {
   const m = new Map<number, unknown>();
   m.set(F.input.kind, ev.kind);
-  if (ev.node) m.set(F.input.node, ev.node);
-  m.set(F.input.seq, ev.seq);
+  if (ev.node) m.set(F.input.node, safeInt(ev.node));
+  m.set(F.input.seq, safeInt(ev.seq));
   if (ev.text) m.set(F.input.text, ev.text);
   if (ev.key) m.set(F.input.key, ev.key);
-  if (ev.modifiers) m.set(F.input.modifiers, ev.modifiers);
-  if (ev.button) m.set(F.input.button, ev.button);
-  if (ev.x) m.set(F.input.x, Math.round(ev.x));
-  if (ev.y) m.set(F.input.y, Math.round(ev.y));
+  if (ev.modifiers) m.set(F.input.modifiers, safeInt(ev.modifiers));
+  if (ev.button) m.set(F.input.button, safeInt(ev.button));
+  if (ev.x) m.set(F.input.x, safeInt(ev.x));
+  if (ev.y) m.set(F.input.y, safeInt(ev.y));
   if (ev.fields) m.set(F.input.fields, ev.fields);
-  if (ev.expectSeq) m.set(F.input.expectSeq, ev.expectSeq);
-  if (ev.ts) m.set(F.input.ts, ev.ts);
-  if (ev.start) m.set(F.input.start, ev.start);
-  if (ev.end) m.set(F.input.end, ev.end);
+  if (ev.expectSeq) m.set(F.input.expectSeq, safeInt(ev.expectSeq));
+  if (ev.ts) m.set(F.input.ts, safeInt(ev.ts));
+  if (ev.start) m.set(F.input.start, safeInt(ev.start));
+  if (ev.end) m.set(F.input.end, safeInt(ev.end));
   if (ev.url) m.set(F.input.url, ev.url);
-  if (ev.repeat) m.set(F.input.repeat, ev.repeat);
+  if (ev.repeat) m.set(F.input.repeat, safeInt(ev.repeat));
   return m;
 }
 
@@ -403,13 +419,13 @@ export function scrollBody(o: {
   tab: number; x: number; y: number; h: number; docH: number; node?: number; seq?: number;
 }): Map<number, unknown> {
   const m = new Map<number, unknown>();
-  m.set(F.scroll.tab, o.tab);
-  if (o.x) m.set(F.scroll.x, Math.round(o.x));
-  if (o.y) m.set(F.scroll.y, Math.round(o.y));
-  if (o.h) m.set(F.scroll.h, Math.round(o.h));
-  if (o.docH) m.set(F.scroll.docH, Math.round(o.docH));
-  if (o.node) m.set(F.scroll.node, o.node);
-  if (o.seq) m.set(F.scroll.seq, o.seq);
+  m.set(F.scroll.tab, safeInt(o.tab));
+  if (o.x) m.set(F.scroll.x, safeInt(o.x));
+  if (o.y) m.set(F.scroll.y, safeInt(o.y));
+  if (o.h) m.set(F.scroll.h, safeInt(o.h));
+  if (o.docH) m.set(F.scroll.docH, safeInt(o.docH));
+  if (o.node) m.set(F.scroll.node, safeInt(o.node));
+  if (o.seq) m.set(F.scroll.seq, safeInt(o.seq));
   return m;
 }
 
@@ -429,6 +445,6 @@ export function adapterCommandBody(o: {
   if (o.space) m.set(F.adapterCommand.space, o.space);
   if (o.text) m.set(F.adapterCommand.text, o.text);
   if (o.localId) m.set(F.adapterCommand.localId, o.localId);
-  if (o.since) m.set(F.adapterCommand.since, o.since);
+  if (o.since) m.set(F.adapterCommand.since, safeInt(o.since));
   return m;
 }

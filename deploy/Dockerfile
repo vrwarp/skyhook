@@ -1,4 +1,12 @@
-# Landside server image: Go binary plus a real Chromium and the image encoders.
+# Landside server image: the Go binary, a real Chromium, the image encoders, and
+# the plane-side PWA the server hands to the browser.
+FROM node:22-bookworm-slim AS client
+WORKDIR /client
+COPY client/package.json client/package-lock.json ./
+RUN npm ci
+COPY client/ ./
+RUN npm run build
+
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -30,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd --create-home --shell /usr/sbin/nologin skyhook
 COPY --from=build /out/skyhookd /usr/local/bin/skyhookd
 COPY --from=build /out/skyhookctl /usr/local/bin/skyhookctl
+COPY --from=client /client/dist /usr/share/skyhook/webapp
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
@@ -37,7 +46,8 @@ USER skyhook
 ENV SKYHOOK_DATA_DIR=/data \
     SKYHOOK_CHROME=/usr/bin/chromium \
     SKYHOOK_LISTEN=:4433 \
-    SKYHOOK_FALLBACK_LISTEN=:4434
+    SKYHOOK_FALLBACK_LISTEN=:4434 \
+    SKYHOOK_WEB_ROOT=/usr/share/skyhook/webapp
 VOLUME ["/data"]
 EXPOSE 4433/udp 4434/tcp
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

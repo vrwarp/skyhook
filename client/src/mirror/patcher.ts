@@ -6,10 +6,11 @@
  * document hashes, so a divergence between them is a bug worth finding rather
  * than a mystery.
  *
- * Nothing here parses HTML. Nodes are constructed one at a time, which is what
- * guarantees the mirror can never execute page script: a <script> element that
- * somehow reached us would be created detached from any parser and never run,
- * and the sanitiser below drops it anyway.
+ * Nothing here parses HTML. Nodes are constructed one at a time, so a <script>
+ * element that somehow reached us would be created detached from any parser and
+ * never run — and the sanitiser below drops it anyway. That is defence in
+ * depth: the document this patches lives in a sandboxed frame with script
+ * execution disabled by the browser (see mirror/host.ts).
  */
 import {
   ImageMeta, MirrorNode, Mutation, NodeFlags, NodeKind, OpCode, Snapshot,
@@ -24,8 +25,12 @@ const FORBIDDEN_TAGS = new Set([
 const FORBIDDEN_ATTR_PREFIX = 'on';
 
 export interface PatcherHooks {
-  /** Called when an image node needs a placeholder or a real bitmap. */
+  /** Called when an image node needs a placeholder or a real bitmap. The hook
+   *  owns setting the element's src, because only the host knows how content
+   *  hashes map onto URLs. */
   onImage?(node: HTMLImageElement, meta: ImageMeta | undefined, hash: string): void;
+  /** Rewrites a skyhook image reference inside a CSS rule. */
+  rewriteCSS?(rule: string): string;
   /** Called when the server reports the landside focus moved. */
   onFocus?(node: Node | null): void;
   /** Called for document-level or container scroll positions. */
@@ -245,10 +250,6 @@ export class Patcher {
         if (n.flags & NodeFlags.Editable) {
           el.setAttribute('data-skyhook-editable', '1');
         }
-        if ((n.flags & NodeFlags.Image) && el instanceof HTMLImageElement) {
-          const hash = imageHashOf(el.getAttribute('src') ?? '');
-          if (hash) this.hooks.onImage?.(el, this.images.get(hash), hash);
-        }
         node = el;
         break;
       }
@@ -274,6 +275,15 @@ export class Patcher {
         /^\s*javascript:/i.test(value)) {
       return;
     }
+    if (lower === 'src' && isImage(el)) {
+      const hash = imageHashOf(value);
+      if (hash) {
+        // Never write the wire form into the DOM: the browser would try to
+        // fetch an unknown scheme. The hook resolves it to a real URL.
+        this.hooks.onImage?.(el as HTMLImageElement, this.images.get(hash), hash);
+        return;
+      }
+    }
     try {
       el.setAttribute(name, value);
     } catch {
@@ -288,9 +298,6 @@ export class Patcher {
       (el as HTMLInputElement).checked = value === '1';
     } else if (lower === 'data-sky-selected') {
       (el as HTMLOptionElement).selected = value === '1';
-    } else if (lower === 'src' && el instanceof HTMLImageElement) {
-      const hash = imageHashOf(value);
-      if (hash) this.hooks.onImage?.(el, this.images.get(hash), hash);
     }
   }
 
@@ -317,16 +324,21 @@ export class Patcher {
     if (!rules.length) return;
     this.ensureStyleElement();
     if (!this.styleEl) return;
-    for (const r of rules) this.cssRules.push(r);
+    for (const r of rules) {
+      this.cssRules.push(this.hooks.rewriteCSS ? this.hooks.rewriteCSS(r) : r);
+    }
     this.styleEl.textContent = this.cssRules.join('\n');
   }
 
   /** Registers image metadata arriving after the snapshot. */
   setImageMeta(meta: ImageMeta): void {
     this.images.set(meta.hash, meta);
-    for (const el of this.doc.querySelectorAll('img')) {
-      const hash = imageHashOf(el.getAttribute('src') ?? '');
-      if (hash === meta.hash) this.hooks.onImage?.(el as HTMLImageElement, meta, hash);
+    // The src already carries the resolved URL, so match on that.
+    for (const el of Array.from(this.doc.querySelectorAll('img'))) {
+      const img = el as HTMLImageElement;
+      if (img.getAttribute('src')?.includes(meta.hash)) {
+        this.hooks.onImage?.(img, meta, meta.hash);
+      }
     }
   }
 
@@ -360,6 +372,15 @@ export class Patcher {
   get rootElement(): HTMLElement | null {
     return this.root;
   }
+}
+
+/**
+ * Tag-name test rather than `instanceof`. The mirrored document lives in a
+ * different JavaScript realm (a sandboxed iframe), where `HTMLImageElement` is
+ * a different constructor entirely, so `instanceof` is always false there.
+ */
+function isImage(el: Element): boolean {
+  return el.tagName?.toUpperCase() === 'IMG';
 }
 
 /** Extracts the content hash from a skyhook image URL. */

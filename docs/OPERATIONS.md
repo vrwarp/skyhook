@@ -50,6 +50,7 @@ default; this is the whole surface:
 ```json
 {
   "listen": ":4433",
+  "webRoot": "/usr/share/skyhook/webapp",
   "fallbackListen": ":4434",
   "dataDir": "/var/lib/skyhook",
   "hosts": ["vps.example.com"],
@@ -70,14 +71,31 @@ default; this is the whole surface:
 
 Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_DATA_DIR`, `SKYHOOK_TOKEN`, `SKYHOOK_CHROME`, `SKYHOOK_HOSTS`,
-`SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_LOG_LEVEL`.
+`SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`, `SKYHOOK_LOG_LEVEL`.
+
+`webRoot` is the built client (`client/dist`). The container image builds it and
+sets `SKYHOOK_WEB_ROOT` already; a bare-metal install should either set the path
+or copy the build to `<dataDir>/webapp`. With neither present the server serves a
+page explaining how to build it, rather than nothing at all.
 
 A missing token is generated on first start and written back to the config file
 when one was supplied.
 
 ## Pairing
 
-The server writes `pairing.json` into its data directory:
+On startup the server logs a one-time pairing link:
+
+```
+level=INFO msg="pair the client by opening this link once" url="https://vps.example.com:4434/#token=…&cert=…"
+```
+
+Open it once in Chrome on the plane-side machine. The token and certificate pin
+ride in the URL *fragment*, which browsers never send to a server, so the
+credential reaches the app without touching any log. The app stores it in
+IndexedDB, strips it from the address bar, and offers itself for install.
+
+The same information is on disk as `pairing.json` in the data directory, and can
+be pasted into the app's pairing dialog instead:
 
 ```json
 {
@@ -119,12 +137,21 @@ What the implementation does about it:
 
 - **One credential, constant-time compared.** No other authentication surface.
 - **Certificate pinning** in both the QUIC and fallback paths.
-- **The client has no internet access.** Every renderer request that is not
-  `skyhook://` is cancelled at the session level, and mirror tabs are sandboxed
-  with a CSP of `default-src 'none'; script-src 'none'`. Page JavaScript cannot
-  exist plane-side.
-- **The client archive is encrypted at rest** with an OS-keychain-wrapped key
-  (Electron `safeStorage`); it contains real message content.
+- **The client has no internet access.** The service worker answers every
+  cross-origin request with a 403 instead of fetching it, and the server serves
+  the app under a CSP with no `connect-src` beyond its own origin. Egress from
+  the app is the one QUIC connection and nothing else.
+- **Page JavaScript cannot run plane-side, and the browser enforces it.**
+  Mirrored documents live in an iframe carrying `sandbox="allow-same-origin"`
+  with no `allow-scripts`, so script execution inside the mirror is impossible
+  by construction rather than by policy. The frame also has no `allow-forms`,
+  `allow-popups` or `allow-top-navigation`, so a mirrored page cannot navigate
+  or submit anything on its own.
+- **The client archive is encrypted at rest** with a non-extractable AES-GCM
+  WebCrypto key held in IndexedDB; it contains real message content. This is
+  weaker than an OS keychain — anything that can run script on the app's origin
+  can ask the key to decrypt — but it does mean the bytes on disk are useless
+  on their own.
 - **The landside agent runs in an isolated world**, so page script cannot see or
   tamper with the mirror.
 - **Kill switch**: `skyhookctl kill -yes` (or the client's kill command) tears
@@ -178,6 +205,9 @@ page state, and that should be your decision rather than a merge's.
 | Symptom | Cause and fix |
 |---|---|
 | Client cannot connect over QUIC | UDP blocked. The client falls back to WebSocket automatically; check the HUD, which shows which transport is live. |
+| The app shows "The client has not been built" | `webRoot` is unset or wrong. Build `client/` and point at `client/dist`. |
+| The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. |
+| Stale UI after a deploy | The service worker serves its cache first and refreshes behind you. Reload twice, or use the browser's "Update on reload". |
 | `unauthorized` on connect | Token mismatch: re-read `pairing.json`. |
 | Connects, then drops immediately | Pinned certificate expired or rotated. Re-pair. |
 | Blank mirror, server logs "isolated world setup failed" | The page navigated during setup; a resync fixes it. Persistent failures mean Chromium is wedged — restart the service. |

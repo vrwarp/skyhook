@@ -15,6 +15,10 @@ this is what survived contact.
 | **M4 — Chat adapter** | Warm open ≤ 3 s, offline history, outbox | **Framework and adapter are built** (append-log, outbox, backlog replay, client archive and UI). The Google Chat selectors are a starting point, not a validated set: they need a session against the real app to tune. |
 | **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Prefetch, tabs, bookmarks and the HUD are built.** Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
 
+The client is a Chrome-targeted PWA served by the server itself; the Electron
+shell the design called for was built first and then pivoted away from
+(deviation 6).
+
 ## Deviations from the design, and why
 
 ### 1. No mutual TLS; the client pins the server certificate instead
@@ -101,14 +105,52 @@ from a JSON file without a rebuild, because Chat's DOM is minified and changes
 without notice. Every selector failure degrades to "found nothing" and the
 generic mirror remains the working fallback.
 
-### 6. The client's local store is not SQLite
+### 6. The client is a PWA, not an Electron app
 
-The design says SQLite. The implementation uses a content-addressed blob store
-plus length-prefixed append logs on the filesystem. A native module (better-sqlite3)
-would have to be rebuilt for every Electron version on every platform the client
-ships to, and what is actually needed here is a blob store and two append-only
-logs — which the filesystem already is. The archive is encrypted at rest through
-Electron's `safeStorage` (OS keychain), as designed.
+The design specifies an Electron shell. The client shipped that way first and
+was then pivoted to a Chrome-targeted progressive web app. Most of the code was
+unaffected — the transport was already written against the browser's
+`WebTransport`, and the patcher and echo engine only ever needed a `Document` —
+but three things changed shape:
+
+**The no-page-JavaScript guarantee.** Electron gave it for free: the mirror
+document declared `script-src 'none'`, and the shim still ran because preloads
+execute in an isolated world that page CSP does not apply to. A browser has no
+isolated world, so the mirror now renders into an iframe carrying
+`sandbox="allow-same-origin"` and, deliberately, *not* `allow-scripts`. The
+browser refuses to execute any script inside it, while `allow-same-origin` lets
+the app reach in through `contentDocument` and patch. `allow-forms`,
+`allow-popups` and `allow-top-navigation` are all withheld, so the frame cannot
+reach the network or leave the page on its own. This is arguably a stronger
+story than the isolated world: the guarantee is enforced by the sandbox, not by
+a policy the content might influence. It is pinned by a test that fails if
+anyone ever adds `allow-scripts`.
+
+**Egress denial.** Electron cancelled every non-`skyhook://` request at the
+session level. The service worker now refuses every cross-origin fetch, and the
+app's CSP allows `connect-src` to exactly one server. The mirror transport is
+not a fetch, so it is unaffected by either.
+
+**The local store.** The design says SQLite; the Electron client used files.
+Both are now IndexedDB plus Cache Storage. Image bytes live in Cache Storage so
+the service worker serves them straight to the mirror frame with no hop through
+the page.
+
+The costs are real and worth naming: the archive is encrypted with a
+non-extractable WebCrypto key in IndexedDB rather than an OS-keychain-wrapped
+one, which resists reading the database out from under the browser but not an
+attacker who already has the device and profile; and a backgrounded tab gets
+throttled and may lose its connection, which Electron's `backgroundThrottling:
+false` avoided. The second costs little in practice because it is the outage
+case the reconnect path already handles, and the app nudges a reconnect on
+`visibilitychange`.
+
+What it buys: no second Chromium (which retires risk #4 in the design, "Electron
+memory on a laptop in airplane mode"), instant updates through the service
+worker instead of a per-platform installer matrix, and — when the server has a
+real certificate — no `serverCertificateHashes` pinning or 13-day rotation
+dance at all, since the same certificate covers the app origin and the
+WebTransport connection.
 
 ### 7. Image encoding degrades gracefully instead of requiring libvips
 
@@ -121,7 +163,21 @@ sprites, chosen by the same palette heuristic the design describes. This keeps
 Resizing to rendered layout size — the part that actually saves the bytes —
 happens either way.
 
-### 8. Stream priority is enforced by the server's scheduler, not by QUIC
+### 8. Integer fields are capped at 32 bits on the client -> server path
+
+`cbor-x`, the client's encoder, emits any integer above 2^32-1 as a float64,
+and the server's decoder refuses to put a float into an `int64` field — which
+rejects the entire frame. A wall-clock `Date.now()` in an input event therefore
+silently dropped every click and keystroke, and the Go test client never
+reproduced it because Go sends proper integers.
+
+Two changes fix it and keep it fixed: timestamps are monotonic milliseconds
+(which is what the protocol always specified), and every integer the client
+writes goes through a `safeInt` clamp. The invariant is now covered from both
+sides — a client test asserts no client frame contains a float, and a Go test
+decodes fixtures the client actually produced.
+
+### 9. Stream priority is enforced by the server's scheduler, not by QUIC
 
 `webtransport-go` exposes no per-stream QUIC priority. The session's outbound
 writer implements strict priority across four queues instead (ctrl/input, dom,
@@ -143,6 +199,9 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
 - **0-RTT resumption** is enabled but not asserted by a test; proving it needs a
   client that survives process restart, which the Go test client does not model.
 - **Bookmarks** are stored and written but have no management UI beyond adding.
+- **Installability is untested against a real install prompt**: the manifest,
+  icons and service worker are all in place and the worker registers in a real
+  browser under test, but nobody has clicked "Install" on a device yet.
 
 ## Measured results
 

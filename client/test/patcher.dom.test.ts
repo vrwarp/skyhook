@@ -4,7 +4,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Patcher, imageHashOf } from '../src/preload/patcher.js';
+import { Patcher, imageHashOf } from '../src/mirror/patcher.js';
 import { NodeKind, OpCode, type Mutation, type Snapshot } from '../src/shared/protocol.js';
 
 function snapshot(): Snapshot {

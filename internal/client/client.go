@@ -411,6 +411,15 @@ func (c *Client) Tabs() []uint32 {
 	return out
 }
 
+// TabState returns the last state reported for a tab. A tab is announced when
+// it opens, so this knows about tabs that have not produced a replica yet.
+func (c *Client) TabState(tab uint32) (protocol.TabState, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st, ok := c.state[tab]
+	return st, ok
+}
+
 // Stats returns the last stats frame.
 func (c *Client) Stats() protocol.Stats {
 	c.mu.Lock()

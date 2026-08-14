@@ -2,20 +2,18 @@
   "name": "skyhook-client",
   "version": "0.1.0",
   "private": true,
-  "description": "Skyhook plane-side client: a DOM patcher and input serialiser in an Electron shell",
+  "description": "Skyhook plane-side client: a PWA that patches a mirrored DOM and serialises input",
   "license": "MIT",
-  "main": "dist/main/index.js",
   "type": "module",
   "scripts": {
     "build": "node esbuild.mjs",
+    "dev": "node esbuild.mjs --dev",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "npm run build && electron dist/main/index.js",
-    "dist": "npm run build && electron-builder --publish never",
-    "dist:dir": "npm run build && electron-builder --dir --publish never"
+    "serve": "node esbuild.mjs --dev && python3 -m http.server 8080 --directory dist"
   },
   "dependencies": {
     "cbor-x": "^1.6.0",
@@ -25,8 +23,6 @@
     "@types/node": "^22.10.0",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
     "@typescript-eslint/parser": "^8.18.0",
-    "electron": "^33.3.0",
-    "electron-builder": "^25.1.8",
     "esbuild": "^0.24.2",
     "eslint": "^9.17.0",
     "jsdom": "^25.0.1",

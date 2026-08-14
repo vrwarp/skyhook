@@ -84,14 +84,15 @@ var pixelPNG = func() []byte {
 }()
 
 type harness struct {
-	t       *testing.T
-	site    *httptest.Server
-	browser *cdp.Browser
-	mgr     *session.Manager
-	ws      *transport.WSServer
-	url     string
-	token   string
-	images  *imgproc.Pipeline
+	t          *testing.T
+	site       *httptest.Server
+	browser    *cdp.Browser
+	mgr        *session.Manager
+	ws         *transport.WSServer
+	url        string
+	token      string
+	images     *imgproc.Pipeline
+	listenAddr string
 }
 
 type router struct{ mgr *session.Manager }
@@ -112,7 +113,24 @@ func (r *router) ImageBytes(tab uint32, data protocol.ImageData) {
 	}
 }
 
+// shapedAddr is the address the link emulator shapes. The netem filter targets
+// exactly this port, so the CDP socket and the fixture web server keep running
+// at landside speed — which is what they do in reality.
+func shapedAddr() string {
+	if p := os.Getenv("SKYHOOK_TEST_PORT"); p != "" {
+		return "127.0.0.1:" + p
+	}
+	return "127.0.0.1:0"
+}
+
 func newHarness(t *testing.T) *harness {
+	return newHarnessOn(t, shapedAddr())
+}
+
+// newHarnessOn builds the landside half with its client listener on a given
+// address. The PWA tests take the shaped address for their own app listener
+// instead, so the browser client is what crosses the emulated link.
+func newHarnessOn(t *testing.T, listenAddr string) *harness {
 	t.Helper()
 	if _, err := cdp.FindChromium(""); err != nil {
 		if os.Getenv("SKYHOOK_E2E") == "1" {
@@ -156,7 +174,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { _ = br.Close() })
 
-	h := &harness{t: t, site: site, browser: br, token: "test-token"}
+	h := &harness{t: t, site: site, browser: br, token: "test-token", listenAddr: listenAddr}
 	r := &router{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{
 		Workers: 2, CacheDir: t.TempDir(), CacheSize: 8 << 20, Logger: log,
@@ -179,14 +197,7 @@ func newHarness(t *testing.T) *harness {
 		h.mgr.Close(c)
 	})
 
-	// A fixed port when the link emulator is in play: the netem filter shapes
-	// exactly this port, so the CDP socket and the fixture web server keep
-	// running at landside speed, which is what they do in reality.
-	listenAddr := "127.0.0.1:0"
-	if p := os.Getenv("SKYHOOK_TEST_PORT"); p != "" {
-		listenAddr = "127.0.0.1:" + p
-	}
-	ln, err := net.Listen("tcp", listenAddr)
+	ln, err := net.Listen("tcp", h.listenAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,6 +475,35 @@ func TestNavigationReplacesDocument(t *testing.T) {
 	}
 	if strings.Contains(cl.Model(tab).Text(), "first message") {
 		t.Error("stale content survived the navigation")
+	}
+}
+
+// A tab opened with no URL has nothing to snapshot, so the only thing that can
+// tell the client it exists is the open itself. This used to depend on a page
+// lifecycle event that about:blank does not reliably produce, and a client that
+// pressed "new tab" was sometimes left with no tab at all.
+func TestOpenTabIsAnnouncedBeforeItHasContent(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(""); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for {
+		if st, ok := cl.TabState(1); ok {
+			if st.URL != "about:blank" {
+				t.Fatalf("announced url = %q, want about:blank", st.URL)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("opening a tab never announced it")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 

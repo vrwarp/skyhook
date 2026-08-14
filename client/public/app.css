@@ -125,3 +125,52 @@ body {
 
 #composer { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #374151; }
 #composer input { flex: 1; background: #111827; color: var(--fg); border: 1px solid #374151; border-radius: 6px; padding: 6px; }
+
+/* --- PWA shell ------------------------------------------------------------ */
+
+/* The mirror area fills everything below the chrome strip. */
+#frames {
+  position: absolute;
+  inset: 88px 0 0 0;
+  background: #fff;
+}
+
+#frames iframe.mirror {
+  display: none;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+/* An outage is worth saying out loud: the page on screen is cached, not live. */
+#frames iframe.mirror.stale { filter: saturate(0.6); }
+
+#pairing {
+  max-width: 560px;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  background: #0b1220;
+  color: var(--fg);
+}
+
+#pairing::backdrop { background: rgba(0, 0, 0, .6); }
+#pairing h2 { margin-top: 0; }
+#pairing p { color: var(--muted); }
+#pairing textarea {
+  width: 100%;
+  background: #111827;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  font: 12px/1.5 ui-monospace, monospace;
+  padding: 8px;
+}
+#pairing button {
+  background: #1f2937;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 6px 14px;
+}
+.error { color: var(--bad); min-height: 1.2em; }

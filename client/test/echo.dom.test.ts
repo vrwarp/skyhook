@@ -4,7 +4,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { EchoEngine, mapCaret } from '../src/preload/echo.js';
+import { EchoEngine, mapCaret } from '../src/mirror/echo.js';
 
 interface Sent {
   text: string[];
@@ -18,11 +18,11 @@ function setup() {
   const input = document.getElementById('box') as HTMLInputElement;
   const sent: Sent = { text: [], keys: [], values: [], focus: [] };
   const echo = new EchoEngine(document, {
-    idOf: (node) => (node === input ? 42 : 0),
-    sendText: (_node, text) => sent.text.push(text),
-    sendKey: (_node, key) => sent.keys.push(key),
-    sendValue: (_node, value) => sent.values.push(value),
-    sendFocus: (_node, focused) => sent.focus.push(focused),
+    idOf: (node: Node | null) => (node === input ? 42 : 0),
+    sendText: (_node: number, text: string) => sent.text.push(text),
+    sendKey: (_node: number, key: string) => sent.keys.push(key),
+    sendValue: (_node: number, value: string) => sent.values.push(value),
+    sendFocus: (_node: number, focused: boolean) => sent.focus.push(focused),
     onChatSend: () => true,
   });
   // Events are dispatched for real rather than synthesised with a forged
