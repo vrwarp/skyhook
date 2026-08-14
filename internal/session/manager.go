@@ -109,35 +109,35 @@ func (m *Manager) Serve(conn transport.Conn) {
 	helloCancel()
 	if err != nil {
 		log.Warn("no hello", "err", err)
-		_ = conn.Close(1, "no hello")
+		_ = conn.Close(protocol.CloseBadHello, "no hello")
 		return
 	}
 	_, frame, err := bootstrap.DecodeFrame(msg.Payload)
 	if err != nil || frame.Type != protocol.TypeHello {
 		log.Warn("bad hello", "err", err)
-		_ = conn.Close(1, "bad hello")
+		_ = conn.Close(protocol.CloseBadHello, "bad hello")
 		return
 	}
 	var hello protocol.Hello
 	if err := frame.DecodeBody(&hello); err != nil {
-		_ = conn.Close(1, "bad hello body")
+		_ = conn.Close(protocol.CloseBadHello, "bad hello body")
 		return
 	}
 	if !m.authorize(hello.Token) {
 		log.Warn("unauthorized client")
-		_ = conn.Close(2, "unauthorized")
+		_ = conn.Close(protocol.CloseUnauthorized, "unauthorized")
 		return
 	}
 	if hello.Version != protocol.Version {
 		log.Warn("protocol mismatch", "client", hello.Version, "server", protocol.Version)
-		_ = conn.Close(3, "protocol version mismatch")
+		_ = conn.Close(protocol.CloseVersionMismatch, "protocol version mismatch")
 		return
 	}
 
 	sess, resumed, err := m.resolve(ctx, hello)
 	if err != nil {
 		log.Error("session setup failed", "err", err)
-		_ = conn.Close(4, err.Error())
+		_ = conn.Close(protocol.CloseSetupFailed, err.Error())
 		return
 	}
 	sess.Attach(conn)

@@ -2,6 +2,7 @@ package protocol_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -219,5 +220,43 @@ func TestChannelPriorityOrdering(t *testing.T) {
 	}
 	if protocol.ChMedia.Priority() >= protocol.ChBulk.Priority() {
 		t.Fatal("media must outrank bulk")
+	}
+}
+
+// A page big enough to fill the sample cap used to take the server with it: the
+// hourly trainer handed zstd a sample larger than a compression block, the
+// encoder walked off the front of its own history buffer, and the panic on the
+// trainer's goroutine ended the process. Every session died, and the client
+// spent the restart being told its pairing was no good.
+func TestTrainingSurvivesOversizeSamples(t *testing.T) {
+	tr := protocol.NewDictTrainer()
+	// Larger than any block zstd will encode, and larger than the trainer's own
+	// cap, so this exercises both the observe path and the train path.
+	tr.MaxSample = 1 << 20
+	for i := 0; i < 32; i++ {
+		var b strings.Builder
+		for b.Len() < 300<<10 {
+			fmt.Fprintf(&b, `<div class="ajA ajC" data-id="%d-%d"><span>row %d</span></div>`, i, b.Len(), i)
+		}
+		tr.Observe("https://mail.google.com", []byte(b.String()))
+	}
+	id, dict, err := tr.Train("https://mail.google.com")
+	if err != nil {
+		t.Fatalf("train: %v", err)
+	}
+	if id == 0 || len(dict) == 0 {
+		t.Fatal("empty dictionary")
+	}
+}
+
+// Samples too short for zstd to look at must not count towards "enough to
+// train": training on them produces a dictionary built from nothing.
+func TestTrainingIgnoresUnusableSamples(t *testing.T) {
+	tr := protocol.NewDictTrainer()
+	for i := 0; i < 4096; i++ {
+		tr.Observe("https://example.com", []byte("x"))
+	}
+	if _, _, err := tr.Train("https://example.com"); !errors.Is(err, protocol.ErrNotEnoughSamples) {
+		t.Fatalf("want ErrNotEnoughSamples, got %v", err)
 	}
 }

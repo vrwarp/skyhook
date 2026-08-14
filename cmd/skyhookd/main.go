@@ -46,15 +46,7 @@ func main() {
 	}
 	log := newLogger(cfg.LogLevel)
 
-	if cfg.Token == "" {
-		cfg.Token = session.NewToken()
-		if *configPath != "" {
-			if err := cfg.Save(*configPath); err != nil {
-				log.Warn("could not persist generated token", "err", err)
-			}
-		}
-		log.Info("generated pairing token", "token", cfg.Token)
-	}
+	ensureToken(&cfg, *configPath, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -103,6 +95,40 @@ func main() {
 		fatal("serve", err)
 	}
 	log.Info("skyhook server stopped")
+}
+
+// ensureToken settles what this server will accept as a credential, in the
+// order the operator would expect: what they configured, then what this server
+// generated last time, and only then a new one.
+//
+// The middle step is the one that matters. The token is the whole of the
+// client's authentication, and a restart that mints a new one silently
+// un-pairs every client that was working a moment ago — they connect, get
+// rejected, reconnect, and flap between "offline" and "connected" forever,
+// while the server logs an unauthorized client and neither end says the token
+// changed. Restarts are not rare: a crash, an image upgrade, a reboot.
+//
+// So a generated token is written next to the data it protects and read back on
+// the next start. A config file gets it too when there is one, because that is
+// where an operator looks.
+func ensureToken(cfg *config.Config, configPath string, log *slog.Logger) {
+	generated, err := cfg.EnsureToken(session.NewToken)
+	if err != nil {
+		// Loud, because the consequence lands one restart later and looks like
+		// something else entirely.
+		log.Error("could not persist the generated token; "+
+			"a restart will generate another one and reject every paired client",
+			"path", cfg.TokenPath(), "err", err)
+	}
+	if !generated {
+		return
+	}
+	if configPath != "" {
+		if err := cfg.Save(configPath); err != nil {
+			log.Warn("could not write the generated token to the config file", "err", err)
+		}
+	}
+	log.Info("generated pairing token", "token", cfg.Token)
 }
 
 // demoConfig points a configuration at this machine only. Anything the demo

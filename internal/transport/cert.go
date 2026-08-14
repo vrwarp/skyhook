@@ -152,6 +152,47 @@ func GenerateSelfSigned(dir string, hosts []string, validity time.Duration) (*Ce
 	return bundle, nil
 }
 
+// LoadSelfSigned reads back a certificate GenerateSelfSigned left in dir.
+//
+// A generated certificate is not a detail of one run: the client pins its
+// SHA-256 from the pairing file and refuses anything else. Minting a new one on
+// every start therefore breaks every client that paired with the last one, for
+// the same reason and with the same symptom as a regenerated token. os.ErrNotExist
+// means there is nothing to reuse, which is the first-run case.
+func LoadSelfSigned(dir string) (*CertBundle, error) {
+	if dir == "" {
+		return nil, os.ErrNotExist
+	}
+	b, err := LoadCert(filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"))
+	if err != nil {
+		return nil, err
+	}
+	b.SelfSigned = true
+	return b, nil
+}
+
+// Covers reports whether the certificate is valid for every host it has to
+// serve. An operator who changes `hosts` has invalidated the stored one, and
+// reusing it would serve a name it does not carry.
+func (b *CertBundle) Covers(hosts []string) bool {
+	if b == nil || b.TLS == nil || len(b.TLS.Certificates) == 0 {
+		return false
+	}
+	leaf := b.TLS.Certificates[0].Leaf
+	if leaf == nil {
+		return false
+	}
+	for _, h := range hosts {
+		if h == "" {
+			continue
+		}
+		if err := leaf.VerifyHostname(h); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // NeedsRotation reports whether a self-signed pin is close enough to expiry
 // that the server should mint a new one (Chromium refuses certificates whose
 // validity window exceeds 14 days, so rotation is routine, not exceptional).

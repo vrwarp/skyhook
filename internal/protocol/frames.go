@@ -16,6 +16,28 @@ import (
 // server must agree exactly; there is a single user and both ends ship together.
 const Version = 1
 
+// Close codes, sent when the server hangs up on a client. They exist so the
+// client can tell a link that dropped from a link it will never be allowed on:
+// the first is worth retrying immediately and forever, the second is worth
+// stopping for and telling the user to pair again. Retrying the second is how a
+// client ends up flapping between "offline" and "connected" indefinitely.
+//
+// The client mirrors these in client/src/shared/protocol.ts.
+const (
+	// CloseNormal is an orderly hang-up: session over, or replaced.
+	CloseNormal uint32 = 0
+	// CloseBadHello means the first frame was missing or undecodable.
+	CloseBadHello uint32 = 1
+	// CloseUnauthorized means the token was not this server's. Fatal: the
+	// credential has to change before a reconnect can go any differently.
+	CloseUnauthorized uint32 = 2
+	// CloseVersionMismatch means the two halves are not the same build. Fatal:
+	// the client has to be reloaded, not reconnected.
+	CloseVersionMismatch uint32 = 3
+	// CloseSetupFailed means the session could not be built. Retryable.
+	CloseSetupFailed uint32 = 4
+)
+
 // Channel identifies a logical stream. Channels map onto real QUIC streams in
 // the WebTransport transport and onto a length-prefixed mux in the WebSocket
 // fallback.

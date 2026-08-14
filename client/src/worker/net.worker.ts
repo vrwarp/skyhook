@@ -17,7 +17,7 @@ import {
   encodeFrame, frameMessage, helloBody, imageWantBody, inputBody, navigateBody, resyncBody,
   scrollBody, unframeMessage, viewportBody, InputEventInit,
 } from '../shared/codec.js';
-import { Channel, FrameType, Viewport } from '../shared/protocol.js';
+import { Channel, CloseCode, FrameType, isFatalClose, Viewport } from '../shared/protocol.js';
 import { Transport, TransportConfig } from '../app/transport.js';
 
 /** Everything the worker needs to reach the server. */
@@ -46,26 +46,42 @@ let statsTick: ReturnType<typeof setInterval> | null = null;
 let serverStats: Record<string, unknown> = {};
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = 500;
+/**
+ * Set when the server refused this client outright. Reconnecting on the same
+ * credential produces the same refusal, so the loop stops here and waits for a
+ * new pairing or an explicit retry — otherwise the app spends forever
+ * alternating between "offline" and "connected" a second apart.
+ */
+let refused: 'unauthorized' | 'version' | null = null;
 
 function post(kind: string, args: Record<string, unknown>, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage({ kind, args }, transfer);
 }
 
 async function connect(): Promise<void> {
-  if (!pairing) return;
+  if (!pairing || refused) return;
   transport = new Transport(pairing, {
     onOpen: (kind) => {
       online = true;
-      reconnectDelay = 500;
+      // Note that the backoff is *not* reset here. An open socket is not a
+      // working session: a server that rejects the token accepts the socket
+      // first and hangs up a moment later, and resetting on open turns that
+      // into a tight loop. The reset lives in the Welcome handler, where the
+      // connection has actually got somewhere.
       post('status', { online: true, kind });
       sendHello();
     },
-    onClose: (reason) => {
+    onClose: (reason, code) => {
       if (!online) return;
       online = false;
       if (statsTick) {
         clearInterval(statsTick);
         statsTick = null;
+      }
+      if (isFatalClose(code)) {
+        refused = code === CloseCode.Unauthorized ? 'unauthorized' : 'version';
+        post('status', { online: false, kind: 'none', reason, refused });
+        return;
       }
       post('status', { online: false, kind: 'none', reason });
       scheduleReconnect();
@@ -140,6 +156,9 @@ function handleMessage(msg: Uint8Array): void {
     case FrameType.Welcome: {
       const w = decodeWelcome(frame.body);
       sessionId = w.sessionId;
+      // A session that reached Welcome is the only evidence that connecting
+      // works, so this is where the backoff earns its reset.
+      reconnectDelay = 500;
       post('welcome', w as unknown as Record<string, unknown>);
       // A resumed session hands back tabs that kept running while we were
       // gone; ask for whatever we do not already hold.
@@ -256,6 +275,10 @@ self.addEventListener('message', (event: MessageEvent) => {
     case 'configure':
       pairing = cmd.args.pairing as Pairing;
       viewport = (cmd.args.viewport as Viewport) ?? viewport;
+      // A new pairing is a new credential, which is exactly what a refusal was
+      // waiting for.
+      refused = null;
+      reconnectDelay = 500;
       void connect();
       break;
     case 'openTab':
@@ -320,6 +343,10 @@ self.addEventListener('message', (event: MessageEvent) => {
       void send(Channel.Ctrl, encodeFrame(FrameType.Kill, 0));
       break;
     case 'reconnect':
+      // Asking for it by hand overrides a refusal: the server may have been
+      // restarted, or repaired, since it last said no.
+      refused = null;
+      reconnectDelay = 500;
       transport?.close();
       void connect();
       break;

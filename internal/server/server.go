@@ -436,6 +436,12 @@ func (s *Server) dictTrainerLoop(ctx context.Context) {
 			for _, origin := range tr.Origins() {
 				id, dict, err := tr.Train(origin)
 				if err != nil {
+					// Too little traffic from an origin to train on is the
+					// common case and says nothing; anything else is the
+					// compressor refusing, and is worth a line.
+					if !errors.Is(err, protocol.ErrNotEnoughSamples) {
+						s.log.Warn("dictionary training failed", "origin", origin, "err", err)
+					}
 					continue
 				}
 				name := filepath.Join(dir, fmt.Sprintf("%s-%08x.dict", sanitize(origin), id))
@@ -484,6 +490,27 @@ func loadOrCreateCert(cfg config.Config, log *slog.Logger) (*transport.CertBundl
 	// A short-lived self-signed certificate is not a compromise here: the client
 	// pins its exact SHA-256 from the pairing file, which is strictly stronger
 	// than trusting the public CA set.
+	//
+	// Which is also why the one from last time is reused while it is still good.
+	// The pin the client stores has to keep matching what the server serves, and
+	// a restart is not a reason to invalidate it — certificate rotation is, and
+	// it has its own loop, which says out loud when it happens.
+	if b, err := transport.LoadSelfSigned(cfg.CertDir()); err == nil {
+		switch {
+		case b.NeedsRotation():
+			log.Info("stored certificate is close to expiry; generating a new one",
+				"expires", b.NotAfter.Format(time.RFC3339))
+		case !b.Covers(cfg.Hosts):
+			log.Info("stored certificate does not cover the configured hosts; " +
+				"generating a new one")
+		default:
+			log.Info("using the stored self-signed certificate",
+				"fingerprint", b.FingerprintHex(), "expires", b.NotAfter.Format(time.RFC3339))
+			return b, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Warn("stored certificate unreadable; generating a new one", "err", err)
+	}
 	b, err := transport.GenerateSelfSigned(cfg.CertDir(), cfg.Hosts, 0)
 	if err != nil {
 		return nil, err

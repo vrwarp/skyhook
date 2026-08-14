@@ -210,14 +210,27 @@ func (c *wsConn) Stats() Stats {
 	return Stats{RTT: rtt, BytesSent: c.sent.Load(), BytesRecv: c.recv.Load()}
 }
 
-func (c *wsConn) Close(_ uint32, reason string) error {
+func (c *wsConn) Close(code uint32, reason string) error {
 	c.writeMu.Lock()
 	_ = c.c.WriteControl(websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason),
+		websocket.FormatCloseMessage(wsCloseCode(code), reason),
 		time.Now().Add(time.Second))
 	c.writeMu.Unlock()
 	c.shutdown()
 	return c.c.Close()
+}
+
+// wsCloseCode carries a Skyhook close code over a WebSocket.
+//
+// The reason string is the same either way, but a browser hands script the
+// close *reason* only when it arrives, and hands it the code always — so the
+// code is the part a reconnect loop can be built on. 4000-4999 is the range
+// reserved for private use, which is exactly what these are.
+func wsCloseCode(code uint32) int {
+	if code == protocol.CloseNormal || code > 999 {
+		return websocket.CloseNormalClosure
+	}
+	return 4000 + int(code)
 }
 
 func (c *wsConn) shutdown() {

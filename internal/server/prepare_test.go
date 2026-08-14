@@ -55,3 +55,59 @@ func TestPrepareNeedsNoBrowser(t *testing.T) {
 		}
 	}
 }
+
+// The client pins the fingerprint of a self-signed certificate, so the server
+// has to keep serving the same one. Regenerating on every start invalidates
+// that pin, and the client — which is doing exactly what it was told — refuses
+// the server it paired with until someone pairs it again.
+func TestCertificateSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.Hosts = []string{"vps.example.com"}
+	cfg.Token = "prepare-token"
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	first, err := loadOrCreateCert(cfg, log)
+	if err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	second, err := loadOrCreateCert(cfg, log)
+	if err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	if first.FingerprintB64() != second.FingerprintB64() {
+		t.Fatalf("the pin changed across a restart: %s then %s",
+			first.FingerprintHex(), second.FingerprintHex())
+	}
+	if !second.SelfSigned {
+		t.Error("a reloaded self-signed certificate must still rotate")
+	}
+}
+
+// Reuse stops where it would be wrong: a certificate that does not name the
+// host the server now answers on is not the one to serve.
+func TestCertificateIsReplacedWhenHostsChange(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.Hosts = []string{"vps.example.com"}
+	cfg.Token = "prepare-token"
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	first, err := loadOrCreateCert(cfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Hosts = []string{"other.example.com"}
+	second, err := loadOrCreateCert(cfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FingerprintB64() == second.FingerprintB64() {
+		t.Fatal("reused a certificate that does not cover the configured host")
+	}
+	if !second.Covers([]string{"other.example.com"}) {
+		t.Error("the replacement does not cover the host either")
+	}
+}

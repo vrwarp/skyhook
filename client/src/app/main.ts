@@ -219,9 +219,11 @@ function handle(kind: string, args: Record<string, unknown>): void {
       const online = args.online === true;
       const changed = online !== connected;
       connected = online;
-      renderStatus(online, String(args.kind ?? ''), args.reason as string | undefined);
+      const refused = args.refused as 'unauthorized' | 'version' | undefined;
+      renderStatus(online, String(args.kind ?? ''), args.reason as string | undefined, refused);
       for (const h of hosts.values()) h.setOffline(!online);
       if (changed) renderTabs();
+      if (refused) showRefusal(refused);
       break;
     }
     case 'stats':
@@ -640,10 +642,40 @@ function renderStats(s: Partial<Stats> & { rttMs?: number }): void {
   }
 }
 
-function renderStatus(online: boolean, kind: string, reason?: string): void {
+function renderStatus(
+  online: boolean, kind: string, reason?: string,
+  refused?: 'unauthorized' | 'version',
+): void {
   el.hudState.className = online ? 'online' : 'offline';
   el.hudState.textContent = online ? kind.replace('web', '') : 'offline';
+  if (refused) el.hudState.textContent = refused === 'version' ? 'stale' : 'unpaired';
   el.hudState.title = reason ?? '';
+}
+
+/**
+ * A refusal is not an outage, and showing it as one is what makes it baffling:
+ * the link is fine, the server is up, and it will keep saying no until the
+ * credential changes. So say which it is, and put the way out of it on screen.
+ *
+ * The usual cause is a server that came back with a new token — a restart
+ * without a persisted one used to do this — so the pairing dialog is the fix,
+ * with a fresh pairing link or the server's pairing.json.
+ */
+function showRefusal(refused: 'unauthorized' | 'version'): void {
+  if (refused === 'version') {
+    log('server refused the connection: client and server are different builds');
+    if (!el.pairing.open) {
+      el.pairingError.textContent =
+        'This client and the server are different builds. Reload the page to pick up the '
+        + 'version the server is serving.';
+    }
+    return;
+  }
+  log('server refused the pairing token');
+  el.pairingError.textContent =
+    'The server no longer accepts this pairing. It has most likely been restarted with a '
+    + 'new token: open a fresh pairing link, or paste the current pairing.json below.';
+  if (!el.pairing.open) el.pairing.showModal();
 }
 
 function log(message: string): void {
