@@ -96,8 +96,14 @@ sets `SKYHOOK_WEB_ROOT` already; a bare-metal install should either set the path
 or copy the build to `<dataDir>/webapp`. With neither present the server serves a
 page explaining how to build it, rather than nothing at all.
 
-A missing token is generated on first start and written back to the config file
-when one was supplied.
+A missing token is generated on first start and kept in `<dataDir>/token`, so a
+restart comes back with the credential its clients already hold. It is written
+back to the config file as well when one was supplied. Set `token` (or
+`SKYHOOK_TOKEN`) to pin it yourself; that always wins.
+
+Deleting `<dataDir>/token` re-pairs the deployment: the next start generates a
+new token and logs a new pairing link, and every client paired with the old one
+is refused until it opens that link.
 
 ### Loopback demo mode
 
@@ -351,7 +357,9 @@ page state, and that should be your decision rather than a merge's.
 | The app shows "The client has not been built" | `webRoot` is unset or wrong. Build `client/` and point at `client/dist`. |
 | The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. |
 | Stale UI after a deploy | The service worker serves its cache first and refreshes behind you. Reload twice, or use the browser's "Update on reload". |
-| `unauthorized` on connect | Token mismatch: re-read `pairing.json`. |
+| `unauthorized` on connect | Token mismatch: re-read `pairing.json`. The client says `unpaired` in the HUD and opens its pairing dialog rather than retrying. |
+| HUD alternates between offline and connected every second or two | The server is refusing the token on every attempt. Older builds retried it forever; check the server log for `unauthorized client`, and for a restart just before it — a server that generated a fresh token has un-paired every client. Pair again from the link in the log. |
+| Server restarts on its own, log ends in a `panic` | Whatever the trace names, and worth reporting. The restart itself is the visible part: sessions are gone and the browser starts cold. |
 | Behind a proxy: the app loads, the HUD stays offline | The pairing names the container's ports, not the proxy's. Set `publicUrl` (and `behindProxy`), restart, and re-pair with the new link — the old one is stored in IndexedDB until it is replaced. |
 | Behind a proxy: connects, then drops after ~60s of idle | The proxy's idle timeout, not the link. Raise `proxy_read_timeout` (nginx); see [behind a reverse proxy](#behind-a-reverse-proxy). |
 | Behind a proxy: console shows a `connect-src` violation | `publicUrl` is not the origin the page was opened on. They have to match exactly, port included. |

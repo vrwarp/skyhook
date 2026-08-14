@@ -3,12 +3,28 @@ package protocol
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"sort"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// maxTrainSample bounds a single training sample.
+//
+// zstd compresses each sample as one block, and the encoder's history buffer is
+// only guaranteed to hold the dictionary content plus one 128 KiB block. Hand
+// it a larger sample and it tries to slide a window that was never filled,
+// indexes the buffer from a negative offset and panics — inside the trainer's
+// own goroutine, which ends the process rather than the dictionary. Mirror
+// frames are far below this anyway, so the cap costs nothing.
+const maxTrainSample = 64 << 10
+
+// minTrainSample is the shortest sample zstd will look at; anything smaller is
+// dropped by the encoder, so counting it towards "enough to train" would let
+// training run on nothing.
+const minTrainSample = 8
 
 // DictTrainer accumulates recent frame payloads per origin and trains zstd
 // dictionaries from them. Minified-class-heavy DOMs (Google apps) compress
@@ -32,7 +48,7 @@ func NewDictTrainer() *DictTrainer {
 	return &DictTrainer{
 		samples:   map[string][][]byte{},
 		bytes:     map[string]int{},
-		MaxSample: 256 << 10,
+		MaxSample: maxTrainSample,
 		MaxBytes:  16 << 20,
 		MaxCount:  4096,
 		DictSize:  110 << 10,
@@ -65,6 +81,10 @@ func (t *DictTrainer) Observe(origin string, payload []byte) {
 // ErrNotEnoughSamples means training would produce a useless dictionary.
 var ErrNotEnoughSamples = errors.New("protocol: not enough samples to train")
 
+// ErrTrainFailed means the compressor gave up on this origin's samples. It is a
+// dictionary that does not get built, and nothing else.
+var ErrTrainFailed = errors.New("protocol: dictionary training failed")
+
 // Train builds a dictionary for an origin. The returned id is a checksum of the
 // dictionary bytes so both ends can identify it without a registry.
 //
@@ -76,8 +96,19 @@ var ErrNotEnoughSamples = errors.New("protocol: not enough samples to train")
 // structural boilerplate almost verbatim.
 func (t *DictTrainer) Train(origin string) (id uint32, dict []byte, err error) {
 	t.mu.Lock()
-	src := make([][]byte, len(t.samples[origin]))
-	copy(src, t.samples[origin])
+	src := make([][]byte, 0, len(t.samples[origin]))
+	for _, s := range t.samples[origin] {
+		// MaxSample is a field an operator can raise, and samples observed
+		// before it was lowered are still in hand, so the ceiling is enforced
+		// here too — this is the call that would otherwise panic.
+		if len(s) > maxTrainSample {
+			s = s[:maxTrainSample]
+		}
+		if len(s) < minTrainSample {
+			continue
+		}
+		src = append(src, s)
+	}
 	t.mu.Unlock()
 
 	if len(src) < 8 {
@@ -101,7 +132,7 @@ func (t *DictTrainer) Train(origin string) (id uint32, dict []byte, err error) {
 		raw = raw[len(raw)-t.DictSize:]
 	}
 
-	dict, err = zstd.BuildDict(zstd.BuildDictOptions{
+	dict, err = buildDict(zstd.BuildDictOptions{
 		ID:       crc32.ChecksumIEEE([]byte(origin)) | 1,
 		Contents: src,
 		History:  raw,
@@ -111,6 +142,22 @@ func (t *DictTrainer) Train(origin string) (id uint32, dict []byte, err error) {
 		return 0, nil, err
 	}
 	return crc32.ChecksumIEEE(dict) | 1, dict, nil
+}
+
+// buildDict calls the compressor with a recover around it.
+//
+// Training runs on its own goroutine over bytes from whatever page the user
+// opened, so a panic in there is an unhandled one: the process dies, every tab
+// dies with it, and the client comes back to a server that has forgotten
+// everything. The sample cap above is the fix for the panic we know about; this
+// is the reason the next one costs a dictionary instead of the session.
+func buildDict(o zstd.BuildDictOptions) (dict []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			dict, err = nil, fmt.Errorf("%w: %v", ErrTrainFailed, r)
+		}
+	}()
+	return zstd.BuildDict(o)
 }
 
 // Origins lists origins with samples, most sampled first.

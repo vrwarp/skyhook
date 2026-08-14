@@ -46,6 +46,33 @@ export enum FrameType {
   Viewport = 26,
 }
 
+/**
+ * Why the server hung up. Mirrors the close codes in internal/protocol.
+ *
+ * The distinction that matters is whether reconnecting could go any better. A
+ * dropped link is worth retrying forever; a refused credential is not, and
+ * retrying it is how a client ends up alternating between "offline" and
+ * "connected" every couple of seconds without ever saying what is wrong.
+ */
+export enum CloseCode {
+  Normal = 0,
+  BadHello = 1,
+  Unauthorized = 2,
+  VersionMismatch = 3,
+  SetupFailed = 4,
+}
+
+/** WebSocket carries the server's code in the private 4000-4999 range. */
+export function closeCodeFromSocket(code: number): CloseCode {
+  if (code > 4000 && code < 5000) return (code - 4000) as CloseCode;
+  return CloseCode.Normal;
+}
+
+/** Whether a close is one that reconnecting cannot fix. */
+export function isFatalClose(code: CloseCode | undefined): boolean {
+  return code === CloseCode.Unauthorized || code === CloseCode.VersionMismatch;
+}
+
 export enum NodeKind {
   Element = 1,
   Text = 3,

@@ -102,7 +102,7 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 // Attach binds a connection to the session, replacing any previous one.
 func (s *Session) Attach(c transport.Conn) {
 	if old := s.conn.Swap(&connHolder{conn: c}); old != nil && old.conn != nil {
-		_ = old.conn.Close(0, "replaced by newer connection")
+		_ = old.conn.Close(protocol.CloseNormal, "replaced by newer connection")
 	}
 	s.mu.Lock()
 	s.lastSeen = time.Now()
@@ -556,7 +556,7 @@ func (s *Session) Close(ctx context.Context) {
 			_ = a.Stop(ctx)
 		}
 		if h := s.conn.Load(); h != nil && h.conn != nil {
-			_ = h.conn.Close(0, "session closed")
+			_ = h.conn.Close(protocol.CloseNormal, "session closed")
 		}
 		s.codec.Close()
 	})

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,5 +202,56 @@ func TestPublicURLFromTheEnvironment(t *testing.T) {
 	ep, ok := cfg.Public()
 	if !ok || ep.Host != "skyhook.example.com" {
 		t.Fatalf("public endpoint = %+v (ok=%v)", ep, ok)
+	}
+}
+
+// The token is the client's whole credential. A server that mints a fresh one
+// on every start rejects every client that paired with the last one — which is
+// what a crash-restart loop looked like from the plane side: connect, refused,
+// reconnect, forever.
+func TestGeneratedTokenSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	minted := 0
+	mint := func() string {
+		minted++
+		return fmt.Sprintf("token-%d", minted)
+	}
+
+	first := Config{DataDir: dir}
+	generated, err := first.EnsureToken(mint)
+	if err != nil || !generated {
+		t.Fatalf("first start: generated=%v err=%v", generated, err)
+	}
+
+	// A restart with no config file at all — the container case, where every
+	// setting arrives through the environment.
+	second := Config{DataDir: dir}
+	generated, err = second.EnsureToken(mint)
+	if err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	if generated {
+		t.Error("a restart generated a new token instead of reusing the stored one")
+	}
+	if second.Token != first.Token {
+		t.Fatalf("token changed across a restart: %q then %q", first.Token, second.Token)
+	}
+}
+
+// An explicitly configured token is the operator's decision and outranks
+// anything left in the data directory.
+func TestConfiguredTokenWins(t *testing.T) {
+	dir := t.TempDir()
+	stored := Config{DataDir: dir}
+	if _, err := stored.EnsureToken(func() string { return "generated" }); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{DataDir: dir, Token: "from-the-operator"}
+	generated, err := cfg.EnsureToken(func() string { return "generated" })
+	if err != nil || generated {
+		t.Fatalf("generated=%v err=%v", generated, err)
+	}
+	if cfg.Token != "from-the-operator" {
+		t.Fatalf("token = %q", cfg.Token)
 	}
 }

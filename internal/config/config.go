@@ -375,6 +375,42 @@ func (c Config) ImageCacheDir() string { return filepath.Join(c.DataDir, "images
 // PairingPath is where the pairing file is written.
 func (c Config) PairingPath() string { return filepath.Join(c.DataDir, "pairing.json") }
 
+// TokenPath is where a generated token is kept.
+//
+// It lives in the data directory rather than in the configuration file because
+// the data directory is the one thing every deployment persists — a container
+// started with environment variables and no config file still has it. A token
+// that does not survive a restart is worse than no token at all: the server
+// comes back with a new one, and every paired client is now a client the server
+// refuses, with nothing on either side saying why.
+func (c Config) TokenPath() string { return filepath.Join(c.DataDir, "token") }
+
+// EnsureToken settles what this server will accept as a credential, in the
+// order an operator would expect: what they configured, then what this server
+// generated last time, and only then a new one. It reports whether it had to
+// generate one, and any failure to persist it — the token is usable either way,
+// but a token that was not written down is one restart away from locking out
+// every paired client.
+//
+// mint is the generator, injected so this package does not depend on the
+// session package for one function.
+func (c *Config) EnsureToken(mint func() string) (generated bool, err error) {
+	if c.Token != "" {
+		return false, nil
+	}
+	if data, rerr := os.ReadFile(c.TokenPath()); rerr == nil {
+		if tok := strings.TrimSpace(string(data)); tok != "" {
+			c.Token = tok
+			return false, nil
+		}
+	}
+	c.Token = mint()
+	if err := os.MkdirAll(c.DataDir, 0o700); err != nil {
+		return true, err
+	}
+	return true, os.WriteFile(c.TokenPath(), []byte(c.Token+"\n"), 0o600)
+}
+
 // Save writes the configuration back, used after generating a token.
 func (c Config) Save(path string) error {
 	if path == "" {

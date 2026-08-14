@@ -10,12 +10,17 @@
  * The WebSocket fallback exists for networks that block UDP outright — some
  * in-flight providers do — and is wire-compatible above the framing layer.
  */
-import { Channel } from '../shared/protocol.js';
+import { Channel, CloseCode, closeCodeFromSocket } from '../shared/protocol.js';
 
 export interface TransportEvents {
   onMessage(channel: Channel, payload: Uint8Array): void;
   onOpen(kind: 'webtransport' | 'websocket'): void;
-  onClose(reason: string): void;
+  /**
+   * The link went away. `code` is the server's reason for hanging up when it
+   * gave one, which is what tells a reconnect worth making from one that will
+   * be refused exactly the same way.
+   */
+  onClose(reason: string, code?: CloseCode): void;
   onStats?(stats: { bytesSent: number; bytesRecv: number; rttMs: number }): void;
 }
 
@@ -85,7 +90,11 @@ export class Transport {
     void this.readIncomingStreams(wt);
     void this.readDatagrams(wt);
     void wt.closed
-      .then(() => this.handleClose('server closed the session'))
+      .then((info: { closeCode?: number; reason?: string } | undefined) => {
+        const code = (info?.closeCode ?? CloseCode.Normal) as CloseCode;
+        const why = info?.reason ? `: ${info.reason}` : '';
+        this.handleClose(`server closed the session${why}`, code);
+      })
       .catch((err: unknown) => this.handleClose(String(err)));
   }
 
@@ -101,7 +110,10 @@ export class Transport {
         resolve();
       };
       ws.onerror = () => reject(new Error(`websocket connect failed: ${url}`));
-      ws.onclose = (ev) => this.handleClose(`websocket closed: ${ev.code}`);
+      ws.onclose = (ev) => this.handleClose(
+        ev.reason ? `websocket closed: ${ev.reason}` : `websocket closed: ${ev.code}`,
+        closeCodeFromSocket(ev.code),
+      );
       ws.onmessage = (ev) => {
         const data = new Uint8Array(ev.data as ArrayBuffer);
         this.bytesRecv += data.length;
@@ -224,14 +236,14 @@ export class Transport {
     return { bytesSent: this.bytesSent, bytesRecv: this.bytesRecv, rttMs };
   }
 
-  private handleClose(reason: string): void {
+  private handleClose(reason: string, code?: CloseCode): void {
     if (this.closed) return;
     this.closed = true;
     this.writers.clear();
     this.wt = null;
     this.ws = null;
     this.kind = 'none';
-    this.events.onClose(reason);
+    this.events.onClose(reason, code);
   }
 
   close(): void {
