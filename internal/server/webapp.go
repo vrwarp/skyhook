@@ -28,10 +28,21 @@ type webapp struct {
 // The client makes exactly one network connection — the WebTransport session —
 // and everything else it needs is local. The policy says so.
 func (w *webapp) csp() string {
-	wt := fmt.Sprintf("https://%s:%d", firstHost(w.cfg.Hosts), portOf(w.cfg.Listen))
-	ws := ""
+	host := firstHost(w.cfg.Hosts)
+	wt := fmt.Sprintf("https://%s:%d", host, portOf(w.cfg.Listen))
+	sockScheme := "wss"
+	if w.cfg.InsecureLoopback {
+		// No QUIC listener exists in loopback mode, and the socket is plain.
+		wt = ""
+		sockScheme = "ws"
+	}
+	connect := []string{"connect-src", "'self'"}
+	if wt != "" {
+		connect = append(connect, wt)
+	}
 	if w.cfg.WebSocketFallback {
-		ws = fmt.Sprintf(" wss://%s:%d", firstHost(w.cfg.Hosts), portOf(w.cfg.FallbackListen))
+		connect = append(connect,
+			fmt.Sprintf("%s://%s:%d", sockScheme, host, portOf(w.cfg.FallbackListen)))
 	}
 	return strings.Join([]string{
 		"default-src 'none'",
@@ -43,7 +54,7 @@ func (w *webapp) csp() string {
 		"manifest-src 'self'",
 		// The mirror frames are same-origin about:blank documents.
 		"frame-src 'self'",
-		"connect-src 'self' " + wt + ws,
+		strings.Join(connect, " "),
 		"form-action 'none'",
 		"base-uri 'none'",
 		"frame-ancestors 'none'",
@@ -137,6 +148,10 @@ or copy the build into <code>&lt;dataDir&gt;/webapp</code>, and restart.</p>
 // The token rides in the fragment, which browsers never send to a server.
 func PairingLink(cfg config.Config, certHash string) string {
 	host := firstHost(cfg.Hosts)
+	scheme, sockScheme := "https", "wss"
+	if cfg.InsecureLoopback {
+		scheme, sockScheme, certHash = "http", "ws", ""
+	}
 	frag := url.Values{}
 	frag.Set("token", cfg.Token)
 	frag.Set("host", host)
@@ -146,9 +161,10 @@ func PairingLink(cfg config.Config, certHash string) string {
 		frag.Set("cert", certHash)
 	}
 	if cfg.WebSocketFallback {
-		frag.Set("fallback", fmt.Sprintf("wss://%s:%d%s", host, portOf(cfg.FallbackListen), cfg.Path))
+		frag.Set("fallback",
+			fmt.Sprintf("%s://%s:%d%s", sockScheme, host, portOf(cfg.FallbackListen), cfg.Path))
 	}
-	return fmt.Sprintf("https://%s:%d/#%s", host, portOf(cfg.FallbackListen), frag.Encode())
+	return fmt.Sprintf("%s://%s:%d/#%s", scheme, host, portOf(cfg.FallbackListen), frag.Encode())
 }
 
 func path(p string) string {

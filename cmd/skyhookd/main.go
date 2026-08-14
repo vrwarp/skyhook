@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,6 +25,9 @@ func main() {
 		printVer   = flag.Bool("version", false, "print version and exit")
 		showPair   = flag.Bool("pair", false, "print the pairing file and exit")
 		initOnly   = flag.Bool("init", false, "create data dir, token and certificate, then exit")
+		demo       = flag.Bool("demo", false,
+			"loopback demo: plain HTTP on 127.0.0.1, no TLS, no QUIC, no pairing certificate")
+		demoFor = flag.Duration("demo-for", 0, "with -demo, stop after this long (0 = until Ctrl-C)")
 	)
 	flag.Parse()
 
@@ -36,6 +40,9 @@ func main() {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fatal("config", err)
+	}
+	if *demo {
+		cfg = demoConfig(cfg)
 	}
 	log := newLogger(cfg.LogLevel)
 
@@ -51,6 +58,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *demo && *demoFor > 0 {
+		// A demo that cleans up after itself: this mode has no TLS, so leaving
+		// it running by accident is exactly what should not happen.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *demoFor)
+		defer cancel()
+		log.Info("demo will stop on its own", "after", demoFor.String())
+	}
 
 	srv, err := server.New(ctx, cfg, log)
 	if err != nil {
@@ -84,6 +100,28 @@ func main() {
 		fatal("serve", err)
 	}
 	log.Info("skyhook server stopped")
+}
+
+// demoConfig points a configuration at this machine only. Anything the demo
+// leaves at its default would otherwise be a public-facing default.
+func demoConfig(cfg config.Config) config.Config {
+	cfg.InsecureLoopback = true
+	cfg.WebSocketFallback = true
+	cfg.Hosts = []string{"127.0.0.1"}
+	if isDefaultAddr(cfg.Listen) {
+		cfg.Listen = "127.0.0.1:4433"
+	}
+	if isDefaultAddr(cfg.FallbackListen) {
+		cfg.FallbackListen = "127.0.0.1:4434"
+	}
+	return cfg
+}
+
+// isDefaultAddr reports whether an address is an unset "all interfaces" one,
+// so an explicit -config choice is never quietly overridden.
+func isDefaultAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	return err != nil || host == "" || host == "0.0.0.0" || host == "::"
 }
 
 func newLogger(level string) *slog.Logger {

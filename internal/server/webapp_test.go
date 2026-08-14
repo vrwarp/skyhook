@@ -161,6 +161,47 @@ func TestPairingLinkCarriesTheTokenInTheFragment(t *testing.T) {
 	}
 }
 
+// Loopback demo mode drops TLS, so everything it advertises has to change with
+// it — a link promising https, or a policy allowing wss, would simply not work.
+func TestLoopbackModeAdvertisesPlainSchemes(t *testing.T) {
+	cfg := testConfig("")
+	cfg.InsecureLoopback = true
+	cfg.Hosts = []string{"127.0.0.1"}
+
+	link := PairingLink(cfg, "aGFzaA==")
+	if !strings.HasPrefix(link, "http://127.0.0.1:4434/#") {
+		t.Fatalf("pairing link = %q", link)
+	}
+	if strings.Contains(link, "cert=") {
+		t.Error("a certificate pin is meaningless without TLS")
+	}
+	if !strings.Contains(link, "ws%3A%2F%2F127.0.0.1%3A4434") {
+		t.Errorf("fallback is not a plain socket: %s", link)
+	}
+
+	csp := (&webapp{cfg: cfg}).csp()
+	if !strings.Contains(csp, "connect-src 'self' ws://127.0.0.1:4434") {
+		t.Errorf("connect-src does not allow the socket the app must use: %s", csp)
+	}
+	if strings.Contains(csp, "wss://") || strings.Contains(csp, "https://") {
+		t.Errorf("policy still advertises TLS origins: %s", csp)
+	}
+}
+
+// The insecure mode must stay on this machine; nothing else about it is safe.
+func TestLoopbackModeRefusesToBindPublicly(t *testing.T) {
+	for _, addr := range []string{":4434", "0.0.0.0:4434", "10.0.0.4:4434", "[::]:4434"} {
+		if err := requireLoopback(addr); err == nil {
+			t.Errorf("%q was accepted", addr)
+		}
+	}
+	for _, addr := range []string{"127.0.0.1:4434", "localhost:4434", "[::1]:4434"} {
+		if err := requireLoopback(addr); err != nil {
+			t.Errorf("%q was refused: %v", addr, err)
+		}
+	}
+}
+
 func TestResolveWebRootPrefersExplicitSetting(t *testing.T) {
 	explicit := buildRoot(t)
 	data := t.TempDir()

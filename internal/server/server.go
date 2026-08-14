@@ -153,6 +153,10 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	port, _ := strconv.Atoi(portStr)
 
+	if s.cfg.InsecureLoopback {
+		return s.startLoopback(ctx, host, port)
+	}
+
 	s.wt = transport.NewWTServer(transport.WTConfig{
 		Addr:      s.cfg.Listen,
 		TLSConfig: s.cert.TLS,
@@ -217,6 +221,83 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = s.Shutdown()
 		return err
 	}
+}
+
+// startLoopback serves the app and the mirror connection over plain HTTP on a
+// loopback address: no TLS, no QUIC, no certificate to trust first.
+//
+// This exists because a demo on your own machine hits a wall that has nothing
+// to do with Skyhook: Chrome will not register a service worker behind a
+// self-signed certificate, so the app cannot install and cannot start offline.
+// It treats 127.0.0.1 as a secure origin regardless of scheme, which makes
+// plain HTTP the honest way to show the real thing locally. It is also why the
+// bind address is checked rather than trusted — this mode must never end up
+// facing a network.
+func (s *Server) startLoopback(ctx context.Context, host string, port int) error {
+	for _, addr := range []string{s.cfg.Listen, s.cfg.FallbackListen} {
+		if err := requireLoopback(addr); err != nil {
+			return err
+		}
+	}
+
+	s.ws = transport.NewWSServer(transport.WSConfig{
+		Addr:   s.cfg.FallbackListen,
+		Path:   s.cfg.Path,
+		Logger: s.log,
+	}, s.mgr.Serve)
+
+	root := resolveWebRoot(s.cfg)
+	mux := http.NewServeMux()
+	mux.Handle(s.cfg.Path, s.ws)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.Handle("/", &webapp{root: root, log: s.log, cfg: s.cfg})
+	s.ws.SetHandler(mux)
+
+	go func() {
+		if err := s.ws.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.errs <- fmt.Errorf("loopback listener: %w", err)
+		}
+	}()
+	if root == "" {
+		s.log.Warn("client app not found; build client/ and set webRoot",
+			"looked", filepath.Join(s.cfg.DataDir, "webapp"))
+	} else {
+		s.log.Info("client app served", "root", root)
+	}
+	s.log.Warn("loopback demo mode: no TLS, no QUIC, loopback only",
+		"addr", s.cfg.FallbackListen)
+	s.log.Info("open this link to start", "url", PairingLink(s.cfg, ""))
+
+	if err := s.writePairing(host, port); err != nil {
+		s.log.Warn("pairing file not written", "err", err)
+	}
+	select {
+	case <-ctx.Done():
+		return s.Shutdown()
+	case err := <-s.errs:
+		_ = s.Shutdown()
+		return err
+	}
+}
+
+// requireLoopback refuses to expose the insecure mode to anything but this
+// machine.
+func requireLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("server: listen address %q: %w", addr, err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("server: insecureLoopback refuses to bind %q: use 127.0.0.1", addr)
+	}
+	return nil
 }
 
 // Shutdown stops everything.

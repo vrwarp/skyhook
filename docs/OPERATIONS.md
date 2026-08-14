@@ -51,6 +51,7 @@ default; this is the whole surface:
 {
   "listen": ":4433",
   "webRoot": "/usr/share/skyhook/webapp",
+  "insecureLoopback": false,
   "fallbackListen": ":4434",
   "dataDir": "/var/lib/skyhook",
   "hosts": ["vps.example.com"],
@@ -71,7 +72,8 @@ default; this is the whole surface:
 
 Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_DATA_DIR`, `SKYHOOK_TOKEN`, `SKYHOOK_CHROME`, `SKYHOOK_HOSTS`,
-`SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`, `SKYHOOK_LOG_LEVEL`.
+`SKYHOOK_HEADLESS`, `SKYHOOK_ADAPTERS`, `SKYHOOK_WEB_ROOT`,
+`SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_LOG_LEVEL`.
 
 `webRoot` is the built client (`client/dist`). The container image builds it and
 sets `SKYHOOK_WEB_ROOT` already; a bare-metal install should either set the path
@@ -80,6 +82,19 @@ page explaining how to build it, rather than nothing at all.
 
 A missing token is generated on first start and written back to the config file
 when one was supplied.
+
+### Loopback demo mode
+
+`skyhookd -demo` (or `scripts/demo.sh`, which also builds the client) serves the
+app and the mirror connection over plain HTTP on `127.0.0.1`, with no TLS, no
+QUIC and no pairing certificate. It exists because Chrome refuses to register a
+service worker behind a self-signed certificate, so a local demo over TLS cannot
+install or start offline; `127.0.0.1` is a secure origin whatever the scheme.
+
+The server refuses to bind anything but a loopback address in this mode, and
+`-demo-for 10m` stops it on its own. Do not run a real deployment this way: the
+token would cross an unencrypted socket, and the whole point of the pinned
+certificate is that it does not.
 
 ## Pairing
 

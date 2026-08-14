@@ -20,6 +20,8 @@ const speculations = new Map<string, Snapshot>();
 let worker: Worker | null = null;
 let active = 0;
 let currentSpace = '';
+/** Whether the link is up. Controls which chrome is usable, not what is shown. */
+let connected = false;
 
 interface TabView {
   id: number;
@@ -64,6 +66,11 @@ async function main(): Promise<void> {
   await store.requestPersistence();
   registerServiceWorker();
   startWorker();
+  // Draw the chrome before anything is connected. The "new tab" button lives in
+  // the tab strip, so waiting for the first server message to render it left a
+  // window — one round trip wide, and this link's round trips are seconds — in
+  // which the app was up and offered no way to open anything.
+  renderTabs();
 
   const pairing = await pairingFromURL() ?? await store.readPairing();
   if (!pairing) {
@@ -216,10 +223,15 @@ function handle(kind: string, args: Record<string, unknown>): void {
       if (!el.panel.hidden) renderChat();
       break;
     }
-    case 'status':
-      renderStatus(args.online === true, String(args.kind ?? ''), args.reason as string | undefined);
-      for (const h of hosts.values()) h.setOffline(args.online !== true);
+    case 'status': {
+      const online = args.online === true;
+      const changed = online !== connected;
+      connected = online;
+      renderStatus(online, String(args.kind ?? ''), args.reason as string | undefined);
+      for (const h of hosts.values()) h.setOffline(!online);
+      if (changed) renderTabs();
       break;
+    }
     case 'stats':
       renderStats(args as unknown as Stats & { rttMs?: number });
       break;
@@ -300,7 +312,10 @@ function renderTabs(): void {
   const add = document.createElement('button');
   add.id = 'newtab';
   add.textContent = '+';
-  add.title = 'New tab';
+  add.title = connected ? 'New tab' : 'Waiting for the link';
+  // Opening a tab is a request to the server, so offline it would do nothing at
+  // all. Better to look unavailable than to look broken.
+  add.disabled = !connected;
   add.addEventListener('click', () => send('openTab', { url: '' }));
   el.strip.appendChild(add);
   syncToolbar();

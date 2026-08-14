@@ -100,6 +100,13 @@ func newPWAHarness(t *testing.T) *pwaHarness {
 // through its pairing link.
 func (h *pwaHarness) openClient(ctx context.Context, t *testing.T) *cdp.Session {
 	t.Helper()
+	return h.openClientWith(ctx, t, h.clientWS)
+}
+
+// openClientWith pairs the app against an arbitrary socket URL, so a test can
+// watch the app behave with a server it cannot reach.
+func (h *pwaHarness) openClientWith(ctx context.Context, t *testing.T, fallback string) *cdp.Session {
+	t.Helper()
 	br, err := cdp.Launch(ctx, cdp.BrowserOptions{
 		UserDataDir: t.TempDir(),
 		Headless:    true,
@@ -112,7 +119,7 @@ func (h *pwaHarness) openClient(ctx context.Context, t *testing.T) *cdp.Session 
 	h.browser = br
 
 	link := fmt.Sprintf("%s/#token=%s&host=127.0.0.1&port=%d&path=/skyhook&fallback=%s",
-		h.appURL, h.token, h.appPort, h.clientWS)
+		h.appURL, h.token, h.appPort, fallback)
 	page, err := br.NewPage(ctx, link)
 	if err != nil {
 		t.Fatalf("open client page: %v", err)
@@ -242,6 +249,35 @@ func TestPWALoadsAndRegistersItsServiceWorker(t *testing.T) {
 		`navigator.serviceWorker.getRegistration().then(r => r ? r.scope : '')`, &scope)
 	if !strings.HasSuffix(scope, "/") {
 		t.Fatalf("service worker scope = %q, want the whole origin", scope)
+	}
+}
+
+// The chrome must be complete before the link is, because on this link "before"
+// can be several seconds. The new-tab button used to be drawn only when the
+// first server message arrived, so the app spent a round trip looking ready
+// while offering nothing to click.
+func TestPWAChromeIsCompleteBeforeTheLinkIsUp(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	// Port 1 is not going to answer, so the app never connects at all.
+	page := h.openClientWith(ctx, t, "ws://127.0.0.1:1/skyhook")
+
+	waitFor(ctx, t, page, `!!document.getElementById('newtab')`,
+		budget(30*time.Second), "the new-tab button")
+
+	var online bool
+	evalJSON(ctx, t, page,
+		`document.getElementById('hud-state').className === 'online'`, &online)
+	if online {
+		t.Fatal("the client connected to a port that should refuse it")
+	}
+	// Offline it cannot do anything, and should say so rather than swallowing
+	// the click.
+	var disabled bool
+	evalJSON(ctx, t, page, `document.getElementById('newtab').disabled`, &disabled)
+	if !disabled {
+		t.Error("the new-tab button is offering an action that cannot work offline")
 	}
 }
 

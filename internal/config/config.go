@@ -67,6 +67,13 @@ type Config struct {
 	WebRoot string `json:"webRoot"`
 	// LogLevel is debug|info|warn|error.
 	LogLevel string `json:"logLevel"`
+	// InsecureLoopback serves the client app and the mirror connection over
+	// plain HTTP on a loopback address, with no TLS and no QUIC. It exists for
+	// demos and local development: Chrome treats 127.0.0.1 as a secure origin,
+	// so the service worker registers and the app installs without a
+	// certificate to trust first. The server refuses to bind anything but a
+	// loopback address in this mode.
+	InsecureLoopback bool `json:"insecureLoopback"`
 	// WebSocketFallback enables the TCP fallback listener.
 	WebSocketFallback bool `json:"webSocketFallback"`
 	// FallbackListen is the fallback listener address (TCP).
@@ -188,6 +195,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SKYHOOK_WEB_ROOT"); v != "" {
 		cfg.WebRoot = v
+	}
+	if v := os.Getenv("SKYHOOK_INSECURE_LOOPBACK"); v != "" {
+		cfg.InsecureLoopback = v == "1" || strings.EqualFold(v, "true")
 	}
 }
 

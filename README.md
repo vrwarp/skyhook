@@ -35,6 +35,22 @@ itself. Mirrored pages render inside iframes carrying `sandbox="allow-same-origi
 and no `allow-scripts`, so the browser itself guarantees that page JavaScript
 never runs plane-side.
 
+## Try it in one command
+
+```sh
+scripts/demo.sh          # builds the client, runs both halves, stops after 10 minutes
+```
+
+It prints a link to open in Chrome. Press **+** for a tab, type a URL, and watch
+a page arrive that your browser never fetched; the HUD shows the transport, the
+queue depth and the bytes actually spent.
+
+The demo runs in loopback mode — plain HTTP on `127.0.0.1`, no TLS, no QUIC.
+That is deliberate rather than lazy: Chrome will not register a service worker
+behind a self-signed certificate, so a local demo over TLS could not install or
+start offline, while `127.0.0.1` is a secure origin whatever the scheme. The
+server refuses to bind anything but loopback in this mode.
+
 ## Quick start
 
 ### Landside (the VPS)
