@@ -34,6 +34,14 @@
          browser itself guarantees no page JavaScript ever runs plane-side. -->
     <main id="frames"></main>
 
+    <!-- A page asked for and not yet here. The bar is indeterminate on purpose:
+         how far along a page is cannot be known from this side, and a bar that
+         fills at an invented rate is a lie told at the moment the reader is
+         deciding whether the click was heard. The line under it says where they
+         are going, which is the part this side does know. -->
+    <div id="progress" role="progressbar" aria-label="Loading the page" hidden><span></span></div>
+    <div id="status" role="status" hidden></div>
+
     <aside id="panel" hidden>
       <div id="panel-header">
         <strong id="panel-title">Chat</strong>

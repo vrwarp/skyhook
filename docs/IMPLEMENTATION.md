@@ -672,6 +672,58 @@ as emitted, so every rule that walk was the first to see was dropped from the
 page for good. That is the late-arriving stylesheets, on every load. Everything
 that walks the sheets now goes through `emitCSSDelta`.
 
+### 22. A click has to be answered before the page can be
+
+Every affordance a browser shows while a page loads — the bar, the tab spinner,
+the address bar going grey — it shows because it started the navigation itself.
+Here it did not. A click on a Hacker News story is a semantic event replayed
+into a Chromium several seconds away, and the earliest this side can hear that
+anything is happening is the tab-state frame landside `frameStartedLoading`
+produces, a full round trip later. Until then the client had exactly one thing
+to show — a `·` prepended to the tab's title by the tab-state frame that had not
+arrived yet — which is to say nothing at all. The most ordinary act in browsing
+produced no evidence it had been heard, on the one link where that reassurance
+is worth most, and the reader's only recourse was to click again.
+
+The shell now records what it has *asked* for
+(`client/src/app/progress.ts`) at the moment the gesture goes out, and draws
+three things from it: an indeterminate bar along the top of the mirror, a
+spinner in the tab (which is the only one of the three that can speak for a
+background tab), and a status line naming the destination in the corner where
+browsers put it. The mirror frame gets `cursor: progress` over links, which is
+the affordance that appears where the reader is already looking. A tab asked for
+and not yet opened gets a placeholder in the strip, for the same reason: a
+middle click that was heard and one that was missed used to look identical for a
+round trip, and the reader who clicks again gets two tabs.
+
+Three things about it are deliberate:
+
+- **It is an ask, not a claim.** A link a page uses as a button produces exactly
+  the same gesture as a link that navigates, and nothing ever comes back to say
+  which it was. So every ask carries a deadline — six round trips, floored at 8
+  s — and one that nothing answers expires quietly. Six is generous on purpose:
+  an ask that expires while its answer is still in flight puts the chrome back
+  to idle and then into loading again, which reads as a fault rather than a wait.
+- **The server's word wins as soon as it arrives.** A tab-state frame saying the
+  tab is loading retires the local ask; from there the tab's own state drives
+  everything. Only `loading: true` retires one, because tab-state frames are
+  emitted for every reason a tab has to speak and most of them carry
+  `loading: false` — one of those in flight when the click went out would
+  otherwise cancel a wait that had not begun.
+- **Nothing invents a percentage.** How far along a page is cannot be known from
+  this end, and a bar filling at a rate nobody measured is a lie told at the
+  exact moment the reader is deciding whether to trust the client. The bar
+  sweeps; it does not fill.
+
+Nothing is drawn while the link is down: the network worker drops navigate
+frames during an outage, so a bar promising a page would be promising something
+that was never sent. The HUD's `offline` is the honest affordance for that
+state, and any outstanding ask is dropped when the link goes.
+
+`test/loading_test.go` drives it through the real client against a landside page
+that takes three seconds to answer, which is the only way to look at a window
+that is otherwise a few milliseconds wide on loopback.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

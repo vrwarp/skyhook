@@ -49,7 +49,23 @@ body {
 .tab.active { background: #374151; color: var(--fg); }
 .tab .title { overflow: hidden; text-overflow: ellipsis; }
 .tab .close { color: var(--muted); padding: 0 2px; }
-.tab.loading .title::before { content: "· "; color: var(--accent); }
+
+/* A tab waiting for a page, and a tab that does not exist yet because the
+   server has not opened it. The spinner sits where a favicon would, which is
+   where a browser puts this and therefore where the eye already looks. */
+.tab .spin {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid rgba(56, 189, 248, .25);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: skyhook-spin .9s linear infinite;
+}
+
+.tab.ghost { color: var(--muted); font-style: italic; opacity: .75; }
+
+@keyframes skyhook-spin { to { transform: rotate(360deg); } }
 
 #newtab { padding: 6px 12px; background: transparent; color: var(--muted); border: 0; }
 
@@ -149,6 +165,65 @@ body {
 
 /* An outage is worth saying out loud: the page on screen is cached, not live. */
 #frames iframe.mirror.stale { filter: saturate(0.6); }
+
+/* --- a page on its way ----------------------------------------------------- */
+
+/* Along the top of the mirror, where a browser draws it, and two pixels tall:
+   the click that started it cost the reader a page of their screen already. */
+#progress {
+  position: fixed;
+  top: 88px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  background: rgba(56, 189, 248, .15);
+}
+
+#progress[hidden] { display: none; }
+
+#progress span {
+  display: block;
+  width: 30%;
+  height: 100%;
+  background: var(--accent);
+  animation: skyhook-sweep 1.6s ease-in-out infinite;
+}
+
+@keyframes skyhook-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(333%); }
+}
+
+/* Bottom left, the way every browser says where a click is taking you. It
+   confirms which link was hit — worth more here than anywhere, because the
+   wrong one costs seconds and the right one is unmistakable. */
+#status {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  max-width: 70vw;
+  padding: 3px 10px 4px;
+  border-top: 1px solid #374151;
+  border-right: 1px solid #374151;
+  border-radius: 0 6px 0 0;
+  background: #0b1220;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#status[hidden] { display: none; }
+
+/* Motion is the affordance here, so where motion is unwelcome the same two
+   things have to say it standing still: a bar that is simply there, and a
+   spinner that is a ring rather than a rotating one. */
+@media (prefers-reduced-motion: reduce) {
+  #progress span { width: 100%; animation: none; }
+  .tab .spin { animation: none; }
+}
 
 /* --- context menu --------------------------------------------------------- */
 

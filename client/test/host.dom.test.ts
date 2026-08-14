@@ -74,6 +74,7 @@ function events() {
     applied: vi.fn(),
     wantImages: vi.fn(),
     openLink: vi.fn(),
+    navigating: vi.fn(),
     menu: vi.fn(),
     dismiss: vi.fn(() => false),
   };
@@ -283,6 +284,9 @@ describe('MirrorHost', () => {
     expect(submit).toBeDefined();
     expect(submit!.node).toBe(20);
     expect((submit!.fields as Record<string, string>).q).toBe('hello');
+    // A search submitted is a page on its way, even though where it lands is
+    // the server's to work out.
+    expect(ev.navigating).toHaveBeenCalledWith(1);
   });
 
   it('refuses to follow a link even when it cannot place it', async () => {
@@ -459,6 +463,52 @@ describe('MirrorHost', () => {
     expect(ev.input).not.toHaveBeenCalled();
     // And the frame still never follows a link itself.
     expect(click.defaultPrevented).toBe(true);
+  });
+
+  /**
+   * The gap this closes is the whole reason the shell has a progress bar: the
+   * click is a semantic event replayed seconds away, and until the server says
+   * `frameStartedLoading` nothing on this side knows a page is coming. It has
+   * to be told as the click goes out, not when the answer arrives.
+   */
+  it('tells the shell a page is coming as the link click goes out', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withLink(snapshot()));
+    const doc = host.frame.contentDocument!;
+
+    doc.querySelector('a')!.dispatchEvent(
+      new doc.defaultView!.MouseEvent('click', { bubbles: true }));
+
+    expect(ev.input).toHaveBeenCalledTimes(1);
+    expect(ev.navigating).toHaveBeenCalledWith(1, 'https://example.test/next');
+  });
+
+  it('says nothing about a click that is not on a link', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    const doc = host.frame.contentDocument!;
+
+    doc.querySelector('li')!.dispatchEvent(
+      new doc.defaultView!.MouseEvent('click', { bubbles: true }));
+
+    // The click still goes landside — it is what makes buttons work — but a
+    // page is not what the reader is waiting for.
+    expect(ev.input).toHaveBeenCalledTimes(1);
+    expect(ev.navigating).not.toHaveBeenCalled();
+  });
+
+  it('says nothing about a link answered on this side', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withTarget(withLink(snapshot(), 'https://example.test/#c2')));
+    const doc = host.frame.contentDocument!;
+    doc.getElementById('c2')!.scrollIntoView = vi.fn();
+
+    doc.querySelector('a')!.dispatchEvent(
+      new doc.defaultView!.MouseEvent('click', { bubbles: true }));
+
+    // A jump inside this document is instant and costs nothing. A bar promising
+    // a page would be promising something that already happened.
+    expect(ev.navigating).not.toHaveBeenCalled();
   });
 
   it('leaves the server the fragments this document cannot answer', async () => {
