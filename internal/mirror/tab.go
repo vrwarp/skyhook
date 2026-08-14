@@ -165,6 +165,11 @@ type Tab struct {
 	// sheetIDs maps a stylesheet's URL to the CSS domain's id for it, which is
 	// how a sheet the page's own CSSOM refuses to open is read anyway.
 	sheetIDs map[string]string
+	// sheetMu serialises recovery passes. The agent announces each blocked sheet
+	// as it finds one, and a page that inserts three widgets at once announces
+	// three times; every pass re-reads the list, so waiting for the one ahead
+	// costs nothing and running alongside it would fetch the same sheet twice.
+	sheetMu sync.Mutex
 }
 
 // NewTab attaches the mirror to a CDP session.
@@ -385,8 +390,15 @@ Relative URLs are resolved first. A constructed stylesheet resolves `url()`
 against the document, not against wherever the sheet came from, so every
 background image in a CDN-hosted sheet would otherwise point at a path on the
 site that has nothing there.
+
+This runs on the main frame's load event and again whenever the agent says it
+has found a sheet it cannot read. Load alone is not enough: the stylesheets a
+page picks up afterwards — a widget's iframe, a route change's next chunk — are
+the ones a reader is most likely to be looking at.
 */
 func (t *Tab) recoverBlockedSheets(ctx context.Context) {
+	t.sheetMu.Lock()
+	defer t.sheetMu.Unlock()
 	raw, err := t.eval(ctx, "__skyhook ? __skyhook.blockedSheets() : []")
 	if err != nil {
 		return
@@ -678,6 +690,15 @@ func (t *Tab) handleAgentMessage(payload string) {
 			return
 		}
 		t.emitMutation(&m)
+	case "sheets":
+		// The agent has found a stylesheet its own CSSOM will not open. Off the
+		// dispatch loop: recovery is several round trips and a fetch, and this
+		// goroutine is the one delivering the tab's mutations.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			t.recoverBlockedSheets(ctx)
+		}()
 	}
 }
 

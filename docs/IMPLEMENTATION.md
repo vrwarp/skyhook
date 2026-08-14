@@ -255,11 +255,41 @@ which were live bugs:
   substitute, so the agent sends the frame's rendered box as `data-sky-box` and
   the client applies it directly.
 
+Inlining the frame's document also puts its nodes into the tab's id space, and
+that is where a fourth bug lived. The client sends back an id, the agent answers
+with `getBoundingClientRect`, and the host replays the click by dispatching a
+mouse event at that point in the *top-level* viewport — but the rect came from
+the frame's document, measured from the frame's own top left. Every click inside
+a frame therefore landed short by exactly where the frame sat, on whatever was
+above and to the left of it. Nothing reports that: the mirror is right, the
+event is delivered, the page is fine, and the control simply never responds.
+`__skyhook.rect` now walks `frameElement` up to the top document and adds each
+frame's border-box origin plus its border and padding. Reproduced by
+`TestPWAClicksAControlInsideAnInlinedFrame`.
+
 Two things about frames are still not what a browser does. A cross-origin frame
 cannot be read at all and renders as an empty box of the right size. And a frame
 that navigates is picked up by a `load` hook that re-snapshots the document,
 which is blunt: nothing about a document being replaced reaches the
 MutationObserver watching the old one, so there is no diff to send.
+
+### 11a. Stylesheets a page picks up after its load event
+
+The CSSOM will not show a page a stylesheet served from another origin, so the
+host reads those over CDP — which is not bound by the same-origin policy — and
+hands the text back as a constructed sheet the agent can filter like any other.
+That recovery ran on `Page.loadEventFired`, once, which catches the sheets the
+document was parsed with and none of the ones after: a widget that inserts its
+iframe on load brings a whole stylesheet with it, and so does the next chunk of
+a client-side route. Those stayed unreadable for the life of the document, and
+their markup arrived with no styling at all.
+
+The agent now sends `{t:'sheets'}` the first time it sees a href it cannot open,
+and the host answers by running the same recovery pass. Google's "unusual
+traffic" interstitial is the page that showed it up: its reCAPTCHA checkbox is a
+`<span>` that is only a checkbox once its stylesheet says so, so plane-side it
+was an invisible zero-size element with nothing to click. Pinned by
+`TestPWARecoversAStylesheetThatArrivesAfterLoad`.
 
 ### 12. The document hash is a three-way contract, and was wrong
 
