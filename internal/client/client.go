@@ -324,7 +324,12 @@ func (c *Client) handle(f *protocol.Frame) {
 		if err := f.DecodeBody(&req); err != nil {
 			return
 		}
-		go c.answerCapture(req)
+		// Frozen here, on the goroutine that owns the replica, and sent from
+		// another. Reading the replica anywhere else would be reading it while
+		// this loop is still applying frames to it — the same discipline the
+		// browser client follows for the same reason, and here it is also the
+		// difference between a correct artifact and a torn one.
+		go c.sendCapture(req, c.freezeCapture(req))
 	case protocol.TypeCaptureDone:
 		var done protocol.CaptureDone
 		if err := f.DecodeBody(&done); err != nil {
@@ -384,60 +389,76 @@ func (c *Client) WaitForCapture(ctx context.Context, timeout time.Duration) (pro
 	return protocol.CaptureDone{}, errors.New("client: no capture completed in time")
 }
 
-// answerCapture supplies this client's half of a bundle.
+// captureArtifact is one finished file, already serialised, waiting only to be
+// sent. Nothing in it refers back to the replica.
+type captureArtifact struct {
+	name string
+	data []byte
+}
+
+// freezeCapture serialises this client's half of a bundle.
 //
 // A headless client is a strange thing to screenshot, and it does not try: what
 // it has instead is the replica, which is the same algorithm the real patcher
 // runs. That makes this the reproduction path — a divergence that shows up here
 // is a divergence in the frames rather than in the browser, and the bundle says
 // which by carrying both.
-func (c *Client) answerCapture(req protocol.CaptureRequest) {
-	part := func(name string, data []byte) {
-		const chunk = 32 << 10
-		for off := 0; off < len(data); off += chunk {
-			end := off + chunk
-			if end > len(data) {
-				end = len(data)
-			}
-			_ = c.send(protocol.ChBulk, protocol.TypeCapturePart, 0, protocol.CapturePart{
-				ID: req.ID, Name: name, Data: data[off:end], More: end < len(data),
-			})
-		}
-		if len(data) == 0 {
-			_ = c.send(protocol.ChBulk, protocol.TypeCapturePart, 0,
-				protocol.CapturePart{ID: req.ID, Name: name})
-		}
-	}
-
+//
+// It must be called from the goroutine that applies frames. Everything it
+// touches — the replica's nodes, its strings, its CSS — is being written by
+// that loop, so reading it anywhere else is a torn read of a live map, and the
+// artifact would describe a document that never existed.
+func (c *Client) freezeCapture(req protocol.CaptureRequest) []captureArtifact {
 	tabs := req.Tabs
 	if len(tabs) == 0 {
 		tabs = c.Tabs()
 	}
-	report := map[string]any{
+	out := make([]captureArtifact, 0, 1+3*len(tabs))
+	add := func(name string, v any) {
+		data, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			return
+		}
+		out = append(out, captureArtifact{name: name, data: data})
+	}
+
+	add("client.json", map[string]any{
 		"client":    "skyhookctl",
 		"sessionId": c.SessionID(),
 		"note": "this half came from the headless Go client, which keeps a replica " +
 			"rather than a real DOM: there is no screenshot to take",
-	}
-	if data, err := json.MarshalIndent(report, "", "  "); err == nil {
-		part("client.json", data)
-	}
+	})
 	for _, tab := range tabs {
 		m := c.Model(tab)
 		if m == nil {
 			continue
 		}
 		base := fmt.Sprintf("tabs/%d", tab)
-		part(base+"/mirror.html", []byte(m.HTML()))
-		state := map[string]any{
+		out = append(out, captureArtifact{name: base + "/mirror.html", data: []byte(m.HTML())})
+		add(base+"/state.json", map[string]any{
 			"tab": tab, "url": m.URL, "title": m.Title, "seq": m.Seq,
 			"nodes": len(m.Nodes), "cssRules": len(m.CSS), "docHash": m.Hash(),
+		})
+		add(base+"/fingerprint.json", modelFingerprint(m))
+	}
+	return out
+}
+
+// sendCapture pushes frozen artifacts up, chunked. It runs off the frame loop
+// because it blocks on the link, and it reads nothing but its own argument.
+func (c *Client) sendCapture(req protocol.CaptureRequest, artifacts []captureArtifact) {
+	const chunk = 32 << 10
+	for _, a := range artifacts {
+		if len(a.data) == 0 {
+			_ = c.send(protocol.ChBulk, protocol.TypeCapturePart, 0,
+				protocol.CapturePart{ID: req.ID, Name: a.name})
+			continue
 		}
-		if data, err := json.MarshalIndent(state, "", "  "); err == nil {
-			part(base+"/state.json", data)
-		}
-		if data, err := json.Marshal(modelFingerprint(m)); err == nil {
-			part(base+"/fingerprint.json", data)
+		for off := 0; off < len(a.data); off += chunk {
+			end := min(off+chunk, len(a.data))
+			_ = c.send(protocol.ChBulk, protocol.TypeCapturePart, 0, protocol.CapturePart{
+				ID: req.ID, Name: a.name, Data: a.data[off:end], More: end < len(a.data),
+			})
 		}
 	}
 	_ = c.send(protocol.ChBulk, protocol.TypeCapturePart, 0,
