@@ -1,6 +1,6 @@
 # Landside server image: the Go binary, a real Chromium, the image encoders, and
 # the plane-side PWA the server hands to the browser.
-FROM node:22-bookworm-slim AS client
+FROM node:26-bookworm-slim AS client
 WORKDIR /client
 COPY client/package.json client/package-lock.json ./
 RUN npm ci
