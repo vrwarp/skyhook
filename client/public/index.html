@@ -18,7 +18,12 @@
         <button id="reload" title="Reload">&#8635;</button>
         <input id="urlbar" type="text" spellcheck="false"
                placeholder="Address, or search" autocomplete="off" />
-        <button id="bookmark" title="Bookmark this page">&#9733;</button>
+        <!-- The star is a toggle and says which way it is thrown; the list
+             beside it is the point of saving anything. Both are drawn from
+             plane-side data, so both work with the link down. -->
+        <button id="bookmark" title="Save this page (Ctrl+D)" aria-pressed="false"
+                aria-label="Save this page">&#9734;</button>
+        <button id="marks" title="Saved pages (Ctrl+B)" aria-expanded="false">Saved</button>
         <button id="chat" title="Chat">Chat</button>
         <div id="hud" title="Link health">
           <span id="hud-state" class="offline">offline</span>

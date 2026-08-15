@@ -200,9 +200,15 @@ func TestTheBrowsersOwnBackAndForwardDriveTheTab(t *testing.T) {
 
 	// Back again, to the blank page the tab was opened on: the start of its
 	// history, where the gesture has nothing left to spend.
+	//
+	// A tab at its beginning is a tab with nothing in it, and that is now a
+	// state with something in it: an empty address bar rather than the word
+	// `about:blank` to type over, and the saved list where the blank frame was.
 	evalJSON(ctx, t, page, `history.back(), true`, nil)
-	waitFor(ctx, t, page, atURL("about:blank"), budget(60*time.Second),
+	waitFor(ctx, t, page, atURL(""), budget(60*time.Second),
 		"the tab to reach the page it was opened on")
+	waitFor(ctx, t, page, `document.getElementById('start').hidden === false`,
+		budget(30*time.Second), "the saved list to come back with it")
 
 	// Here the gesture is let through instead of being kept, so that a browser
 	// which cannot be left is not what this becomes: the shell is left standing
@@ -227,7 +233,7 @@ func TestTheBrowsersOwnBackAndForwardDriveTheTab(t *testing.T) {
 	waitFor(ctx, t, page, trap+` === 'skyhook:here'`, budget(30*time.Second),
 		"the back gesture to be worth keeping again")
 	evalJSON(ctx, t, page, `history.back(), true`, nil)
-	waitFor(ctx, t, page, atURL("about:blank"), budget(60*time.Second),
+	waitFor(ctx, t, page, atURL(""), budget(60*time.Second),
 		"the back gesture to work a second time")
 	alive("the back gesture, rearmed")
 }

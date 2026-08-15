@@ -13,7 +13,7 @@ this is what survived contact.
 | **M2 — Feel** | Local echo, ghost-send, scroll telemetry, images with blurhash, used-CSS | **Done.** Echo and reconciliation are unit-tested; used-CSS filtering and image transcoding are covered end-to-end. |
 | **M3 — Survive** | Reconnect, resync, offline mode | **Done for reconnect/resync/offline queueing.** 0-RTT resumption is enabled in the QUIC config; it is not separately asserted by a test. FEC is not implemented — see below. |
 | **M4 — Chat adapter** | Warm open ≤ 3 s, offline history, outbox | **Framework and adapter are built** (append-log, outbox, backlog replay, client archive and UI). The Google Chat selectors are a starting point, not a validated set: they need a session against the real app to tune. |
-| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 17. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
+| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 17. Bookmarks are a start page, a panel and address-bar completion rather than a list that is only written to — see deviation 23. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
 
 The client is a Chrome-targeted PWA served by the server itself; the Electron
 shell the design called for was built first and then pivoted away from
@@ -724,6 +724,63 @@ state, and any outstanding ask is dropped when the link goes.
 that takes three seconds to answer, which is the only way to look at a window
 that is otherwise a few milliseconds wide on loopback.
 
+### 23. Bookmarks are a navigation surface, not a list that gets written to
+
+The design asks for bookmarks in one clause of R5, beside tabs and the URL bar,
+and what was built matched the clause: a star that appended `{title, url}` to an
+array in IndexedDB. Nothing ever read the array back. There was no way to see a
+saved page, remove one, or tell whether the page on screen was already saved —
+so the second click, the one a reader makes because the first produced no
+visible change, saved it again.
+
+Read against this link rather than against a browser, the feature is more
+important than that clause makes it sound. Every other way of getting somewhere
+spends the link: an address costs a page load, and a mistyped one costs two; a
+link on the page had to be paid for before it could be clicked. The saved list
+is the only navigation surface that is entirely plane-side — reading it,
+searching it and rearranging it are free, they work during an outage, and the
+single round trip is the one the reader chose. That is worth building four
+surfaces on rather than one:
+
+- **The star** is a toggle that says which way it is thrown (`aria-pressed`, a
+  filled glyph, a changed title), is idempotent by normalised URL, and reports
+  what it did in a toast whose action is the undo. So is removal: no
+  confirmation dialog anywhere, because the notice is the way back.
+- **The panel** grew a second view beside chat — search, rename in place, remove,
+  a per-row menu, and export/import. Rename matters because a bookmark made from
+  a mirror link carries the anchor's own text, which is regularly `more` or
+  nothing at all. Export matters because this is the one thing on the client
+  that exists nowhere else: `Store.wipe()`, a cleared profile or a reinstalled
+  PWA all take it.
+- **The start page** replaced the blank white frame a new tab used to be. A tab
+  that has not been anywhere now shows the saved list, drawn by the shell over
+  the frame area rather than inside a mirror — no script runs there, and a
+  document the server never sent has no business in a mirror. It reads §22's
+  `isBusy` for whether to stand aside, so a tab with a page already on the way
+  cannot be offered the list again by a surface that disagrees with the bar
+  above it about what is happening.
+- **The address bar** completes from the list as the reader types: substring,
+  never fuzzy, because a suggestion that is nearly right costs a round trip to
+  find out.
+
+Two smaller things fell out of it. A tab opened with `+` is now focused, which
+it was not — the server has no opinion about focus and the client never formed
+one, so the button silently opened a background tab; that was survivable when a
+new tab was blank and is not when it is where the reader goes to start. And the
+address bar shows an empty field rather than `about:blank` for a tab that has
+not been anywhere, since that string is only ever something to type over.
+
+The list itself is validated on read rather than trusted: the on-disk shape has
+already changed once, entries missing ids or timestamps are repaired instead of
+dropped, and duplicates an older client wrote are collapsed. It refuses to grow
+past 500 rather than evicting somebody's oldest entry to make room — a silent
+data loss they would discover on the flight they needed it.
+
+`test/bookmarks_test.go` drives the whole journey in a real browser: an empty
+tab offers the list, the star keeps a page, the list survives a reload of the
+app, one click brings the page back into the tab in front, and the undo restores
+what a removal took.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
@@ -740,7 +797,10 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
 - **The chat adapter's selectors are unvalidated** against the live app.
 - **0-RTT resumption** is enabled but not asserted by a test; proving it needs a
   client that survives process restart, which the Go test client does not model.
-- **Bookmarks** are stored and written but have no management UI beyond adding.
+- **Bookmarks are per-device and stay there.** The list is plane-side only, with
+  no server copy and no sync between two paired browsers; export and import are
+  the whole of the story. Reordering is by use rather than by hand — there are
+  no folders and no manual sort.
 - **Installability is untested against a real install prompt**: the manifest,
   icons and service worker are all in place and the worker registers in a real
   browser under test, but nobody has clicked "Install" on a device yet.

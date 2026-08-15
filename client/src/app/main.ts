@@ -12,6 +12,11 @@ import { pairingFromFragment, transportUrls } from './pairing.js';
 import { gather } from './capture.js';
 import * as clientlog from './clientlog.js';
 import { Progress, type Ask } from './progress.js';
+import {
+  BOOKMARK_LIMIT, Bookmarks, exportText, parseImport, search, type Bookmark,
+} from './bookmarks.js';
+import { BookmarkPanel, StartPage } from './bookmarkview.js';
+import { Suggest } from './suggest.js';
 import { Store, type Pairing } from '../store/store.js';
 import type {
   AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Refusal, Snapshot, Stats,
@@ -34,6 +39,8 @@ let connected = false;
 let linkRtt = 0;
 /** One timer for every outstanding ask, armed at the earliest deadline. */
 let sweepTimer: ReturnType<typeof setTimeout> | null = null;
+/** How many tabs have been asked for that the reader expects to land in. */
+let wantForeground = 0;
 
 interface TabView {
   id: number;
@@ -51,11 +58,13 @@ const el = {
   forward: byId<HTMLButtonElement>('forward'),
   reload: byId<HTMLButtonElement>('reload'),
   bookmark: byId<HTMLButtonElement>('bookmark'),
+  marks: byId<HTMLButtonElement>('marks'),
   chat: byId<HTMLButtonElement>('chat'),
   frames: byId<HTMLDivElement>('frames'),
   progress: byId<HTMLDivElement>('progress'),
   status: byId<HTMLDivElement>('status'),
   panel: byId<HTMLElement>('panel'),
+  panelTitle: byId<HTMLElement>('panel-title'),
   panelBody: byId<HTMLDivElement>('panel-body'),
   panelClose: byId<HTMLButtonElement>('panel-close'),
   hudState: byId<HTMLSpanElement>('hud-state'),
@@ -92,6 +101,10 @@ async function main(): Promise<void> {
   // window — one round trip wide, and this link's round trips are seconds — in
   // which the app was up and offered no way to open anything.
   renderTabs();
+  // The saved list is local, so the start page can be on screen with something
+  // worth clicking before the transport has even been configured.
+  await bookmarks.whenReady();
+  renderBookmarks();
 
   const pairing = await pairingFromURL() ?? await store.readPairing();
   if (!pairing) {
@@ -206,6 +219,16 @@ function handle(kind: string, args: Record<string, unknown>): void {
         // The tab the reader asked for has arrived, so its placeholder in the
         // strip has a real tab to become.
         progress.appeared();
+        // And if it was asked for by a gesture that means "go there" — the +
+        // button, an address typed with no tab open — this is where the reader
+        // lands. The server has no opinion about focus, so the answer has to be
+        // remembered from the gesture, and it matters more now that an empty
+        // tab has the saved list in it rather than nothing.
+        if (wantForeground > 0) {
+          wantForeground -= 1;
+          active = id;
+          layout();
+        }
       }
       // Once the server says a tab is loading it is telling this side what it
       // had been guessing, and it is the better source.
@@ -233,7 +256,9 @@ function handle(kind: string, args: Record<string, unknown>): void {
       const records = (args.records ?? []) as AdapterRecord[];
       void store.appendArchive(records);
       for (const r of records) ingestRecord(r, true);
-      if (!el.panel.hidden) renderChat();
+      // Only when the panel is actually showing chat: a message arriving while
+      // the reader is looking at the saved list used to replace the list.
+      if (!el.panel.hidden && panelView === 'chat') renderChat();
       break;
     }
     case 'status': {
@@ -393,7 +418,7 @@ function renderTabs(): void {
   // Opening a tab is a request to the server, so offline it would do nothing at
   // all. Better to look unavailable than to look broken.
   add.disabled = !connected;
-  add.addEventListener('click', () => openTab(''));
+  add.addEventListener('click', () => openTab('', 'focus'));
   el.strip.appendChild(add);
   syncToolbar();
 }
@@ -429,12 +454,22 @@ function closeTabLocally(id: number): void {
 
 function syncToolbar(): void {
   const tab = tabs.get(active);
-  if (document.activeElement !== el.urlbar) el.urlbar.value = tab?.url ?? '';
+  const url = tab?.url ?? '';
+  // A tab that has not been anywhere shows an empty address bar rather than
+  // `about:blank`: the reader is about to type over it, and a placeholder that
+  // has to be cleared first is a placeholder in the way.
+  if (document.activeElement !== el.urlbar) el.urlbar.value = isBlank(url) ? '' : url;
   el.back.disabled = !tab?.canBack;
   el.forward.disabled = !tab?.canForward;
   // A back gesture let through earlier spent the trap. Now that there is a page
   // to go back to, it is worth keeping again.
   if (!centred && tab?.canBack) claimHistoryGestures();
+  renderBookmarks();
+}
+
+/** A tab that has not been anywhere yet. `about:blank` is not a page. */
+function isBlank(url: string): boolean {
+  return !url || url.startsWith('about:');
 }
 
 function layout(): void {
@@ -567,16 +602,20 @@ function openInNewTab(url: string): void {
 
 /** Asks the server for a tab, and puts a placeholder in the strip until it
  *  arrives. Every gesture that opens one comes through here. */
-function openTab(url: string): void {
+function openTab(url: string, where: 'background' | 'focus' = 'background'): void {
   send('openTab', { url });
   if (!connected) return;
+  // A tab the reader means to be in, rather than one opened beside what they
+  // are reading: the + button and the menus mean the first, a middle click on a
+  // link means the second, and only the gesture knows which.
+  if (where === 'focus') wantForeground += 1;
   progress.askOpen({ verb: 'Opening', url: url || undefined }, clock(), linkRtt);
   renderProgress();
 }
 
 function navigateTo(tab: number, url: string): void {
   if (!tab) {
-    openTab(url);
+    openTab(url, 'focus');
     return;
   }
   send('navigate', { tab, url });
@@ -608,12 +647,237 @@ function goHistory(tab: number, action: 'back' | 'forward'): boolean {
   return true;
 }
 
+// ------------------------------------------------------------------ bookmarks
+//
+// The saved list is the only way of getting somewhere that does not spend the
+// link: reading it, searching it and rearranging it are free and work through
+// an outage, and the single round trip at the end is the one the reader meant
+// to spend. So it is wired into four places rather than one — the star, the
+// side panel, the start page a tab shows before it has been anywhere, and the
+// address bar's completions — and every one of them is drawn from the same
+// list, plane-side, with no server involved.
+
+const bookmarks = new Bookmarks({
+  read: () => store.readBookmarks(),
+  write: (marks) => store.writeBookmarks(marks),
+  onError: (message) => {
+    log(message);
+    // A silent failure here is the worst kind: the reader believes a page is
+    // kept, and finds out it is not on the flight where they needed it.
+    toast(message);
+  },
+});
+
+const marksPanel = new BookmarkPanel({
+  open: (mark, where) => openBookmark(mark, where),
+  remove: (mark) => removeBookmark(mark),
+  rename: (mark, title) => bookmarks.rename(mark.id, title),
+  menu: (mark, x, y) => bookmarkMenu(mark, x, y, 'panel'),
+  exportAll: () => exportBookmarks(),
+  importFrom: () => importBookmarks(),
+});
+
+const startPage = new StartPage({
+  open: (mark, where) => openBookmark(mark, where),
+  remove: (mark) => removeBookmark(mark),
+  rename: (mark, title) => bookmarks.rename(mark.id, title),
+  menu: (mark, x, y) => bookmarkMenu(mark, x, y, 'start'),
+});
+el.frames.appendChild(startPage.root);
+
+const suggest = new Suggest(el.urlbar, {
+  source: (query, limit) => search(bookmarks.all(), query, limit),
+  pick: (mark) => openBookmark(mark, 'here'),
+});
+
+bookmarks.onChange(() => renderBookmarks());
+
+/** Redraws everything that shows the saved list. Cheap: it is all local. */
+function renderBookmarks(): void {
+  const marks = bookmarks.all();
+  syncBookmarkButton();
+  if (!el.panel.hidden && panelView === 'marks') marksPanel.render(marks, connected);
+  startPage.render(marks, { show: startShouldShow(), online: connected });
+}
+
+/**
+ * Whether the tab on screen has nothing in it. A tab that has been asked to go
+ * somewhere counts as occupied even before the answer arrives, and a session
+ * with no tabs at all counts as empty — that is the moment after a cold start,
+ * and the list is the most useful thing the app can put there.
+ */
+function startShouldShow(): boolean {
+  // A tab with a page on the way is not an empty tab, even while it still looks
+  // like one: `isBusy` is the same fact the bar and the tab spinner are drawn
+  // from, so the start page cannot disagree with them about what is happening.
+  if (isBusy(active)) return false;
+  const tab = tabs.get(active);
+  if (!tab) return true;
+  return isBlank(tab.url);
+}
+
+function syncBookmarkButton(): void {
+  const url = tabs.get(active)?.url ?? '';
+  const savable = !isBlank(url);
+  const saved = savable && bookmarks.has(url);
+  el.bookmark.disabled = !savable;
+  el.bookmark.textContent = saved ? '★' : '☆';
+  el.bookmark.classList.toggle('on', saved);
+  // The star is a toggle, so it has to say which way it is currently thrown —
+  // the version that always read "Bookmark this page" was the reason a second
+  // click seemed like the only way to find out whether the first had worked.
+  el.bookmark.setAttribute('aria-pressed', String(saved));
+  el.bookmark.title = saved
+    ? 'Saved. Click to remove (Ctrl+D)'
+    : 'Save this page (Ctrl+D)';
+  el.marks.setAttribute('aria-expanded', String(!el.panel.hidden && panelView === 'marks'));
+}
+
+/** The star, Ctrl+D, and the page menu all land here. */
+function toggleBookmark(id = active): void {
+  const tab = tabs.get(id);
+  const url = tab?.url ?? '';
+  if (isBlank(url)) {
+    toast('There is no page here to save yet.');
+    return;
+  }
+  const existing = bookmarks.find(url);
+  if (existing) {
+    removeBookmark(existing);
+    return;
+  }
+  addBookmark(tab?.title ?? '', url);
+}
+
+/**
+ * Saves a page or a link. Idempotent, and it says so: a reader who cannot see
+ * that a page is already kept will keep it again, and used to get a second
+ * identical row for it.
+ */
 function addBookmark(title: string, url: string): void {
   if (!url) return;
-  void store.readBookmarks().then((marks) => {
-    marks.push({ title: title || url, url });
-    return store.writeBookmarks(marks);
+  const result = bookmarks.add(title, url);
+  if (result.full) {
+    toast(`The saved list is full at ${BOOKMARK_LIMIT}. Remove one to make room.`);
+    return;
+  }
+  if (!result.mark) return;
+  const mark = result.mark;
+  if (result.existed) {
+    toast(`Already saved as “${mark.title}”.`, {
+      label: 'Rename',
+      run: () => {
+        openPanel('marks');
+        marksPanel.beginRename(mark.id);
+      },
+    });
+    return;
+  }
+  toast(`Saved “${mark.title}”.`, { label: 'Undo', run: () => void bookmarks.remove(mark.id) });
+}
+
+/**
+ * Removes one, with the undo alongside it. No confirmation: a confirmation on
+ * every removal is a cost paid on every correct one, and this is the same
+ * bargain the rest of the shell makes — say what happened, and offer the way
+ * back.
+ */
+function removeBookmark(mark: Bookmark): void {
+  const gone = bookmarks.remove(mark.id);
+  if (!gone) return;
+  toast(`Removed “${gone.mark.title}”.`, {
+    label: 'Undo',
+    run: () => bookmarks.restore(gone.mark, gone.index),
   });
+}
+
+/**
+ * Opens a saved page. The only part of the feature that needs the link, which
+ * is why it is the only part that goes quiet during an outage — and it says so
+ * rather than doing nothing.
+ */
+function openBookmark(mark: Bookmark, where: 'here' | 'newTab'): void {
+  if (!connected) {
+    toast('Offline: opening a saved page needs the link. The list stays readable.');
+    return;
+  }
+  bookmarks.touch(mark.url);
+  if (where === 'newTab') {
+    openInNewTab(mark.url);
+    return;
+  }
+  navigateTo(active, mark.url);
+}
+
+/** The menu on a saved row, in either view. */
+function bookmarkMenu(mark: Bookmark, x: number, y: number, from: 'panel' | 'start'): void {
+  showMenu(x, y, [
+    [
+      { label: 'Open', disabled: !connected, run: () => openBookmark(mark, 'here') },
+      {
+        label: 'Open in new tab',
+        hint: 'Middle click',
+        disabled: !connected,
+        run: () => openBookmark(mark, 'newTab'),
+      },
+      { label: 'Copy address', run: () => copyText(mark.url) },
+    ],
+    [
+      {
+        label: 'Rename…',
+        run: () => {
+          // The rename happens in the panel's list, so a rename asked for from
+          // the start page brings the panel with it rather than failing quietly.
+          if (from === 'start') openPanel('marks');
+          marksPanel.beginRename(mark.id);
+        },
+      },
+      { label: 'Remove', run: () => removeBookmark(mark) },
+    ],
+  ]);
+}
+
+/**
+ * Writes the list out as JSON. Everything else on this client is recoverable
+ * from the server; the saved list is not — it is the one thing that exists only
+ * plane-side, and `Store.wipe()`, a cleared browser profile or a reinstalled
+ * PWA all take it with them. So there is a way out of the box.
+ */
+function exportBookmarks(): void {
+  const marks = bookmarks.all();
+  if (!marks.length) {
+    toast('Nothing saved yet.');
+    return;
+  }
+  const blob = new Blob([exportText(marks)], { type: 'application/json' });
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = 'skyhook-bookmarks.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(href), 10000);
+  toast(`Exported ${marks.length} saved page(s).`);
+}
+
+/** Reads one back in. Additive: an import never overwrites what is here. */
+function importBookmarks(): void {
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = 'application/json,.json';
+  picker.addEventListener('change', () => {
+    const file = picker.files?.[0];
+    if (!file) return;
+    void file.text().then((text) => {
+      const { added, skipped } = bookmarks.merge(parseImport(text));
+      toast(skipped
+        ? `Imported ${added}; skipped ${skipped} already saved.`
+        : `Imported ${added} saved page(s).`);
+    }).catch((err: unknown) => {
+      log(`bookmark import failed: ${String(err)}`);
+      toast(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  });
+  picker.click();
 }
 
 function copyText(text: string): void {
@@ -691,10 +955,15 @@ function pageGroups(tab: number): MenuGroups {
     [
       { label: 'Copy page address', disabled: !url, run: () => copyText(url) },
       {
-        label: 'Bookmark page',
-        disabled: !url,
-        run: () => addBookmark(view?.title ?? '', url),
+        // Says which way the toggle is thrown, like the star does. An entry
+        // that reads "Bookmark page" on a page already bookmarked is an
+        // invitation to make a second copy of it.
+        label: bookmarks.has(url) ? 'Remove bookmark' : 'Bookmark page',
+        hint: 'Ctrl+D',
+        disabled: isBlank(url),
+        run: () => toggleBookmark(tab),
       },
+      { label: 'Saved pages…', hint: 'Ctrl+B', run: () => showPanel('marks') },
       {
         label: 'Duplicate tab',
         disabled: !url || !connected,
@@ -730,7 +999,18 @@ function mirrorMenu(tab: number, target: MenuTarget): MenuGroups {
       },
       { label: 'Open link', disabled: !connected, run: () => navigateTo(tab, link) },
       { label: 'Copy link address', run: () => copyText(link) },
-      { label: 'Bookmark link', run: () => addBookmark(target.linkText ?? '', link) },
+      bookmarks.has(link)
+        // A link already in the list is worth saying so about: on this link the
+        // reason to bookmark rather than click is that the page has not been
+        // paid for yet, and "already saved" is the answer to that question.
+        ? {
+          label: 'Remove saved link',
+          run: () => {
+            const mark = bookmarks.find(link);
+            if (mark) removeBookmark(mark);
+          },
+        }
+        : { label: 'Bookmark link', run: () => addBookmark(target.linkText ?? '', link) },
     ]);
   }
 
@@ -785,7 +1065,7 @@ function tabMenu(id: number): MenuGroups {
   const view = tabs.get(id);
   return [
     [
-      { label: 'New tab', disabled: !connected, run: () => openTab('') },
+      { label: 'New tab', disabled: !connected, run: () => openTab('', 'focus') },
       {
         label: 'Duplicate tab',
         disabled: !view?.url || !connected,
@@ -815,7 +1095,7 @@ function tabMenu(id: number): MenuGroups {
 /** The menu for a right click on the chrome itself. */
 function shellMenu(): MenuGroups {
   const groups: MenuGroups = [
-    [{ label: 'New tab', disabled: !connected, run: () => openTab('') }],
+    [{ label: 'New tab', disabled: !connected, run: () => openTab('', 'focus') }],
   ];
   if (active) groups.push(...pageGroups(active));
   return groups;
@@ -837,16 +1117,15 @@ el.urlbar.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Enter') return;
   const url = el.urlbar.value.trim();
   if (!url) return;
+  suggest.close();
   navigateTo(active, url);
 });
 
 el.back.addEventListener('click', () => goHistory(active, 'back'));
 el.forward.addEventListener('click', () => goHistory(active, 'forward'));
 el.reload.addEventListener('click', () => reloadTab(active));
-el.bookmark.addEventListener('click', () => {
-  const tab = tabs.get(active);
-  if (tab) addBookmark(tab.title, tab.url);
-});
+el.bookmark.addEventListener('click', () => toggleBookmark());
+el.marks.addEventListener('click', () => showPanel('marks'));
 
 // ------------------------------------------- the browser's own back and forward
 //
@@ -988,15 +1267,39 @@ function log(message: string): void {
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** A transient notice in the corner, for things the reader asked for. */
-function toast(message: string): void {
-  el.toast.textContent = message;
+/**
+ * A transient notice in the corner, for things the reader asked for.
+ *
+ * The optional action is what makes "Saved" and "Removed" safe to do without
+ * asking first: the notice that says what happened is also the way to undo it,
+ * so neither one needs a dialog in front of it.
+ */
+function toast(message: string, action?: { label: string; run(): void }): void {
+  el.toast.textContent = '';
+  const text = document.createElement('span');
+  text.className = 'toast-text';
+  text.textContent = message;
+  el.toast.appendChild(text);
+  if (action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'toast-act';
+    button.textContent = action.label;
+    button.addEventListener('click', () => {
+      hideToast();
+      action.run();
+    });
+    el.toast.appendChild(button);
+  }
   el.toast.hidden = false;
   if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    el.toast.hidden = true;
-    toastTimer = null;
-  }, 8000);
+  toastTimer = setTimeout(hideToast, 8000);
+}
+
+function hideToast(): void {
+  el.toast.hidden = true;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = null;
 }
 
 function basename(path: string): string {
@@ -1112,15 +1415,54 @@ function shellReport(): Record<string, unknown> {
   };
 }
 
-// -------------------------------------------------------------- the chat panel
+// ------------------------------------------------------------------ the panel
+//
+// One panel, two views. They are the two things on this client worth reading
+// while the link is down — the chat archive and the saved list — and both are
+// read beside a page rather than instead of it, so they share the strip of
+// screen that is already the cost of not being the page.
 
-el.chat.addEventListener('click', () => {
-  el.panel.hidden = !el.panel.hidden;
-  if (!el.panel.hidden) void openChat();
-});
-el.panelClose.addEventListener('click', () => {
+type PanelView = 'chat' | 'marks';
+let panelView: PanelView = 'chat';
+
+const PANEL_TITLES: Record<PanelView, string> = { chat: 'Chat', marks: 'Saved pages' };
+
+/** Opens a view, or closes the panel if that view is already the one showing. */
+function showPanel(view: PanelView): void {
+  if (!el.panel.hidden && panelView === view) {
+    closePanel();
+    return;
+  }
+  openPanel(view);
+}
+
+/**
+ * Opens a view without the toggle. Anything that needs the panel *there* —
+ * a rename, which happens in the list — goes through this: asking for it while
+ * it is already open must not be what closes it.
+ */
+function openPanel(view: PanelView): void {
+  panelView = view;
+  el.panel.hidden = false;
+  el.panelTitle.textContent = PANEL_TITLES[view];
+  el.panelBody.textContent = '';
+  if (view === 'chat') {
+    void openChat();
+  } else {
+    el.panelBody.appendChild(marksPanel.root);
+    marksPanel.render(bookmarks.all(), connected);
+    marksPanel.focusSearch();
+  }
+  syncBookmarkButton();
+}
+
+function closePanel(): void {
   el.panel.hidden = true;
-});
+  syncBookmarkButton();
+}
+
+el.chat.addEventListener('click', () => showPanel('chat'));
+el.panelClose.addEventListener('click', () => closePanel());
 
 async function openChat(): Promise<void> {
   // Cold open comes from the local archive, not from the network: the
@@ -1253,13 +1595,37 @@ window.addEventListener('resize', () => {
 });
 
 document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !ev.defaultPrevented && !el.panel.hidden) {
+    // Not when a menu just took it: the menu handles Escape in the capture
+    // phase and marks it handled, and closing the panel out from under a menu
+    // dismissal is two things happening for one key.
+    closePanel();
+    return;
+  }
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+  const key = ev.key.toLowerCase();
   // Ctrl/⌘+Shift+D. The browser's own devtools chord is F12 and Ctrl+Shift+I,
   // and this deliberately avoids both: on a mirrored page devtools show a
   // sandboxed frame full of inert nodes, which is the wrong answer to the
   // question somebody pressing them is asking.
-  if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && (ev.key === 'D' || ev.key === 'd')) {
+  if (ev.shiftKey) {
+    if (key !== 'd') return;
     ev.preventDefault();
     askForCapture();
+    return;
+  }
+  // The two chords every browser already has for this, doing what they do
+  // everywhere else. Both are claimed from the host browser deliberately: its
+  // own bookmark would save the app shell's address, which is the one page in
+  // this session nobody needs a way back to.
+  if (key === 'd') {
+    ev.preventDefault();
+    toggleBookmark();
+    return;
+  }
+  if (key === 'b') {
+    ev.preventDefault();
+    showPanel('marks');
   }
 });
 
