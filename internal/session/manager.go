@@ -185,6 +185,10 @@ func (m *Manager) Serve(conn transport.Conn) {
 		sess.Resync(ctx, ta.Tab, ta.Seq, "reconnect")
 	}
 	if resumed {
+		// The client may be rejoining after nothing worse than a reconnect, or it
+		// may have just been loaded from scratch and know only what the Welcome
+		// above carried. Telling both is one frame per tab and settles it.
+		sess.RefreshTabs(ctx)
 		sess.replayAdapterBacklog(ctx)
 	}
 

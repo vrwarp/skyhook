@@ -364,7 +364,7 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		}
 		// Again once the page has settled: a redirect or a client-side route
 		// change moves the history under a URL that has already been announced.
-		t.refreshState(ctx)
+		t.RefreshState(ctx)
 	}()
 }
 
@@ -399,7 +399,7 @@ func (t *Tab) onLoad() {
 	// that late stylesheets have landed.
 	_, _ = t.eval(ctx, "__skyhook && __skyhook.flush()")
 	t.recoverBlockedSheets(ctx)
-	t.refreshState(ctx)
+	t.RefreshState(ctx)
 }
 
 /*
@@ -886,7 +886,7 @@ func (t *Tab) emitState(st protocol.TabState) {
 
 // syncHistory asks the browser where the tab sits in its own history and caches
 // the answer. It emits nothing: callers that want the client told use
-// refreshState, and callers that are about to emit for their own reasons — a
+// RefreshState, and callers that are about to emit for their own reasons — a
 // navigation announcing its URL — want the cache correct before they do.
 func (t *Tab) syncHistory(ctx context.Context) (url, title string) {
 	var hist struct {
@@ -909,7 +909,9 @@ func (t *Tab) syncHistory(ctx context.Context) (url, title string) {
 	return "", ""
 }
 
-func (t *Tab) refreshState(ctx context.Context) {
+// RefreshState tells the client where the tab is: its URL and title, and
+// whether it has anywhere to go back or forward to.
+func (t *Tab) RefreshState(ctx context.Context) {
 	url, title := t.syncHistory(ctx)
 	t.emitState(protocol.TabState{URL: url, Title: title})
 }

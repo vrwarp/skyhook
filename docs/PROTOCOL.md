@@ -242,6 +242,16 @@ server → Welcome{sessionId, resumed, tabs[], caps[], keepaliveMs, adapters[]}
 buffered while offline, which the server replays into the pages **before** any
 resync, so the state the client syncs to already contains their typing.
 
+`sessionId` is offered on every connection, including the first one after a page
+load. Tabs are landside and outlive the page that was showing them, so a client
+that omits it is asking for a new session and abandoning whatever it had open.
+The client stores the id from each Welcome and offers it back; a session it names
+that the server no longer has is answered with a new one and `resumed: false`,
+which tells the client the tabs it was holding are gone. A resumed session is
+sent a `TabState` per tab immediately after the Welcome, because a `TabRef`
+carries no history flags and a client that has just loaded has no other way to
+learn them.
+
 Capabilities are advertised, not assumed: a client that does not say `zstd` gets
 uncompressed frames, and one that does not say `zstd-dict` never sees a
 dictionary-coded message.

@@ -445,6 +445,12 @@ self.addEventListener('message', (event: MessageEvent) => {
     case 'configure':
       pairing = cmd.args.pairing as Pairing;
       viewport = (cmd.args.viewport as Viewport) ?? viewport;
+      // The session the shell remembers from a previous load of the page, which
+      // is what makes a reload rejoin its tabs instead of being handed a fresh
+      // and empty session. Only ever adopted when this worker has none of its
+      // own: a session it has been welcomed into is the newer truth, and the
+      // stored one is what that replaced.
+      if (!sessionId) sessionId = String(cmd.args.sessionId ?? '');
       // A new pairing is a new credential, which is exactly what a refusal was
       // waiting for.
       refused = null;
