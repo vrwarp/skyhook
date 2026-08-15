@@ -51,6 +51,12 @@ const fixturePage = `<!DOCTYPE html>
      page dress a control it does not own. The mirror flattens the shadow tree,
      so this has to arrive naming something that still exists there. */
   sky-card::part(face) { padding: 3px; }
+  /* A quoted url() token carrying a bracket, which is legal and which a site
+     hands over without meaning anything by it. Ending the token at the inner
+     bracket leaves the rest of it loose in the sheet, and the rules below stop
+     parsing. The marker rule after it is how the test can tell. */
+  #bracket-url { background-image: url("/tile(2x).png"); }
+  .after-the-bracket-url { color: rgb(22, 23, 24); }
 </style>
 </head>
 <body>
@@ -70,6 +76,8 @@ const fixturePage = `<!DOCTYPE html>
     <rect x="0" y="0" width="20" height="10" fill="rgb(2, 4, 6)"/>
   </svg>
   <div id="tile"></div>
+  <div id="bracket-url"></div>
+  <div class="after-the-bracket-url">below the bracket</div>
   <div class="used">styled</div>
   <form id="login"><input id="secret" type="password" value=""></form>
   <sky-card id="card" tone="warm"></sky-card>
@@ -520,6 +528,12 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		_, _ = w.Write(pixelPNG)
 	})
 	mux.HandleFunc("/tile.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(tilePNG)
+	})
+	// A path with a bracket in it, which a url() token may carry as long as it
+	// is quoted. See TestABracketInAURLDoesNotTruncateTheSheet.
+	mux.HandleFunc("/tile(2x).png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(tilePNG)
 	})
@@ -1176,6 +1190,86 @@ func TestShadowScopedSelectorsSurviveFlattening(t *testing.T) {
 	if t.Failed() {
 		t.Logf("client CSS was:\n%s", css)
 	}
+}
+
+/*
+A bundle is rules joined end to end, so a rewrite that leaves one of them unable
+to close itself does not cost that rule — it costs every rule after it.
+
+A quoted url() token may hold a bracket, and reading it as far as the first one
+rewrote half the token and left the rest as loose text, whose orphaned quote
+swallowed the closing brace and everything following. A mirrored Gmail arrived
+as bare markup that way: 2,773 of its 3,422 rules never parsed, because 18 bytes
+of one background-image did not end where they claimed to.
+
+So the fixture puts a bracketed url() above an ordinary rule, and the ordinary
+rule is what is checked.
+*/
+func TestABracketInAURLDoesNotTruncateTheSheet(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	if err := cl.WaitForText(ctx, tab, "below the bracket", budget(30*time.Second)); err != nil {
+		t.Fatalf("fixture never arrived: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = strings.Join(cl.Model(tab).CSS, "\n")
+		if strings.Contains(css, "rgb(22,23,24)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// The rule *after* the bracketed url(): present only if the sheet went on
+	// parsing past it.
+	if !strings.Contains(css, "rgb(22,23,24)") {
+		t.Error("the rule after the bracketed url() never arrived: the sheet was cut short there")
+	}
+	// And every rule that did arrive has to be able to close itself, or it takes
+	// its neighbours down on the client.
+	for _, rule := range cl.Model(tab).CSS {
+		if !ruleCloses(rule) {
+			t.Errorf("a rule that cannot close itself reached the client: %q", rule)
+		}
+	}
+}
+
+// ruleCloses reports whether a rule's braces and quotes all end, which is what
+// decides whether the rules after it in the bundle are read as rules at all.
+func ruleCloses(rule string) bool {
+	depth := 0
+	for i := 0; i < len(rule); i++ {
+		switch c := rule[i]; c {
+		case '\\':
+			i++
+		case '"', '\'':
+			j := i + 1
+			for j < len(rule) && rule[j] != c {
+				if rule[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j >= len(rule) {
+				return false // unterminated string
+			}
+			i = j
+		case '{':
+			depth++
+		case '}':
+			if depth--; depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
 }
 
 // A password is the one thing on a page that must not be mirrored. The value

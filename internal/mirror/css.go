@@ -9,14 +9,238 @@ import (
 )
 
 var (
-	// RE2 has no backreferences, so the quote style is matched loosely; a
-	// url() token cannot contain an unescaped quote anyway.
-	cssURL = regexp.MustCompile(`url\(\s*['"]?([^'")]+)['"]?\s*\)`)
 	// Custom properties that nothing references are dead weight in apps that
 	// define hundreds of them per theme.
 	cssVarDecl = regexp.MustCompile(`(--[A-Za-z0-9_-]+)\s*:`)
 	cssVarUse  = regexp.MustCompile(`var\(\s*(--[A-Za-z0-9_-]+)`)
 )
+
+/*
+replaceCSSURLs hands every url() token in text to fn and puts back what it
+returns — the whole token, `url(` and `)` included — or leaves the token alone
+for an empty string.
+
+This is scanned rather than matched by pattern, and the reason is a bug that
+cost one mirrored Gmail four fifths of its stylesheet. The pattern this replaces
+ended the URL at the first `)`:
+
+	url\(\s*['"]?([^'")]+)['"]?\s*\)
+
+A *quoted* url token may contain a `)`, and Gmail ships one — its own templating
+leaves an unsubstituted variable inside the string:
+
+	background-image:url("//ssl.gstatic.com/…/var(--hub-nav-…-asset)_1x.png")
+
+so the pattern matched up to that inner `)`, swapped in a placeholder, and left
+`_1x.png")` behind as text. The orphaned quote then opened a string that ate the
+rule's closing brace and the `@media` block after it, and Chromium dropped
+everything past that point: 2,773 of 3,422 rules, and a page that arrived as
+bare markup. Eighteen bytes of rewrite decided the whole sheet.
+
+Scanning also settles the quieter half of the same bug: a `url(` inside a string
+— `content:"url(x)"` — is text a page means to display, not a reference to
+rewrite, and a pattern cannot tell the two apart.
+*/
+func replaceCSSURLs(text string, fn func(raw string) string) string {
+	if !containsFold(text, "url(") {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := 0; i < len(text); {
+		c := text[i]
+		if c == '\\' && i+1 < len(text) {
+			b.WriteString(text[i : i+2])
+			i += 2
+			continue
+		}
+		if c == '"' || c == '\'' {
+			j := scanCSSString(text, i)
+			b.WriteString(text[i:j])
+			i = j
+			continue
+		}
+		// `url(` is only a url token where an identifier does not run into it:
+		// `-webkit-url(` would be some other function.
+		if !matchFold(text, i, "url(") || (i > 0 && isURLIdentByte(text[i-1])) {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		raw, end, ok := scanURLToken(text, i)
+		if !ok {
+			// An unterminated token: copy it out untouched rather than guess at
+			// where it was meant to stop.
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		if rep := fn(raw); rep != "" {
+			b.WriteString(rep)
+		} else {
+			b.WriteString(text[i:end])
+		}
+		i = end
+	}
+	return b.String()
+}
+
+// scanURLToken reads the url token starting at i, which must be at its `url(`,
+// and returns the address it names and the index just past its `)`.
+func scanURLToken(s string, i int) (raw string, end int, ok bool) {
+	j := i + len("url(")
+	for j < len(s) && isCSSSpace(s[j]) {
+		j++
+	}
+	if j >= len(s) {
+		return "", 0, false
+	}
+	if q := s[j]; q == '"' || q == '\'' {
+		k := scanCSSString(s, j)
+		if k > len(s) || k-1 <= j || s[k-1] != q {
+			return "", 0, false // unterminated
+		}
+		raw = unescapeCSSURL(s[j+1 : k-1])
+		for k < len(s) && isCSSSpace(s[k]) {
+			k++
+		}
+		if k >= len(s) || s[k] != ')' {
+			return "", 0, false
+		}
+		return raw, k + 1, true
+	}
+	// Unquoted, so it runs to the first `)` that is not escaped. A token of this
+	// kind may hold neither whitespace nor brackets unescaped, which is what
+	// makes reading it this way safe.
+	start := j
+	for j < len(s) {
+		if s[j] == '\\' && j+1 < len(s) {
+			j += 2
+			continue
+		}
+		if s[j] == ')' {
+			break
+		}
+		j++
+	}
+	if j >= len(s) {
+		return "", 0, false
+	}
+	return unescapeCSSURL(strings.TrimRight(s[start:j], " \t\n\r\f")), j + 1, true
+}
+
+// unescapeCSSURL resolves the `\x` escapes that let a URL carry a quote or a
+// bracket. A hex escape is left as written: reading it means knowing where the
+// digits stop, and no address in any capture has ever used one.
+func unescapeCSSURL(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) || isHexByte(s[i+1]) {
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+/*
+cssURLToken writes an address back out as a url token.
+
+The address decides the quoting, not the other way round: a URL holding a
+bracket, a quote or a space is only a url token at all inside quotes, and the
+unquoted form a site happened to use is no reason to hand it back in a form that
+does not parse.
+*/
+func cssURLToken(raw string) string {
+	if !strings.ContainsAny(raw, "\"'()\\ \t\n\r\f") {
+		return "url(" + raw + ")"
+	}
+	var b strings.Builder
+	b.Grow(len(raw) + 8)
+	b.WriteString(`url("`)
+	for i := 0; i < len(raw); i++ {
+		if c := raw[i]; c == '"' || c == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(raw[i])
+	}
+	b.WriteString(`")`)
+	return b.String()
+}
+
+func isURLIdentByte(c byte) bool {
+	return c == '-' || c == '_' ||
+		(c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// containsFold reports whether s holds lit, which must be lowercase, anywhere.
+func containsFold(s, lit string) bool {
+	for i := 0; i+len(lit) <= len(s); i++ {
+		if matchFold(s, i, lit) {
+			return true
+		}
+	}
+	return false
+}
+
+/*
+wellFormedRule reports whether a rule can be concatenated with its neighbours
+without taking them down.
+
+A bundle is one stylesheet made by joining rules end to end, so a rule with a
+brace or a quote left open does not fail alone: everything after it is read as
+part of it, and the reader loses the rest of the page's styling to a fault in
+one declaration. That has happened twice — once from a stripped custom property
+leaving a selector with nothing to close it (see stripUnusedVars), once from a
+url() rewrite leaving half a token behind — so it is worth one pass to be sure
+that whatever a transform did, the result still ends where it says it does.
+
+Dropping the rule is the right failure: one rule lost against every rule after
+it is not a close call.
+*/
+func wellFormedRule(rule string) bool {
+	depth := 0
+	for i := 0; i < len(rule); i++ {
+		switch c := rule[i]; {
+		case c == '\\':
+			i++ // escaped: whatever it is, it is not structure
+		case c == '"' || c == '\'':
+			j := scanCSSString(rule, i)
+			if j > len(rule) || j-1 <= i || rule[j-1] != c {
+				return false // unterminated string
+			}
+			i = j - 1
+		case c == '{':
+			depth++
+		case c == '}':
+			if depth--; depth < 0 {
+				return false // closes a block it never opened
+			}
+		}
+	}
+	return depth == 0
+}
+
+// dropMalformed removes the rules that would corrupt the bundle they join.
+func dropMalformed(rules []string) []string {
+	out := rules[:0:0]
+	for _, r := range rules {
+		if wellFormedRule(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
 
 // minifyCSS squeezes rule text: comments out, runs of whitespace collapsed,
 // spaces after structural punctuation dropped.
@@ -349,18 +573,14 @@ func rewriteCSSImages(rules []string, base string, maxDim int) ([]string, []Imag
 	seen := map[string]bool{}
 	out := make([]string, len(rules))
 	for i, r := range rules {
-		out[i] = cssURL.ReplaceAllStringFunc(r, func(m string) string {
-			sub := cssURL.FindStringSubmatch(m)
-			if len(sub) < 2 {
-				return m
-			}
-			raw := strings.TrimSpace(sub[1])
+		out[i] = replaceCSSURLs(r, func(raw string) string {
+			raw = strings.TrimSpace(raw)
 			if raw == "" || strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "skyhook://") {
-				return m
+				return ""
 			}
 			abs := resolveURL(base, raw)
 			if abs == "" {
-				return m
+				return ""
 			}
 			key := ImageKey(abs, maxDim, 0)
 			if !seen[key] {
@@ -372,7 +592,9 @@ func rewriteCSSImages(rules []string, base string, maxDim int) ([]string, []Imag
 			return fmt.Sprintf("url(skyhook://img/%s)", key)
 		})
 	}
-	return out, reqs
+	// Last transform before the rules are joined into a sheet, so this is where
+	// the bundle's structure is checked. See wellFormedRule.
+	return dropMalformed(out), reqs
 }
 
 // absolutizeCSSURLs rewrites every relative url() against the sheet's own
@@ -385,24 +607,20 @@ func rewriteCSSImages(rules []string, base string, maxDim int) ([]string, []Imag
 // nothing there. Fragment-only references are left alone: they name an SVG
 // filter or gradient in the document, not a file.
 func absolutizeCSSURLs(text, base string) string {
-	if base == "" || !strings.Contains(text, "url(") {
+	if base == "" {
 		return text
 	}
-	return cssURL.ReplaceAllStringFunc(text, func(m string) string {
-		sub := cssURL.FindStringSubmatch(m)
-		if len(sub) < 2 {
-			return m
-		}
-		raw := strings.TrimSpace(sub[1])
+	return replaceCSSURLs(text, func(raw string) string {
+		raw = strings.TrimSpace(raw)
 		if raw == "" || strings.HasPrefix(raw, "#") ||
 			strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "skyhook://") {
-			return m
+			return ""
 		}
 		abs := resolveURL(base, raw)
 		if abs == "" {
-			return m
+			return ""
 		}
-		return "url(" + abs + ")"
+		return cssURLToken(abs)
 	})
 }
 

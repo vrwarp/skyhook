@@ -1228,6 +1228,57 @@ build the server is serving, that cache is the only shell generation left, and
 it holds every precached file. Against the old worker it fails with
 `shell caches = [skyhook-shell-v1], want exactly [skyhook-shell-<id>]`.
 
+### 29. A url() token has to be read, and a rule has to close itself
+
+A mirrored Gmail arrived as bare markup — no layout, icons inflated to the width
+of the window, a heading where the logo should be. The DOM was not at fault: the
+capture's two halves agreed on the hash, and the markup matched landside node
+for node. The stylesheet had crossed the link too, all 293 KB of it. Chromium
+was parsing 649 rules out of it and discarding 2,773.
+
+Gmail's own templating leaves an unsubstituted variable inside a url string:
+
+```css
+background-image:url("//ssl.gstatic.com/…/var(--hub-nav-container-button-icon-asset)_1x.png")
+```
+
+which is legal — a *quoted* url token may hold a bracket. The pattern that
+rewrote page URLs into image keys could not:
+
+```
+url\(\s*['"]?([^'")]+)['"]?\s*\)
+```
+
+`[^'")]+` ends the address at the first bracket, so the rewrite consumed two
+thirds of the token and left `_1x.png")` in the sheet as text. The orphaned
+quote opened a string that ran through the rule's closing brace and the `@media`
+block after it, and everything past that byte stopped being CSS. Eighteen bytes
+of one background-image cost the page four fifths of its styling.
+
+Two things came out of it, because the second is what makes the first survivable.
+
+**Read the token.** `replaceCSSURLs` scans instead of matching: a quoted token
+ends at its closing quote, an unquoted one at the first unescaped bracket, and
+whichever it was, the address is handed back through `cssURLToken`, which quotes
+it when the address needs quoting rather than when the page happened to. Scanning
+settles the quieter half of the same bug too — a `url(` inside a string is text
+the page means to display, and no pattern can tell that from a reference.
+
+**Check what comes out.** A bundle is rules joined end to end, so a rule that
+cannot close itself never fails alone. That had already happened once, from a
+different direction: a custom property stripped out from under its selector,
+which is why `stripUnusedVars` drops a rule whose declarations all go rather than
+emit a selector with nothing to close it. Two doors into one failure is enough to
+stop guarding the doors, so `wellFormedRule` now runs over every rule after the
+last transform that can touch it, and `dropMalformed` drops the ones whose braces
+or quotes do not end. One rule lost against every rule after it is not a close
+call.
+
+`TestABracketInAURLDoesNotTruncateTheSheet` puts a bracketed url() above an
+ordinary rule in the fixture and checks the ordinary rule, which is the symptom a
+reader would report. Against the old pattern it fails with the same wreckage the
+capture held: `#bracket-url{background-image:url(skyhook://img/44fee7e3).png");}`.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

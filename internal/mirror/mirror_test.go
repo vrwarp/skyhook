@@ -344,6 +344,121 @@ func TestRewriteCSSImagesProducesStableKeys(t *testing.T) {
 	}
 }
 
+/*
+A url() token's extent has to be read, not guessed at.
+
+A quoted one may hold a `)`, and Gmail ships one: its own templating leaves an
+unsubstituted variable inside the string. Ending the token at that inner bracket
+rewrote half of it and left the rest — `_1x.png")` — as loose text, whose
+orphaned quote swallowed the rule's closing brace and the block after it. The
+whole sheet past that point stopped parsing: 2,773 of 3,422 rules, and Gmail
+arrived as bare markup.
+*/
+func TestRewriteCSSImagesReadsWholeURLTokens(t *testing.T) {
+	const gmail = `.WR .z0>.L3:before{background-image:url(` +
+		`"//ssl.gstatic.com/ui/v1/icons/mail/rfr/var(--hub-nav-container-button-icon-asset)_1x.png")}`
+
+	rules, reqs := rewriteCSSImages([]string{gmail}, "https://mail.google.com/mail/u/0/", 512)
+	if len(rules) != 1 {
+		t.Fatalf("the rule was dropped: %v", rules)
+	}
+	if !wellFormedRule(rules[0]) {
+		t.Errorf("rewriting left the rule unable to close itself: %q", rules[0])
+	}
+	if strings.Contains(rules[0], `_1x.png")`) {
+		t.Errorf("half the url token was left behind as text: %q", rules[0])
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("expected one image request, got %v", reqs)
+	}
+	// The whole address, inner bracket included, is what the page asked for.
+	if !strings.HasSuffix(reqs[0].URL, "var(--hub-nav-container-button-icon-asset)_1x.png") {
+		t.Errorf("url was cut short: %q", reqs[0].URL)
+	}
+}
+
+func TestReplaceCSSURLsScansRatherThanMatches(t *testing.T) {
+	id := func(raw string) string { return "url(<" + raw + ">)" }
+	for _, tc := range []struct{ name, in, want string }{
+		{"plain", `.a{background:url(/x.png)}`, `.a{background:url(</x.png>)}`},
+		{"quoted", `.a{background:url("/x.png")}`, `.a{background:url(</x.png>)}`},
+		{"single quoted", `.a{background:url('/x.png')}`, `.a{background:url(</x.png>)}`},
+		{"padded", `.a{background:url( "/x.png" )}`, `.a{background:url(</x.png>)}`},
+		// The bracket that started all this.
+		{"bracket inside quotes", `.a{background:url("/a(b)c.png")}`, `.a{background:url(</a(b)c.png>)}`},
+		{"escaped bracket", `.a{background:url(/a\)b.png)}`, `.a{background:url(</a)b.png>)}`},
+		// Two tokens in one declaration, the shape image-set() arrives in.
+		{"two tokens", `.a{background:image-set(url("/a.png") 1x,url("/b.png") 2x)}`,
+			`.a{background:image-set(url(</a.png>) 1x,url(</b.png>) 2x)}`},
+		// A url( a page means to display is not a reference.
+		{"inside a string", `.a::before{content:"url(/x.png)"}`, `.a::before{content:"url(/x.png)"}`},
+		// An identifier running into it is some other function.
+		{"other function", `.a{mask:my-url(/x.png)}`, `.a{mask:my-url(/x.png)}`},
+		{"uppercase", `.a{background:URL("/x.png")}`, `.a{background:url(</x.png>)}`},
+		// Nothing to guess at, so nothing is touched.
+		{"unterminated", `.a{background:url("/x.png}`, `.a{background:url("/x.png}`},
+	} {
+		if got := replaceCSSURLs(tc.in, id); got != tc.want {
+			t.Errorf("%s: replaceCSSURLs(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// An address that only parses inside quotes has to come back inside quotes,
+// whatever form the page wrote it in.
+func TestAbsolutizeCSSURLsQuotesWhatNeedsIt(t *testing.T) {
+	const base = "https://cdn.example.com/css/site.css"
+	for _, tc := range []struct{ in, want string }{
+		{`.a{background:url(../img/logo.png)}`,
+			`.a{background:url(https://cdn.example.com/img/logo.png)}`},
+		{`.a{background:url("a(b).png")}`,
+			`.a{background:url("https://cdn.example.com/css/a(b).png")}`},
+		// A fragment names something in the document, not a file.
+		{`.a{filter:url(#blur)}`, `.a{filter:url(#blur)}`},
+		{`.a{background:url(data:image/gif;base64,AA)}`, `.a{background:url(data:image/gif;base64,AA)}`},
+	} {
+		got := absolutizeCSSURLs(tc.in, base)
+		if got != tc.want {
+			t.Errorf("absolutizeCSSURLs(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if !wellFormedRule(got) {
+			t.Errorf("absolutizeCSSURLs(%q) produced a rule that cannot close itself: %q", tc.in, got)
+		}
+	}
+}
+
+/*
+A bundle is rules joined end to end, so a rule that cannot close itself does not
+fail alone — it takes every rule after it. Whatever a transform does, what comes
+out has to end where it says it does, and a rule that does not is dropped.
+*/
+func TestMalformedRulesNeverReachTheBundle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rule string
+		ok   bool
+	}{
+		{"plain", `.a{color:red}`, true},
+		{"nested block", `@media (min-width:10px){.a{color:red}}`, true},
+		{"brace in a string", `.a::before{content:"}"}`, true},
+		{"escaped quote", `.a::before{content:"\""}`, true},
+		{"brace in a selector's string", `[title="{"]{color:red}`, true},
+		{"unclosed block", `.a{color:red`, false},
+		{"stray close", `.a{color:red}}`, false},
+		{"unterminated string", `.a::before{content:"oops}`, false},
+		{"the Gmail orphan", `.a{background:url(skyhook://img/1234abcd)_1x.png")}`, false},
+	} {
+		if got := wellFormedRule(tc.rule); got != tc.ok {
+			t.Errorf("%s: wellFormedRule(%q) = %v, want %v", tc.name, tc.rule, got, tc.ok)
+		}
+	}
+
+	kept := dropMalformed([]string{`.a{color:red}`, `.b{color:blue`, `.c{color:green}`})
+	if len(kept) != 2 || kept[0] != `.a{color:red}` || kept[1] != `.c{color:green}` {
+		t.Errorf("dropMalformed kept %q; the broken rule should go and its neighbours stay", kept)
+	}
+}
+
 func TestImageKeyMatchesAgentAlgorithm(t *testing.T) {
 	// The agent computes fnv1a over UTF-16 code units of "url|WxH"; if these
 	// two ever disagree, every image in the mirror becomes a cache miss.
