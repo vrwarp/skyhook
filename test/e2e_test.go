@@ -682,6 +682,26 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			</div>
 			</body></html>`)
 	})
+	// The layout every full-height application on the web is built on: the
+	// definite height comes from the viewport, through `html, body { height:
+	// 100% }`, and every box below it asks for 100% of its parent. Gmail,
+	// Google Chat, Docs, Slack — all of them. The chain has one property that
+	// makes it a good test: it runs through the mirrored root, so anything the
+	// mirror inserts above that root breaks all of it at once, and the page
+	// collapses to the height of its own header.
+	mux.HandleFunc("/full-height", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Full height</title>
+			<style>
+			  html, body { height: 100%; margin: 0 }
+			  #app { height: 100% }
+			  #header { height: 40px }
+			  #main { height: calc(100% - 40px) }
+			</style></head>
+			<body>
+			<div id="app"><div id="header">bar</div><div id="main">measure me</div></div>
+			</body></html>`)
+	})
 	// A frame whose document lays out taller than the box the page gave it.
 	// Landside the frame clips it, as a frame does; plane-side the mirror has
 	// to leave it reachable, because the reader has no way to resize the box

@@ -1279,6 +1279,57 @@ ordinary rule in the fixture and checks the ordinary rule, which is the symptom 
 reader would report. Against the old pattern it fails with the same wreckage the
 capture held: `#bracket-url{background-image:url(skyhook://img/44fee7e3).png");}`.
 
+### 30. The mirror's own wrapper was breaking every full-height layout
+
+Google Chat mirrored as a header bar, the word "Shortcuts", and eight hundred
+pixels of white. The DOM was perfect: 1238 nodes on both sides, hashes agreeing,
+every string of text present in `expected.html` — "Welcome, benson", the
+shortcut list, the three empty-state cards — and none of it on screen. A capture
+that says the two documents are identical and the reader saying the page is
+blank are both true at once only if the difference is in the box tree, and the
+box tree is the one thing neither side hashes.
+
+The patcher builds a snapshot detached and swaps it in whole, which is right: a
+resync that appends a thousand nodes into the live document lays the page out a
+thousand times and the reader watches their page empty itself and refill. What
+was wrong was the container. It was a `<div>`, and it went into the document
+with the tree still inside it.
+
+A `<div>` is a box, and its height is auto. The mirrored root is the page's own
+`<html>`, so the whole of a page's full-height layout resolves *through* that
+box:
+
+    html, body { height: 100% }      <- the page's own rule; 881px, correct
+      div (skyhook's)                <- auto
+        html                         <- 100% of auto = auto
+          body                       <- auto
+            .app { height: 100% }    <- auto, and so is everything under it
+
+One box, and every `height: 100%` below it collapses to its content. That is not
+an unusual pattern to break — it is how essentially every application on the web
+says "fill the window". Gmail, Chat, Docs, Slack.
+
+This had been true since the patcher was written and hurt nothing until
+[§25](#25-the-mirror-was-rendering-the-entire-web-in-quirks-mode). Quirks mode's
+percentage-height rule walks up the ancestors until it finds a definite height,
+so it walked straight past the wrapper to the frame's own viewport and got very
+nearly the right answer for entirely the wrong reason. Fixing the compatibility
+mode was correct and made the reCAPTCHA usable; it also removed the accident
+that had been hiding this, which is worth stating plainly because "the fix
+exposed a second bug" is the shape a regression report takes when nobody knows
+about the first one.
+
+The container is now a `DocumentFragment`. It holds a detached tree exactly as
+well and generates no box at all, so the page's root becomes a child of the
+frame's body and the chain is the one the page was written for. There is no
+replacement wrapper and no compensating stylesheet rule: the fix is that
+Skyhook stops putting anything in the middle.
+
+`TestPWAKeepsTheDocumentRootDirectlyInTheBody` asserts both halves — that
+nothing sits between the frame's body and the page's root, and that a fixture
+whose only definite height is the viewport reaches it. Against the wrapper it
+fails with `#main came out 18px in a 725px frame, wanted about 685px`.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

@@ -1303,7 +1303,10 @@ export class MirrorHost {
   // --------------------------------------------------------------- optimistic
 
   private placeGhost(composer: Node, text: string): boolean {
-    const root = (composer as HTMLElement).closest?.('[data-skyhook-root], body');
+    // The mirrored page's own <body>, which is a node inside this document
+    // rather than this document's body — the snapshot is rooted at the page's
+    // <html> and that whole element is a child of the frame's real body.
+    const root = (composer as HTMLElement).closest?.('body') ?? this.doc?.body;
     const list = root?.querySelector('[role="list"], ul, ol');
     if (!list || !this.doc) return false;
     const ghost = this.doc.createElement('div');
