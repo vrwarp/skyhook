@@ -30,6 +30,11 @@ img { background-repeat: no-repeat; background-size: cover; }
 [data-skyhook-static] {
   background: repeating-linear-gradient(45deg, #eee, #eee 8px, #e5e5e5 8px, #e5e5e5 16px);
 }
+/* A page on its way. The cursor is the one affordance that appears where the
+   reader is already looking — on the link they just clicked — and it is the
+   operating system's own word for "taken, working on it". Links only: over
+   text, the selection cursor is still the true one. */
+html.skyhook-busy, html.skyhook-busy a[href] { cursor: progress; }
 `;
 
 /** What the shell needs to know to draw a context menu for a right click. */
@@ -82,6 +87,17 @@ export interface HostEvents {
   wantImages(tab: number, hashes: string[]): void;
   /** A link the user asked to open in a new tab (middle or ctrl/⌘ click). */
   openLink(tab: number, url: string): void;
+  /**
+   * A gesture that should produce a new page in this tab: a plain click on a
+   * link, or a form submitted. Sent as the event goes landside, which is a
+   * round trip before the server can say a navigation started — the whole
+   * reason the shell has anything to show in the meantime.
+   *
+   * It is an expectation and not a fact. A link the page treats as a button
+   * produces exactly this gesture and no navigation, so the shell's wait is
+   * bounded rather than open-ended.
+   */
+  navigating(tab: number, url?: string): void;
   /** A right click, for the shell to answer with Skyhook's own menu. */
   menu(tab: number, target: MenuTarget): void;
   /**
@@ -429,6 +445,13 @@ export class MirrorHost {
         point: this.pointInBox(mouse, (anchor ?? target) as Element),
         path: this.approachPath(),
       });
+      // Following a link is the gesture this whole client is slowest at
+      // answering, so the shell is told the moment it goes out rather than when
+      // the page comes back. Everything narrower — a click on a button, a
+      // checkbox — is left alone: those usually change the page in place, and a
+      // page arriving is not what the reader is waiting for.
+      const link = plainClick(mouse) ? this.linkAt(anchor) : undefined;
+      if (link) this.events.navigating(this.tab, link.url);
       // The frame has no allow-forms, so a submit control never produces a
       // native submit event; recognise it here instead.
       this.maybeSubmit(target);
@@ -770,6 +793,11 @@ export class MirrorHost {
       tab: this.tab, seq: this.inputSeq, ts: Math.round(performance.now()),
       kind: InputKind.Submit, node, fields,
     });
+    // A submitted form is a page on its way, in every case that is not an app
+    // answering it with script. Where it lands is the server's business — the
+    // action may be relative, a redirect, or computed — so the shell is told
+    // that something is coming without being told where.
+    this.events.navigating(this.tab);
     return true;
   }
 
@@ -1090,6 +1118,11 @@ export class MirrorHost {
   /** Marks the mirror as showing stale content during an outage. */
   setOffline(offline: boolean): void {
     this.doc?.documentElement.classList.toggle('skyhook-offline', offline);
+  }
+
+  /** Marks the mirror as waiting for a page it has asked for. */
+  setBusy(busy: boolean): void {
+    this.doc?.documentElement.classList.toggle('skyhook-busy', busy);
   }
 
   /** Node count, for the HUD. */

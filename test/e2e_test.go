@@ -346,6 +346,26 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, commentsPage())
 	})
+	// A link to a page that takes its time answering. What the client shows
+	// between a click and the page it asks for only exists in that window, and
+	// on loopback the window is a few milliseconds wide — too narrow to look at,
+	// and nothing like the seconds this project exists for.
+	mux.HandleFunc("/slow-link", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Waiting room</title></head>
+			<body><h1>the waiting room</h1><p><a href="/slow">the page that takes its time</a></p>
+			</body></html>`)
+	})
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(3 * time.Second):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Slow</title></head>
+			<body><h1>the page that took its time</h1></body></html>`)
+	})
 	mux.HandleFunc("/story", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>A Story</title></head>

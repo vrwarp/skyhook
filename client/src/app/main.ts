@@ -11,6 +11,7 @@ import { closeMenu, menuIsOpen, showMenu, type MenuGroups } from './menu.js';
 import { pairingFromFragment, transportUrls } from './pairing.js';
 import { gather } from './capture.js';
 import * as clientlog from './clientlog.js';
+import { Progress, type Ask } from './progress.js';
 import { Store, type Pairing } from '../store/store.js';
 import type {
   AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Refusal, Snapshot, Stats,
@@ -22,11 +23,17 @@ const hosts = new Map<number, MirrorHost>();
 const tabs = new Map<number, TabView>();
 const archive: AdapterRecord[] = [];
 const spaces = new Map<string, { name: string; unread: number }>();
+/** Navigations asked for and not yet answered. See progress.ts. */
+const progress = new Progress();
 let worker: Worker | null = null;
 let active = 0;
 let currentSpace = '';
 /** Whether the link is up. Controls which chrome is usable, not what is shown. */
 let connected = false;
+/** The link's last round trip, which is what an ask's patience is measured in. */
+let linkRtt = 0;
+/** One timer for every outstanding ask, armed at the earliest deadline. */
+let sweepTimer: ReturnType<typeof setTimeout> | null = null;
 
 interface TabView {
   id: number;
@@ -46,6 +53,8 @@ const el = {
   bookmark: byId<HTMLButtonElement>('bookmark'),
   chat: byId<HTMLButtonElement>('chat'),
   frames: byId<HTMLDivElement>('frames'),
+  progress: byId<HTMLDivElement>('progress'),
+  status: byId<HTMLDivElement>('status'),
   panel: byId<HTMLElement>('panel'),
   panelBody: byId<HTMLDivElement>('panel-body'),
   panelClose: byId<HTMLButtonElement>('panel-close'),
@@ -166,7 +175,10 @@ function handle(kind: string, args: Record<string, unknown>): void {
         void hostFor(t.tab);
         if (t.active) active = t.tab;
       }
-      renderTabs();
+      // The server has just said what every tab is, which answers anything this
+      // side was still waiting to hear about them.
+      progress.clear();
+      renderProgress();
       break;
     }
     case 'snapshot':
@@ -189,7 +201,15 @@ function handle(kind: string, args: Record<string, unknown>): void {
       // A tab we have never seen needs its frame now, not when its first
       // snapshot happens to arrive: a tab opened onto about:blank has nothing
       // to snapshot until it navigates somewhere.
-      if (!known) void hostFor(id);
+      if (!known) {
+        void hostFor(id);
+        // The tab the reader asked for has arrived, so its placeholder in the
+        // strip has a real tab to become.
+        progress.appeared();
+      }
+      // Once the server says a tab is loading it is telling this side what it
+      // had been guessing, and it is the better source.
+      progress.serverLoading(id, st.loading);
       tab.url = st.url || tab.url;
       tab.title = st.title || tab.title;
       // Relative links in the mirror resolve against this; a tab that navigates
@@ -200,7 +220,7 @@ function handle(kind: string, args: Record<string, unknown>): void {
       tab.canForward = st.canForward;
       upsertTab(tab);
       if (!active) active = id;
-      renderTabs();
+      renderProgress();
       break;
     }
     case 'imageMeta':
@@ -220,10 +240,15 @@ function handle(kind: string, args: Record<string, unknown>): void {
       const online = args.online === true;
       const changed = online !== connected;
       connected = online;
+      // Nothing asked for is on its way during an outage: the worker drops
+      // navigate frames while the link is down. Saying a page is coming would
+      // be a promise the shell cannot keep, and the HUD's "offline" is the
+      // honest affordance for that state.
+      const stalled = !online && progress.clear();
       const refused = args.refused as Refusal | undefined;
       renderStatus(online, String(args.kind ?? ''), args.reason as string | undefined, refused);
       for (const h of hosts.values()) h.setOffline(!online);
-      if (changed) renderTabs();
+      if (changed || stalled) renderProgress();
       if (refused) showRefusal(refused);
       break;
     }
@@ -260,6 +285,10 @@ async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
   // gone, and half its entries would act on a node that no longer exists.
   if (tab === active) closeMenu();
   host.applySnapshot(snap);
+  // The page the reader asked for is on screen. Waiting for the tab-state frame
+  // behind it to say so would leave the bar running over a page that has
+  // already arrived.
+  if (progress.arrived(tab, snap.url)) renderProgress();
 }
 
 async function applyMutation(tab: number, m: Mutation, seq: number): Promise<void> {
@@ -279,6 +308,7 @@ async function hostFor(tab: number): Promise<MirrorHost> {
     applied: (t, seq, hash) => send('ack', { tab: t, seq, hash }),
     wantImages: (t, hashes) => send('wantImage', { tab: t, hashes }),
     openLink: (_t, url) => openInNewTab(url),
+    navigating: (t, url) => asking(t, 'Loading', url),
     menu: (t, target) => showMenu(target.x, target.y, mirrorMenu(t, target)),
     dismiss: () => {
       const was = menuIsOpen();
@@ -303,9 +333,14 @@ function upsertTab(tab: TabView): void {
 function renderTabs(): void {
   el.strip.textContent = '';
   for (const tab of tabs.values()) {
+    const busy = isBusy(tab.id);
     const node = document.createElement('div');
-    node.className = `tab${tab.id === active ? ' active' : ''}${tab.loading ? ' loading' : ''}`;
+    node.className = `tab${tab.id === active ? ' active' : ''}${busy ? ' loading' : ''}`;
     node.setAttribute('role', 'tab');
+    // Before the title, where a favicon goes and where a browser puts this: a
+    // background tab fetching a page is the case the bar over the mirror cannot
+    // show, because the mirror it would sit over is another tab's.
+    if (busy) node.appendChild(spinner());
 
     const title = document.createElement('span');
     title.className = 'title';
@@ -323,7 +358,7 @@ function renderTabs(): void {
 
     node.addEventListener('click', () => {
       active = tab.id;
-      renderTabs();
+      renderProgress();
       layout();
       syncToolbar();
     });
@@ -336,6 +371,21 @@ function renderTabs(): void {
     });
     el.strip.appendChild(node);
   }
+  // A tab is opened by the server, so between the gesture and the tab there is
+  // a round trip in which the strip is unchanged and the reader has no way to
+  // tell a middle click that was heard from one that was missed. They press
+  // again, and come back to two tabs.
+  for (const open of progress.opening) {
+    const ghost = document.createElement('div');
+    ghost.className = 'tab ghost loading';
+    ghost.title = 'Waiting for the server to open this tab';
+    ghost.appendChild(spinner());
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = (open.url && hostOf(open.url)) || 'New tab';
+    ghost.appendChild(title);
+    el.strip.appendChild(ghost);
+  }
   const add = document.createElement('button');
   add.id = 'newtab';
   add.textContent = '+';
@@ -343,9 +393,20 @@ function renderTabs(): void {
   // Opening a tab is a request to the server, so offline it would do nothing at
   // all. Better to look unavailable than to look broken.
   add.disabled = !connected;
-  add.addEventListener('click', () => send('openTab', { url: '' }));
+  add.addEventListener('click', () => openTab(''));
   el.strip.appendChild(add);
   syncToolbar();
+}
+
+/** The one moving thing in the chrome: a tab, or a tab-to-be, is waiting. */
+function spinner(): HTMLElement {
+  const spin = document.createElement('span');
+  spin.className = 'spin';
+  // Decoration to a screen reader otherwise, in a strip that is otherwise a
+  // row of page names.
+  spin.setAttribute('role', 'img');
+  spin.setAttribute('aria-label', 'Loading');
+  return spin;
 }
 
 function closeTab(id: number): void {
@@ -357,11 +418,12 @@ function closeTabLocally(id: number): void {
   hosts.get(id)?.destroy();
   hosts.delete(id);
   tabs.delete(id);
+  progress.forget(id);
   if (active === id) {
     const next = tabs.keys().next().value;
     active = typeof next === 'number' ? next : 0;
   }
-  renderTabs();
+  renderProgress();
   layout();
 }
 
@@ -389,6 +451,104 @@ function hostOf(url: string): string {
   }
 }
 
+// ------------------------------------------------------------------ progress
+//
+// Three affordances, for three questions a reader asks in the seconds after a
+// click, and one timer under all of them.
+//
+//   the bar    — did that do anything? (the active tab, at the top of the page)
+//   the strip  — which tab is it doing it in? (spinners, and tabs-to-be)
+//   the line   — where am I going? (bottom left, the way browsers say it)
+//
+// All three are driven from the same two facts: what this side has asked for
+// (progress.ts) and what the server last said about the tab. Nothing here
+// invents a percentage: how far along a page is, is not knowable from this end,
+// and a bar that fills at a rate nobody measured is a lie told at the exact
+// moment the reader is deciding whether to trust the thing.
+
+/** Whether a tab is waiting for a page: either half of the story counts. */
+function isBusy(tab: number): boolean {
+  return !!progress.waiting(tab) || !!tabs.get(tab)?.loading;
+}
+
+/**
+ * Records a navigation this side has just asked for, and shows it at once.
+ *
+ * Offline it records nothing: the worker drops navigate frames while the link
+ * is down, so there would be no page coming to wait for.
+ */
+function asking(tab: number, verb: string, url?: string): void {
+  if (!connected || !tab) return;
+  progress.ask(tab, { verb, url, from: tabs.get(tab)?.url ?? '' }, clock(), linkRtt);
+  renderProgress();
+}
+
+/** Redraws everything that says a page is on its way. */
+function renderProgress(): void {
+  renderTabs();
+  const busy = isBusy(active);
+  el.progress.hidden = !busy;
+  el.status.hidden = !busy;
+  if (busy) el.status.textContent = busyLabel(active);
+  for (const [id, host] of hosts) host.setBusy(isBusy(id));
+  armSweep();
+}
+
+/** What the status line says: the verb the gesture meant, and where it points. */
+function busyLabel(tab: number): string {
+  const ask = progress.waiting(tab);
+  // While there is an ask, only the ask's own destination. A gesture whose
+  // destination this side does not know — back, forward, a form submitted —
+  // would otherwise be labelled with the tab's current URL, which is the one
+  // page the reader is definitely not going to. Once the server has taken over
+  // the tab's URL is the newer truth, and by then it is the page arriving.
+  const url = ask ? ask.url ?? '' : tabs.get(tab)?.url ?? '';
+  const verb = ask?.verb ?? 'Loading';
+  return url ? `${verb} ${plainUrl(url)}…` : `${verb}…`;
+}
+
+/**
+ * A URL as a status line shows one: no scheme, no trailing slash on a bare
+ * host. Overlong ones are left overlong and clipped by the element, so what is
+ * dropped is the tail and not the host the reader is checking.
+ */
+function plainUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const path = u.pathname === '/' ? '' : u.pathname;
+    return u.host + path + u.search;
+  } catch {
+    return url;
+  }
+}
+
+/** The clock asks are timed against: monotonic, so a sleeping laptop or a
+ *  clock correction cannot expire one early. */
+function clock(): number {
+  return performance.now();
+}
+
+/**
+ * Arms a single timer at the earliest deadline outstanding.
+ *
+ * Something has to fire, or an ask nothing ever answers — a link the page
+ * treats as a button — leaves the bar running with no event coming to take it
+ * down.
+ */
+function armSweep(): void {
+  if (sweepTimer) {
+    clearTimeout(sweepTimer);
+    sweepTimer = null;
+  }
+  const until = progress.deadline();
+  if (!Number.isFinite(until)) return;
+  sweepTimer = setTimeout(() => {
+    sweepTimer = null;
+    if (progress.sweep(clock())) renderProgress();
+    else armSweep();
+  }, Math.max(50, until - clock()));
+}
+
 // -------------------------------------------------------------------- actions
 
 /**
@@ -402,15 +562,31 @@ function openInNewTab(url: string): void {
     log('offline: a new tab needs the link');
     return;
   }
+  openTab(url);
+}
+
+/** Asks the server for a tab, and puts a placeholder in the strip until it
+ *  arrives. Every gesture that opens one comes through here. */
+function openTab(url: string): void {
   send('openTab', { url });
+  if (!connected) return;
+  progress.askOpen({ verb: 'Opening', url: url || undefined }, clock(), linkRtt);
+  renderProgress();
 }
 
 function navigateTo(tab: number, url: string): void {
   if (!tab) {
-    send('openTab', { url });
+    openTab(url);
     return;
   }
   send('navigate', { tab, url });
+  asking(tab, 'Loading', url);
+}
+
+/** Reloads a tab, from wherever the gesture came from. */
+function reloadTab(tab: number): void {
+  send('navigate', { tab, action: 'reload' });
+  asking(tab, 'Reloading', tabs.get(tab)?.url);
 }
 
 /**
@@ -426,6 +602,9 @@ function goHistory(tab: number, action: 'back' | 'forward'): boolean {
   if (!connected || !tab || !view) return false;
   if (!(action === 'back' ? view.canBack : view.canForward)) return false;
   send('navigate', { tab, action });
+  // Where it goes is the tab's history, which this side does not keep — only
+  // that it was asked for, which is what the reader is waiting to see.
+  asking(tab, action === 'back' ? 'Going back' : 'Going forward');
   return true;
 }
 
@@ -496,17 +675,17 @@ function pageGroups(tab: number): MenuGroups {
       {
         label: 'Back',
         disabled: !connected || !view?.canBack,
-        run: () => send('navigate', { tab, action: 'back' }),
+        run: () => goHistory(tab, 'back'),
       },
       {
         label: 'Forward',
         disabled: !connected || !view?.canForward,
-        run: () => send('navigate', { tab, action: 'forward' }),
+        run: () => goHistory(tab, 'forward'),
       },
       {
         label: 'Reload',
         disabled: !connected || !tab,
-        run: () => send('navigate', { tab, action: 'reload' }),
+        run: () => reloadTab(tab),
       },
     ],
     [
@@ -606,7 +785,7 @@ function tabMenu(id: number): MenuGroups {
   const view = tabs.get(id);
   return [
     [
-      { label: 'New tab', disabled: !connected, run: () => send('openTab', { url: '' }) },
+      { label: 'New tab', disabled: !connected, run: () => openTab('') },
       {
         label: 'Duplicate tab',
         disabled: !view?.url || !connected,
@@ -615,7 +794,7 @@ function tabMenu(id: number): MenuGroups {
       {
         label: 'Reload',
         disabled: !connected,
-        run: () => send('navigate', { tab: id, action: 'reload' }),
+        run: () => reloadTab(id),
       },
     ],
     [
@@ -636,7 +815,7 @@ function tabMenu(id: number): MenuGroups {
 /** The menu for a right click on the chrome itself. */
 function shellMenu(): MenuGroups {
   const groups: MenuGroups = [
-    [{ label: 'New tab', disabled: !connected, run: () => send('openTab', { url: '' }) }],
+    [{ label: 'New tab', disabled: !connected, run: () => openTab('') }],
   ];
   if (active) groups.push(...pageGroups(active));
   return groups;
@@ -663,7 +842,7 @@ el.urlbar.addEventListener('keydown', (ev) => {
 
 el.back.addEventListener('click', () => goHistory(active, 'back'));
 el.forward.addEventListener('click', () => goHistory(active, 'forward'));
-el.reload.addEventListener('click', () => send('navigate', { tab: active, action: 'reload' }));
+el.reload.addEventListener('click', () => reloadTab(active));
 el.bookmark.addEventListener('click', () => {
   const tab = tabs.get(active);
   if (tab) addBookmark(tab.title, tab.url);
@@ -733,6 +912,9 @@ window.addEventListener('popstate', (ev) => {
 
 function renderStats(s: Partial<Stats> & { rttMs?: number }): void {
   const rttMs = s.rttMs || Math.round((s.rttMicros ?? 0) / 1000);
+  // How long the shell waits for an answer is measured in round trips, so the
+  // HUD's own number is where that comes from.
+  if (rttMs) linkRtt = rttMs;
   el.hudRtt.textContent = rttMs ? `${rttMs} ms` : '--';
   el.hudQueue.textContent = `q${s.queueDepth ?? 0}`;
   const bytes = (s.bytesRecv ?? 0) + (s.bytesSent ?? 0);
@@ -903,6 +1085,13 @@ function runCapture(request: CaptureRequest): void {
   })();
 }
 
+/** An outstanding ask as the bundle's client.json records it, with how long it
+ *  has been outstanding — the number that says whether the reader was waiting. */
+function waitReport(ask: Ask | undefined): Record<string, unknown> | null {
+  if (!ask) return null;
+  return { verb: ask.verb, url: ask.url ?? '', from: ask.from, forMs: Math.round(clock() - ask.at) };
+}
+
 /** What the shell itself knows, for the bundle's client.json. */
 function shellReport(): Record<string, unknown> {
   return {
@@ -913,7 +1102,11 @@ function shellReport(): Record<string, unknown> {
       canBack: t.canBack, canForward: t.canForward,
       hasFrame: hosts.has(t.id),
       nodes: hosts.get(t.id)?.nodes ?? 0,
+      // A page the reader is still waiting for is the other half of "this looks
+      // wrong": a capture taken mid-navigation is a picture of the old page.
+      waitingFor: waitReport(progress.waiting(t.id)),
     })),
+    openingTabs: progress.opening.map((o) => waitReport(o)),
     chatPanelOpen: !el.panel.hidden,
     archivedRecords: archive.length,
   };
