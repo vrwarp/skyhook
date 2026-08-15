@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -459,10 +460,37 @@ func (s *Session) TabRefs() []protocol.TabRef {
 	for id, ts := range s.tabs {
 		out = append(out, protocol.TabRef{
 			Tab: id, URL: ts.tab.URL(), Title: ts.tab.Title(),
-			Seq: ts.tab.Seq(), Active: id == active,
+			Seq: ts.tab.Seq(), Active: id == active, Loading: ts.tab.Loading(),
 		})
 	}
+	// In the order they were opened, because that is the order the strip is in
+	// on the client that opened them. Ranging a map hands them over shuffled, so
+	// a reader who reloaded came back to their tabs rearranged — and tab order
+	// is muscle memory.
+	sort.Slice(out, func(i, j int) bool { return out[i].Tab < out[j].Tab })
 	return out
+}
+
+// RefreshTabs re-announces every tab: its URL and title, whether it is loading,
+// and where it sits in its own history.
+//
+// Welcome carries the first two and no more, which is enough to draw a strip and
+// not enough to work with. A client that has just loaded the app — a reload, a
+// relaunch of the installed PWA — has no history flags for tabs it did not
+// watch navigate, so its back and forward buttons would sit disabled over a tab
+// with ten pages behind it until the reader navigated somewhere to find out
+// otherwise. That is a round trip spent to learn something already known
+// landside; one small frame per tab is cheaper.
+func (s *Session) RefreshTabs(ctx context.Context) {
+	s.mu.Lock()
+	tabs := make([]*mirror.Tab, 0, len(s.tabs))
+	for _, ts := range s.tabs {
+		tabs = append(tabs, ts.tab)
+	}
+	s.mu.Unlock()
+	for _, t := range tabs {
+		t.RefreshState(ctx)
+	}
 }
 
 func (s *Session) tabURL(id uint32) string {

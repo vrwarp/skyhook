@@ -998,6 +998,69 @@ boring option that works; its one visible effect is that the frame's URL
 becomes the shell's, which changes no resolution because an about:blank frame
 had already inherited that same base URL from its creator.
 
+### 26. Loading the app is rejoining a session, not starting a browser
+
+A Skyhook tab is a real Chromium tab on the VPS. It is not a thing the client
+owns a copy of and it is not reconstructible plane-side: the client holds a
+mirror of what that tab currently shows, in a frame, in a page, and the page is
+the most disposable object in the system. A reload throws it away. So does
+closing the installed app, a crash, a background tab the OS reclaimed, and a
+service worker update.
+
+None of that touches the tabs. They are landside, they kept loading while the
+app was gone, and they are still logged in. The session that owns them lives for
+12 hours without a client — which was designed for a flight, and is exactly as
+right for the ten seconds between one page load and the next.
+
+The client did not ask for it back. It stored the session id from the Welcome
+that named it (`store.writeSessionId`) and never once read it back, so every
+load introduced itself as a stranger, was given a fresh and empty session
+(`Manager.resolve`), and left the reader's tabs running landside with nothing
+able to reach them. What the reader saw was an empty strip and a blank frame.
+What it cost was every page in that session, re-fetched over a link where a page
+is measured in seconds — and a Chromium per orphaned session, burning landside
+until the TTL collected it.
+
+The shell now reads the stored id at startup and hands it to the network worker
+with the pairing, and the worker offers it in its first Hello. It adopts one
+only when it holds none of its own: a worker that has already been welcomed into
+a session knows the newer id, and the stored one is what that replaced. The
+server's side of the handshake needed nothing — `Hello.sessionId` and the tab
+list in `Welcome` were always there, and `resolve` had always been willing to
+hand a session back to whoever named it.
+
+Getting the strip back is the visible half. Three things behind it are what make
+the tabs usable rather than decorative:
+
+- **The frames have to fill.** A cold client holds no document for any tab and
+  no diff can build one, so the worker asks for a snapshot of every tab the
+  Welcome names. That was already the behaviour on reconnect; it now runs on the
+  path that matters most, where *every* tab is cold.
+- **Welcome does not carry history.** A `TabRef` is a URL, a title and a
+  sequence number. Whether a tab can go back is the browser's answer and no
+  client that has just loaded can know it, so the toolbar sat disabled over a
+  tab with ten pages behind it until the reader spent a navigation finding out
+  otherwise. A resumed session now gets a `TabState` per tab
+  (`Session.RefreshTabs`) immediately behind the Welcome, which is a few dozen
+  bytes for something already known landside.
+- **Tab order is muscle memory.** `TabRefs` ranged a map, so the strip came back
+  shuffled — different on every reload. It is sorted by tab id, which is the
+  order they were opened in and the order the strip was already in.
+
+The reconcile in the other direction is the same fix seen from the other end: a
+Welcome that is *not* a resume — the server was restarted under a reconnect —
+means the tabs this side is holding no longer exist, and a strip of tabs that
+cannot be reached is worse than a short one, because every click on one goes to
+a tab id the server will refuse.
+
+`test/resume_test.go` drives the whole of it through the real client: two tabs,
+one of them with a page behind the page it is on, then the app loaded again with
+no pairing fragment — the installed PWA being started rather than paired. Both
+tabs come back, in order, with their documents in them, in the one session that
+was there before; the active tab is the one on screen, and the tab with history
+knows it has it. Without the fix the test fails with the symptom it was written
+for: `+ ← → ↻ ★ Chat` and nothing else.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

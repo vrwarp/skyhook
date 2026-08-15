@@ -329,6 +329,11 @@ export class MirrorHost {
     this.events = events;
     this.frame = document.createElement('iframe');
     this.frame.className = 'mirror';
+    // Which landside tab this frame is showing. Nothing in the shell reads it —
+    // it keeps its own map — but a frame is otherwise anonymous, and both a
+    // capture and a test looking at a strip of them have no other way to say
+    // which page is which.
+    this.frame.dataset.tab = String(tab);
     this.frame.setAttribute('sandbox', 'allow-same-origin');
     this.frame.setAttribute('referrerpolicy', 'no-referrer');
     this.frame.src = 'about:blank';

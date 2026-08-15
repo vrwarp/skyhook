@@ -33,6 +33,11 @@ const progress = new Progress();
 let worker: Worker | null = null;
 let active = 0;
 let currentSpace = '';
+/**
+ * The session this app was last reading, offered back to the server on the next
+ * load. Tabs are landside and outlive the page that was showing them.
+ */
+let resumeSession = '';
 /** Whether the link is up. Controls which chrome is usable, not what is shown. */
 let connected = false;
 /** The link's last round trip, which is what an ask's patience is measured in. */
@@ -107,6 +112,9 @@ async function main(): Promise<void> {
   renderBookmarks();
 
   const pairing = await pairingFromURL() ?? await store.readPairing();
+  // Read before the dialog below can send us down the pairing path, so both
+  // ways into configure() carry the session this app left behind.
+  resumeSession = await store.readSessionId();
   if (!pairing) {
     el.pairing.showModal();
     return;
@@ -147,6 +155,14 @@ function configure(pairing: Pairing): void {
       token: pairing.token,
       preferFallback: urls.preferFallback,
     },
+    // The session this app was reading when it was last closed. The tabs are
+    // landside — real Chromium tabs, still loaded, still logged in — and they
+    // outlive the page that was showing them. A load that did not name the
+    // session it left behind was given a fresh one, and everything the reader
+    // had open went on running on the VPS with nothing able to reach it: an
+    // empty strip and a blank frame, over a link where every one of those pages
+    // cost seconds.
+    sessionId: resumeSession,
     viewport: viewport(),
   });
 }
@@ -179,15 +195,36 @@ function handle(kind: string, args: Record<string, unknown>): void {
   switch (kind) {
     case 'welcome': {
       const w = args as unknown as Welcome;
+      resumeSession = w.sessionId;
       void store.writeSessionId(w.sessionId);
+      const held = new Set<number>();
       for (const t of w.tabs ?? []) {
+        held.add(t.tab);
+        // Welcome carries a URL and a title and no history flags, so a tab this
+        // side already knows keeps the ones it has rather than being told it
+        // cannot go back. A tab arriving cold gets them from the state frame
+        // the server sends behind this.
+        const known = tabs.get(t.tab);
         upsertTab({
           id: t.tab, url: t.url, title: t.title, loading: t.loading,
-          canBack: false, canForward: false,
+          canBack: known?.canBack ?? false, canForward: known?.canForward ?? false,
         });
         void hostFor(t.tab);
         if (t.active) active = t.tab;
       }
+      // Whatever this side holds and the session does not is gone: a server
+      // restarted under a reconnect answers with a session that never had those
+      // tabs, and a strip of tabs that cannot be reached is worse than a short
+      // one — every click on them would go to a tab id the server will refuse.
+      for (const id of Array.from(tabs.keys())) {
+        if (!held.has(id)) closeTabLocally(id);
+      }
+      if (!tabs.has(active)) active = tabs.keys().next().value ?? 0;
+      // The tab the session says is the active one is the tab to show. Each
+      // frame above was laid out as it was created, so without this the visible
+      // one is whichever tab happened to be first rather than the one the strip
+      // is about to mark active.
+      layout();
       // The server has just said what every tab is, which answers anything this
       // side was still waiting to hear about them.
       progress.clear();
@@ -362,6 +399,10 @@ function renderTabs(): void {
     const node = document.createElement('div');
     node.className = `tab${tab.id === active ? ' active' : ''}${busy ? ' loading' : ''}`;
     node.setAttribute('role', 'tab');
+    // The landside tab this row stands for, for the same reason the frame
+    // carries it: a row in the strip is otherwise identified only by a title it
+    // shares with every other tab on the same site.
+    node.dataset.tab = String(tab.id);
     // Before the title, where a favicon goes and where a browser puts this: a
     // background tab fetching a page is the case the bar over the mirror cannot
     // show, because the mirror it would sit over is another tab's.
