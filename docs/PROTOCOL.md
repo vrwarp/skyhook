@@ -132,6 +132,17 @@ echo reconciliation.
 Resolving clicks by node id rather than coordinates is what makes the mirror
 robust to layout drift between the mirrored document and the real page.
 
+`drag(node, {point, path})` is the exception, and the exception proves the
+rule. A canvas is reached through its pixels or not at all: there is no node
+inside a map to click and none inside a game board to focus, so nothing the
+rest of this list can say means "pan from here to there". What a map
+understands is a button going down, moving and coming up, and the distances
+between those points are the whole message. The path arrives in the same units
+as a click's approach — viewport permille — which is what makes it comparable
+across two layouts, and the press lands at `point` inside the node's box.
+Plane-side the gesture is only claimed when the press was on such a region:
+anywhere else it is the reader selecting text.
+
 A click additionally carries what the reader's pointer actually did, because
 the alternative is the server inventing it:
 
@@ -154,6 +165,25 @@ human and one it can measure as not.
 tiny. Bytes follow immediately for above-the-fold images; below-the-fold images
 wait for the client to say it does not already have that hash. That is the
 mechanism that makes a warm cross-flight cache pay off.
+
+Two things that are not images travel this way, because what the channel
+actually carries is "bytes identified by their content hash", and both need
+exactly that:
+
+- **Region shots.** A canvas, WebGL surface or video has no description a
+  mirror can send — its content is whatever page JavaScript painted, and page
+  JavaScript never runs plane-side — so the landside browser photographs the
+  box instead. The metadata names the node it was taken from and carries `box`,
+  the `(x, y, w, h)` in CSS pixels placing the photograph inside that node's
+  border box: a canvas half off the viewport is shipped as the half that
+  exists rather than stretched over the whole element. The hash is of the
+  pixels, so a canvas the reader did not change costs one small metadata frame
+  and no bytes at all.
+- **Webfonts.** Kept only for a family the page draws private-use codepoints
+  in, which is an icon font and has no substitute on any device. They reach the
+  channel the ordinary way — an `@font-face` `src` is a `url()` in a stylesheet
+  like any background image — and pass through the transcoder untouched, since
+  there is no smaller version of a font to make.
 
 ### Adapters
 

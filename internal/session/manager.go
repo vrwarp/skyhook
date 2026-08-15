@@ -48,6 +48,10 @@ type ManagerOptions struct {
 	Adapters []adapter.Factory
 	// HomeURL is opened in the first tab of a fresh session.
 	HomeURL string
+	// CanvasStream keeps following a canvas that animates with nobody touching
+	// it. Zero, the default, means a canvas is photographed only because of
+	// something the reader did. See mirror.Options.StreamEvery.
+	CanvasStream time.Duration
 	// Capture configures the diagnostic bundles this server writes.
 	Capture CaptureOptions
 	// IntegrityInterval is how often each tab's document is checked against the

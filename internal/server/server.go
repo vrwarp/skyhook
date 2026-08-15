@@ -134,6 +134,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 		Adapters:       factories,
 		HomeURL:        cfg.HomeURL,
 		Capture:        s.captureOptions(),
+		CanvasStream:   cfg.CanvasStreamEvery.Get(),
 	}
 	if !mgrOpts.Capture.Enabled() {
 		log.Info("diagnostic captures are off (captureKeep is 0)")

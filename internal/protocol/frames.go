@@ -352,6 +352,13 @@ type ImageMeta struct {
 	Bytes    int    `cbor:"7,keyasint,omitempty"`
 	Priority int    `cbor:"8,keyasint,omitempty"` // 0 = above the fold
 	Alt      string `cbor:"9,keyasint,omitempty"`
+	// Box places a region shot inside the element it was taken from: x, y, w, h
+	// in CSS pixels, relative to that element's border box. A canvas half off
+	// the bottom of the viewport is photographed as the half that exists, and
+	// this is what stops the client from stretching that half over the whole
+	// box. Empty means the image covers the element, which is what an ordinary
+	// <img> means and what a fully visible canvas reduces to.
+	Box []int `cbor:"10,keyasint,omitempty"`
 }
 
 // ImageData carries the encoded bytes for a hash.

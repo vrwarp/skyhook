@@ -142,6 +142,7 @@ export const InputKind = {
   Paste: 'paste',
   SetValue: 'setvalue',
   Wheel: 'wheel',
+  Drag: 'drag',
 } as const;
 
 export interface Frame {
@@ -215,6 +216,12 @@ export interface ImageMeta {
   bytes: number;
   priority: number;
   alt: string;
+  /**
+   * Where a region shot belongs inside its element: [x, y, w, h] in CSS
+   * pixels, relative to the element's border box. Empty means the image
+   * covers the element, which is what an ordinary <img> means.
+   */
+  box: number[];
 }
 
 export interface TabState {
@@ -321,7 +328,9 @@ export const F = {
     off: 8, del: 9, add: 10, drop: 11, image: 12, x: 13, y: 14, str: 15,
   },
   mutation: { strings: 1, ops: 2, docHash: 3, flush: 4 },
-  imageMeta: { node: 1, hash: 2, w: 3, h: 4, blur: 5, mime: 6, bytes: 7, priority: 8, alt: 9 },
+  imageMeta: {
+    node: 1, hash: 2, w: 3, h: 4, blur: 5, mime: 6, bytes: 7, priority: 8, alt: 9, box: 10,
+  },
   imageData: { hash: 1, mime: 2, data: 3 },
   imageWant: { hashes: 1, have: 2 },
   input: {

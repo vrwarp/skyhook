@@ -181,6 +181,18 @@ func Launch(ctx context.Context, opts BrowserOptions) (*Browser, error) {
 		// and CDP turns it on. Nothing about a remote-controlled browser being
 		// used as a browser needs the page to know it is being driven.
 		"--disable-blink-features=AutomationControlled",
+		// A VPS has no GPU, and recent Chromium will not quietly fall back to
+		// SwiftShader for WebGL any more: it blocklists the context and the
+		// page gets a null from getContext('webgl'), which every WebGL app
+		// reads as "this browser cannot run me". Sites that draw themselves
+		// into a canvas then show their own error instead of their content,
+		// landside, before the mirror has been asked for anything.
+		//
+		// "Unsafe" is about the sandbox around a software rasteriser fed by
+		// hostile shaders, which is a real cost. It is the cost this project
+		// already pays for every other part of a page: the landside browser
+		// exists to run untrusted code so the plane side does not have to.
+		"--enable-unsafe-swiftshader",
 		"--window-size=" + strconv.Itoa(w) + "," + strconv.Itoa(h),
 	}
 	headless := opts.Headless

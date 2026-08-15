@@ -213,6 +213,8 @@ export class MirrorHost {
   private inputSeq = 0;
   private lastSeq = 0;
   private pendingImages = new Map<string, HTMLImageElement[]>();
+  /** Canvas and video elements waiting for the bytes of a region shot. */
+  private pendingShots = new Map<string, { el: HTMLElement; box: number[] }[]>();
   /** Object URLs handed to the frame, by content hash. Revoked with the tab. */
   private blobs = new Map<string, string>();
   /** Hashes already looked for in the local cache, so a redraw does not ask
@@ -290,6 +292,7 @@ export class MirrorHost {
     this.patcher = new Patcher(doc, {
       isOwned: (node: Node): boolean => this.echo?.isOwned(node) ?? false,
       onImage: (el, meta, hash) => this.applyImage(el, meta, hash),
+      onShot: (el, meta) => this.applyShot(el, meta),
       rewriteCSS: (rule) => this.resolveCSSImages(rule),
       onFocus: (node) => {
         if (this.echo?.ownedId) return;
@@ -348,20 +351,126 @@ export class MirrorHost {
   /** A sample older than this is not part of the approach to this click. */
   private static readonly PATH_MAX_AGE_MS = 500;
 
-  private recordPointer(ev: MouseEvent): void {
-    const now = performance.now();
-    const last = this.pointerPath[this.pointerPath.length - 1];
-    if (last && now - last.t < MirrorHost.PATH_MIN_GAP_MS) return;
+  /**
+   * A drag in progress over a canvas, or null.
+   *
+   * Only over a canvas. Everywhere else a press-move-release is the reader
+   * selecting text, which the mirror does natively and must not have taken
+   * away from it — and there is a node to click besides, which is the whole
+   * reason the rest of the mirror never needs coordinates.
+   */
+  private dragging: {
+    node: number;
+    point: number[] | undefined;
+    samples: Array<{ x: number; y: number; t: number }>;
+  } | null = null;
+
+  /** Set when a drag consumed the gesture, so its trailing click does not
+   *  arrive landside as a second, contradictory instruction. */
+  private dragConsumedClick = false;
+
+  /** Movement below this is a hand not holding still, not a drag. */
+  private static readonly DRAG_SLOP_PX = 5;
+
+  /** How many samples describe a drag. More than a click's approach, because
+   *  the shape of a pan is the message rather than the preamble to one. */
+  private static readonly DRAG_SAMPLES = 16;
+
+  /** The element under the pointer whose content is pixels, if any. */
+  private regionAt(target: EventTarget | null): Element | null {
+    const el = target as Element | null;
+    return el?.closest?.('[data-skyhook-static]') ?? null;
+  }
+
+  private beginDrag(ev: MouseEvent): void {
+    if (ev.button !== 0) return;
+    const region = this.regionAt(ev.target);
+    if (!region) return;
+    const node = this.patcher?.idOf(region) ?? 0;
+    if (!node) return;
+    const start = this.samplePointer(ev);
+    if (!start) return;
+    this.dragging = { node, point: this.pointInBox(ev, region), samples: [start] };
+  }
+
+  /**
+   * Adds a sample to the drag in progress, keeping the press.
+   *
+   * Over the cap the oldest *middle* sample goes, never the first: where the
+   * button went down is one end of the displacement being described, and a
+   * pan measured from halfway is a pan of the wrong distance. The rest of the
+   * path only has to look like a hand moving.
+   */
+  private recordDrag(sample: { x: number; y: number; t: number }): void {
+    const drag = this.dragging;
+    if (!drag) return;
+    drag.samples.push(sample);
+    if (drag.samples.length > MirrorHost.DRAG_SAMPLES) drag.samples.splice(1, 1);
+  }
+
+  /**
+   * Ends a drag, sending it only if the pointer actually travelled.
+   *
+   * A press and release in the same spot is a click, and a map told it was
+   * dragged nowhere has been asked to do nothing at all — while the click it
+   * really was would never arrive.
+   */
+  private endDrag(ev: MouseEvent): void {
+    const drag = this.dragging;
+    this.dragging = null;
+    if (!drag) return;
+    const last = this.samplePointer(ev);
+    if (last) drag.samples.push(last);
+    if (drag.samples.length < 2) return;
+
     const win = this.frame.contentWindow;
     const w = win?.innerWidth ?? 0;
     const h = win?.innerHeight ?? 0;
-    if (!w || !h) return;
-    this.pointerPath.push({
+    const first = drag.samples[0];
+    const end = drag.samples[drag.samples.length - 1];
+    const moved = Math.hypot(
+      ((end.x - first.x) / 1000) * w,
+      ((end.y - first.y) / 1000) * h,
+    );
+    if (moved < MirrorHost.DRAG_SLOP_PX) return;
+
+    const path: number[] = [];
+    for (let i = 0; i < drag.samples.length; i++) {
+      const gap = i === 0 ? 0 : Math.round(drag.samples[i].t - drag.samples[i - 1].t);
+      path.push(drag.samples[i].x, drag.samples[i].y, gap);
+    }
+    this.dragConsumedClick = true;
+    this.send({
+      kind: InputKind.Drag,
+      node: drag.node,
+      modifiers: modifierMask(ev),
+      point: drag.point,
+      path,
+    });
+  }
+
+  /** Where the pointer is, in viewport permille, or null if the frame has no
+   *  size to measure against yet. */
+  private samplePointer(ev: MouseEvent): { x: number; y: number; t: number } | null {
+    const win = this.frame.contentWindow;
+    const w = win?.innerWidth ?? 0;
+    const h = win?.innerHeight ?? 0;
+    if (!w || !h) return null;
+    return {
       x: Math.round((ev.clientX / w) * 1000),
       y: Math.round((ev.clientY / h) * 1000),
-      t: now,
-    });
+      t: performance.now(),
+    };
+  }
+
+  private recordPointer(ev: MouseEvent): void {
+    const last = this.pointerPath[this.pointerPath.length - 1];
+    if (last && performance.now() - last.t < MirrorHost.PATH_MIN_GAP_MS) return;
+    const sample = this.samplePointer(ev);
+    if (!sample) return;
+    this.pointerPath.push(sample);
     if (this.pointerPath.length > MirrorHost.PATH_SAMPLES) this.pointerPath.shift();
+    this.recordDrag(sample);
   }
 
   /** The approach as the wire carries it: (x, y, dt) triplets, oldest first. */
@@ -402,6 +511,17 @@ export class MirrorHost {
   private wireInput(doc: Document): void {
     doc.addEventListener('mousemove', (ev) => this.recordPointer(ev as MouseEvent), true);
 
+    // A canvas is reached through its pixels or not at all: there is no node
+    // inside a map to click and no element inside a game board to focus, so a
+    // press-move-release over one is the only way to say "pan from here to
+    // there". Everywhere else that gesture is the reader selecting text, which
+    // the mirror does natively and this must not take away — hence beginDrag
+    // starting nothing unless the press landed on a region.
+    doc.addEventListener('mouseup', (ev) => this.endDrag(ev as MouseEvent), true);
+    // A pointer that left the frame mid-drag is not coming back to release the
+    // button, and a drag left open would swallow the next click.
+    doc.addEventListener('mouseleave', (ev) => this.endDrag(ev as MouseEvent), true);
+
     doc.addEventListener('click', (ev) => {
       const target = ev.target as HTMLElement | null;
       if (!target) return;
@@ -423,6 +543,13 @@ export class MirrorHost {
       const newTab = this.linkAt(anchor);
       if (newTab && (ev.ctrlKey || ev.metaKey)) {
         this.events.openLink(this.tab, newTab.url);
+        return;
+      }
+      // A gesture that panned a map is not also a click on it: landside the
+      // two would be a pan followed by a press wherever it ended. First,
+      // because a gesture already spent is not a click of any kind.
+      if (this.dragConsumedClick) {
+        this.dragConsumedClick = false;
         return;
       }
       const mouse = ev as MouseEvent;
@@ -465,7 +592,12 @@ export class MirrorHost {
     doc.addEventListener('mousedown', (ev) => {
       const mouse = ev as MouseEvent;
       this.pointerDownAt = performance.now();
+      // A drag whose click never came — the pointer left the frame, the page
+      // swallowed it — must not leave the flag armed for the next gesture,
+      // which would arrive as a press that does nothing.
+      this.dragConsumedClick = false;
       this.recordPointer(mouse);
+      this.beginDrag(mouse);
       this.events.dismiss(this.tab);
       // Inside a text field the gesture is X11's primary-selection paste, which
       // the browser performs natively and the echo engine picks up as an input
@@ -816,6 +948,10 @@ export class MirrorHost {
     const keep = { x: win?.scrollX ?? 0, y: win?.scrollY ?? 0 };
     this.url = snap.url ?? '';
 
+    // Every element is about to be rebuilt, so a shot still waiting on its
+    // bytes is waiting for an element that will not be in the document when
+    // they land. The server re-photographs against the new document.
+    this.pendingShots.clear();
     this.patcher.applySnapshot(snap);
 
     if (resync) {
@@ -855,13 +991,19 @@ export class MirrorHost {
 
   /** Called when the store has bytes for a hash: show them. */
   imageArrived(hash: string): void {
-    if (!this.pendingImages.has(hash) && !this.pendingCSS.has(hash)) return;
+    if (!this.pendingImages.has(hash) && !this.pendingCSS.has(hash)
+      && !this.pendingShots.has(hash)) return;
     void this.blobFor(hash).then((url) => {
       if (!url) return;
       const waiting = this.pendingImages.get(hash);
       if (waiting) {
         this.pendingImages.delete(hash);
         for (const el of waiting) this.showImage(el, url);
+      }
+      const shots = this.pendingShots.get(hash);
+      if (shots) {
+        this.pendingShots.delete(hash);
+        for (const s of shots) this.showShot(s.el, url, s.box, hash);
       }
       if (this.pendingCSS.delete(hash)) this.refreshCSSSoon();
     });
@@ -941,6 +1083,71 @@ export class MirrorHost {
     delete el.dataset.skyhookBlur;
   }
 
+  /**
+   * Paints a region shot onto the element it was taken from.
+   *
+   * A background image rather than a replaced element, because the canvas is
+   * still the page's own canvas: the site's CSS sizes it, positions it and
+   * stacks it, and all of that keeps working around a background where
+   * swapping in an <img> would throw it away. The box places the photograph
+   * where it came from — a canvas half off the bottom of the landside viewport
+   * was photographed as the half that exists, and stretching that half over
+   * the whole element would be a picture of somewhere the reader is not.
+   */
+  private showShot(el: HTMLElement, url: string, box: number[], hash: string): void {
+    // Bytes for a frame the reader has already moved past: the element is
+    // wearing a newer photograph and this one would be a step backwards.
+    if (el.dataset.skyhookShot !== hash) return;
+    el.style.backgroundImage = `url("${url}")`;
+    el.style.backgroundRepeat = 'no-repeat';
+    // The border box, because that is the box the agent measured against.
+    el.style.backgroundOrigin = 'border-box';
+    if (box.length === 4) {
+      const [x, y, w, h] = box;
+      el.style.backgroundPosition = `${x}px ${y}px`;
+      el.style.backgroundSize = `${w}px ${h}px`;
+    } else {
+      // No placement given: the photograph is of the whole element.
+      el.style.backgroundPosition = '0 0';
+      el.style.backgroundSize = '100% 100%';
+    }
+  }
+
+  private applyShot(el: HTMLElement, meta: ImageMeta): void {
+    if (!meta.hash) return;
+    // The frame this element was waiting for is now a frame behind. Left in
+    // the queue it would hold a reference to the element until its bytes
+    // arrived, once per repaint, for as long as the link stayed down.
+    this.forgetShot(el, el.dataset.skyhookShot);
+    el.dataset.skyhookShot = meta.hash;
+    const known = this.blobs.get(meta.hash);
+    if (known) {
+      this.showShot(el, known, meta.box, meta.hash);
+      return;
+    }
+    const list = this.pendingShots.get(meta.hash) ?? [];
+    if (!list.some((p) => p.el === el)) list.push({ el, box: meta.box });
+    this.pendingShots.set(meta.hash, list);
+    // Shots are pushed unasked, being the content rather than an illustration
+    // beside it. Asking anyway covers the push that was dropped while the link
+    // was down, which is the one case where nothing would ever announce them.
+    if (!this.probed.has(meta.hash)) {
+      this.probed.add(meta.hash);
+      this.imageArrived(meta.hash);
+    }
+    this.requestImagesSoon();
+  }
+
+  /** Drops an element from the queue waiting on a superseded shot. */
+  private forgetShot(el: HTMLElement, hash: string | undefined): void {
+    if (!hash) return;
+    const list = this.pendingShots.get(hash);
+    if (!list) return;
+    const rest = list.filter((p) => p.el !== el);
+    if (rest.length) this.pendingShots.set(hash, rest);
+    else this.pendingShots.delete(hash);
+  }
+
   private applyImage(el: HTMLImageElement, meta: ImageMeta | undefined, hash: string): void {
     if (!hash) return;
     el.dataset.skyhookImg = hash;
@@ -985,6 +1192,9 @@ export class MirrorHost {
   private requestPendingImages(): void {
     const want: string[] = [];
     for (const hash of this.pendingImages.keys()) {
+      if (!this.requested.has(hash)) want.push(hash);
+    }
+    for (const hash of this.pendingShots.keys()) {
       if (!this.requested.has(hash)) want.push(hash);
     }
     for (const hash of this.pendingCSS) {
@@ -1098,6 +1308,12 @@ export class MirrorHost {
       inputSeq: this.inputSeq,
       patcher: this.patcher.diag(),
       pendingImages: Array.from(this.pendingImages.keys()),
+      // A canvas is the one element whose emptiness a capture cannot show:
+      // the mirrored markup is identical whether or not its photograph
+      // arrived. These two say which it was.
+      shots: Array.from(doc.querySelectorAll('[data-skyhook-shot]'))
+        .map((el) => (el as HTMLElement).dataset.skyhookShot),
+      pendingShots: Array.from(this.pendingShots.keys()),
       // The reader having taken the scroller over is why the server's scroll
       // positions stop being applied, which looks exactly like a mirror that
       // has stopped updating.
@@ -1144,6 +1360,7 @@ export class MirrorHost {
     if (this.imageRequest) clearTimeout(this.imageRequest);
     this.releaseBlobs();
     this.pendingImages.clear();
+    this.pendingShots.clear();
     this.patcher = null;
     this.echo = null;
     this.doc = null;

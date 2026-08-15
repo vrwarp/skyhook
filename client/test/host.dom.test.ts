@@ -10,7 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MirrorHost, type MenuTarget } from '../src/mirror/host.js';
 import { imageCacheKey } from '../src/shared/caches.js';
-import { NodeKind, OpCode, type Mutation, type Snapshot } from '../src/shared/protocol.js';
+import {
+  NodeFlags, NodeKind, OpCode, type ImageMeta, type Mutation, type Snapshot,
+} from '../src/shared/protocol.js';
 
 function snapshot(): Snapshot {
   return {
@@ -149,6 +151,122 @@ describe('MirrorHost', () => {
     expect(payload.seq).toBe(1);
   });
 
+  /**
+   * Drags the pointer across an element and returns what the host sent.
+   *
+   * jsdom lays nothing out, so every clientX here is a number the frame's
+   * innerWidth turns into permille and nothing else depends on.
+   */
+  function dragAcross(host: MirrorHost, el: Element, from: number, to: number): void {
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const at = (type: string, x: number) => el.dispatchEvent(
+      new win.MouseEvent(type, { bubbles: true, clientX: x, clientY: 40, button: 0 }),
+    );
+    at('mousedown', from);
+    at('mousemove', Math.round((from + to) / 2));
+    at('mousemove', to);
+    at('mouseup', to);
+    el.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: to, clientY: 40 }));
+  }
+
+  it('turns a drag across a canvas into a pan', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    const canvas = host.frame.contentDocument!.querySelector('canvas')!;
+
+    dragAcross(host, canvas, 100, 400);
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).toContain('drag');
+    // And not also a click: landside the two would be a pan followed by a
+    // press wherever it ended.
+    expect(kinds).not.toContain('click');
+
+    const drag = (ev.input.mock.calls.find(
+      (c) => (c[1] as Record<string, unknown>).kind === 'drag',
+    )![1]) as Record<string, unknown>;
+    expect(drag.node).toBe(10);
+    const path = drag.path as number[];
+    // Triplets, and the first sample is where the button went down — a pan
+    // measured from halfway is a pan of the wrong distance. Two samples is the
+    // floor rather than the expectation: intermediate moves go through the
+    // same 12 ms throttle as a click's approach, and here every event fires in
+    // the same millisecond. The press and the release always survive it, and
+    // between them they are the displacement.
+    expect(path.length % 3).toBe(0);
+    expect(path.length / 3).toBeGreaterThanOrEqual(2);
+    expect(path[0]).toBeLessThan(path[path.length - 3]);
+  });
+
+  it('does not let a drag swallow the click after next', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const canvas = doc.querySelector('canvas')!;
+
+    // A drag whose click never arrives: the pointer left the frame instead.
+    canvas.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, clientX: 100, button: 0 }));
+    canvas.dispatchEvent(new win.MouseEvent('mousemove', { bubbles: true, clientX: 400 }));
+    canvas.dispatchEvent(new win.MouseEvent('mouseleave', { bubbles: true, clientX: 400 }));
+
+    ev.input.mockClear();
+    const li = doc.querySelector('li')!;
+    li.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, clientX: 10, button: 0 }));
+    li.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 10 }));
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).toContain('click');
+  });
+
+  it('leaves a drag over ordinary content to the browser', async () => {
+    // Press, move and release over text is the reader selecting it, which the
+    // mirror does natively. Sending a pan as well would drag something
+    // landside that the reader was only highlighting.
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    const li = host.frame.contentDocument!.querySelector('li')!;
+
+    dragAcross(host, li, 100, 400);
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).not.toContain('drag');
+    expect(kinds).toContain('click');
+  });
+
+  it('does not send a pan for a press that never moved', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    const canvas = host.frame.contentDocument!.querySelector('canvas')!;
+
+    dragAcross(host, canvas, 200, 200);
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    // A map told it was dragged nowhere has been asked to do nothing, and the
+    // click it really was would never arrive.
+    expect(kinds).not.toContain('drag');
+    expect(kinds).toContain('click');
+  });
+
   it('asks for images the frame references', async () => {
     const { host, ev } = await mount();
     const snap = snapshot();
@@ -161,7 +279,7 @@ describe('MirrorHost', () => {
     });
     snap.images.push({
       node: 10, hash: 'deadbeef', w: 10, h: 10, blur: '', mime: 'image/png',
-      bytes: 100, priority: 0, alt: '',
+      bytes: 100, priority: 0, alt: '', box: [],
     });
     host.applySnapshot(snap);
 
@@ -239,6 +357,84 @@ describe('MirrorHost', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     // And with nothing to show, the placeholder stands.
     expect(img.getAttribute('src')?.startsWith('data:image/gif')).toBe(true);
+  });
+
+  /**
+   * Mounts a snapshot holding a canvas, which is the one element whose content
+   * no part of a snapshot describes: nothing here says what was painted, and
+   * nothing plane-side will ever paint it.
+   */
+  async function withCanvas(): Promise<{ host: MirrorHost; canvas: HTMLElement }> {
+    const { host } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    return { host, canvas: host.frame.contentDocument!.querySelector('canvas')! };
+  }
+
+  function shotMeta(hash: string, box: number[]): ImageMeta {
+    return {
+      node: 10, hash, w: 200, h: 120, blur: '', mime: 'image/png',
+      bytes: 400, priority: 0, alt: '', box,
+    };
+  }
+
+  it('paints a region shot onto the canvas it was taken from', async () => {
+    const { host, canvas } = await withCanvas();
+    stubCache({ [imageCacheKey('c0ffee')]: new Uint8Array([1, 2, 3]) });
+
+    host.setImageMeta(shotMeta('c0ffee', [0, 20, 200, 100]));
+    await vi.waitFor(() => expect(canvas.style.backgroundImage).toContain('blob:mirror/c0ffee'));
+    // The rectangle goes back where it came from. A canvas photographed as the
+    // part of it that was on screen must not be stretched over the whole box.
+    expect(canvas.style.backgroundPosition).toBe('0px 20px');
+    expect(canvas.style.backgroundSize).toBe('200px 100px');
+    expect(canvas.style.backgroundOrigin).toBe('border-box');
+    expect(canvas.style.backgroundRepeat).toBe('no-repeat');
+  });
+
+  it('does not repaint a canvas with a frame it has already moved past', async () => {
+    const { host, canvas } = await withCanvas();
+    stubCache({
+      [imageCacheKey('older')]: new Uint8Array([1]),
+      [imageCacheKey('newer')]: new Uint8Array([2]),
+    });
+    // Named after the bytes they were minted from, so the assertion can tell
+    // which frame the canvas ended up wearing.
+    let minted = 0;
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(
+      () => ['blob:mirror/older', 'blob:mirror/newer'][minted++] ?? 'blob:mirror/extra',
+    );
+
+    // Two shots in flight, the second superseding the first; the first's bytes
+    // arrive last, which over a lossy link is an ordinary Tuesday.
+    host.setImageMeta(shotMeta('older', [0, 0, 200, 120]));
+    await vi.waitFor(() => expect(canvas.style.backgroundImage).toContain('blob:mirror/older'));
+    host.setImageMeta(shotMeta('newer', [0, 0, 200, 120]));
+    await vi.waitFor(() => expect(canvas.style.backgroundImage).toContain('blob:mirror/newer'));
+
+    host.imageArrived('older');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(canvas.style.backgroundImage).toContain('blob:mirror/newer');
+  });
+
+  it('asks for the bytes of a shot that was never pushed', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('canvas');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+    });
+    host.applySnapshot(snap);
+    stubCache({});
+
+    host.setImageMeta(shotMeta('c0ffee', [0, 0, 200, 120]));
+    await vi.waitFor(() => expect(ev.wantImages).toHaveBeenCalledWith(1, ['c0ffee']));
   });
 
   it('keeps looking after a miss, rather than freezing on it', async () => {
@@ -330,7 +526,7 @@ describe('MirrorHost', () => {
 
     host.setImageMeta({
       node: 10, hash: 'c0ffee', w: 320, h: 240, blur: '', mime: 'image/png',
-      bytes: 900, priority: 0, alt: '',
+      bytes: 900, priority: 0, alt: '', box: [],
     });
     expect(img.getAttribute('width')).toBe('320');
     expect(img.getAttribute('height')).toBe('240');
@@ -708,7 +904,7 @@ describe('MirrorHost', () => {
       });
       snap.images = [{
         node: 40, hash: 'abc123', w: 10, h: 10, blur: '', mime: 'image/webp',
-        bytes: 1, priority: 0, alt: '',
+        bytes: 1, priority: 0, alt: '', box: [],
       }];
       host.applySnapshot(snap);
 

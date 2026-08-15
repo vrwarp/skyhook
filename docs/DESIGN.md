@@ -71,7 +71,7 @@ These are decisions, not open questions:
 - **Security model = "the VPS is me."** All cookies, passwords, and sessions live landside. Typed passwords transit (encrypted) to the VPS. Acceptable for a personal, self-hosted deployment; unacceptable to ever offer to third parties. Mitigations in §2.12.
 - **Page JS never runs client-side.** Sites whose core interaction is client-computed (games, drawing tools, spreadsheets with heavy local logic) will be degraded or unusable. Out of scope.
 - **Hover states, JS-driven animations, and sub-100ms visual feedback loops are lost.** CSS-defined transitions/animations still run client-side for free.
-- **Fonts:** system font substitution with metric overrides. Layout may shift a few px vs. true rendering. Nobody cares at 35,000 ft.
+- **Fonts:** system font substitution with metric overrides. Layout may shift a few px vs. true rendering. Nobody cares at 35,000 ft. *Amended in build:* a family the page draws private-use codepoints in is shipped instead, because an icon font has no substitute — every device is entitled to have nothing at those codepoints, and the substitution is a row of empty boxes where the toolbar was. See [IMPLEMENTATION.md §22](IMPLEMENTATION.md).
 
 ---
 

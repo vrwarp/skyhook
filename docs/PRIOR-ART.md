@@ -83,10 +83,21 @@ are polled instead, and re-read when they upgrade. Landside cycles are free;
 only a real change reaches the wire. See
 [IMPLEMENTATION.md §19](IMPLEMENTATION.md).
 
-**Left deliberately.** rrweb's canvas capture (periodic `toDataURL` snapshots or
-a recorded WebGL command stream). Canvas remains out of scope: the honest
-options are a video codec or a lie, and both are worse than telling the user
-this page needs the ground.
+**Left deliberately.** rrweb's *continuous* canvas capture — periodic
+`toDataURL` snapshots or a recorded WebGL command stream. Following a canvas
+frame by frame still needs a video codec or a lie, and both are worse than
+telling the reader this page needs the ground.
+
+What rrweb was right about is that a canvas has to be photographed at all.
+Skyhook takes one landside screenshot of the region on load and one after each
+input, which is where its answer parts from rrweb's: rrweb records for a replay
+that nobody is waiting on, so a fixed frame rate costs it only disk. Here the
+frames cross the bad link while the reader watches, so the shutter is tied to
+interaction rather than to a clock — nothing is spent while nothing is
+happening, and what the reader just did is on screen a round trip later. Not
+`toDataURL` either: a WebGL context without `preserveDrawingBuffer` reads back
+blank, which is most of them. See
+[IMPLEMENTATION.md §23](IMPLEMENTATION.md).
 
 ## The gap rrweb pointed at that we did not have
 

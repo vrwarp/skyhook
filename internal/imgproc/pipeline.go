@@ -28,6 +28,12 @@ type Request struct {
 	Priority int // 0 = above the fold, ship immediately
 	Node     int64
 	Referer  string
+	// Src carries the source bytes when there is nothing to fetch: a canvas or
+	// a video frame exists only as pixels the landside browser was asked to
+	// photograph, and no URL names it. Set, it replaces both fetch paths.
+	Src []byte
+	// Box places a region shot inside its element; see protocol.ImageMeta.Box.
+	Box []int
 }
 
 // Fetcher retrieves image bytes through the landside browser, so an asset is
@@ -66,8 +72,20 @@ type Pipeline struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
 	meta     map[string]protocol.ImageMeta
+	metaAge  *list.List          // keys oldest-first, so meta can be bounded
 	wanted   map[string][]uint32 // key -> tabs waiting for bytes
 }
+
+// metaMax bounds the metadata table.
+//
+// A page of ordinary images adds one entry per distinct asset and then stops.
+// A canvas adds one per frame it was photographed at, for as long as the
+// reader keeps playing — an afternoon of panning a map would otherwise grow
+// this without any limit at all. Dropping the oldest entry costs a
+// re-transcode if that exact image ever comes back, which for the entries
+// this bound exists to drop — a board position from ten minutes ago — it will
+// not.
+const metaMax = 4096
 
 // PipelineOptions configures the pipeline.
 type PipelineOptions struct {
@@ -121,6 +139,7 @@ func NewPipeline(opts PipelineOptions, d Delivery) (*Pipeline, error) {
 		stop:     make(chan struct{}),
 		inFlight: map[string]bool{},
 		meta:     map[string]protocol.ImageMeta{},
+		metaAge:  list.New(),
 		wanted:   map[string][]uint32{},
 	}
 	for i := 0; i < opts.Workers; i++ {
@@ -138,7 +157,7 @@ func (p *Pipeline) Close() {
 
 // Submit queues a request, skipping duplicates and cache hits.
 func (p *Pipeline) Submit(req Request) {
-	if req.Key == "" || req.URL == "" {
+	if req.Key == "" || (req.URL == "" && len(req.Src) == 0) {
 		return
 	}
 	p.mu.Lock()
@@ -146,6 +165,7 @@ func (p *Pipeline) Submit(req Request) {
 		p.mu.Unlock()
 		// Already transcoded: the new node just needs to know the key exists.
 		meta.Node = req.Node
+		meta.Box = req.Box
 		p.deliver.ImageReady(req.Tab, meta)
 		if req.Priority == 0 {
 			p.sendCached(req.Tab, req.Key)
@@ -175,12 +195,33 @@ func (p *Pipeline) Submit(req Request) {
 }
 
 // Want handles a client cache miss: ship bytes for keys it does not have.
+//
+// Whether a key is finished is decided by the metadata table and not by
+// looking in the cache, because the two questions race. A request that read
+// the cache a moment before the bytes landed there, and joined the waiting
+// list a moment after the worker had already read that list, would be answered
+// by neither — and nothing here is ever asked for twice, so that asset would be
+// missing from the page for the rest of the session.
+//
+// The window is microseconds wide and was found by reading rather than by
+// reproducing it; what prompted the reading was one full-suite run where an
+// icon font never arrived, on a machine running ten browsers, which has never
+// happened again. That is evidence of nothing in particular and a good enough
+// reason to close a hole that is free to close.
+//
+// Under the lock, meta and wanted are consistent with each other: the worker
+// writes the cache before it publishes the metadata, so a key in meta is a key
+// whose bytes are there to send.
 func (p *Pipeline) Want(tab uint32, keys []string) {
 	for _, k := range keys {
-		if !p.sendCached(tab, k) {
-			p.mu.Lock()
+		p.mu.Lock()
+		_, done := p.meta[k]
+		if !done {
 			p.wanted[k] = append(p.wanted[k], tab)
-			p.mu.Unlock()
+		}
+		p.mu.Unlock()
+		if done {
+			p.sendCached(tab, k)
 		}
 	}
 }
@@ -234,24 +275,44 @@ func (p *Pipeline) process(req Request) {
 	}
 	res, err := p.tc.Transcode(ctx, src, req.W, req.H)
 	if err != nil {
-		p.log.Debug("image transcode failed", "url", req.URL, "err", err)
+		// A region shot has no URL to name it; the key is all there is to say
+		// which image failed.
+		p.log.Debug("image transcode failed", "url", req.URL, "key", req.Key, "err", err)
 		return
 	}
 	meta := res.Meta(req.Key, req.Node, req.Priority)
 	meta.Alt = req.Alt
+	meta.Box = req.Box
+	// The cache first, then the metadata, and both before the waiting list is
+	// taken: a client asking for this key sees it as finished only once the
+	// bytes it would be answered with are actually there. See Want.
+	p.cache.put(req.Key, res.Data, res.Mime)
 	p.mu.Lock()
-	p.meta[req.Key] = meta
+	p.remember(req.Key, meta)
 	waiting := p.wanted[req.Key]
 	delete(p.wanted, req.Key)
 	p.mu.Unlock()
 
-	p.cache.put(req.Key, res.Data, res.Mime)
 	p.deliver.ImageReady(req.Tab, meta)
 	if req.Priority == 0 {
 		p.deliver.ImageBytes(req.Tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
 	}
 	for _, tab := range waiting {
 		p.deliver.ImageBytes(tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
+	}
+}
+
+// remember records a key's metadata, dropping the oldest once past metaMax.
+// Callers hold p.mu.
+func (p *Pipeline) remember(key string, meta protocol.ImageMeta) {
+	if _, dup := p.meta[key]; !dup {
+		p.metaAge.PushBack(key)
+	}
+	p.meta[key] = meta
+	for p.metaAge.Len() > metaMax {
+		old := p.metaAge.Front()
+		p.metaAge.Remove(old)
+		delete(p.meta, old.Value.(string))
 	}
 }
 
@@ -304,6 +365,11 @@ func dataURL(raw string) ([]byte, bool) {
 // It sends no credentials, so an asset that needs a login simply fails there
 // rather than leaking one.
 func (p *Pipeline) fetch(ctx context.Context, req Request) ([]byte, error) {
+	// A region shot arrives with its pixels: the landside browser has already
+	// been asked to photograph a canvas that no URL names.
+	if len(req.Src) > 0 {
+		return req.Src, nil
+	}
 	// An inline image is already here. Neither path can do anything with one:
 	// there is no request to make, and both would report that they have never
 	// heard of the scheme.
@@ -474,4 +540,32 @@ func Sniff(data []byte) string {
 		return "image/gif"
 	}
 	return "application/octet-stream"
+}
+
+// SniffFont names a font's container, or "" for anything that is not one.
+//
+// The magic numbers are the whole test: a font reaches the image pipeline
+// because it was named by a url() in a stylesheet, exactly as a background
+// image is, and by then nothing but the bytes says which it was. The content
+// type is worth carrying because it rides all the way to the blob the mirror
+// frame loads the font from.
+func SniffFont(data []byte) string {
+	if len(data) < 4 {
+		return ""
+	}
+	switch string(data[0:4]) {
+	case "wOFF":
+		return "font/woff"
+	case "wOF2":
+		return "font/woff2"
+	case "OTTO":
+		return "font/otf"
+	case "ttcf":
+		return "font/collection"
+	case "true", "typ1":
+		return "font/ttf"
+	case "\x00\x01\x00\x00":
+		return "font/ttf"
+	}
+	return ""
 }

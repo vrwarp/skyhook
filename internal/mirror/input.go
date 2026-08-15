@@ -57,6 +57,16 @@ func (t *Tab) HandleInput(ctx context.Context, ev *protocol.InputEvent) error {
 	t.pendingInput = ev.Seq
 	t.mu.Unlock()
 
+	err := t.dispatchInput(ctx, ev)
+	// A canvas repaints without touching the DOM, so no mutation will ever
+	// report that the board moved or the map panned. This is the moment we
+	// know something the reader caused might have changed — and the only one,
+	// which is why it is taken whether or not the replay above succeeded.
+	t.shotSoon(shotAfterInput)
+	return err
+}
+
+func (t *Tab) dispatchInput(ctx context.Context, ev *protocol.InputEvent) error {
 	switch ev.Kind {
 	case protocol.InClick, protocol.InDblClick, protocol.InContext:
 		return t.click(ctx, ev)
@@ -78,6 +88,8 @@ func (t *Tab) HandleInput(ctx context.Context, ev *protocol.InputEvent) error {
 		return t.insertText(ctx, ev)
 	case protocol.InWheel:
 		return t.wheel(ctx, ev)
+	case protocol.InDrag:
+		return t.drag(ctx, ev)
 	case protocol.InHover:
 		return t.hover(ctx, ev)
 	case protocol.InSelect:
@@ -131,6 +143,9 @@ const (
 	pathBudget = 150 * time.Millisecond
 	// pathMaxGap caps any single gap within an approach, for the same reason.
 	pathMaxGap = 60 * time.Millisecond
+	// dragSettle is how long the pointer holds still before a drag releases.
+	// Long enough to be outside the window a velocity tracker averages over.
+	dragSettle = 120 * time.Millisecond
 	// holdMax caps a reported hold, so a stuck button cannot stall the tab.
 	holdMax = 400 * time.Millisecond
 )
@@ -203,6 +218,111 @@ func (t *Tab) click(ctx context.Context, ev *protocol.InputEvent) error {
 	// Give the page a beat to react, then push whatever it changed. Without
 	// this the batch waits the full 100 ms window, which is dead time the user
 	// is already paying an RTT for.
+	go t.flushSoon(60 * time.Millisecond)
+	return nil
+}
+
+/*
+drag replays a press, a path and a release as one gesture.
+
+A canvas is reached through its pixels or not at all. There is no node to click
+inside a map and no element to focus inside a game board, so every one of the
+semantic events the rest of the mirror is built on — click this node, type into
+that field — has nothing to name. What a map understands is a button going down
+somewhere, moving, and coming up, and the distances between those points are
+the whole message: they are how far it pans.
+
+So this is the one input that is deliberately about coordinates. The path
+arrives as it does for a click — permille of the viewport, sampled plane-side —
+because the landside viewport is set from the reader's, which makes the two
+comparable in a way pixels never are across two different layouts. The press
+lands where the reader pressed inside the node's box, and the release wherever
+the path ended, so a page reading only the endpoints gets the right answer and
+one following every move gets that too.
+
+It is bounded by the same path budget as a click's approach: a reader who spent
+four seconds dragging does not get four seconds of landside replay before the
+answer starts coming back.
+*/
+func (t *Tab) drag(ctx context.Context, ev *protocol.InputEvent) error {
+	r, err := t.rect(ctx, ev.Node)
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	vp := t.opts.Viewport
+	t.mu.Unlock()
+	if vp.W <= 0 || vp.H <= 0 || len(ev.Path) < 3 || len(ev.Path)%3 != 0 {
+		return nil // nothing to drag along
+	}
+
+	x, y := t.clickPoint(r, ev)
+	// Arrive before pressing. A page that starts a gesture on mousedown reads
+	// the position of the press, and a pointer that teleported there is one
+	// that was never anywhere else.
+	if err := t.movePointer(ctx, x, y, ev.Modifiers); err != nil {
+		return err
+	}
+	press := map[string]any{
+		"type": "mousePressed", "x": x, "y": y, "button": "left",
+		"clickCount": 1, "modifiers": ev.Modifiers, "buttons": 1,
+	}
+	if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", press, nil); err != nil {
+		return err
+	}
+
+	spent := time.Duration(0)
+	for i := 0; i+2 < len(ev.Path); i += 3 {
+		x = float64(clampPermille(ev.Path[i])) / 1000 * float64(vp.W)
+		y = float64(clampPermille(ev.Path[i+1])) / 1000 * float64(vp.H)
+		if gap := time.Duration(ev.Path[i+2]) * time.Millisecond; gap > 0 && i > 0 {
+			if gap > pathMaxGap {
+				gap = pathMaxGap
+			}
+			if spent+gap > pathBudget {
+				gap = pathBudget - spent
+			}
+			if gap > 0 {
+				sleepCtx(ctx, gap)
+				spent += gap
+			}
+		}
+		// buttons: 1 throughout — a move with no button down is a hover, and a
+		// map told the button came up mid-drag stops panning there.
+		if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": "mouseMoved", "x": x, "y": y,
+			"modifiers": ev.Modifiers, "buttons": 1, "clickCount": 0,
+		}, nil); err != nil {
+			return err
+		}
+	}
+	t.mu.Lock()
+	t.pointerX, t.pointerY, t.pointerSet = x, y, true
+	t.mu.Unlock()
+
+	// Come to rest before letting go.
+	//
+	// The replay is compressed into the path budget, so a drag the reader spent
+	// two seconds over arrives here in a fraction of that. A page measuring
+	// velocity across the last few moves — which is every map with inertia —
+	// reads that as a flick and throws itself somewhere nobody asked to go. A
+	// still moment first makes the measured velocity zero, and the pan lands
+	// where the reader put it. A deliberate flick is lost with it, which on a
+	// link where the result is a round trip away was never a gesture that
+	// worked.
+	sleepCtx(ctx, dragSettle)
+	if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+		"type": "mouseMoved", "x": x, "y": y,
+		"modifiers": ev.Modifiers, "buttons": 1, "clickCount": 0,
+	}, nil); err != nil {
+		return err
+	}
+	if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+		"type": "mouseReleased", "x": x, "y": y, "button": "left",
+		"clickCount": 1, "modifiers": ev.Modifiers, "buttons": 0,
+	}, nil); err != nil {
+		return err
+	}
 	go t.flushSoon(60 * time.Millisecond)
 	return nil
 }
@@ -478,6 +598,9 @@ func (t *Tab) wheel(ctx context.Context, ev *protocol.InputEvent) error {
 // end of the mirrored document synthesises real scrolling so infinite lists
 // keep producing content.
 func (t *Tab) HandleScroll(ctx context.Context, ev *protocol.ScrollEvent) error {
+	// Scrolling moves a canvas relative to the viewport, so the rectangle the
+	// last shot covered is no longer the rectangle the reader is looking at.
+	defer t.shotSoon(shotAfterInput)
 	if ev.Node != 0 {
 		_, err := t.eval(ctx, fmt.Sprintf("__skyhook.scrollTo(%d,%d,%d)", ev.Node, ev.X, ev.Y))
 		return err
@@ -543,33 +666,6 @@ func (t *Tab) Navigate(ctx context.Context, n protocol.Navigate) error {
 	url := normalizeURL(n.URL)
 	t.setLoading(true)
 	return t.sess.Do(ctx, "Page.navigate", map[string]any{"url": url}, nil)
-}
-
-// CaptureRegion renders one JPEG of a node's box: the fallback for canvas,
-// WebGL and video regions, which the mirror cannot represent.
-func (t *Tab) CaptureRegion(ctx context.Context, node int64) ([]byte, error) {
-	r, err := t.rect(ctx, node)
-	if err != nil {
-		return nil, err
-	}
-	if r.W < 1 || r.H < 1 {
-		return nil, fmt.Errorf("mirror: node %d has no box", node)
-	}
-	var out struct {
-		Data []byte `json:"data"`
-	}
-	err = t.sess.Do(ctx, "Page.captureScreenshot", map[string]any{
-		"format":  "jpeg",
-		"quality": 55,
-		"clip": map[string]any{
-			"x": r.X, "y": r.Y, "width": r.W, "height": r.H, "scale": 1,
-		},
-		"captureBeyondViewport": false,
-	}, &out)
-	if err != nil {
-		return nil, err
-	}
-	return out.Data, nil
 }
 
 // DocHash asks the agent for a whole-document fingerprint of the page as it is

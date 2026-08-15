@@ -601,6 +601,15 @@ func (c *Client) Stats() protocol.Stats {
 	return c.stats
 }
 
+// WantImages asks for the bytes behind content hashes nothing pushed.
+//
+// Only assets above the fold are sent unasked. Everything a stylesheet names
+// waits to be asked for, because the server cannot see a viewport position for
+// a background image or a webfont — so without this they never arrive at all.
+func (c *Client) WantImages(tab uint32, hashes []string) error {
+	return c.send(protocol.ChCtrl, protocol.TypeImageWant, tab, protocol.ImageWant{Hashes: hashes})
+}
+
 // Images reports known image metadata.
 func (c *Client) Images() map[string]protocol.ImageMeta {
 	c.mu.Lock()
