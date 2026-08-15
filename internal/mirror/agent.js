@@ -538,16 +538,239 @@
     return rows;
   }
 
+  // ------------------------------------------------- shadow-scoped selectors
+
+  /*
+   * The mirror flattens every shadow tree into its host (see serializeNode), so
+   * plane-side there is no boundary left for a shadow-scoped selector to be
+   * scoped by. `:host` matches nothing outside a shadow tree and `::part()`
+   * names a part of a tree that is no longer there, so a component's own
+   * stylesheet crosses the link intact and then does nothing at all.
+   *
+   * That is not a corner case on a site built out of web components. Reddit's
+   * search field is a `faceplate-search-input` whose box padding, its font, and
+   * the `white-space: pre` that keeps its placeholder on one line are all
+   * `:host` rules; with every one of them inert the field spelled "Find
+   * anything" down the screen a letter per line, on top of the header.
+   *
+   * So the selectors are re-pointed at the flattened tree as the sheet is read,
+   * which is the one place that still knows which element hosts it:
+   *
+   *   :host             -> the host's tag name
+   *   :host(S)          -> the host, carrying S's own conditions
+   *   :host-context(S)  -> the host under an ancestor matching S, or matching it
+   *   X::part(p)        -> [part~="p"] under X, which is where it now sits
+   *
+   * Two things are deliberately left undone. `::slotted()` goes on being
+   * dropped: flattening lands slotted content beside the slot rather than in
+   * it, so re-pointing it means rewriting the selector around the host, and no
+   * page in any capture so far has a rule that would gain by it. And a part
+   * renamed on the way out by `exportparts` is matched under the name it was
+   * given inside, because the flattened tree keeps the inner name and nothing
+   * else records the mapping.
+   *
+   * Specificity moves for `:host`, which counts as a pseudo-class (0,1,0) and
+   * lands as a type selector (0,0,1). It moves by that same amount for every
+   * rule in a component's sheet, so the order a component intends among its own
+   * rules survives; only ties against a different sheet can turn over, and in a
+   * document whose shadow styles are all hoisted into one sheet those were
+   * approximate already.
+   */
+
+  // scanSelString returns the index just past the string literal opening at i.
+  function scanSelString(s, i) {
+    var quote = s.charAt(i);
+    for (var j = i + 1; j < s.length; j++) {
+      if (s.charAt(j) === '\\') { j++; continue; }
+      if (s.charAt(j) === quote) return j + 1;
+    }
+    return s.length; // unterminated
+  }
+
+  // scanSelGroup takes the index of a '(' and returns the index of the ')' that
+  // closes it, or -1. Nesting and quoted attribute values both count.
+  function scanSelGroup(s, open) {
+    var depth = 0;
+    for (var i = open; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (c === '\\') { i++; continue; }
+      if (c === '"' || c === "'") { i = scanSelString(s, i) - 1; continue; }
+      if (c === '(') depth++;
+      else if (c === ')' && --depth === 0) return i;
+    }
+    return -1;
+  }
+
+  function isSelIdentChar(c) {
+    return c === '-' || c === '_' || c === '\\' ||
+      (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+      (c >= 'A' && c <= 'Z') || c >= '\u0080';
+  }
+
+  // startsWith, case-folded: pseudo-class names are ASCII case-insensitive.
+  function selAt(s, i, lit) {
+    return s.substr(i, lit.length).toLowerCase() === lit;
+  }
+
+  /*
+   * rewriteHost re-points a shadow sheet's host selectors at the flattened
+   * tree. `host` is the tag name of the element the sheet's shadow root hangs
+   * off; the empty string means the sheet is a document's, and there is nothing
+   * to re-point.
+   *
+   * The argument of `:host(S)` is wrapped in `:is()` rather than pasted onto
+   * the tag name, because a compound selector must lead with its type: the
+   * paste spells `:host(:not([multiline]))` correctly and `:host-context(body)`
+   * as the tag name "bodyfaceplate-search-input".
+   */
+  function rewriteHost(sel, host) {
+    if (!host || sel.indexOf(':host') < 0) return sel;
+    var out = '', i = 0, changed = false;
+    while (i < sel.length) {
+      var c = sel.charAt(i);
+      if (c === '"' || c === "'") {
+        var end = scanSelString(sel, i);
+        out += sel.slice(i, end);
+        i = end;
+        continue;
+      }
+      // An escaped character stands for itself: `.\:host` is a class name.
+      if (c === '\\') { out += sel.substr(i, 2); i += 2; continue; }
+      if (c === ':' && !(i > 0 && sel.charAt(i - 1) === ':')) {
+        if (selAt(sel, i, ':host-context(')) {
+          var ctx = scanSelGroup(sel, i + ':host-context'.length);
+          if (ctx > 0) {
+            var outer = sel.slice(i + ':host-context('.length, ctx);
+            // Matching the ancestor, or matching it itself — both are what
+            // :host-context() means, and a descendant combinator is only half.
+            out += ':is(' + host + ':is(' + outer + '),' + outer + ' ' + host + ')';
+            i = ctx + 1;
+            changed = true;
+            continue;
+          }
+        } else if (selAt(sel, i, ':host(')) {
+          var arg = scanSelGroup(sel, i + ':host'.length);
+          if (arg > 0) {
+            out += host + ':is(' + sel.slice(i + ':host('.length, arg) + ')';
+            i = arg + 1;
+            changed = true;
+            continue;
+          }
+        } else if (selAt(sel, i, ':host') && !isSelIdentChar(sel.charAt(i + 5))) {
+          out += host;
+          i += ':host'.length;
+          changed = true;
+          continue;
+        }
+      }
+      out += c;
+      i++;
+    }
+    return changed ? out : sel;
+  }
+
+  // rewritePart turns `X::part(p)` into `X [part~="p"]`. The part attribute
+  // survives flattening on the element itself, so the descendant it now is can
+  // be named directly. A name is a plain identifier; anything else is left be.
+  var PART_RE = /::part\(\s*([-\w\u00a0-\uffff]+)\s*\)/g;
+
+  function rewritePart(sel) {
+    if (sel.indexOf('::part(') < 0) return sel;
+    return sel.replace(PART_RE, function (m, name) {
+      return ' [part~="' + name + '"]';
+    });
+  }
+
+  // rewriteScoped is the pair of them, applied to one rule's selector.
+  function rewriteScoped(sel, host) {
+    return rewritePart(rewriteHost(sel, host));
+  }
+
   // ------------------------------------------------------------------ used CSS
 
   var PSEUDO_RE = /::?(?:hover|active|focus(?:-visible|-within)?|visited|link|target|checked|disabled|enabled|placeholder|before|after|first-line|first-letter|selection|marker|backdrop|-webkit-[a-z-]+|-moz-[a-z-]+)(?:\([^)]*\))?/gi;
 
+  /*
+   * splitSelectorList splits on the commas that separate selectors, and not on
+   * the ones inside `:is(a, b)`, `:not([x], [y])` or a quoted attribute value.
+   * Splitting on all of them builds fragments that are not selectors, and a
+   * fragment that fails to parse takes its whole rule down the throwing path
+   * into "keep" — which is safe, but keeps rules nothing on the page wants.
+   */
+  function splitSelectorList(sel) {
+    var parts = [], depth = 0, start = 0;
+    for (var i = 0; i < sel.length; i++) {
+      var c = sel.charAt(i);
+      if (c === '\\') { i++; continue; }
+      if (c === '"' || c === "'") { i = scanSelString(sel, i) - 1; continue; }
+      if (c === '(' || c === '[') depth++;
+      else if (c === ')' || c === ']') { if (depth > 0) depth--; }
+      else if (c === ',' && depth === 0) { parts.push(sel.slice(start, i)); start = i + 1; }
+    }
+    parts.push(sel.slice(start));
+    return parts;
+  }
+
+  /*
+   * afterHost reduces a selector to the part of it that can still be looked up.
+   *
+   * A shadow sheet's rules are tested against the shadow root, and there the
+   * host is not a descendant: `:host .label-container` finds nothing, and so
+   * would every rule a component writes about its own box. What can be asked is
+   * whether the shadow root holds a `.label-container` — the host is the root's
+   * own, so its half of the question is already answered yes.
+   *
+   * Returns '' when the selector says nothing beyond the host, which is a rule
+   * that has to be kept without a test.
+   */
+  function afterHost(part) {
+    var last = -1, i = 0;
+    while (i < part.length) {
+      var c = part.charAt(i);
+      if (c === '\\') { i += 2; continue; }
+      if (c === '"' || c === "'") { i = scanSelString(part, i); continue; }
+      if (c === ':' && !(i > 0 && part.charAt(i - 1) === ':') && selAt(part, i, ':host')) {
+        i += ':host'.length;
+        if (part.charAt(i) === '-' && selAt(part, i, '-context')) i += '-context'.length;
+        if (part.charAt(i) === '(') {
+          var end = scanSelGroup(part, i);
+          i = end < 0 ? part.length : end + 1;
+        }
+        last = i;
+        continue;
+      }
+      i++;
+    }
+    if (last < 0) return part;
+    // Everything up to the host compound goes, and so does the combinator that
+    // separated it from what follows.
+    return part.slice(last).replace(/^[\s>+~]+/, '');
+  }
+
+  /*
+   * testableSelector turns a selector into something querySelector can answer,
+   * or null for "no honest test exists — keep the rule".
+   *
+   * `::part()` is reduced to the element whose parts are being styled. The part
+   * itself is inside that element's shadow root landside, out of reach of the
+   * document doing the asking, but whether the element is on the page at all is
+   * the question that decides the rule — and a site ships parts for drawers and
+   * modals it is not currently showing.
+   */
   function testableSelector(sel) {
-    var s = sel.replace(PSEUDO_RE, '');
-    s = s.replace(/\s*,\s*/g, ',');
-    // A selector that was nothing but a pseudo (":root::before") degrades to
-    // an empty part; keep such rules rather than risk dropping layout.
-    var parts = s.split(',').filter(function (p) { return p.trim().length > 0; });
+    var parts = [];
+    var list = splitSelectorList(sel);
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      if (p.indexOf(':host') >= 0) p = afterHost(p);
+      var part = p.indexOf('::part(') >= 0 ? p.slice(0, p.indexOf('::part(')) : p;
+      part = part.replace(PSEUDO_RE, '').trim();
+      // A selector that was nothing but a pseudo (":root::before"), or nothing
+      // but the host, degrades to an empty part; keep such rules rather than
+      // risk dropping layout.
+      if (!part) return null;
+      parts.push(part);
+    }
     if (!parts.length) return null;
     return parts.join(',');
   }
@@ -576,7 +799,26 @@
     }
   }
 
-  function collectRules(doc, list, out, depth) {
+  /*
+   * ruleText gives a style rule the text it should cross the link as: its own,
+   * unless re-pointing its selector at the flattened tree changed it.
+   *
+   * The declarations are taken from rule.style rather than cut out of cssText,
+   * which keeps a selector containing a brace-like character in a quoted
+   * attribute value from being split in the wrong place.
+   */
+  function ruleText(rule, host) {
+    var sel = rule.selectorText;
+    var next = rewriteScoped(sel, host);
+    if (next === sel) return rule.cssText;
+    var body = '';
+    try { body = rule.style.cssText; } catch (e) { body = ''; }
+    return body ? next + '{' + body + '}' : rule.cssText;
+  }
+
+  // host is the tag name of the element a shadow root hangs off, or '' for a
+  // document's own sheets. See rewriteHost.
+  function collectRules(doc, list, out, depth, host) {
     if (!list || depth > 8) return;
     for (var i = 0; i < list.length; i++) {
       var rule = list[i];
@@ -585,7 +827,7 @@
           case 1: // style rule
             cssSeen++;
             if (selectorMatches(doc, rule.selectorText)) {
-              out.push(rule.cssText);
+              out.push(ruleText(rule, host));
             } else {
               noteRejected(rule.selectorText);
             }
@@ -593,7 +835,7 @@
           case 4: // media
           case 12: // supports
             var inner = [];
-            collectRules(doc, rule.cssRules, inner, depth + 1);
+            collectRules(doc, rule.cssRules, inner, depth + 1, host);
             if (inner.length) {
               var cond = rule.type === 4 ? '@media ' + rule.conditionText
                 : '@supports ' + rule.conditionText;
@@ -626,7 +868,7 @@
     }
   }
 
-  function collectSheets(doc, sheets, out) {
+  function collectSheets(doc, sheets, out, host) {
     if (!sheets) return;
     for (var i = 0; i < sheets.length; i++) {
       var sheet = sheets[i];
@@ -651,18 +893,22 @@
         }
       }
       if (!rules) continue;
-      collectRules(doc, rules, out, 0);
+      collectRules(doc, rules, out, 0, host);
     }
   }
 
   function collectUsedCSS(doc) {
     var out = [];
-    try { collectSheets(doc, doc.styleSheets, out); } catch (e) { /* detached */ }
+    // A shadow root's sheets are written against a boundary the mirror does not
+    // keep, and its host is the one thing that can re-point them. See
+    // rewriteHost.
+    var host = doc.host ? localNameOf(doc.host) : '';
+    try { collectSheets(doc, doc.styleSheets, out, host); } catch (e) { /* detached */ }
     // Constructed stylesheets are invisible to document.styleSheets, and they
     // are how every Lit-based web component ships its CSS. Without these a
     // component-heavy page arrives with its structure intact and no styling at
     // all, which looks far more broken than a missing rule.
-    try { collectSheets(doc, doc.adoptedStyleSheets, out); } catch (e) { /* unsupported */ }
+    try { collectSheets(doc, doc.adoptedStyleSheets, out, host); } catch (e) { /* unsupported */ }
     return out;
   }
 
