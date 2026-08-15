@@ -591,37 +591,15 @@ func TestPWAReportsBothVersionsAndAgreesWithTheServer(t *testing.T) {
 	}
 
 	page := h.openClient(ctx, t)
-	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
-		budget(45*time.Second), "the client to connect")
+	// Not for the HUD, which goes green when the socket opens — a whole round
+	// trip before the Welcome that carries the versions. On a LAN the two are
+	// indistinguishable; on the link this project exists for they are a second
+	// and a half apart, and the dialog in between honestly says "not connected
+	// yet". So this waits for the answer rather than for the connection.
+	waitFor(ctx, t, page, versionsDialogWhen(`/Up to date/.test(verdict)`),
+		budget(60*time.Second), "the two halves to agree about their versions")
 
-	// Through the menu, because that is the reader's only route to it: a right
-	// click anywhere on the shell, or the phone's ⋯.
-	evalJSON(ctx, t, page, `(() => {
-      document.dispatchEvent(new MouseEvent('contextmenu',
-        { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
-      const items = Array.from(document.querySelectorAll('.menu .item'));
-      const entry = items.find((i) => /Skyhook versions|Update Skyhook/.test(i.textContent));
-      if (!entry) throw new Error('no versions entry in the shell menu');
-      entry.click();
-      return true;
-    })()`, nil)
-
-	waitFor(ctx, t, page, `document.getElementById('about').open === true`,
-		budget(10*time.Second), "the versions dialog")
-
-	var shown struct {
-		Rows    []string `json:"rows"`
-		Verdict string   `json:"verdict"`
-		Update  bool     `json:"update"`
-	}
-	evalJSON(ctx, t, page, `(() => {
-      const dl = document.getElementById('about-rows');
-      return {
-        rows: Array.from(dl.children).map((n) => n.textContent),
-        verdict: document.getElementById('about-verdict').textContent,
-        update: !document.getElementById('about-update').hidden,
-      };
-    })()`, &shown)
+	shown := readVersionsDialog(ctx, t, page)
 
 	joined := strings.Join(shown.Rows, " | ")
 	// The build the app knows it is, which comes from its own bytes.
@@ -708,21 +686,9 @@ func TestPWAIsToldWhenTheServerHasANewerBuild(t *testing.T) {
 		t.Errorf("shell menu says %q, want it to offer the update", label)
 	}
 
-	var shown struct {
-		Rows    []string `json:"rows"`
-		Verdict string   `json:"verdict"`
-		Update  bool     `json:"update"`
-	}
-	evalJSON(ctx, t, page, `(() => {
-      const items = Array.from(document.querySelectorAll('.menu .item'));
-      items.find((i) => /Skyhook versions|Update Skyhook/.test(i.textContent)).click();
-      const dl = document.getElementById('about-rows');
-      return {
-        rows: Array.from(dl.children).map((n) => n.textContent),
-        verdict: document.getElementById('about-verdict').textContent,
-        update: !document.getElementById('about-update').hidden,
-      };
-    })()`, &shown)
+	waitFor(ctx, t, page, versionsDialogWhen(`/different build/.test(verdict)`),
+		budget(30*time.Second), "the versions dialog to say the two disagree")
+	shown := readVersionsDialog(ctx, t, page)
 
 	joined := strings.Join(shown.Rows, " | ")
 	if !strings.Contains(joined, "a-newer-build") || !strings.Contains(joined, "9.9.9") {
@@ -826,10 +792,44 @@ func TestPWAUpdatesItselfOntoTheServersBuild(t *testing.T) {
 	// new build is what distinguishes an update that happened from one that
 	// reloaded onto the same cache: the second is the bug, and it looks like
 	// success everywhere except here.
-	waitFor(ctx, t, page, `(() => {
-      // Re-opened on every poll rather than read once: the dialog renders what
-      // was known at the moment it opened, and after a reload that can be
-      // before the connection is back.
+	waitFor(ctx, t, page,
+		versionsDialogWhen(`rows[1].includes('`+now+`') && /Up to date/.test(verdict)`),
+		budget(90*time.Second), "the app to come back as the build the server serves")
+
+	after := readVersionsDialog(ctx, t, page)
+	if !strings.Contains(after.Rows[1], now) {
+		t.Errorf("after updating, the app is still %q; want the served build %q",
+			after.Rows[1], now)
+	}
+	if after.Update || !strings.Contains(after.Verdict, "Up to date") {
+		t.Errorf("the two halves still disagree after an update: %q", after.Verdict)
+	}
+}
+
+// dialogState is what the versions dialog is showing: the rows as a flat list
+// of terms and values, the verdict under them, and whether an update is on
+// offer.
+type dialogState struct {
+	Rows    []string `json:"rows"`
+	Verdict string   `json:"verdict"`
+	Update  bool     `json:"update"`
+}
+
+/*
+versionsDialogWhen builds a polling expression that opens the versions dialog
+the way a reader does — right-click, then the last entry in the shell menu —
+and evaluates cond against what it shows. cond may use `rows` (dt and dd text,
+interleaved) and `verdict`.
+
+It re-opens on every poll rather than opening once and reading afterwards,
+because the dialog renders what was known at the moment it opened. The moments
+that matter here are exactly the ones where that is not yet the answer: the HUD
+turns green when the socket opens, a full round trip before the Welcome that
+carries the versions, and this link's round trips are seconds. A test that
+opened once and read would be racing the link, and would win on a LAN.
+*/
+func versionsDialogWhen(cond string) string {
+	return `(() => {
       const dialog = document.getElementById('about');
       if (!dialog) return false;
       if (dialog.open) dialog.close();
@@ -839,30 +839,26 @@ func TestPWAUpdatesItselfOntoTheServersBuild(t *testing.T) {
       const entry = items.find((i) => /Skyhook versions|Update Skyhook/.test(i.textContent));
       if (!entry) return false;
       entry.click();
-      const rows = document.getElementById('about-rows');
-      if (!rows || rows.children.length < 2) return false;
-      return rows.children[1].textContent.includes('`+now+`')
-        && /Up to date/.test(document.getElementById('about-verdict').textContent);
-    })()`, budget(90*time.Second), "the app to come back as the build the server serves")
+      const dl = document.getElementById('about-rows');
+      if (!dl || dl.children.length < 4) return false;
+      const rows = Array.from(dl.children).map((n) => n.textContent);
+      const verdict = document.getElementById('about-verdict').textContent;
+      return !!(` + cond + `);
+    })()`
+}
 
-	var after struct {
-		Build   string `json:"build"`
-		Verdict string `json:"verdict"`
-		Update  bool   `json:"update"`
-	}
+// readVersionsDialog reads the dialog a versionsDialogWhen poll has just left
+// open and populated.
+func readVersionsDialog(ctx context.Context, t *testing.T, page *cdp.Session) dialogState {
+	t.Helper()
+	var shown dialogState
 	evalJSON(ctx, t, page, `(() => ({
-      build: document.getElementById('about-rows').children[1].textContent,
+      rows: Array.from(document.getElementById('about-rows').children)
+        .map((n) => n.textContent),
       verdict: document.getElementById('about-verdict').textContent,
       update: !document.getElementById('about-update').hidden,
-    }))()`, &after)
-
-	if !strings.Contains(after.Build, now) {
-		t.Errorf("after updating, the app is still %q; want the served build %q",
-			after.Build, now)
-	}
-	if after.Update || !strings.Contains(after.Verdict, "Up to date") {
-		t.Errorf("the two halves still disagree after an update: %q", after.Verdict)
-	}
+    }))()`, &shown)
+	return shown
 }
 
 func readStamp(t *testing.T, dist string) string {
