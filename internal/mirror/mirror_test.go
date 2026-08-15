@@ -554,3 +554,53 @@ func TestAbsolutizeCSSURLs(t *testing.T) {
 		t.Error("rewrote a rule with no url() in it")
 	}
 }
+
+// A replica is written by whatever is feeding it frames and read by whatever is
+// asking what the page says, and in the end-to-end client those are two
+// goroutines that overlap for as long as a test polls. Unsynchronised that is
+// not a flaky assertion but a runtime fatal — "concurrent map read and map
+// write" — which takes down the whole suite in whichever test happened to be
+// running when the frames arrived.
+//
+// Worth a test rather than a comment because the failure is invisible until it
+// is not: it needs `-race` to be caught deliberately, and CI to be unlucky to
+// be caught by accident.
+func TestAReplicaCanBeReadWhileFramesArrive(t *testing.T) {
+	m := buildModel(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			id := int64(100 + i)
+			mu := &protocol.Mutation{
+				Strings: []string{"li", "row"},
+				Ops: []protocol.Op{{
+					Op: protocol.OpInsert, Parent: 3,
+					Nodes: []protocol.Node{
+						{ID: id, Parent: 3, Kind: protocol.KindElement, Ref: int32(len(m.Strings))},
+						{ID: id + 1000, Parent: id, Kind: protocol.KindText, Ref: int32(len(m.Strings) + 1)},
+					},
+				}},
+			}
+			if err := m.ApplyMutation(mu, uint64(i+1)); err != nil {
+				t.Errorf("apply %d: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	// The reader the client runs: text, structure and the hash the integrity
+	// check compares, all while the writer above is inserting.
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		_ = m.Text()
+		_ = m.HTML()
+		_ = m.Hash()
+		_ = m.Find("ul", "id", "list")
+		_ = m.FindByText("one")
+	}
+}

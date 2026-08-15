@@ -719,50 +719,9 @@ func (c *Client) FindByText(tab uint32, substr string) (*mirror.ModelNode, error
 	if m == nil {
 		return nil, errors.New("client: no such tab")
 	}
-	var best *mirror.ModelNode
-	var walk func(id int64) string
-	walk = func(id int64) string {
-		n := m.Nodes[id]
-		if n == nil {
-			return ""
-		}
-		if n.Kind == protocol.KindText {
-			return n.Text
-		}
-		var sb strings.Builder
-		for _, ch := range n.Children {
-			sb.WriteString(walk(ch))
-		}
-		text := sb.String()
-		if strings.Contains(text, substr) {
-			if best == nil || len(text) < lengthOfNodeText(m, best) {
-				best = n
-			}
-		}
-		return text
-	}
-	walk(m.Root)
+	best := m.FindByText(substr)
 	if best == nil {
 		return nil, fmt.Errorf("client: no element containing %q", substr)
 	}
 	return best, nil
-}
-
-func lengthOfNodeText(m *mirror.Model, n *mirror.ModelNode) int {
-	var sb strings.Builder
-	var walk func(id int64)
-	walk = func(id int64) {
-		node := m.Nodes[id]
-		if node == nil {
-			return
-		}
-		if node.Kind == protocol.KindText {
-			sb.WriteString(node.Text)
-		}
-		for _, ch := range node.Children {
-			walk(ch)
-		}
-	}
-	walk(n.ID)
-	return sb.Len()
 }
