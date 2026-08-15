@@ -47,6 +47,16 @@ const fixturePage = `<!DOCTYPE html>
      background — so a screenshot containing it proves the stylesheet's own
      image references were resolved, which no <img> on the page can prove. */
   #tile { width: 48px; height: 48px; background-image: url(/tile.png); }
+  /* A part styled from outside the component, the way a design system lets a
+     page dress a control it does not own. The mirror flattens the shadow tree,
+     so this has to arrive naming something that still exists there. */
+  sky-card::part(face) { padding: 3px; }
+  /* A quoted url() token carrying a bracket, which is legal and which a site
+     hands over without meaning anything by it. Ending the token at the inner
+     bracket leaves the rest of it loose in the sheet, and the rules below stop
+     parsing. The marker rule after it is how the test can tell. */
+  #bracket-url { background-image: url("/tile(2x).png"); }
+  .after-the-bracket-url { color: rgb(22, 23, 24); }
 </style>
 </head>
 <body>
@@ -66,20 +76,33 @@ const fixturePage = `<!DOCTYPE html>
     <rect x="0" y="0" width="20" height="10" fill="rgb(2, 4, 6)"/>
   </svg>
   <div id="tile"></div>
+  <div id="bracket-url"></div>
+  <div class="after-the-bracket-url">below the bracket</div>
   <div class="used">styled</div>
   <form id="login"><input id="secret" type="password" value=""></form>
-  <sky-card id="card"></sky-card>
+  <sky-card id="card" tone="warm"></sky-card>
 <script>
   // A web component whose styles live in a constructed stylesheet, which is
   // how every Lit-based component ships CSS. These never appear in
   // document.styleSheets.
+  //
+  // Its sheet is written the way a component's is: most of what it says about
+  // its own box it says through :host, which stops meaning anything once the
+  // shadow tree is flattened into the document.
   class SkyCard extends HTMLElement {
     connectedCallback() {
       const root = this.attachShadow({ mode: 'open' });
       const sheet = new CSSStyleSheet();
-      sheet.replaceSync('.card { color: rgb(4, 5, 6); }');
+      sheet.replaceSync([
+        ':host { display: block; color: rgb(7, 8, 9); }',
+        ':host([tone="warm"]) .card { background-color: rgb(10, 11, 12); }',
+        ':host .card { border-color: rgb(13, 14, 15); }',
+        ':host([tone="cold"]) .card { outline-color: rgb(16, 17, 18); }',
+        '.card { color: rgb(4, 5, 6); }',
+        '.absent-from-this-component { color: rgb(19, 20, 21); }'
+      ].join('\n'));
       root.adoptedStyleSheets = [sheet];
-      root.innerHTML = '<div class="card">inside the shadow</div>';
+      root.innerHTML = '<div class="card" part="face">inside the shadow</div>';
     }
   }
   customElements.define('sky-card', SkyCard);
@@ -505,6 +528,12 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		_, _ = w.Write(pixelPNG)
 	})
 	mux.HandleFunc("/tile.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(tilePNG)
+	})
+	// A path with a bracket in it, which a url() token may carry as long as it
+	// is quoted. See TestABracketInAURLDoesNotTruncateTheSheet.
+	mux.HandleFunc("/tile(2x).png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(tilePNG)
 	})
@@ -1083,6 +1112,164 @@ func TestConstructedStylesheetsReachTheClient(t *testing.T) {
 	}
 	t.Fatalf("the component's adopted stylesheet never reached the client; CSS = %q",
 		strings.Join(cl.Model(tab).CSS, " "))
+}
+
+/*
+The mirror flattens shadow trees into their hosts, which leaves a component's
+own stylesheet talking about a boundary that is no longer there: `:host` matches
+nothing outside a shadow tree, and `::part()` names a part of one. Shipped as
+written those rules cross the link and do nothing, and a component-heavy page
+arrives with its structure intact and its own layout missing — which is how a
+mirrored Reddit came to spell "Find anything" down the screen a letter per line,
+the search field having lost every rule that gave it a shape.
+
+So they arrive re-pointed at the flattened tree. The fixture's component says
+most of what it says about itself through :host, and the page dresses one of its
+parts from outside.
+*/
+func TestShadowScopedSelectorsSurviveFlattening(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	if err := cl.WaitForText(ctx, tab, "inside the shadow", budget(30*time.Second)); err != nil {
+		t.Fatalf("shadow content never arrived: %v", err)
+	}
+
+	// Rules arrive minified, so these are the minified spellings. Each pairs a
+	// rewritten selector with a colour that appears nowhere else, so a match
+	// proves the declarations travelled with it rather than some other rule
+	// happening to mention the same element.
+	want := []struct{ what, css string }{
+		{":host", "sky-card{"},
+		{":host declarations", "rgb(7,8,9)"},
+		{":host(S) descendant", `sky-card:is([tone="warm"]) .card{`},
+		{":host(S) declarations", "rgb(10,11,12)"},
+		{":host descendant", "sky-card .card{"},
+		{":host descendant declarations", "rgb(13,14,15)"},
+		{"::part()", `sky-card [part~="face"]{`},
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = strings.Join(cl.Model(tab).CSS, "\n")
+		ok := true
+		for _, w := range want {
+			if !strings.Contains(css, w.css) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	for _, w := range want {
+		if !strings.Contains(css, w.css) {
+			t.Errorf("%s did not survive flattening: no %q in the client's CSS", w.what, w.css)
+		}
+	}
+	// Nothing shadow-scoped should still be spelled the way it was landside: a
+	// rule that arrives saying :host is a rule that arrives doing nothing.
+	for _, dead := range []string{":host", "::part("} {
+		if strings.Contains(css, dead) {
+			t.Errorf("%q reached the client unrewritten, where it matches nothing", dead)
+		}
+	}
+	// Re-pointing must not turn the used-CSS filter off: a rule matching nothing
+	// inside the shadow tree is still dead weight, and still goes.
+	if strings.Contains(css, "rgb(19,20,21)") {
+		t.Error("a shadow rule that matches nothing in the component was sent anyway")
+	}
+	if t.Failed() {
+		t.Logf("client CSS was:\n%s", css)
+	}
+}
+
+/*
+A bundle is rules joined end to end, so a rewrite that leaves one of them unable
+to close itself does not cost that rule — it costs every rule after it.
+
+A quoted url() token may hold a bracket, and reading it as far as the first one
+rewrote half the token and left the rest as loose text, whose orphaned quote
+swallowed the closing brace and everything following. A mirrored Gmail arrived
+as bare markup that way: 2,773 of its 3,422 rules never parsed, because 18 bytes
+of one background-image did not end where they claimed to.
+
+So the fixture puts a bracketed url() above an ordinary rule, and the ordinary
+rule is what is checked.
+*/
+func TestABracketInAURLDoesNotTruncateTheSheet(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	if err := cl.WaitForText(ctx, tab, "below the bracket", budget(30*time.Second)); err != nil {
+		t.Fatalf("fixture never arrived: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = strings.Join(cl.Model(tab).CSS, "\n")
+		if strings.Contains(css, "rgb(22,23,24)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// The rule *after* the bracketed url(): present only if the sheet went on
+	// parsing past it.
+	if !strings.Contains(css, "rgb(22,23,24)") {
+		t.Error("the rule after the bracketed url() never arrived: the sheet was cut short there")
+	}
+	// And every rule that did arrive has to be able to close itself, or it takes
+	// its neighbours down on the client.
+	for _, rule := range cl.Model(tab).CSS {
+		if !ruleCloses(rule) {
+			t.Errorf("a rule that cannot close itself reached the client: %q", rule)
+		}
+	}
+}
+
+// ruleCloses reports whether a rule's braces and quotes all end, which is what
+// decides whether the rules after it in the bundle are read as rules at all.
+func ruleCloses(rule string) bool {
+	depth := 0
+	for i := 0; i < len(rule); i++ {
+		switch c := rule[i]; c {
+		case '\\':
+			i++
+		case '"', '\'':
+			j := i + 1
+			for j < len(rule) && rule[j] != c {
+				if rule[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j >= len(rule) {
+				return false // unterminated string
+			}
+			i = j
+		case '{':
+			depth++
+		case '}':
+			if depth--; depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
 }
 
 // A password is the one thing on a page that must not be mirrored. The value

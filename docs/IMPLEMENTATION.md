@@ -609,9 +609,49 @@ becomes `:not([data-sky-undefined])`. Specificity is unchanged — a pseudo-clas
 and an attribute selector count the same — and the mark is cleared by the same
 pass that re-reads the upgraded element, so the two halves cannot drift apart.
 
-The general rule this is an instance of: a selector whose truth differs between
-the two sides has to be answered landside and carried, never re-asked
-plane-side. `:defined` is the sharpest case because it always differs.
+**The scoping half.** The same page came back with a third version of the same
+mistake, and this one was structural rather than temporal. The mirror flattens
+every shadow tree into its host, so plane-side there is no boundary left for a
+shadow-scoped selector to be scoped *by*: `:host` matches nothing outside a
+shadow tree, and `::part()` names a part of a tree that is no longer there. A
+component's stylesheet therefore crossed the link intact and did nothing —
+`:host` rules shipped and inert, `::part()` rules dropped by the filter, since
+`querySelector` never matches a pseudo-element and every one of them looked like
+a rule the page had no use for. It is not a corner: Reddit's search field is a
+`faceplate-search-input` whose box padding, its font and the `white-space: pre`
+that keeps its placeholder on one line are all `:host` rules, and with all of
+them dead the field spelled "Find anything" straight down the screen, a letter
+per line, on top of the header.
+
+So they are re-pointed as the sheet is read, in the one place that still knows
+which element hosts it — `:host` becomes the host's tag name, `:host(S)` carries
+S's conditions onto it, `:host-context(S)` becomes the host under an ancestor
+matching S or matching it itself, and `X::part(p)` becomes `X [part~="p"]`,
+which is exactly where flattening left it. `::slotted()` is left dropped:
+flattening lands slotted content beside the slot rather than in it, so
+re-pointing it means rewriting the selector around the host, and no capture so
+far holds a rule that would gain by it. A part renamed on the way out by
+`exportparts` is matched under its inner name, because that is the name the
+flattened tree keeps. Specificity does move here — `:host` counts as a
+pseudo-class and lands as a type selector — but by the same amount for every
+rule in a component's sheet, so the order a component intends among its own
+rules survives; only ties against another sheet can turn over, and those were
+approximate already in a document whose shadow styles are all hoisted into one.
+
+The filter had to learn the same distinction, because a selector that reaches
+across the boundary cannot be tested by asking one side of it. A shadow sheet's
+rules are tested against the shadow root with the host compound taken off the
+front — the host is the root's own, so its half of the question is answered
+before it is asked — and a `::part()` rule is tested by asking whether the
+element whose parts it styles is on the page at all, which is the question that
+actually decides it: a site ships parts for drawers and modals it is not
+currently showing, and those still go.
+
+The general rule all three are instances of: a selector whose truth differs
+between the two sides has to be answered landside and carried, never re-asked
+plane-side. `:defined` is the sharpest case because it always differs; `:host`
+is the widest, because on a site built out of web components it is most of what
+a component says about itself.
 
 ### 20. A divergence check has to compare two documents, not two instants
 
@@ -1188,6 +1228,57 @@ build the server is serving, that cache is the only shell generation left, and
 it holds every precached file. Against the old worker it fails with
 `shell caches = [skyhook-shell-v1], want exactly [skyhook-shell-<id>]`.
 
+### 29. A url() token has to be read, and a rule has to close itself
+
+A mirrored Gmail arrived as bare markup — no layout, icons inflated to the width
+of the window, a heading where the logo should be. The DOM was not at fault: the
+capture's two halves agreed on the hash, and the markup matched landside node
+for node. The stylesheet had crossed the link too, all 293 KB of it. Chromium
+was parsing 649 rules out of it and discarding 2,773.
+
+Gmail's own templating leaves an unsubstituted variable inside a url string:
+
+```css
+background-image:url("//ssl.gstatic.com/…/var(--hub-nav-container-button-icon-asset)_1x.png")
+```
+
+which is legal — a *quoted* url token may hold a bracket. The pattern that
+rewrote page URLs into image keys could not:
+
+```
+url\(\s*['"]?([^'")]+)['"]?\s*\)
+```
+
+`[^'")]+` ends the address at the first bracket, so the rewrite consumed two
+thirds of the token and left `_1x.png")` in the sheet as text. The orphaned
+quote opened a string that ran through the rule's closing brace and the `@media`
+block after it, and everything past that byte stopped being CSS. Eighteen bytes
+of one background-image cost the page four fifths of its styling.
+
+Two things came out of it, because the second is what makes the first survivable.
+
+**Read the token.** `replaceCSSURLs` scans instead of matching: a quoted token
+ends at its closing quote, an unquoted one at the first unescaped bracket, and
+whichever it was, the address is handed back through `cssURLToken`, which quotes
+it when the address needs quoting rather than when the page happened to. Scanning
+settles the quieter half of the same bug too — a `url(` inside a string is text
+the page means to display, and no pattern can tell that from a reference.
+
+**Check what comes out.** A bundle is rules joined end to end, so a rule that
+cannot close itself never fails alone. That had already happened once, from a
+different direction: a custom property stripped out from under its selector,
+which is why `stripUnusedVars` drops a rule whose declarations all go rather than
+emit a selector with nothing to close it. Two doors into one failure is enough to
+stop guarding the doors, so `wellFormedRule` now runs over every rule after the
+last transform that can touch it, and `dropMalformed` drops the ones whose braces
+or quotes do not end. One rule lost against every rule after it is not a close
+call.
+
+`TestABracketInAURLDoesNotTruncateTheSheet` puts a bracketed url() above an
+ordinary rule in the fixture and checks the ordinary rule, which is the symptom a
+reader would report. Against the old pattern it fails with the same wreckage the
+capture held: `#bracket-url{background-image:url(skyhook://img/44fee7e3).png");}`.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
@@ -1230,6 +1321,12 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   be read from an isolated world any more than it can from the page, so such a
   component mirrors as its light DOM and nothing else. Late-attached *open*
   roots are handled (§19); closed ones cannot be.
+- **`::slotted()` rules are dropped, and `exportparts` renaming is ignored.**
+  Flattening puts slotted content beside its slot rather than inside it, so a
+  `::slotted()` rule cannot be re-pointed the way `:host` and `::part()` are
+  (§19) without rewriting the whole selector around the host; nothing in any
+  capture so far wants one. A part re-exported under a new name is matched under
+  the name it carries inside, which is the only one the flattened tree keeps.
 
 ## Measured results
 
