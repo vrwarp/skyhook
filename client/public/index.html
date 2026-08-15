@@ -2,7 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- `interactive-widget` is pinned rather than left to the browser's
+         default, because the default has changed once already and the two
+         behaviours cost very different amounts here. Resizing the layout
+         viewport when the on-screen keyboard opens fires a resize, which this
+         shell answers by telling the server its viewport changed — and the
+         server answers that by laying the real page out again and sending a
+         fresh snapshot. Tapping into a search box would cost a page. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover,
+                                   interactive-widget=resizes-visual" />
     <title>Skyhook</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
@@ -25,12 +33,20 @@
                 aria-label="Save this page">&#9734;</button>
         <button id="marks" title="Saved pages (Ctrl+B)" aria-expanded="false">Saved</button>
         <button id="chat" title="Chat">Chat</button>
-        <div id="hud" title="Link health">
+        <!-- Both only exist on a phone, where there is no room for a strip of
+             tabs and no gesture that reaches a right-click menu. The count is
+             the whole label: it is what says how many pages are already paid
+             for, and it spins when one of them is still arriving. -->
+        <button id="tabs" title="Tabs" aria-expanded="false">1</button>
+        <button id="more" title="More" aria-label="More" aria-haspopup="menu">&#8943;</button>
+        <!-- Tappable on a phone, where it shrinks to the one bit that matters
+             at a glance — the colour — and says the rest when asked. -->
+        <button id="hud" title="Link health" aria-label="Link health">
           <span id="hud-state" class="offline">offline</span>
           <span id="hud-rtt">--</span>
           <span id="hud-queue">q0</span>
           <span id="hud-bytes">0 KB</span>
-        </div>
+        </button>
       </div>
     </header>
 
@@ -62,6 +78,15 @@
           Paste the contents of <code>pairing.json</code> from the server's data
           directory. It carries the token and the certificate fingerprint this
           client pins.
+        </p>
+        <!-- Said here because this dialog is the first screen anybody sees, and
+             on a phone the path it describes is the worst one available: the
+             file is on the server, and getting its contents into this box means
+             a shell session and a clipboard. Opening the link the server prints
+             is one tap and does the same thing. -->
+        <p class="muted">
+          Easier: open the pairing link the server logs on startup. It carries
+          the same thing in its fragment, which browsers never send anywhere.
         </p>
         <textarea id="pairing-json" rows="10" spellcheck="false"
                   placeholder='{ "host": "vps.example.com", "port": 4433, ... }'></textarea>

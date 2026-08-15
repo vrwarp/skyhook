@@ -37,6 +37,12 @@ itself. Mirrored pages render inside iframes carrying `sandbox="allow-same-origi
 and no `allow-scripts`, so the browser itself guarantees that page JavaScript
 never runs plane-side.
 
+On a phone it draws a different chrome for the same browser: one row instead of
+two, the tab strip as a list behind a count, the panels and menus as sheets, and
+the HUD as a coloured dot that spells itself out when the answer is *offline* or
+*slow*. It also tells the server it is a phone, which is what gets a site's own
+mobile layout rather than its desktop one squeezed into 393 pixels.
+
 ## Try it in one command
 
 ```sh

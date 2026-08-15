@@ -8,6 +8,17 @@
   --warn: #f59e0b;
   --bad: #ef4444;
   --good: #22c55e;
+  /* How much of the screen is not the page. Everything that sits under the
+     chrome — the mirror, the progress bar, the panel — is placed from this one
+     number, because the phone shell below spends a different amount of it and
+     a second copy of that arithmetic is a second thing to get wrong. */
+  --chrome-h: 88px;
+  /* The screen the hardware will not let anything be drawn on: a notch, a
+     rounded corner, the bar the home gesture lives in. Zero everywhere else. */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
 }
 
 * { box-sizing: border-box; }
@@ -18,9 +29,21 @@ body {
   background: var(--bg);
   color: var(--fg);
   overflow: hidden;
+  /* A swipe that runs past the end of a mirrored page must not reach the
+     browser underneath: Chrome answers an overscroll at the top with
+     pull-to-refresh, and a reload of this shell throws away every tab and
+     every page the reader has already paid seconds for. */
+  overscroll-behavior: none;
 }
 
-#chrome { height: 88px; display: flex; flex-direction: column; }
+#chrome {
+  height: var(--chrome-h);
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--safe-t);
+  padding-left: var(--safe-l);
+  padding-right: var(--safe-r);
+}
 
 #tabstrip {
   display: flex;
@@ -52,8 +75,9 @@ body {
 
 /* A tab waiting for a page, and a tab that does not exist yet because the
    server has not opened it. The spinner sits where a favicon would, which is
-   where a browser puts this and therefore where the eye already looks. */
-.tab .spin {
+   where a browser puts this and therefore where the eye already looks — in the
+   strip and, on a phone, in the row that replaces it. */
+.spin {
   flex: none;
   width: 9px;
   height: 9px;
@@ -86,6 +110,9 @@ body {
 }
 
 #toolbar button:disabled { color: #4b5563; }
+/* The two controls that only exist on the phone shell. See the bottom of this
+   file for what they carry and why the wide chrome has neither. */
+#tabs, #more { display: none; }
 /* A saved page is the one thing in this chrome worth a colour of its own: it is
    how the reader tells, at a glance, whether the page they are on is one they
    can get back to for free. */
@@ -101,12 +128,18 @@ body {
   font: inherit;
 }
 
+/* A button, because on a phone it shrinks to a coloured dot and has to be
+   askable for the numbers it drops. Everywhere else it is the flat row of
+   figures it has always been, so the button's own chrome is taken back off. */
 #hud {
   display: flex;
   gap: 8px;
   align-items: center;
+  font: inherit;
   font-variant-numeric: tabular-nums;
   color: var(--muted);
+  background: transparent;
+  border: 0;
   padding-left: 6px;
 }
 
@@ -117,7 +150,7 @@ body {
 
 #panel {
   position: fixed;
-  top: 88px;
+  top: var(--chrome-h);
   right: 0;
   bottom: 0;
   width: 380px;
@@ -134,9 +167,25 @@ body {
 #panel-header {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   padding: 8px 10px;
   border-bottom: 1px solid #374151;
 }
+
+/* Left to the user agent this is a grey system button, which is invisible on a
+   desktop at 16 pixels and a white slab on a phone at 44. */
+#panel-close {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+
+#panel-close:hover { background: #1f2937; color: var(--fg); }
 
 #panel-body { flex: 1; overflow-y: auto; padding: 8px 10px; }
 
@@ -149,6 +198,16 @@ body {
 
 #composer { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #374151; }
 #composer input { flex: 1; background: #111827; color: var(--fg); border: 1px solid #374151; border-radius: 6px; padding: 6px; }
+/* Same as the panel's close button: left to the user agent it is a system
+   button, and a system button in this chrome is a white slab. */
+#composer button {
+  background: #1f2937;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+}
 
 /* --- saved pages ---------------------------------------------------------- */
 
@@ -281,7 +340,7 @@ body {
 /* The mirror area fills everything below the chrome strip. */
 #frames {
   position: absolute;
-  inset: 88px 0 0 0;
+  inset: var(--chrome-h) 0 0 0;
   background: #fff;
 }
 
@@ -302,7 +361,7 @@ body {
    the click that started it cost the reader a page of their screen already. */
 #progress {
   position: fixed;
-  top: 88px;
+  top: var(--chrome-h);
   left: 0;
   right: 0;
   height: 2px;
@@ -352,7 +411,7 @@ body {
    spinner that is a ring rather than a rotating one. */
 @media (prefers-reduced-motion: reduce) {
   #progress span { width: 100%; animation: none; }
-  .tab .spin { animation: none; }
+  .spin { animation: none; }
 }
 
 /* --- context menu --------------------------------------------------------- */
@@ -486,3 +545,327 @@ body {
   font: inherit;
   flex: none;
 }
+
+/* --- the phone ------------------------------------------------------------
+ *
+ * Everything below this line exists because the chrome above was drawn for a
+ * mouse on a wide screen, and a phone is neither. It is written as an override
+ * rather than a rewrite so that the desktop shell — which the end-to-end suite
+ * drives, and which is the shell most of this app was designed against — comes
+ * out of it byte for byte unchanged.
+ *
+ * Three things drive it. The screen is narrow, so the chrome is one row instead
+ * of two and the panel is a sheet instead of a column. The pointer is a finger,
+ * so nothing worth hitting is smaller than a fingertip. And the reader is on
+ * the same terrible link as everyone else, so none of it is allowed to cost
+ * more page than the chrome it replaces: the phone shell is 36 pixels shorter
+ * than the desktop one, which on a phone held sideways is a tenth of the page.
+ */
+
+/* Fingertips, wherever they are. A touch laptop is a real thing and it wants
+   the same target sizes; it does not want the phone's layout. */
+@media (pointer: coarse) {
+  #toolbar button,
+  #newtab {
+    min-width: 44px;
+    min-height: 44px;
+    /* No 300 ms wait for a double tap that means nothing here. */
+    touch-action: manipulation;
+  }
+
+  .tab { min-height: 44px; }
+  /* The one control on this shell that is destructive, and it was 15 pixels
+     wide beside a target twice its size. */
+  .tab .close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    min-height: 32px;
+    margin-right: -6px;
+  }
+
+  .menu .item { min-height: 48px; }
+  .mark, .start-mark { min-height: 48px; justify-content: center; }
+  .marks-act, #panel-close { min-width: 44px; min-height: 44px; }
+  /* The dialogs. The pairing one is the first screen anybody ever sees here,
+     and it used to answer a finger with a 30-pixel button. */
+  #pairing button, #capture-buttons button, #composer button { min-height: 44px; }
+
+  /* A chord is a hint on a machine that has the chord. Told to a finger it is
+     an instruction to press keys that are not there — and the reader who goes
+     looking for them is spending the attention this whole client exists to
+     save. What a thing *costs* is not a chord and stays: it matters more here,
+     not less. */
+  .menu .chord { display: none; }
+
+  /* Safari zooms the page in on a field whose text is under 16px, and never
+     zooms back out. The mirror is then off-centre for the rest of the session
+     with no gesture in this shell that recentres it. */
+  #urlbar, .marks-search, .mark-rename, #composer input,
+  #pairing textarea, #capture textarea { font-size: 16px; }
+}
+
+/* --- the compact chrome -----------------------------------------------------
+ *
+ * Anything without room to spare, which is a phone either way up: 393 pixels
+ * across held one way and 393 down held the other. Both want the same thing —
+ * one row of chrome instead of two — and the second case is the one the first
+ * draft missed, so a phone turned sideways to read spent a fifth of what it had
+ * left on a tab strip and three buttons.
+ */
+@media (max-width: 600px), (max-height: 500px) {
+  :root {
+    /* One row, plus whatever the hardware is keeping for itself. */
+    --chrome-h: calc(56px + var(--safe-t));
+  }
+
+  /* The strip is the first thing to go. Six tabs on a phone is four titles too
+     narrow to read and a "+" pushed off the end of the screen — the button
+     that opens a tab, unreachable, in a browser whose tabs are the session.
+     They move into a list behind the count in the toolbar, which is where
+     every phone browser has put them for fifteen years. */
+  #tabstrip { display: none; }
+
+  #toolbar {
+    height: 56px;
+    gap: 4px;
+    padding: 6px;
+    /* With the strip gone there is nothing between the chrome and the page, and
+       a mirrored page whose own background is dark used to run straight into
+       the toolbar as one surface. */
+    border-bottom: 1px solid #374151;
+  }
+
+  /* Both are single glyphs standing in for a word, and a glyph at body size in
+     a 44-pixel target reads as a smudge. */
+  #bookmark, #more { font-size: 17px; line-height: 1; }
+
+  /* Back, forward and reload go with the strip. Nothing is lost: the system
+     back gesture is already caught and spent on the tab's own history (see
+     main.ts), and all three are in the ⋯ menu, which is one tap from here and
+     one tap the reader is not making on every page. */
+  #back, #forward, #reload, #marks, #chat { display: none; }
+
+  #tabs, #more { display: block; }
+
+  /* Everything the buttons leave, which is why there are four of them and not
+     eight: an address bar too narrow to read the host in cannot answer the one
+     question it is there to answer. */
+  #urlbar {
+    min-width: 0;
+    padding: 8px 10px;
+  }
+
+  #toolbar button {
+    flex: none;
+    padding: 5px 6px;
+  }
+
+  /* The tab count, boxed the way every phone browser boxes it, and spinning
+     when a tab that is not on screen is still waiting for its page. With the
+     strip gone that spinner is the only thing that says a background tab is
+     doing anything at all. */
+  #tabs {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    border-radius: 7px;
+    border-width: 2px;
+  }
+
+  #tabs.loading { border-color: var(--accent); color: var(--accent); }
+
+  #start { padding: 20px 16px calc(20px + var(--safe-b)); }
+
+  /* Where a page is coming from moves to the top, under the bar that says one
+     is coming at all. The two are halves of one answer — did that do anything,
+     and where is it going — and on a screen this tall the bottom left corner is
+     eight hundred pixels away from the bar, which is a place nobody looks while
+     waiting. It is also where the sheets and the notices live. */
+  #status {
+    top: calc(var(--chrome-h) + 2px);
+    bottom: auto;
+    left: 0;
+    right: 0;
+    max-width: none;
+    padding: 5px calc(10px + var(--safe-r)) 5px calc(10px + var(--safe-l));
+    border: 0;
+    border-bottom: 1px solid #374151;
+    border-radius: 0;
+  }
+}
+
+/* --- and the narrow one -----------------------------------------------------
+ *
+ * The rest is about width rather than room: a sheet, a dialog and a menu are
+ * all things that have to fit across the screen, and a phone held sideways has
+ * plenty of across. It keeps the panel beside the page and the HUD spelled out,
+ * because at 850 pixels there is room for both.
+ */
+@media (max-width: 600px) {
+  /* The HUD collapses to its colour. That is the bit a reader glances at — is
+     the link there, is it bad — and the three numbers behind it are diagnostic
+     detail nobody reads at a glance and everybody wants eventually, so the dot
+     is a button that says them. It re-earns its width when the answer is bad:
+     "offline" and "slow" are worth the pixels precisely because they are the
+     states where the reader is about to waste a gesture.
+
+     Narrower than the buttons beside it, deliberately: it is a light rather
+     than a control, and the sixteen pixels it gives back go to the address
+     bar, which is the field on this shell that never has enough. */
+  #hud { min-width: 28px; padding: 0; justify-content: center; }
+  #hud-rtt, #hud-queue, #hud-bytes { display: none; }
+
+  #hud-state {
+    display: block;
+    width: 12px;
+    height: 12px;
+    padding: 0;
+    border-radius: 50%;
+    overflow: hidden;
+    text-indent: -100px;
+  }
+
+  #hud-state.online { background: var(--good); }
+  #hud-state.offline { background: var(--bad); }
+  #hud-state.degraded { background: var(--warn); }
+
+  #hud-state.offline, #hud-state.degraded {
+    width: auto;
+    height: auto;
+    padding: 3px 7px;
+    border-radius: 4px;
+    text-indent: 0;
+  }
+
+  #hud-state.offline { background: rgba(239, 68, 68, .15); color: var(--bad); }
+  #hud-state.degraded { background: rgba(245, 158, 11, .15); color: var(--warn); }
+
+  /* A panel 380px wide on a 393px screen used to hang off the right edge and
+     drag the whole document sideways with it, chrome and all. It comes up from
+     the bottom instead: that is where a thumb is, and a sheet that covers the
+     page rather than displacing it leaves the page where the reader left it. */
+  #panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 72dvh;
+    border-left: 0;
+    border-top: 1px solid #374151;
+    border-radius: 12px 12px 0 0;
+    padding-bottom: var(--safe-b);
+    box-shadow: 0 -8px 28px rgba(0, 0, 0, .5);
+  }
+
+  #panel-header { padding: 10px 12px; align-items: center; }
+  #panel-title { font-size: 15px; }
+
+  /* Same argument as the panel, and the same fix: a menu placed at a point is
+     a menu for a device that has a point. A finger has an area, and the area
+     it can reach is the bottom of the screen. */
+  .menu.sheet {
+    left: 0 !important;
+    right: 0;
+    top: auto !important;
+    bottom: 0;
+    min-width: 0;
+    max-height: 76dvh;
+    overflow-y: auto;
+    padding: 6px 6px calc(6px + var(--safe-b));
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 -8px 28px rgba(0, 0, 0, .5);
+  }
+
+  .menu.sheet .item { padding: 12px 14px; }
+
+  .start-grid { grid-template-columns: 1fr; }
+
+  /* Both dialogs were sized for a desktop window and would be cropped by a
+     screen narrower than they are. */
+  #pairing, #capture {
+    width: calc(100vw - 24px);
+    max-width: none;
+    margin: auto 12px;
+    padding: 16px;
+  }
+
+  /* Ten rows of monospace JSON is most of a phone screen, and the button under
+     it ends up behind the on-screen keyboard that opens the moment the box is
+     tapped. Enough to see that something was pasted is enough. */
+  #pairing textarea { height: 110px; }
+
+  /* Full width, above the home bar, and out of the way of the thumb that is
+     about to press Undo on it. */
+  #toast {
+    left: calc(12px + var(--safe-l));
+    right: calc(12px + var(--safe-r));
+    bottom: calc(12px + var(--safe-b));
+    max-width: none;
+  }
+
+}
+
+/* --- the tab list ---------------------------------------------------------
+ *
+ * What the strip becomes on a phone. A row per tab, wide enough to read the
+ * title and the host — the two things that tell two tabs on the same site
+ * apart — with the close button far enough from the row's own tap target that
+ * one is not the other.
+ */
+
+.tablist { display: flex; flex-direction: column; height: 100%; gap: 4px; }
+.tablist-rows { flex: 1; overflow-y: auto; margin: 0 -4px; }
+
+.tabrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 8px;
+  cursor: default;
+}
+
+.tabrow:hover, .tabrow:focus-visible { background: #1f2937; outline: none; }
+.tabrow.on { background: #374151; box-shadow: inset 3px 0 0 var(--accent); }
+.tabrow.ghost { color: var(--muted); font-style: italic; opacity: .75; }
+.tabrow-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.tabrow-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tabrow-host { color: var(--muted); font-size: 11px; }
+
+.tabrow-close {
+  flex: none;
+  min-width: 44px;
+  min-height: 44px;
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 18px;
+}
+
+.tabrow-close:hover { background: #4b5563; color: var(--fg); }
+
+/* The one row in the list that is not a tab. It is last rather than first
+   because the list is read from the top and this is not what the reader came
+   for — but it is the only way to open a tab on a phone, so it never scrolls
+   away with the rest of them. */
+.tablist-new {
+  flex: none;
+  min-height: 48px;
+  padding: 12px 8px;
+  background: transparent;
+  color: var(--accent);
+  border: 0;
+  border-top: 1px solid #374151;
+  font: inherit;
+  text-align: left;
+}
+
+.tablist-new:disabled { color: #4b5563; }
+
+/* Nothing in the chrome is a page, so nothing in it should flash grey when a
+   finger lands on it. */
+#chrome, #panel, .menu { -webkit-tap-highlight-color: transparent; }

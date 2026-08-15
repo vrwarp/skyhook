@@ -8,15 +8,28 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { closeMenu, menuIsOpen, showMenu } from '../src/app/menu.js';
+import { PHONE } from '../src/app/layout.js';
 
 function labels(menu: HTMLElement): string[] {
   return Array.from(menu.querySelectorAll('.item .label')).map((n) => n.textContent ?? '');
+}
+
+/** jsdom has no matchMedia, so the shell's one question about the screen is
+ *  answered here rather than left to throw. */
+function matchPhone(phone: boolean): void {
+  window.matchMedia = ((query: string) => ({
+    matches: query === PHONE && phone,
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  })) as unknown as typeof window.matchMedia;
 }
 
 describe('context menu', () => {
   afterEach(() => {
     closeMenu();
     document.body.innerHTML = '';
+    matchPhone(false);
   });
 
   it('draws groups with a separator between them', () => {
@@ -86,5 +99,31 @@ describe('context menu', () => {
 
     document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     expect(document.activeElement).toBe(menu!.querySelectorAll('.item')[1]);
+  });
+
+  it('separates what an entry costs from the gesture that does the same thing', () => {
+    const menu = showMenu(0, 0, [[{
+      label: 'Report a rendering problem…',
+      hint: 'sends a screenshot',
+      chord: 'Ctrl+Shift+D',
+      run: () => undefined,
+    }]]);
+    // Both are drawn; the stylesheet is what hides a chord from a device that
+    // has no keys to press. A cost is shown everywhere, because a phone reader
+    // is on the same link as everyone else.
+    const notes = Array.from(menu!.querySelectorAll('.hint')).map((n) => n.textContent);
+    expect(notes).toEqual(['sends a screenshot', 'Ctrl+Shift+D']);
+    expect(menu!.querySelectorAll('.hint.chord')).toHaveLength(1);
+  });
+
+  it('comes up from the bottom of a phone rather than at the point pressed', () => {
+    // The point a long press reports is under the finger that made it, which is
+    // the one part of the screen the reader cannot see.
+    matchPhone(true);
+    const menu = showMenu(180, 500, [[{ label: 'Reload', run: () => undefined }]]);
+    expect(menu!.classList.contains('sheet')).toBe(true);
+    // Placed by the stylesheet, not by coordinates that would fight it.
+    expect(menu!.style.left).toBe('');
+    expect(menu!.style.top).toBe('');
   });
 });
