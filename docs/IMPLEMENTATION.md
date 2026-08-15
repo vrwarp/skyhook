@@ -1140,6 +1140,54 @@ going to. `Progress` now keeps the destination for as long as the tab has not
 got there ([progress.ts](../client/src/app/progress.ts)), and the label is drawn
 from somewhere this side actually asked to go or from nothing at all.
 
+### 28. A deploy was replacing the shell one file at a time
+
+The mobile chrome from [§27](#27-the-chrome-was-drawn-for-a-mouse-on-a-wide-screen)
+shipped, and an Android phone kept drawing the desktop one. Not because a media
+query failed — because the phone was running the new `index.html` against the
+previous `app.css`. The new markup's two extra buttons were on screen, styled by
+a stylesheet that has no rules for them, inside a chrome sized for a mouse.
+
+Three things had to be true at once, and were:
+
+- **The cache name was a constant.** `skyhook-shell-v1`, hard-coded, so every
+  build shared one cache and `activate` deliberately kept it.
+- **The worker never changed.** A browser decides whether to install a new
+  service worker by byte-comparing the script, and `service-worker.ts` had no
+  reason to differ between builds — so a deploy that changed every other file in
+  the shell never triggered an install, and the precache never re-ran.
+- **The shell refreshed per file, in the background.** `serveShell` returned the
+  cached copy and re-fetched it "so the next start is current" — each file on
+  its own, whenever it happened to be asked for. There was no moment at which
+  the cache held one build.
+
+So the steady state after a deploy was a shell made of two of them, for as long
+as it took each file to be requested. The build had been emitting a
+`dist/version.json` since the beginning, with a comment saying it was "a build
+stamp the service worker can key its cache on, so a deploy does not serve half
+of one version and half of another". Nothing read it.
+
+The cache is now named after a hash of the files it holds. `esbuild.mjs` builds
+the app and the network worker, copies the static files, hashes that set, and
+builds the service worker last with the id substituted in — so the worker's
+bytes differ exactly when the shell differs, which is what makes the browser
+install it, which is what creates a new cache, which `install` fills completely
+before `activate` deletes every older generation. The background refresh is
+gone: with a whole-generation swap it has nothing left to do and was the thing
+mixing the generations in the first place.
+
+The id is content-addressed rather than a timestamp or a version number, for two
+reasons. A rebuild of identical sources produces an identical id, so redeploying
+the same bytes does not evict a phone's cache or make it re-fetch a shell it
+already holds. And nothing has to be remembered: a hand-maintained version's
+failure mode is sitting at `v1` through every deploy, which is what happened.
+
+`TestPWAKeysItsShellCacheToTheBuildItServes` asserts the property rather than
+the mechanism — the worker running on the client keys its cache on exactly the
+build the server is serving, that cache is the only shell generation left, and
+it holds every precached file. Against the old worker it fails with
+`shell caches = [skyhook-shell-v1], want exactly [skyhook-shell-<id>]`.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
