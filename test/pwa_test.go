@@ -239,10 +239,28 @@ func waitFor(ctx context.Context, t *testing.T, page *cdp.Session, expr string, 
 		what, expr, dump, mirror)
 }
 
-/** mirrorText reads the text of the mirrored document inside the sandboxed frame. */
+/*
+mirrorText reads the text of the mirrored document inside the sandboxed frame.
+
+It walks shadow roots rather than taking `body.textContent`, because
+`textContent` does not cross a shadow boundary and an inlined sub-document lives
+inside one. Reading only the light DOM would say a mirrored frame was empty.
+*/
 const mirrorText = `(() => {
   const f = document.querySelector('iframe.mirror');
-  return f && f.contentDocument ? (f.contentDocument.body.textContent || '') : '';
+  if (!f || !f.contentDocument) return '';
+  const out = [];
+  const walk = (node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) out.push(child.nodeValue || '');
+      else if (child.nodeType === Node.ELEMENT_NODE) {
+        if (child.shadowRoot) walk(child.shadowRoot);
+        walk(child);
+      }
+    }
+  };
+  walk(f.contentDocument.body);
+  return out.join('');
 })()`
 
 func TestPWALoadsAndRegistersItsServiceWorker(t *testing.T) {

@@ -55,7 +55,7 @@
   // or four deep; past this something is looping and a click is not worth it.
   var FRAME_DEPTH_MAX = 16;
 
-  var KIND_ELEMENT = 1, KIND_TEXT = 3, KIND_DOCTYPE = 10;
+  var KIND_ELEMENT = 1, KIND_TEXT = 3, KIND_DOCTYPE = 10, KIND_FRAGMENT = 11;
   var FLAG_EDITABLE = 1, FLAG_IMAGE = 2, FLAG_SCROLL = 4, FLAG_SHADOW = 8, FLAG_CANVAS = 16;
 
   // Tags never mirrored: they either carry code, or carry styling we ship
@@ -80,6 +80,10 @@
   var SENSITIVE_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i;
 
   var nextId = 1;
+  // A mirrored sub-document -> the shadow-root node id it was serialised into.
+  // The CSS pass needs it to say which sheet a rule belongs to; without it the
+  // rules go to the document and the boundary buys nothing.
+  var docRoot = new WeakMap();
   var idOf = new WeakMap();     // node -> id
   var byId = new Map();         // id -> node
   var strings = [];             // intern table
@@ -96,6 +100,7 @@
   var flushTimer = null;
   var cssTimer = null;
   var emittedCSS = new Map();   // rule text -> index
+  var scopedEmitted = new Map(); // shadow-root id -> its own emitted-rule set
   var cssOrder = [];
   var recoveredSheets = new Map(); // href -> constructed sheet the host supplied
   var blockedSheets = {};          // href -> 1, for sheets nothing can read yet
@@ -420,7 +425,22 @@
       var idoc = null;
       try { idoc = node.contentDocument; } catch (e) { idoc = null; }
       if (idoc && idoc.documentElement) {
-        n += serializeNode(idoc.documentElement, id2, rows);
+        // The frame's document goes inside a shadow root rather than straight
+        // into the stand-in box. A frame is a document, and a document's
+        // stylesheet is written on the assumption that it governs a document —
+        // `body { margin: 0 }` means this frame's body. Inlined flat, that
+        // sheet joins the page's own and the rule reaches the page's body too.
+        // The root is the boundary that makes it mean what it says. See §31.
+        // Registered like any other node, and against the frame's document:
+        // the hash is taken over what is registered, so a node the client is
+        // sent and the agent does not count is a divergence every thirty
+        // seconds. It also gives the document an id, which is what a later
+        // mutation inside the frame needs to find its parent.
+        var fragId = idFor(idoc);
+        rows.push([fragId, id2, KIND_FRAGMENT, -1, 0, null]);
+        n += 1;
+        docRoot.set(idoc, fragId);
+        n += serializeNode(idoc.documentElement, fragId, rows);
         observeDocument(idoc);
       }
       return n;
@@ -1055,17 +1075,31 @@
     cssRejected = 0;
     cssRejectedList = [];
     var adds = [];
+    var scoped = [];
     for (var d = 0; d < docs.length; d++) {
-      var rules = collectUsedCSS(docs[d]);
+      var doc = docs[d];
+      var root = docRoot.get(doc) || 0;
+      var rules = collectUsedCSS(doc);
+      // A scoped sheet is deduped against itself, not against the document's:
+      // the same rule text may be needed in two places and mean two different
+      // things, which is the point of scoping it.
+      var seen = root ? scopedEmitted.get(root) : emittedCSS;
+      if (root && !seen) { seen = new Map(); scopedEmitted.set(root, seen); }
+      var mine = [];
       for (var i = 0; i < rules.length; i++) {
         var text = rules[i];
-        if (emittedCSS.has(text)) continue;
-        emittedCSS.set(text, cssOrder.length);
-        cssOrder.push(text);
-        adds.push(text);
+        if (seen.has(text)) continue;
+        seen.set(text, 1);
+        if (root) {
+          mine.push(text);
+        } else {
+          cssOrder.push(text);
+          adds.push(text);
+        }
       }
+      if (root && mine.length) scoped.push([root, mine]);
     }
-    return adds;
+    return { adds: adds, scoped: scoped };
   }
 
   /*
@@ -1099,10 +1133,15 @@
   // `quiet` is for the host's own walk, which is already holding the answer
   // announceBlocked would be asking it for.
   function emitCSSDelta(quiet) {
-    var adds = cssDelta();
+    var delta = cssDelta();
     if (!quiet) announceBlocked();
-    if (!adds.length) return false;
-    pendingOps.push([7, adds]);
+    if (!delta.adds.length && !delta.scoped.length) return false;
+    // Node 0 is the document's own sheet; anything else names the shadow root
+    // whose sheet this is.
+    if (delta.adds.length) pendingOps.push([7, delta.adds, 0]);
+    for (var s2 = 0; s2 < delta.scoped.length; s2++) {
+      pendingOps.push([7, delta.scoped[s2][1], delta.scoped[s2][0]]);
+    }
     scheduleFlush(false);
     return true;
   }
@@ -1439,12 +1478,21 @@
     var live = new Map();
     for (var r = 0; r < rows.length; r++) live.set(rows[r][0], byId.get(rows[r][0]));
     byId = live;
-    var css = cssDelta();
+    // Root ids are new after a snapshot, so what each root had already been
+    // sent is not about these roots.
+    scopedEmitted = new Map();
+    var delta = cssDelta();
+    var css = delta.adds;
+    var scopedCSS = [];
+    for (var sc = 0; sc < delta.scoped.length; sc++) {
+      scopedCSS.push({ root: delta.scoped[sc][0], rules: delta.scoped[sc][1] });
+    }
     var imgs = pendingImages; pendingImages = [];
     snapshotDone = true;
     seq = 0;
     send({
       t: 'snap', seq: 0, strings: strings.slice(), nodes: rows, css: css,
+      scoped: scopedCSS,
       url: location.href, title: document.title,
       scrollX: globalThis.scrollX | 0, scrollY: globalThis.scrollY | 0,
       vw: globalThis.innerWidth | 0, vh: globalThis.innerHeight | 0,

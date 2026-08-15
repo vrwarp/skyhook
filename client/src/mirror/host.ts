@@ -418,6 +418,9 @@ export class MirrorHost {
       onScroll: (node, x, y) => this.followScroll(node, x, y),
       onApplied: (seq) => {
         this.lastSeq = seq;
+        // A snapshot is where shadow roots appear, and a root the client has
+        // not bound is a sub-document whose scrolling nobody hears.
+        this.bindRootScroll();
         this.events.applied(this.tab, seq, this.patcher?.docHash() ?? 0);
       },
     });
@@ -490,6 +493,20 @@ export class MirrorHost {
   private static readonly DRAG_SAMPLES = 16;
 
   /** The element under the pointer whose content is pixels, if any. */
+  /**
+   * The node an event actually happened on.
+   *
+   * `event.target` is retargeted at a shadow boundary: a click inside a
+   * mirrored sub-document reports the box the document is inside, not the thing
+   * under the finger, and the id sent landside would be the wrong one. The
+   * composed path starts at the real node and is the same as `target` where
+   * there is no boundary to cross.
+   */
+  private eventTarget(ev: Event): Node | null {
+    const path = ev.composedPath();
+    return (path.length ? (path[0] as Node) : (ev.target as Node | null)) ?? null;
+  }
+
   private regionAt(target: EventTarget | null): Element | null {
     const el = target as Element | null;
     return el?.closest?.('[data-skyhook-static]') ?? null;
@@ -497,7 +514,7 @@ export class MirrorHost {
 
   private beginDrag(ev: MouseEvent): void {
     if (ev.button !== 0) return;
-    const region = this.regionAt(ev.target);
+    const region = this.regionAt(this.eventTarget(ev));
     if (!region) return;
     const node = this.patcher?.idOf(region) ?? 0;
     if (!node) return;
@@ -636,7 +653,7 @@ export class MirrorHost {
     doc.addEventListener('mouseleave', (ev) => this.endDrag(ev as MouseEvent), true);
 
     doc.addEventListener('click', (ev) => {
-      const target = ev.target as HTMLElement | null;
+      const target = this.eventTarget(ev) as HTMLElement | null;
       if (!target) return;
       const anchor = target.closest?.('a[href], area[href]') as HTMLAnchorElement | null;
       // The mirror never navigates itself: a click is a semantic event the
@@ -727,7 +744,7 @@ export class MirrorHost {
     }, true);
 
     doc.addEventListener('dblclick', (ev) => {
-      const node = this.patcher?.idOf(ev.target as Node) ?? 0;
+      const node = this.patcher?.idOf(this.eventTarget(ev)) ?? 0;
       if (!node) return;
       const mouse = ev as MouseEvent;
       this.send({
@@ -750,7 +767,7 @@ export class MirrorHost {
       this.events.menu(this.tab, this.menuTarget(ev as MouseEvent));
     }, true);
 
-    doc.addEventListener('focusin', (ev) => this.echo?.focus(ev.target), true);
+    doc.addEventListener('focusin', (ev) => this.echo?.focus(this.eventTarget(ev)), true);
     doc.addEventListener('focusout', () => {
       this.echo?.blur((op) => this.applyOne(op));
     }, true);
@@ -792,20 +809,41 @@ export class MirrorHost {
 
     // Scroll events do not bubble, but they do reach a capturing listener on
     // the document, which is how a scrolled container is noticed at all.
-    doc.addEventListener('scroll', (ev) => {
-      const target = ev.target as Node | null;
-      // The document's own scroll arrives here too; the window listener above
-      // owns that one.
-      if (!target || target.nodeType !== Node.ELEMENT_NODE) return;
-      const el = target as HTMLElement;
-      if (el === doc.documentElement) return;
-      // Same reason as the window listener: a scrolled container leaves an open
-      // menu pointing somewhere the node no longer is.
-      this.events.dismiss(this.tab);
-      const mine = this.adopted.get(el);
-      if (!mine || mine.x !== el.scrollLeft || mine.y !== el.scrollTop) this.readerMoved.add(el);
-    }, { capture: true, passive: true });
+    doc.addEventListener('scroll', this.onElementScroll, { capture: true, passive: true });
   }
+
+  /*
+   * The same listener, on a shadow root.
+   *
+   * A scroll event is not composed, so its path stops at the root it happened
+   * in and a listener on the document never sees it. Everything a reader does
+   * inside a mirrored sub-document — a widget with its own scrollbar, a frame
+   * taller than its box — would go unrecorded, and coming back to the page
+   * would put them somewhere they had never been.
+   *
+   * Re-run whenever a snapshot lands, because that is when roots appear.
+   * addEventListener with the same function and the same options is idempotent,
+   * so a root that was already bound is not bound twice.
+   */
+  private bindRootScroll(): void {
+    for (const root of this.patcher?.shadowRoots() ?? []) {
+      root.addEventListener('scroll', this.onElementScroll, { capture: true, passive: true });
+    }
+  }
+
+  private onElementScroll = (ev: Event): void => {
+    const doc = this.frame?.contentDocument;
+    const target = this.eventTarget(ev) as Node | null;
+    // The document's own scroll arrives here too; the window listener owns that.
+    if (!target || target.nodeType !== Node.ELEMENT_NODE) return;
+    const el = target as HTMLElement;
+    if (doc && el === doc.documentElement) return;
+    // Same reason as the window listener: a scrolled container leaves an open
+    // menu pointing somewhere the node no longer is.
+    this.events.dismiss(this.tab);
+    const mine = this.adopted.get(el);
+    if (!mine || mine.x !== el.scrollLeft || mine.y !== el.scrollTop) this.readerMoved.add(el);
+  };
 
   // ------------------------------------------------------------------ scroll
 
@@ -927,7 +965,7 @@ export class MirrorHost {
   // -------------------------------------------------------------- context menu
 
   private menuTarget(ev: MouseEvent): MenuTarget {
-    const target = ev.target as HTMLElement | null;
+    const target = this.eventTarget(ev) as HTMLElement | null;
     const link = this.linkAt(target);
     const img = target?.closest?.('img') as HTMLImageElement | null;
     const field = asEditable(target);

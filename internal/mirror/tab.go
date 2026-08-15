@@ -716,6 +716,13 @@ type agentSnapshot struct {
 	DPR       float64             `json:"dpr"`
 	Images    []agentImage        `json:"images"`
 	DocHeight int                 `json:"docHeight"`
+	Scoped    []agentScopedCSS    `json:"scoped"`
+}
+
+// agentScopedCSS is one shadow root's stylesheet, as the agent reports it.
+type agentScopedCSS struct {
+	Root  int64    `json:"root"`
+	Rules []string `json:"rules"`
 }
 
 type agentMutation struct {
@@ -803,10 +810,25 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	css, cssImages := rewriteCSSImages(
 		stripUnusedVars(minifyCSS(s.CSS), s.Strings), s.URL, cssImageMaxDim)
 
+	// A scoped sheet goes through the same mill as the document's. Custom
+	// properties are not pruned there: a shadow sheet reads plenty it does not
+	// declare, from the page around it, and deciding otherwise needs both
+	// sheets in view at once.
+	var scoped []protocol.ScopedCSS
+	for _, sc := range s.Scoped {
+		rules, reqs := rewriteCSSImages(minifyCSS(sc.Rules), s.URL, cssImageMaxDim)
+		if len(rules) == 0 {
+			continue
+		}
+		scoped = append(scoped, protocol.ScopedCSS{Root: sc.Root, Rules: rules})
+		cssImages = append(cssImages, reqs...)
+	}
+
 	snap := protocol.Snapshot{
 		Strings:  s.Strings,
 		Nodes:    nodes,
 		CSS:      css,
+		Scoped:   scoped,
 		URL:      s.URL,
 		Title:    s.Title,
 		Viewport: protocol.Viewport{W: s.VW, H: s.VH, DPR: s.DPR, Mobile: vp.Mobile},
@@ -1111,13 +1133,19 @@ func decodeOpRow(row []json.RawMessage) (protocol.Op, bool) {
 		op.Off = int32(decodeInt(row[2]))
 		op.Del = int32(decodeInt(row[3]))
 		op.Ref = int32(decodeInt(row[4]))
-	case protocol.OpStyle: // [7, [rules...]]
+	case protocol.OpStyle: // [7, [rules...], rootID]
 		if len(row) < 2 {
 			return op, false
 		}
 		var adds []string
 		if err := json.Unmarshal(row[1], &adds); err != nil {
 			return op, false
+		}
+		// Which sheet these belong to. Absent or zero is the document's own,
+		// which is what every op from a server-side agent older than scoping
+		// says by saying nothing.
+		if len(row) >= 3 {
+			op.Node = decodeInt(row[2])
 		}
 		// Unused custom properties are only strippable over a whole bundle, so
 		// the incremental path minifies but does not prune.

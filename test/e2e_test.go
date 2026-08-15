@@ -674,6 +674,7 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Framed</title></head>
 			<body><h1>outside the frame</h1>
+			<p id="outsider" class="shared">outside the frame, and not the frame's to dress</p>
 			<iframe id="kid" src="/framed-inner" width="320" height="180" style="border:0"></iframe>
 			<button id="reframe">reframe</button>
 			<script>
@@ -775,8 +776,13 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			body = "the frame moved on"
 		}
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head>
-			<style>.framed { color: rgb(7, 8, 9); }</style></head>
-			<body><p class="framed">`+body+`</p></body></html>`)
+			<style>
+			  .framed { color: rgb(7, 8, 9); }
+			  body { background-color: rgb(51, 52, 53); }
+			  .shared { color: rgb(41, 42, 43); }
+			</style></head>
+			<body><p class="framed">`+body+`</p>
+			<p class="shared">the frame's own</p></body></html>`)
 	})
 	site := httptest.NewServer(mux)
 	t.Cleanup(site.Close)
@@ -1386,6 +1392,68 @@ func TestSlottedContentIsMirroredWhereItIsDrawn(t *testing.T) {
 	if strings.Contains(model.Text(), "plain child, no slot claims it") {
 		t.Error("a light-DOM child that no slot claims was mirrored; " +
 			"the browser draws it nowhere and neither should the mirror")
+	}
+}
+
+/*
+A mirrored frame's stylesheet is the frame's, not the page's.
+
+An inlined document brings its own sheet, and that sheet is written by someone
+who believed they were styling a document: `body { … }` means this frame's body,
+and a class name is only as unique as the frame needed it to be. Hoisted into
+the page's own sheet — which is what flattening did — both reach the page. The
+frame goes inside a real shadow root instead, and its rules go into that root's
+sheet, where they say what their author meant. See §31.
+*/
+func TestAFramesStylesheetStaysInTheFrame(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	tab := h.openPage(ctx, cl, "/framed", "outside the frame")
+	if err := cl.WaitForText(ctx, tab, "inside the frame", budget(30*time.Second)); err != nil {
+		t.Fatalf("the frame's document never arrived: %v", err)
+	}
+
+	model := cl.Model(tab)
+	doc := strings.Join(model.CSS, "\n")
+
+	// The frame's rules are somewhere, but not in the sheet that governs the
+	// page: `.shared` outside the frame is not the frame's to colour.
+	if strings.Contains(doc, "rgb(41,42,43)") || strings.Contains(doc, "rgb(41, 42, 43)") {
+		t.Error("a rule from inside the frame reached the page's own stylesheet, " +
+			"where it dresses every .shared on the page")
+	}
+	if strings.Contains(doc, "rgb(51,52,53)") || strings.Contains(doc, "rgb(51, 52, 53)") {
+		t.Error("the frame's `body` rule reached the page's own stylesheet, " +
+			"where it applies to the page's body")
+	}
+
+	// And they did arrive — scoped to a root, which is the only place they can
+	// do what the frame asked without doing it to everyone else.
+	var scoped string
+	for _, rules := range model.Scoped {
+		scoped += strings.Join(rules, "\n") + "\n"
+	}
+	if !strings.Contains(scoped, "rgb(41,42,43)") && !strings.Contains(scoped, "rgb(41, 42, 43)") {
+		t.Errorf("the frame's own rule never arrived at all; scoped sheets = %q", scoped)
+	}
+
+	// The boundary has to actually be there: a scoped sheet with no root to
+	// adopt it is rules that reach nothing.
+	roots := 0
+	for _, n := range model.Nodes {
+		if n.Kind == protocol.KindFragment {
+			roots++
+		}
+	}
+	if roots == 0 {
+		t.Error("the frame was inlined without a shadow root to scope it")
+	}
+	if t.Failed() {
+		t.Logf("document sheet was:\n%s", doc)
 	}
 }
 

@@ -31,9 +31,13 @@ type Model struct {
 	Nodes   map[int64]*ModelNode
 	Root    int64
 	CSS     []string
-	URL     string
-	Title   string
-	Seq     uint64
+	// Scoped holds each shadow root's own stylesheet, keyed by the root's node
+	// id. Rules here reach only inside that root, which is the whole point of
+	// their being kept apart from CSS above.
+	Scoped map[int64][]string
+	URL    string
+	Title  string
+	Seq    uint64
 }
 
 // ModelNode is one node in the replica.
@@ -50,7 +54,7 @@ type ModelNode struct {
 
 // NewModel returns an empty replica.
 func NewModel() *Model {
-	return &Model{Nodes: map[int64]*ModelNode{}}
+	return &Model{Nodes: map[int64]*ModelNode{}, Scoped: map[int64][]string{}}
 }
 
 func (m *Model) str(ref int32) string {
@@ -67,6 +71,10 @@ func (m *Model) ApplySnapshot(s *protocol.Snapshot) error {
 	m.Strings = append([]string{}, s.Strings...)
 	m.Nodes = make(map[int64]*ModelNode, len(s.Nodes))
 	m.CSS = append([]string{}, s.CSS...)
+	m.Scoped = make(map[int64][]string, len(s.Scoped))
+	for _, sc := range s.Scoped {
+		m.Scoped[sc.Root] = append([]string{}, sc.Rules...)
+	}
 	m.URL, m.Title = s.URL, s.Title
 	m.Root = 0
 	m.Seq = 0
@@ -199,6 +207,13 @@ func (m *Model) applyOp(op *protocol.Op) error {
 		n.Parent = op.Parent
 		insertChild(parent, op.Node, op.Before)
 	case protocol.OpStyle:
+		if op.Node != 0 {
+			if m.Scoped == nil {
+				m.Scoped = map[int64][]string{}
+			}
+			m.Scoped[op.Node] = append(m.Scoped[op.Node], op.Add...)
+			break
+		}
 		m.CSS = append(m.CSS, op.Add...)
 	case protocol.OpDocInfo:
 		if op.Str != "" {
@@ -294,6 +309,17 @@ func (m *Model) HTML() string {
 			return
 		case protocol.KindDoctype:
 			b.WriteString("<!DOCTYPE " + n.Name + ">")
+			return
+		case protocol.KindFragment:
+			// A shadow root, written declaratively so that re-parsing the
+			// markup rebuilds the boundary rather than promoting its contents
+			// into the page. See §23: a reader of a capture gets a document
+			// shaped like the one the client had, not one the parser flattened.
+			b.WriteString(`<template shadowrootmode="open">`)
+			for _, ch := range n.Children {
+				walk(ch)
+			}
+			b.WriteString("</template>")
 			return
 		}
 		b.WriteString("<" + n.Name)

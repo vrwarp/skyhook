@@ -1436,6 +1436,72 @@ subtree contains a list at all is the conversation pane. The walk still ends at
 the body, which is what keeps a plain message board — where the body *is* the
 container — working as before.
 
+### 31. Keeping the boundary instead of reconstructing it
+
+Three of the fixes above — the shadow-scoped selector rewrite, the slot
+composition, and the used-CSS filter's per-root testing — are the same work
+done three times: rebuilding, by hand and approximately, a boundary the mirror
+had already thrown away. This records why the boundary should be kept instead,
+and what it costs, because the measurements were worth more than the argument.
+
+**What flattening still gets wrong, and cannot stop getting wrong.** A shadow
+sheet's rules are hoisted into one document-level stylesheet. Rewriting fixes
+the rules that *name* the boundary (`:host`, `::part()`); it can do nothing
+about the rules that merely relied on it. In one capture of Reddit's front page,
+**77 of 881 shipped rule groups select on a bare tag name alone** — `label`,
+`textarea`, `ul`, `svg`, `rpl-popper`, `faceplate-menu`. Landside, `label {
+display: flex; position: relative }` was scoped to one text input's shadow root.
+Plane-side it is in the common sheet and reaches every label on the page. The
+same is true of a same-origin iframe's sheet, which is hoisted the same way and
+whose `body { … }` matches the outer body. `::slotted()` and `exportparts`
+renaming stay unimplemented for the same reason: there is no boundary left for
+them to mean anything against.
+
+**Measured, in the browser the client actually runs in** (Chromium 151,
+`sandbox="allow-same-origin"` with no `allow-scripts`, driven from the parent
+realm the way the patcher drives it):
+
+| Question | Answer |
+| --- | --- |
+| Can the client build a root inside the sandboxed frame? | Yes, and page JavaScript still never runs |
+| Does the boundary actually scope? | A document rule measured 13px outside a root and 0px inside |
+| Cost of 1000 roots — Reddit's order | 9 ms to build vs 7 ms flat; 16 ms layout vs 13 ms |
+| One sheet shared by 1000 roots? | Yes, via `adoptedStyleSheets` |
+| Does a serialised root survive re-parsing? | Yes — `parseHTMLUnsafe`, `setHTMLUnsafe` and `getHTML({serializableShadowRoots:true})` all round-trip |
+| Protocol headroom | Node kinds mirror `nodeType` (1, 3, 8, 10); **11 is DocumentFragment and free** |
+
+Performance is not the objection it looks like, and the capture artifact gets
+better rather than worse: §23's re-parse damage is partly repaired, because a
+declarative root survives the parser even though the nested `<html>`/`<body>`
+wrappers inside it still do not.
+
+**What it costs, including the parts that are not obvious:**
+
+- **Constructed stylesheets are realm-bound.** A `CSSStyleSheet` built in the
+  parent realm is refused by the frame's root — `NotAllowedError: Sharing
+  constructed style...`. It has to be built from the frame's own
+  `contentWindow.CSSStyleSheet`.
+- **Non-composed events do not cross a boundary.** Measured: a `scroll` from
+  inside a root reaches a listener on the root and never reaches one on the
+  document. The client listens for `scroll` on the document, so scroll telemetry
+  — which is most of what keeps a reader's place — goes silent for any scroller
+  inside a component unless a listener is registered per root.
+- **Composed events retarget.** On a real browser-generated `focusin`, `target`
+  reports the host and `composedPath()[0]` the true node. The client reads
+  `ev.target` in about seven places; every one of them has to change.
+- **CSS delivery has to gain a scope.** `Snapshot.CSS` is a flat `[]string` with
+  no owner. Per-root sheets need the rules to say which root they belong to,
+  which is a protocol change and a conformance-fixture change — CBOR's
+  `keyasint,omitempty` keeps it backward compatible, but it is not free.
+- **Scoping is not isolation.** Inherited properties — `color`, `font` — cross
+  the boundary as they do anywhere else.
+
+**The order.** Iframes first. An inlined frame is one root per frame rather than
+a thousand per page, it exercises every part of the mechanism — the node kind,
+`attachShadow`, frame-realm sheet construction, `composedPath` input routing,
+declarative serialisation in the capture — and it independently closes the
+iframe half of the leak. Components second, where the seventy-seven rules are.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

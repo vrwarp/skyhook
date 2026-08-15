@@ -108,6 +108,10 @@ export class Patcher {
   private flags = new Map<number, number>();
   private styleEl: HTMLStyleElement | null = null;
   private cssRules: string[] = [];
+  /** Rules per shadow root, and the constructed sheet each root has adopted. */
+  private scopedRules = new Map<number, string[]>();
+  private scopedSheets = new Map<number, CSSStyleSheet>();
+  private roots = new Set<ShadowRoot>();
   private hooks: PatcherHooks;
   /** The mirrored document's root element, which is the page's own <html>. */
   private root: HTMLElement | null = null;
@@ -169,6 +173,9 @@ export class Patcher {
     if (!body) return;
     this.ensureStyleElement();
     this.cssRules = [];
+    this.scopedRules = new Map();
+    this.scopedSheets = new Map();
+    this.roots = new Set();
     this.setCSS(snap.css);
 
     // Built detached and swapped in whole. Appending thousands of nodes into
@@ -195,13 +202,16 @@ export class Patcher {
       if (!el) continue;
       const parent = n.parent === 0 ? container : this.nodes.get(n.parent);
       if (!parent) continue;
-      parent.appendChild(el);
+      // A shadow root is attached rather than inserted: attachShadow has
+      // already put it where it belongs, and appending one throws.
+      if (n.kind !== NodeKind.Fragment) parent.appendChild(el);
       if (n.parent === 0 && !root && el.nodeType === Node.ELEMENT_NODE) {
         root = el as HTMLElement;
       }
     }
     this.root = root;
     body.replaceChildren(container);
+    for (const sc of snap.scoped ?? []) this.setScopedCSS(sc.root, sc.rules);
     this.doc.title = snap.title || this.doc.title;
     this.hooks.onApplied?.(0);
   }
@@ -226,11 +236,13 @@ export class Patcher {
             created.push(el ?? this.doc.createComment(''));
             if (!el) continue;
             if (n.id === op.nodes[0].id) continue;
+            if (n.kind === NodeKind.Fragment) continue; // attached, not inserted
             const p = this.nodes.get(n.parent);
             if (p) p.appendChild(el);
           }
           const first = created[0];
-          if (first && first.nodeType !== Node.COMMENT_NODE) {
+          if (first && first.nodeType !== Node.COMMENT_NODE
+              && op.nodes[0].kind !== NodeKind.Fragment) {
             parent.insertBefore(first, before && before.parentNode === parent ? before : null);
           }
           break;
@@ -284,7 +296,10 @@ export class Patcher {
           break;
         }
         case OpCode.Style:
-          this.setCSS(op.add);
+          // node names the shadow root whose sheet this is; zero is the
+          // document's own.
+          if (op.node) this.setScopedCSS(op.node, op.add);
+          else this.setCSS(op.add);
           break;
         case OpCode.Focus:
           this.hooks.onFocus?.(op.node ? this.nodes.get(op.node) ?? null : null);
@@ -317,6 +332,38 @@ export class Patcher {
   private createNode(n: MirrorNode): Node | null {
     let node: Node;
     switch (n.kind) {
+      case NodeKind.Fragment: {
+        /*
+         * A shadow root is not built, it is attached — to the node that is
+         * already standing where it belongs.
+         *
+         * This is what a mirrored sub-document gets to live inside. A frame's
+         * stylesheet says `body { margin: 0 }` and means *its* body; inlined
+         * flat into the page's own sheet, that rule reaches the page's body
+         * too. The root is the boundary that makes the sheet mean what it
+         * says, and the reason the rules for it arrive separately.
+         */
+        const host = this.nodes.get(n.parent);
+        if (!(host instanceof Element)) return null;
+        try {
+          // Already attached — a resnapshot re-walking the same element, or an
+          // element the page had opened a root on before we reached it.
+          const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
+          this.roots.add(root);
+          // A root has no tag name, and the hash is taken over names: say so
+          // explicitly rather than leaving the three implementations to agree
+          // by accident on what a nameless node is worth.
+          this.names.set(n.id, '');
+          return root;
+        } catch {
+          // Not every element may host one: the tag list is the browser's, and
+          // it is the same list landside, so this is the substituted-tag case
+          // rather than a page doing something exotic. Falling back to a plain
+          // box loses the scoping and keeps the content, which is the right way
+          // round.
+          return this.doc.createElement(SUBSTITUTE_TAG);
+        }
+      }
       case NodeKind.Text:
         node = this.doc.createTextNode(this.str(n.ref));
         break;
@@ -459,6 +506,59 @@ export class Patcher {
   }
 
   /**
+   * Appends rules to one shadow root's own stylesheet.
+   *
+   * The sheet has to be constructed by the document that will use it. A
+   * `CSSStyleSheet` built in the shell's realm is refused by a root inside the
+   * mirror frame — `NotAllowedError: Sharing constructed style sheets is not
+   * allowed` — and the frame's own constructor is reached through its window.
+   *
+   * One sheet per root, adopted once and rewritten in place, so a rule arriving
+   * later costs a `replaceSync` and not a new sheet on every delta.
+   */
+  setScopedCSS(rootID: number, rules: string[]): void {
+    if (!rules.length) return;
+    const root = this.nodes.get(rootID);
+    if (!root || !(root instanceof this.shadowRootCtor())) return;
+    const kept = this.scopedRules.get(rootID) ?? [];
+    kept.push(...rules);
+    this.scopedRules.set(rootID, kept);
+    this.renderScopedCSS(rootID, root as unknown as ShadowRoot);
+  }
+
+  private shadowRootCtor(): typeof ShadowRoot {
+    const win = this.doc.defaultView as (Window & typeof globalThis) | null;
+    return (win?.ShadowRoot ?? ShadowRoot) as typeof ShadowRoot;
+  }
+
+  private renderScopedCSS(rootID: number, root: ShadowRoot): void {
+    const rules = this.scopedRules.get(rootID);
+    if (!rules) return;
+    const rewrite = this.hooks.rewriteCSS;
+    const text = rewrite ? rules.map((r) => rewrite(r)).join('\n') : rules.join('\n');
+    let sheet = this.scopedSheets.get(rootID);
+    if (!sheet) {
+      const win = this.doc.defaultView as (Window & typeof globalThis) | null;
+      const Ctor = win?.CSSStyleSheet ?? CSSStyleSheet;
+      try {
+        sheet = new Ctor();
+      } catch {
+        return;
+      }
+      this.scopedSheets.set(rootID, sheet);
+      try {
+        root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+      } catch {
+        this.scopedSheets.delete(rootID);
+        return;
+      }
+    }
+    try {
+      sheet.replaceSync(text);
+    } catch { /* one bad rule must not cost the sheet */ }
+  }
+
+  /**
    * Re-renders the stylesheet from the rules as they arrived.
    *
    * Rules are kept in their wire form rather than rewritten on arrival, because
@@ -468,6 +568,10 @@ export class Patcher {
    */
   refreshCSS(): void {
     if (this.styleEl) this.renderCSS();
+    for (const rootID of this.scopedRules.keys()) {
+      const root = this.nodes.get(rootID);
+      if (root) this.renderScopedCSS(rootID, root as unknown as ShadowRoot);
+    }
   }
 
   private renderCSS(): void {
@@ -580,6 +684,18 @@ export class Patcher {
   /** Number of mirrored nodes, for the HUD. */
   get size(): number {
     return this.nodes.size;
+  }
+
+  /**
+   * Every shadow root in the mirror.
+   *
+   * The host needs them because a `scroll` event is not composed and so never
+   * leaves the root it happened in: a listener on the document hears nothing
+   * from inside a mirrored sub-document, and the reader's place in it would be
+   * lost. See §31.
+   */
+  shadowRoots(): ShadowRoot[] {
+    return [...this.roots];
   }
 
   /** The mirrored document's own root element — the page's <html>. */
