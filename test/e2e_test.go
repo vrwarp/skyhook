@@ -618,6 +618,31 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Slow</title></head>
 			<body><h1>the page that took its time</h1></body></html>`)
 	})
+	// A page that finishes, and then quietly starts a frame that never does.
+	// Google's sites do this constantly — chat.google.com injects a
+	// cookie-rotation frame and a contact hovercard after load — and a frame
+	// lifecycle event says which frame it is about for exactly this reason.
+	mux.HandleFunc("/late-frame", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Late frame</title></head>
+			<body><h1>the page itself is here</h1>
+			<script>
+			setTimeout(function () {
+			  var f = document.createElement('iframe');
+			  f.src = '/never-finishes';
+			  document.body.appendChild(f);
+			}, 400);
+			</script>
+			</body></html>`)
+	})
+	mux.HandleFunc("/never-finishes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><body>a frame still on its way`)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done() // the response body is never closed
+	})
 	mux.HandleFunc("/story", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>A Story</title></head>

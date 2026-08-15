@@ -1330,6 +1330,31 @@ nothing sits between the frame's body and the page's root, and that a fixture
 whose only definite height is the viewport reaches it. Against the wrapper it
 fails with `#main came out 18px in a 725px frame, wanted about 685px`.
 
+### 31. A frame the page starts is not the page still loading
+
+The same capture had the tab flagged `loading` sixteen minutes after
+`readyState` went to `complete`. `Page.frameStartedLoading` and
+`Page.frameStoppedLoading` fire for every frame in a tab and carry the
+`frameId` that says which; Skyhook subscribed to both and discarded the
+parameters, so the tab's loading flag was the state of whichever frame spoke
+last.
+
+Google's sites make that the ordinary case. chat.google.com finishes, and then
+injects a cookie-rotation frame and a contact hovercard — and over a link with a
+second of latency, something is always still in flight. The reader gets a
+spinner in the tab strip and a progress cursor over every link on a page that is
+finished and interactive.
+
+The other direction is the more expensive one. A subframe that finishes while
+the page is still coming clears the flag early, so the shell says the page has
+arrived when it has not. That is the reassurance
+[§22](#22-a-click-has-to-be-answered-before-the-page-can-be) exists to provide,
+and a false one is worse than none.
+
+Both handlers now compare the `frameId` against the tab's main frame, which is
+the distinction `onFrameNavigated` was already making with the same field.
+`Page.loadEventFired` is main-frame only and needed no change.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

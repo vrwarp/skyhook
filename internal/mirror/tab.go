@@ -263,8 +263,16 @@ func (t *Tab) install(ctx context.Context) error {
 	s.Subscribe("Runtime.bindingCalled", t.onBinding)
 	s.Subscribe("Page.frameNavigated", t.onFrameNavigated)
 	s.Subscribe("Page.loadEventFired", func(string, json.RawMessage) { t.onLoad() })
-	s.Subscribe("Page.frameStartedLoading", func(string, json.RawMessage) { t.setLoading(true) })
-	s.Subscribe("Page.frameStoppedLoading", func(string, json.RawMessage) { t.setLoading(false) })
+	s.Subscribe("Page.frameStartedLoading", func(_ string, p json.RawMessage) {
+		if t.isMainFrame(p) {
+			t.setLoading(true)
+		}
+	})
+	s.Subscribe("Page.frameStoppedLoading", func(_ string, p json.RawMessage) {
+		if t.isMainFrame(p) {
+			t.setLoading(false)
+		}
+	})
 	s.Subscribe("Page.javascriptDialogOpening", t.onDialog)
 	s.Subscribe("Inspector.targetCrashed", func(string, json.RawMessage) {
 		t.log.Warn("tab crashed", "tab", t.ID)
@@ -298,6 +306,42 @@ func (t *Tab) setLoading(v bool) {
 	t.loading = v
 	t.mu.Unlock()
 	t.emitState(protocol.TabState{Loading: v})
+}
+
+/*
+isMainFrame reports whether a frame lifecycle event is about the page itself.
+
+Page.frameStartedLoading and Page.frameStoppedLoading fire for every frame in
+the tab, subframes included, and both carry the frameId that says which. Acting
+on all of them makes the tab's loading state the state of whichever frame
+spoke last, which is wrong in both directions and wrong in a way the reader
+feels.
+
+A subframe that starts loading after the page has settled pins the tab in
+"loading" for as long as it takes: on chat.google.com the cookie-rotation
+iframe and the contact hovercard are both injected after load, and one of them
+hanging leaves the tab spinning, the mirror wearing its busy class, and a
+progress cursor over every link on a page that finished a quarter of an hour
+ago. A subframe that *stops* while the page is still coming does the opposite
+and says the page has arrived when it has not — and telling the reader their
+page is here before it is undoes the one reassurance a link this slow needs.
+
+Page.loadEventFired is main-frame only and needs no test. This matches what
+onFrameNavigated already does with the same distinction.
+*/
+func (t *Tab) isMainFrame(params json.RawMessage) bool {
+	var p struct {
+		FrameID string `json:"frameId"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.FrameID == "" {
+		return true // nothing to distinguish by; behave as before
+	}
+	t.mu.Lock()
+	frame := t.frameID
+	t.mu.Unlock()
+	// Before the first navigation the tab has no main frame id to compare
+	// against, and there is no document yet for a subframe to live in.
+	return frame == "" || frame == p.FrameID
 }
 
 func (t *Tab) onDialog(_ string, params json.RawMessage) {
