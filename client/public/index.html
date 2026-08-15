@@ -117,6 +117,23 @@
       </form>
     </dialog>
 
+    <!-- Which build is on each end of the link, and the way to make them the
+         same one. A PWA answers "reload to get the new version" out of its own
+         cache, so an app that never says what it is can be a fortnight behind
+         its server with no symptom at all. This dialog is where it says. -->
+    <dialog id="about">
+      <form id="about-form" method="dialog">
+        <h2>Skyhook versions</h2>
+        <dl id="about-rows"></dl>
+        <p id="about-verdict"></p>
+        <p id="about-detail" class="muted"></p>
+        <div id="about-buttons">
+          <button type="button" id="about-update" hidden>Update now</button>
+          <button type="submit">Close</button>
+        </div>
+      </form>
+    </dialog>
+
     <div id="toast" hidden></div>
 
     <script type="module" src="/app.js"></script>

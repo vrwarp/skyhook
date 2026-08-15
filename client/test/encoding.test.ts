@@ -157,7 +157,7 @@ describe('client frames encode integers as CBOR integers', () => {
       token: 'conformance-token', caps: ['zstd'],
       viewport: { w: 1280, h: 800, dpr: 1, mobile: false },
       resume: [{ tab: 1, seq: 9, hash: 0xdeadbeef }],
-      client: 'conformance',
+      client: 'conformance', build: 'conformance-build',
     })),
   };
 

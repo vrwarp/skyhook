@@ -518,6 +518,45 @@ body {
 #capture-buttons button[type="submit"] { background: #1d4ed8; border-color: #2563eb; }
 .muted { color: var(--muted); font-size: 12px; }
 
+/* The versions dialog. Two columns of facts and one sentence about them: what
+   this app is, what the server is, and whether they are the same build. */
+#about {
+  max-width: 460px;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  background: #0b1220;
+  color: var(--fg);
+}
+
+#about::backdrop { background: rgba(0, 0, 0, .6); }
+#about h2 { margin-top: 0; font-size: 16px; }
+#about-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 16px;
+  margin: 0 0 14px;
+  font-size: 13px;
+}
+
+#about-rows dt { color: var(--muted); }
+/* The build id is a hash, and a hash read off a screen to somebody on the
+   ground is read character by character. */
+#about-rows dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+#about-rows dd .stale { color: var(--warn); }
+#about-verdict { margin: 0 0 4px; font-size: 13px; }
+#about-detail { margin: 0 0 14px; }
+#about-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+#about-buttons button {
+  background: #1f2937;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 6px 14px;
+}
+
+#about-update { background: #1d4ed8; border-color: #2563eb; }
+#about-update:disabled { opacity: .5; }
+
 #toast {
   position: fixed;
   display: flex;
@@ -590,7 +629,8 @@ body {
   .marks-act, #panel-close { min-width: 44px; min-height: 44px; }
   /* The dialogs. The pairing one is the first screen anybody ever sees here,
      and it used to answer a finger with a 30-pixel button. */
-  #pairing button, #capture-buttons button, #composer button { min-height: 44px; }
+  #pairing button, #capture-buttons button, #about-buttons button,
+  #composer button { min-height: 44px; }
 
   /* A chord is a hint on a machine that has the chord. Told to a finger it is
      an instruction to press keys that are not there — and the reader who goes
@@ -784,7 +824,7 @@ body {
 
   /* Both dialogs were sized for a desktop window and would be cropped by a
      screen narrower than they are. */
-  #pairing, #capture {
+  #pairing, #capture, #about {
     width: calc(100vw - 24px);
     max-width: none;
     margin: auto 12px;

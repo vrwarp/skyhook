@@ -157,6 +157,8 @@ export function decodeWelcome(body: unknown): Welcome {
     server: str(f, F.welcome.server),
     keepaliveMs: num(f, F.welcome.keepaliveMs, 15000),
     adapters: arr<string>(f, F.welcome.adapters),
+    clientVersion: str(f, F.welcome.clientVersion),
+    clientBuild: str(f, F.welcome.clientBuild),
     tabs: arr<Fields>(f, F.welcome.tabs).map((t): TabRef => ({
       tab: num(t, F.tabRef.tab),
       url: str(t, F.tabRef.url),
@@ -342,6 +344,7 @@ export function helloBody(opts: {
   resume?: { tab: number; seq: number; hash: number }[];
   queued?: Map<number, unknown>[];
   client: string;
+  build: string;
 }): Map<number, unknown> {
   const m = new Map<number, unknown>();
   m.set(F.hello.version, 1);
@@ -363,6 +366,10 @@ export function helloBody(opts: {
   // whole frame maps so the server can dispatch them unchanged.
   if (opts.queued?.length) m.set(F.hello.queued, opts.queued);
   m.set(F.hello.client, opts.client);
+  // Which bytes of the app are speaking. The server logs it, a diagnostic
+  // bundle records it, and it is what lets the server say — in the Welcome
+  // coming back — whether this is the build it would serve today.
+  if (opts.build) m.set(F.hello.build, opts.build);
   return m;
 }
 

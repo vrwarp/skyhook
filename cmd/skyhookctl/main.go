@@ -133,6 +133,19 @@ func probe(args []string) {
 	}
 
 	report := map[string]any{"url": *url, "tab": tab}
+	// Which halves are actually running. A probe that passes against one build
+	// and fails against another is the ordinary way a regression is found, and
+	// the report has to say which build it was.
+	server, clientVersion, clientBuild := cl.Server()
+	if server != "" {
+		report["serverVersion"] = server
+	}
+	// Omitted rather than blank when the server does not say: a server older
+	// than this field and a server serving no client app are different facts,
+	// and neither is "".
+	if served := strings.TrimSpace(clientVersion + " " + clientBuild); served != "" {
+		report["servedClient"] = served
+	}
 	if *expect != "" {
 		if err := cl.WaitForText(ctx, tab, *expect, *timeout); err != nil {
 			log.Fatalf("expect: %v", err)
@@ -206,7 +219,7 @@ func probe(args []string) {
 	}
 	keys := []string{"url", "tab", "title", "nodes", "cssRules", "textBytes",
 		"images", "firstUsefulPaintMs", "firstSnapshotMs", "clickLatencyMs",
-		"bytesSent", "bytesReceived", "elapsedMs"}
+		"bytesSent", "bytesReceived", "elapsedMs", "serverVersion", "servedClient"}
 	for _, k := range keys {
 		if v, ok := report[k]; ok {
 			fmt.Printf("%-20s %v\n", k, v)

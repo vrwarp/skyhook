@@ -141,6 +141,14 @@ install. After that it starts from its own cache with no network at all — whic
 is the point, since you will be opening it at 35,000 feet. You can also paste
 `pairing.json` into the app's pairing dialog if you would rather not use a link.
 
+Because it runs from that cache, a deploy landside changes nothing in a browser
+that already holds a copy, and no reload can see past it. So both halves say
+which build they are on every connection: right-click anywhere for *Skyhook
+versions…* to see the app's build, the server's version and the build the server
+is serving. When they differ the entry becomes *Update Skyhook…*, and pressing
+it fetches the new app and reloads onto it. Nothing updates by itself — it is a
+download over a link that charges seconds for one.
+
 ### Diagnostics from anywhere
 
 `skyhookctl` speaks the real protocol, so it is both a debugging tool and the

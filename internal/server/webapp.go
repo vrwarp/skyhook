@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/vrwarp/skyhook/internal/appver"
 	"github.com/vrwarp/skyhook/internal/config"
 )
 
@@ -122,6 +123,13 @@ func (w *webapp) headers(rw http.ResponseWriter, name string) {
 		rw.Header().Set("Cache-Control", "no-cache")
 	case strings.HasSuffix(name, ".html") || strings.HasSuffix(name, ".webmanifest"):
 		rw.Header().Set("Cache-Control", "no-cache")
+	case name == appver.StampFile:
+		// The one file whose whole purpose is to say what is being served right
+		// now. Cached for a week — which is where it landed by default, being
+		// neither markup nor the worker — it would answer with the build that
+		// was current when somebody last asked, which is the single wrong
+		// answer to the only question it is ever asked.
+		rw.Header().Set("Cache-Control", "no-store")
 	default:
 		// The service worker revalidates its own precache, so assets can be
 		// cached hard: a cold start in flight must not wait on the network.

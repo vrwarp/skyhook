@@ -35,6 +35,12 @@ type Session struct {
 	viewport protocol.Viewport
 	caps     map[string]bool
 	lastSeen time.Time
+	// client is whatever the last Hello said it was: app name and build id.
+	// Kept because a capture taken to explain a mirror that looks wrong has to
+	// say which plane-side build drew it — the patcher is half of every bug
+	// here, and "the current one" is not a fact about a browser holding a shell
+	// it cached before the last three deploys.
+	client clientID
 
 	conn   atomic.Pointer[connHolder]
 	sendQ  [4]chan outbound
@@ -516,6 +522,32 @@ func (s *Session) tabURL(id uint32) string {
 		return ts.tab.URL()
 	}
 	return ""
+}
+
+// clientID is what a Hello said about the app on the other end: the app's name
+// and version ("skyhook-pwa/0.1.0"), and the build id of the exact bytes it is
+// running.
+type clientID struct {
+	App   string
+	Build string
+}
+
+// SetClient records who just said hello. A resumed session is taken over by
+// whichever client is holding it now, so this is the newest answer rather than
+// the one the session was created with — which matters precisely when it
+// changes, because a reader who has just updated the app is a reader whose last
+// bug report was drawn by the previous build.
+func (s *Session) SetClient(app, build string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.client = clientID{App: app, Build: build}
+}
+
+// Client reports the app on the other end of the connection.
+func (s *Session) Client() (app, build string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.client.App, s.client.Build
 }
 
 // SetViewport re-applies the client's window size to every tab.

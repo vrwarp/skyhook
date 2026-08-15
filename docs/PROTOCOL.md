@@ -234,8 +234,10 @@ server's disk, and the server does not let a peer decide how much of it to use.
 ## Handshake
 
 ```
-client → Hello{version, token, sessionId?, caps[], viewport, resume[], queued[]}
-server → Welcome{sessionId, resumed, tabs[], caps[], keepaliveMs, adapters[]}
+client → Hello{version, token, sessionId?, caps[], viewport, resume[], queued[],
+               client, build}
+server → Welcome{sessionId, resumed, tabs[], caps[], keepaliveMs, adapters[],
+                 server, clientVersion, clientBuild}
 ```
 
 `resume` carries per-tab `(seq, hash)`; `queued` carries input frames the client
@@ -260,4 +262,36 @@ dictionary-coded message.
 
 `Version` is a single integer that must match exactly. There is one user and
 both halves ship together; a negotiation matrix would be more machinery than the
-problem deserves. A mismatch closes the connection with a clear error.
+problem deserves. A mismatch closes the connection with `CloseVersionMismatch`,
+which the client shows as a refusal rather than an outage — reconnecting cannot
+fix it, and retrying is how a client ends up flapping between "offline" and
+"connected" for ever.
+
+### Which build each half is
+
+The protocol version says whether the two halves can *talk*. It does not say
+whether they are the same release, and on this client they routinely are not: the
+plane-side app is a PWA served by its own service worker out of its own cache, so
+a deploy landside changes nothing in a browser that already holds a copy — and
+neither a reload nor any other request can see past that cache, because answering
+out of it is the worker's entire job.
+
+So the handshake carries build identity in both directions, and nothing is
+refused over it:
+
+- `client` and `build` in the Hello are the app's name with its version
+  (`skyhook-pwa/0.1.0`) and the id of the exact bytes running. The id is a hash
+  of the shell, compiled into it at build time and written to `version.json`
+  beside it; it is also what the service worker names its cache after. The
+  headless Go client sends `skyhookctl` and no build, and a blank build is never
+  compared.
+- `server`, `clientVersion` and `clientBuild` in the Welcome are the server's
+  own version and the version and build of the app **the server is serving right
+  now** — read from `version.json` under its web root, and re-read when a deploy
+  replaces it.
+
+A client compares `clientBuild` against its own and offers the reader the
+upgrade; the server logs the disagreement, and a diagnostic bundle records both
+ids, because a mirror bug is half plane-side and "which patcher drew this" is
+not answerable from the document alone. See
+[OPERATIONS.md](OPERATIONS.md#versions-and-updates).

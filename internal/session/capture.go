@@ -304,6 +304,8 @@ func (c *capture) run() {
 // when it was taken, what asked for it, and which halves are actually in it.
 func (c *capture) manifest(planeFiles, planeBytes int) map[string]any {
 	s := c.sess
+	clientApp, clientBuild := s.Client()
+	served := s.mgr.clientApp.Stamp()
 	return map[string]any{
 		"id":              c.id,
 		"reason":          c.reason,
@@ -312,12 +314,19 @@ func (c *capture) manifest(planeFiles, planeBytes int) map[string]any {
 		"tookMs":          time.Since(c.start).Milliseconds(),
 		"protocolVersion": protocol.Version,
 		"serverVersion":   Version(),
-		"agentHash":       mirror.AgentHash(),
-		"goVersion":       runtime.Version(),
-		"platform":        runtime.GOOS + "/" + runtime.GOARCH,
-		"sessionId":       s.ID,
-		"tabs":            c.tabIDs(),
-		"clientOnline":    s.Online(),
+		// Which plane-side build drew the half of this bundle that came up the
+		// link, and which one the server would have served. When they differ,
+		// that is the first thing to know about a mirror that looks wrong: the
+		// patcher in the bundle is not the patcher in the tree.
+		"clientApp":         clientApp,
+		"clientBuild":       clientBuild,
+		"servedClientBuild": served.Build,
+		"agentHash":         mirror.AgentHash(),
+		"goVersion":         runtime.Version(),
+		"platform":          runtime.GOOS + "/" + runtime.GOARCH,
+		"sessionId":         s.ID,
+		"tabs":              c.tabIDs(),
+		"clientOnline":      s.Online(),
 		"planeSide": map[string]any{
 			"files": planeFiles,
 			"bytes": planeBytes,

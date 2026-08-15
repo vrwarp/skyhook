@@ -464,6 +464,57 @@ SSH. It needs these repository secrets:
 Deployment is manual on purpose: restarting the server drops every open tab's
 page state, and that should be your decision rather than a merge's.
 
+## Versions and updates
+
+Both halves ship together, and only one of them can be counted on to be current.
+The server is whatever binary is running. The plane-side app is a PWA: it is
+served by its own service worker out of a cache it filled on some earlier flight,
+which is deliberate — it has to start with no network at all — and the
+consequence is that a deploy landside changes nothing in a browser that already
+holds a copy. Reloading does not help, because the reload is answered from that
+same cache. A reader can spend weeks on a build the server replaced, with no
+symptom except bugs that were fixed a fortnight ago.
+
+So each half says what it is, in the handshake:
+
+- The client's **build id** is a hash of the shell files, computed by
+  `client/esbuild.mjs`, compiled into the app's own bytes, used as the service
+  worker's cache name, and written to `dist/version.json`. Nothing has to be
+  bumped by hand — the failure mode of a hand-maintained version is that it
+  stays at `v1` through every deploy.
+- The **server** reads `version.json` under its web root and names that build in
+  every `Welcome`, re-reading the file when a deploy replaces it. It is
+  therefore stating what it would hand a browser asking for the app right now,
+  which is exactly what the running client cannot find out for itself.
+
+Where they differ the client says so once, in a notice with a way out, and the
+shell menu (right-click anywhere, or ⋯ on a phone) changes from *Skyhook
+versions…* to *Update Skyhook…*. Both open a dialog showing this app's version
+and build, the server's version, the build the server is serving, and the
+protocol version. Nothing updates on its own: it is a fresh download of the app
+over a link that charges seconds for it, so the reader chooses the moment.
+
+*Update now* re-fetches the service worker, which installs the new shell whole
+under a new cache name, takes the page over, and reloads onto it. It needs the
+link. If the two halves disagree about the *protocol* version the server refuses
+the connection outright — the wire format is the one thing that has to match —
+and the same dialog is what the refusal opens, because an update is the only
+thing that can fix it.
+
+To find out which build something is without asking the person holding it:
+
+```sh
+curl -s https://skyhook.example.com/version.json          # what the server serves
+skyhookctl probe -pairing ~/.skyhook/pairing.json -json   # serverVersion, servedClient
+```
+
+The server's log says which app it found at startup (`client app served`) and
+notes any client that connects on an older one (`client is running an older
+build of the app`). A diagnostic bundle records the client's build, the served
+build and the server's version in its manifest — which is the first thing to
+read when a mirror looks wrong, because the patcher that drew it may not be the
+patcher in your tree.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -471,7 +522,7 @@ page state, and that should be your decision rather than a merge's.
 | Client cannot connect over QUIC | UDP blocked. The client falls back to WebSocket automatically; check the HUD, which shows which transport is live. |
 | The app shows "The client has not been built" | `webRoot` is unset or wrong. Build `client/` and point at `client/dist`. |
 | The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. |
-| Stale UI after a deploy | The service worker serves its cache first and refreshes behind you. Reload twice, or use the browser's "Update on reload". |
+| Stale UI after a deploy | Expected: the app runs from the service worker's cache and a reload is answered from it. The client compares builds with the server on every connection and offers *Update Skyhook…* in the shell menu; see [versions and updates](#versions-and-updates). |
 | `unauthorized` on connect | Token mismatch: re-read `pairing.json`. The client says `unpaired` in the HUD and opens its pairing dialog rather than retrying. |
 | HUD alternates between offline and connected every second or two | The server is refusing the token on every attempt. Older builds retried it forever; check the server log for `unauthorized client`, and for a restart just before it — a server that generated a fresh token has un-paired every client. Pair again from the link in the log. |
 | HUD flaps once a second, log shows `client connected`/`client disconnected` pairs and a resync of every tab on each one | Two connections trading one session. The log tells you which: the same `session=` on every line, and a `client connected` about 120 ms before each disconnect. Normally that means the app is open twice on the same origin — an installed window beside a browser tab, sharing the stored session — and the copy you bring to the front takes it back; the other now says `taken over` rather than reconnecting. Older builds had no way to say that, and traded the session back and forth indefinitely, resyncing every tab each pass. |
@@ -480,6 +531,7 @@ page state, and that should be your decision rather than a merge's.
 | Behind a proxy: connects, then drops after ~60s of idle | The proxy's idle timeout, not the link. Raise `proxy_read_timeout` (nginx); see [behind a reverse proxy](#behind-a-reverse-proxy). |
 | Behind a proxy: console shows a `connect-src` violation | `publicUrl` is not the origin the page was opened on. They have to match exactly, port included. |
 | Connects, then drops immediately | Pinned certificate expired or rotated. Re-pair. |
+| HUD says `stale`, and the versions dialog opens by itself | The two halves speak different protocol versions, so the server refused the connection. Press *Update now*; a reload cannot fix it, because the reload is served from the app's own cache. |
 | Blank mirror, server logs "isolated world setup failed" | The page navigated during setup; a resync fixes it. Persistent failures mean Chromium is wedged — restart the service. |
 | Images never arrive | Check `avifenc`/`cwebp` are installed, and look for "image transcode failed" in the logs. The transcoder degrades to JPEG/PNG, so persistent silence means the *fetch* failed (authenticated asset, expired cookie). |
 | Mirror looks stale | Look for "mirror divergence" in the logs: the integrity check found a hash mismatch and resynced. To find out *why* next time, set `captureOnDivergence: true` and leave it running — or take one by hand from the client while it still looks wrong. See [diagnosing the mirror](#diagnosing-the-mirror). |
@@ -529,7 +581,8 @@ seat-back wifi, and asking it to hold a file is asking for the file to be lost.
 ### What is in one
 
 ```
-manifest.json                    what, when, why, and which halves are present
+manifest.json                    what, when, why, which halves are present, and
+                                 which build each of them was
 NOTES.txt                        what is missing from this bundle, and why
 server.log                       the server's last few thousand lines, at debug
 session/session.json             session, viewport, link stats

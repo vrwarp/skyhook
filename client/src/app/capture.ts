@@ -28,6 +28,7 @@
  * already plane-side in Cache Storage.
  */
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
+import { BUILD, VERSION } from '../shared/build.js';
 import type { CaptureRequest } from '../shared/protocol.js';
 import type { MirrorFreeze } from '../mirror/host.js';
 import * as clientlog from './clientlog.js';
@@ -142,6 +143,11 @@ function clientReport(input: CaptureInput): Record<string, unknown> {
     note: input.request.note,
     takenAt: new Date().toISOString(),
     sinceLoadMs: Math.round(performance.now()),
+    // Which plane-side build drew the document in this bundle. The server
+    // records the build it serves beside it, and when the two differ that is
+    // the first thing to know about a mirror that looks wrong: the patcher in
+    // the bundle is not the patcher in the tree.
+    app: { version: VERSION, build: BUILD },
     userAgent: nav.userAgent,
     languages: nav.languages,
     hardwareConcurrency: nav.hardwareConcurrency,

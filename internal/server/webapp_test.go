@@ -32,6 +32,7 @@ func buildRoot(t *testing.T) string {
 		"app.js":               "export {};",
 		"sw.js":                "export {};",
 		"manifest.webmanifest": `{"name":"Skyhook"}`,
+		"version.json":         `{"version":"0.1.0","build":"abc123"}`,
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
@@ -69,6 +70,25 @@ func TestServiceWorkerGetsRootScope(t *testing.T) {
 	}
 	if got := res.Header.Get("Cache-Control"); got != "no-cache" {
 		t.Fatalf("service worker must not be cached hard, got %q", got)
+	}
+}
+
+// The stamp says what is being served right now, so it is the one file that
+// must never be answered from a cache. It used to fall through to the default —
+// a week of hard caching — which would have had a client comparing itself
+// against whatever build was current the last time anything asked.
+func TestVersionStampIsNeverCached(t *testing.T) {
+	app := &webapp{root: buildRoot(t), cfg: testConfig("")}
+	res := get(t, app, "/version.json")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	if got := res.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), "abc123") {
+		t.Fatalf("body = %q", body)
 	}
 }
 

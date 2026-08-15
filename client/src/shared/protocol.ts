@@ -244,6 +244,16 @@ export interface Welcome {
   server: string;
   keepaliveMs: number;
   adapters: string[];
+  /**
+   * The version and build of the plane-side app the *server* is serving, which
+   * is not necessarily the one reading this frame: a PWA runs from its own
+   * cache until something makes it upgrade. Comparing `clientBuild` against
+   * this app's own build id is how the reader finds out there is a newer one,
+   * and it is the only channel that can tell them — every other route to the
+   * question goes through the cache being asked about.
+   */
+  clientVersion: string;
+  clientBuild: string;
 }
 
 export interface TabRef {
@@ -305,8 +315,14 @@ export interface CaptureDone {
 /** Field numbers, kept next to the decoders that use them. */
 export const F = {
   frame: { type: 1, tab: 2, seq: 3, base: 4, body: 5, cause: 6 },
-  hello: { version: 1, token: 2, sessionId: 3, caps: 4, viewport: 5, resume: 6, queued: 7, client: 8 },
-  welcome: { version: 1, sessionId: 2, resumed: 3, tabs: 4, caps: 5, server: 6, keepaliveMs: 7, adapters: 8 },
+  hello: {
+    version: 1, token: 2, sessionId: 3, caps: 4, viewport: 5, resume: 6, queued: 7, client: 8,
+    build: 9,
+  },
+  welcome: {
+    version: 1, sessionId: 2, resumed: 3, tabs: 4, caps: 5, server: 6, keepaliveMs: 7,
+    adapters: 8, clientVersion: 9, clientBuild: 10,
+  },
   tabRef: { tab: 1, url: 2, title: 3, seq: 4, active: 5, loading: 6 },
   tabAck: { tab: 1, seq: 2, hash: 3 },
   viewport: { w: 1, h: 2, dpr: 3, mobile: 4 },

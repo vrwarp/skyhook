@@ -35,6 +35,24 @@ const staticFiles = [
   'icon.svg',
 ];
 
+/** The version the app calls itself, from package.json. */
+const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+
+/**
+ * The identity every bundle is stamped with.
+ *
+ * `SKYHOOK_BUILD` is the generation of the shell; `SKYHOOK_VERSION` is the
+ * human-facing number beside it. Both are compiled in rather than fetched,
+ * because a fetch for "which build am I" is answered by the service worker out
+ * of the very cache whose staleness is the question.
+ */
+function stampDefines(id) {
+  return {
+    SKYHOOK_BUILD: JSON.stringify(id),
+    SKYHOOK_VERSION: JSON.stringify(pkg.version),
+  };
+}
+
 function optionsFor(t, define) {
   return {
     entryPoints: [t.in],
@@ -52,9 +70,17 @@ function optionsFor(t, define) {
   };
 }
 
-async function bundle() {
+/**
+ * The id the first pass compiles in, so the hash below is taken over bytes that
+ * do not yet know what they hash to. Every build uses the same placeholder, so
+ * identical sources still produce an identical hash and therefore an identical
+ * id — the property the whole scheme rests on.
+ */
+const UNSTAMPED = 'unstamped';
+
+async function bundle(id) {
   for (const t of targets) {
-    const options = optionsFor(t);
+    const options = optionsFor(t, stampDefines(id));
     if (watch) {
       const ctx = await context(options);
       await ctx.watch();
@@ -65,7 +91,8 @@ async function bundle() {
 }
 
 /**
- * Which build this is: a hash of the files the service worker precaches.
+ * Which build this is: a hash of the files the service worker precaches, as
+ * they are before the id is compiled into them.
  *
  * Content rather than a timestamp or a version number, for two reasons. A build
  * that changed nothing produces the same id, so a redeploy of identical bytes
@@ -95,7 +122,7 @@ async function buildId() {
  * when the rest of the shell does.
  */
 async function bundleServiceWorker(id) {
-  await build(optionsFor(swTarget, { SKYHOOK_BUILD: JSON.stringify(id) }));
+  await build(optionsFor(swTarget, stampDefines(id)));
 }
 
 /**
@@ -178,7 +205,6 @@ async function assets() {
  * /version.json — rather than by guessing from symptoms.
  */
 async function stamp(id) {
-  const pkg = JSON.parse(await readFile('package.json', 'utf8'));
   await writeFile('dist/version.json', JSON.stringify({
     version: pkg.version,
     build: id,
@@ -190,14 +216,34 @@ async function run() {
   // A stale bundle from an earlier layout would be precached by the service
   // worker and served for a very long time.
   if (!watch) await rm('dist', { recursive: true, force: true });
-  await bundle();
+  if (watch) {
+    // Watch mode has no content hash to compute — the id is per-run — so the
+    // bundles can be stamped on the first and only pass.
+    const id = await buildId();
+    await bundle(id);
+    await assets();
+    await bundleServiceWorker(id);
+    await stamp(id);
+    console.log('watching for changes');
+    return;
+  }
+  await bundle(UNSTAMPED);
   await assets();
-  // Last, and in this order: the id is a hash of what the two steps above just
-  // wrote, and the worker carries the id.
+  // In this order: the id is a hash of what the two steps above just wrote.
   const id = await buildId();
+  // And then the two bundles are built again, carrying it. The app has to know
+  // which build it is — it is the half of the comparison the server cannot make
+  // for it — and it cannot read that from a file, because every file it could
+  // read is answered from the service worker's cache, which is precisely the
+  // thing whose age is in question. So the id is compiled in.
+  //
+  // Stamping after hashing rather than before is what keeps the id honest: the
+  // hash is taken over the unstamped output, so it changes when the source
+  // changes and not because the last build had a different id — which would be
+  // a value that changed on every build and meant nothing.
+  await bundle(id);
   await bundleServiceWorker(id);
   await stamp(id);
-  if (watch) console.log('watching for changes');
 }
 
 run().catch((err) => {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vrwarp/skyhook/internal/adapter"
+	"github.com/vrwarp/skyhook/internal/appver"
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/imgproc"
 	"github.com/vrwarp/skyhook/internal/mirror"
@@ -58,6 +59,12 @@ type ManagerOptions struct {
 	// client's. Zero means the default; a test that would otherwise wait out
 	// two ticks turns it down.
 	IntegrityInterval time.Duration
+	// WebRoot is the directory the plane-side app is served from. The manager
+	// reads its build stamp so every Welcome can say which build of the client
+	// this server would hand out today; the client compares that against its
+	// own and offers the reader the upgrade. Empty means no app is served, and
+	// then the question simply goes unanswered.
+	WebRoot string
 }
 
 // Manager owns the browser and the set of sessions.
@@ -67,6 +74,10 @@ type Manager struct {
 	browser *cdp.Browser
 	images  *imgproc.Pipeline
 	trainer *protocol.DictTrainer
+
+	// clientApp reports the build stamp of the plane-side app on disk, re-read
+	// when a deploy replaces it.
+	clientApp *appver.Reader
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -92,8 +103,9 @@ func NewManager(br *cdp.Browser, images *imgproc.Pipeline, opts ManagerOptions) 
 	}
 	m := &Manager{
 		opts: opts, log: opts.Logger, browser: br, images: images,
-		trainer:  protocol.NewDictTrainer(),
-		sessions: map[string]*Session{},
+		trainer:   protocol.NewDictTrainer(),
+		sessions:  map[string]*Session{},
+		clientApp: appver.NewReader(opts.WebRoot),
 	}
 	go m.janitor()
 	return m
@@ -153,19 +165,33 @@ func (m *Manager) Serve(conn transport.Conn) {
 		return
 	}
 
+	// The build of the app this server would serve today, which is not
+	// necessarily the build that is talking: a PWA runs out of its own cache
+	// until something makes it upgrade. Nothing is refused over it — the wire
+	// format is what has to match, and the protocol version above is what says
+	// whether it does — but both halves say so, here in the log and in the
+	// Welcome below, so the reader can be offered the newer one.
+	served := m.clientApp.Stamp()
+	if served.Known() && hello.Build != "" && hello.Build != served.Build {
+		log.Info("client is running an older build of the app",
+			"client", hello.Build, "served", served.Build)
+	}
+
 	sess, resumed, err := m.resolve(ctx, hello)
 	if err != nil {
 		log.Error("session setup failed", "err", err)
 		_ = conn.Close(protocol.CloseSetupFailed, err.Error())
 		return
 	}
+	sess.SetClient(hello.Client, hello.Build)
 	sess.Attach(conn)
 	defer sess.Detach(conn)
 
 	welcome := protocol.Welcome{
 		Version: protocol.Version, SessionID: sess.ID, Resumed: resumed,
 		Tabs: sess.TabRefs(), KeepaliveMS: 15000, Server: Version(),
-		Adapters: sess.AdapterNames(),
+		Adapters:      sess.AdapterNames(),
+		ClientVersion: served.Version, ClientBuild: served.Build,
 	}
 	if m.opts.Compression {
 		welcome.Caps = append(welcome.Caps, "zstd")

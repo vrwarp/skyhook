@@ -19,6 +19,7 @@ import {
   scrollBody, unframeMessage, viewportBody, InputEventInit,
 } from '../shared/codec.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
+import { BUILD, CLIENT_ID } from '../shared/build.js';
 import {
   Channel, CloseCode, FrameType, isFatalClose, Refusal, Viewport,
 } from '../shared/protocol.js';
@@ -192,7 +193,8 @@ function sendHello(): void {
     viewport,
     resume,
     queued,
-    client: 'skyhook-pwa',
+    client: CLIENT_ID,
+    build: BUILD,
   })));
 }
 
