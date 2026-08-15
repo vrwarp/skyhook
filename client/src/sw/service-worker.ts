@@ -153,14 +153,32 @@ async function serveImage(url: URL): Promise<Response> {
  * freshness.
  */
 async function serveShell(req: Request): Promise<Response> {
+  // One exception, and it is the file that says which build the server is
+  // serving. Cached, it would answer with the build that was current when this
+  // generation first asked — which is the one answer that is never useful, and
+  // is worse than useless during the window this file exists for: between a
+  // deploy and this worker's own upgrade, a cached copy would state the new
+  // build's number while the old build was still running, and the app would
+  // conclude it was up to date. The build the app is *running* is compiled into
+  // its bytes (shared/build.ts); this file is only ever the other half.
+  if (new URL(req.url).pathname === '/version.json') {
+    try {
+      return await fetch(req);
+    } catch {
+      // Offline, which is an answer: there is no server to ask what it serves.
+      return new Response('offline', { status: 504, statusText: 'Gateway Timeout' });
+    }
+  }
+
   const cache = await caches.open(SHELL_CACHE);
   const hit = await cache.match(req, { ignoreSearch: true });
   if (hit) return hit;
   try {
     const res = await fetch(req);
-    // Anything outside the precached shell — an icon, the version stamp — is
-    // kept as it is met. It belongs to this generation because this generation
-    // is what asked for it.
+    // Anything outside the precached shell — an icon, a source map — is kept as
+    // it is met. It belongs to this generation because this generation is what
+    // asked for it. The version stamp above is the one thing that does not,
+    // because it describes the server rather than the app.
     if (res.ok && req.method === 'GET') await cache.put(req, res.clone());
     return res;
   } catch {

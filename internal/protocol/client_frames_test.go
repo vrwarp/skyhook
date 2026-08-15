@@ -170,6 +170,12 @@ func TestClientHelloDecodes(t *testing.T) {
 	if hello.Viewport.W != 1280 {
 		t.Fatalf("viewport = %+v", hello.Viewport)
 	}
+	// Which bytes of the app are speaking, so the server can say whether they
+	// are the bytes it would serve.
+	if hello.Client == "" || hello.Build == "" {
+		t.Fatalf("hello did not identify the client: client=%q build=%q",
+			hello.Client, hello.Build)
+	}
 }
 
 // TestEveryClientFixtureDecodes is the blunt version: whatever the client can

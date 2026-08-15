@@ -165,8 +165,10 @@ case the reconnect path already handles, and the app nudges a reconnect on
 `visibilitychange`.
 
 What it buys: no second Chromium (which retires risk #4 in the design, "Electron
-memory on a laptop in airplane mode"), instant updates through the service
-worker instead of a per-platform installer matrix, and — when the server has a
+memory on a laptop in airplane mode"), updates through the service worker
+instead of a per-platform installer matrix — though "instant" was the wrong word
+for them, and [§33](#33-a-client-that-runs-from-its-own-cache-cannot-see-that-it-is-old)
+is what it cost — and — when the server has a
 real certificate — no `serverCertificateHashes` pinning or 13-day rotation
 dance at all, since the same certificate covers the app origin and the
 WebTransport connection.
@@ -1482,6 +1484,71 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   assignment, and nothing in any capture so far wants one. A part re-exported
   under a new name is matched under the name it carries inside, which is the
   only one the flattened tree keeps.
+
+### 33. A client that runs from its own cache cannot see that it is old
+
+[§28](#28-a-deploy-was-replacing-the-shell-one-file-at-a-time) made a deploy
+swap the shell whole instead of a file at a time. It left the larger half of the
+problem standing: the swap only happens when the browser goes and looks, and
+nothing plane-side had any way of knowing it had not.
+
+The client is a PWA whose service worker answers every request for the app out
+of the cache it filled at its last upgrade. That is the point of it — the thing
+has to start with no network at all — and the consequence is that the app cannot
+find out it is stale by asking. Fetching `index.html` returns the cached one.
+Fetching `version.json` returned the cached one, and worse: the file was being
+cached per generation, so between a deploy landing and the worker catching up an
+old shell could cache the *new* stamp and conclude it was current. The advice
+the app itself gave on a version refusal — "reload the page to pick up the
+version the server is serving" — was a reload served from that cache, which came
+back as the same build and was refused again.
+
+None of this is visible. There is no error, no banner, no slow path. A reader
+opens the app at 35,000 feet on a build the server replaced three weeks ago and
+meets bugs that were fixed in the interval, and the only symptom is the bug.
+
+Both halves now state what they are, over the one channel a cache does not sit
+in front of: the live connection.
+
+- **The app's build id is compiled into its bytes.** `esbuild.mjs` already
+  hashed the shell to name the worker's cache; it now builds the app and the
+  network worker twice — once unstamped, to hash, and again with the id
+  substituted in. Hashing the unstamped output is what keeps the id honest: it
+  changes when the sources change and not because the previous build had a
+  different id, which would be a value that changed every time and meant
+  nothing.
+- **The server states the build it serves.** It reads `version.json` from its
+  web root — re-reading it when a deploy replaces it, since a stamp read once at
+  boot would describe an app that is no longer there — and names it in every
+  `Welcome`, alongside its own version.
+- **Neither is enforced.** The protocol version already says whether the two
+  halves can talk, and closes the connection when they cannot. A build
+  difference is not that: the wire format is the same, everything works, and
+  refusing over it would strand a reader mid-flight over a patch release.
+
+Where they differ the client says so once and offers the update. Pressing it
+re-fetches the worker, which installs the new generation whole, takes the page
+over, and only then reloads — an order that matters more than it looks. Reload
+first, which is the obvious implementation, and the page comes back from the
+cache that is still in charge, as the build it already was. That failure is
+indistinguishable from a button that does nothing, and it is invisible to any
+test that does not run a real service worker.
+
+Nothing updates on its own. The download is the whole app over a link that
+charges seconds for it, and this client does not spend the link without being
+asked — the same rule that governs captures and prefetch.
+
+The build ids also settle a question every diagnostic bundle used to beg: which
+plane-side build drew the document in it. A capture now records the client's
+build, the build the server was serving, and the server's own version, because
+a mirror bug is half plane-side and the patcher in the bundle may not be the
+patcher in the tree.
+
+`TestPWAIsToldWhenTheServerHasANewerBuild` deploys a new stamp under a running
+client and asserts it is told; `TestPWAUpdatesItselfOntoTheServersBuild` deploys
+a genuinely different build, presses the button, and asserts the app comes back
+as the one the server serves — with the reload-does-nothing premise asserted in
+between, since the whole mechanism is worthless if a reload had been enough.
 
 ## Measured results
 

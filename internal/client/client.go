@@ -140,6 +140,19 @@ func (c *Client) SessionID() string {
 	return c.sessionID
 }
 
+// Server reports what the Welcome said about the far end: the server's own
+// build, and the version and build of the plane-side app it is serving. The
+// last two are how a probe answers "which client would a browser get from this
+// server right now" without running a browser.
+func (c *Client) Server() (server, clientVersion, clientBuild string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.welcome == nil {
+		return "", "", ""
+	}
+	return c.welcome.Server, c.welcome.ClientVersion, c.welcome.ClientBuild
+}
+
 // Events exposes the event stream.
 func (c *Client) Events() <-chan Event { return c.events }
 

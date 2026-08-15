@@ -20,10 +20,16 @@ import { TabList } from './tabsview.js';
 import { isPhone, isTouch } from './layout.js';
 import { Suggest } from './suggest.js';
 import { Store, type Pairing } from '../store/store.js';
+import { BUILD, VERSION } from '../shared/build.js';
+import {
+  browserEnv, detail as versionDetail, headline as versionHeadline, installUpdate, needsUpdate,
+  verdict,
+} from './upgrade.js';
 import type {
   AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Refusal, Snapshot, Stats,
   TabState, Welcome,
 } from '../shared/protocol.js';
+import { PROTOCOL_VERSION } from '../shared/protocol.js';
 
 const store = new Store();
 const hosts = new Map<number, MirrorHost>();
@@ -85,6 +91,11 @@ const el = {
   pairingForm: byId<HTMLFormElement>('pairing-form'),
   pairingJSON: byId<HTMLTextAreaElement>('pairing-json'),
   pairingError: byId<HTMLParagraphElement>('pairing-error'),
+  about: byId<HTMLDialogElement>('about'),
+  aboutRows: byId<HTMLElement>('about-rows'),
+  aboutVerdict: byId<HTMLParagraphElement>('about-verdict'),
+  aboutDetail: byId<HTMLParagraphElement>('about-detail'),
+  aboutUpdate: byId<HTMLButtonElement>('about-update'),
   capture: byId<HTMLDialogElement>('capture'),
   captureForm: byId<HTMLFormElement>('capture-form'),
   captureNote: byId<HTMLTextAreaElement>('capture-note'),
@@ -115,6 +126,10 @@ async function main(): Promise<void> {
   // worth clicking before the transport has even been configured.
   await bookmarks.whenReady();
   renderBookmarks();
+
+  // What the server said last time. It is the only answer available until the
+  // link comes back, and on this link that can be the whole flight.
+  serverVersions = await store.readVersions() ?? serverVersions;
 
   const pairing = await pairingFromURL() ?? await store.readPairing();
   // Read before the dialog below can send us down the pairing path, so both
@@ -217,6 +232,9 @@ function handle(kind: string, args: Record<string, unknown>): void {
       const w = args as unknown as Welcome;
       resumeSession = w.sessionId;
       void store.writeSessionId(w.sessionId);
+      // Before the tabs, because it is the one thing in this frame that is not
+      // about tabs: which build each half is, and whether they are the same.
+      noteVersions(w);
       const held = new Set<number>();
       for (const t of w.tabs ?? []) {
         held.add(t.tab);
@@ -1236,6 +1254,14 @@ function shellMenu(): MenuGroups {
     [{ label: 'New tab', disabled: !connected, run: () => openTab('', 'focus') }],
   ];
   if (active) groups.push(...pageGroups(active));
+  // Last, and always present: the one entry that works with the link down, and
+  // the only way to find out that the app itself is behind the server. It says
+  // which of the two it is in the label, because a reader who has an update
+  // waiting should not have to open a dialog to discover it.
+  groups.push([{
+    label: needsUpdate(verdict(versionSides())) ? 'Update Skyhook…' : 'Skyhook versions…',
+    run: () => openAbout(),
+  }]);
   return groups;
 }
 
@@ -1406,12 +1432,13 @@ function showRefusal(refused: Refusal): void {
     return;
   }
   if (refused === 'version') {
-    log('server refused the connection: client and server are different builds');
-    if (!el.pairing.open) {
-      el.pairingError.textContent =
-        'This client and the server are different builds. Reload the page to pick up the '
-        + 'version the server is serving.';
-    }
+    // Telling the reader to reload was advice that could not work. This app is
+    // served by its own service worker out of its own cache; a reload fetches
+    // nothing and comes back as the same build, refused the same way. The
+    // versions dialog is the only place where the update can actually happen.
+    log('server refused the connection: client and server speak different protocols');
+    versionRefused = true;
+    if (!el.pairing.open) openAbout();
     return;
   }
   log('server refused the pairing token');
@@ -1420,6 +1447,139 @@ function showRefusal(refused: Refusal): void {
     + 'new token: open a fresh pairing link, or paste the current pairing.json below.';
   if (!el.pairing.open) el.pairing.showModal();
 }
+
+// ------------------------------------------------------------------ versions
+//
+// Two halves that ship together, and one of them is a PWA: it runs whatever its
+// service worker cached, it starts with no network at all — which is the entire
+// point of it — and every route by which it might ask for something newer is
+// answered out of that same cache. A deploy landside therefore changes nothing
+// plane-side, and there is no symptom. The reader is simply, quietly, on last
+// month's client, meeting bugs that were fixed weeks ago.
+//
+// So each half states what it is. The app's build id is compiled into its bytes;
+// the server names the build it would hand out today in every Welcome. Where
+// they differ the reader is told once and offered the download — offered, not
+// given, because it is a few hundred kilobytes over a link that charges seconds
+// for them, and nothing in this client spends the link on its own initiative.
+
+/** What the server last told us. Persisted, so an offline start still knows. */
+let serverVersions = { server: '', clientVersion: '', clientBuild: '' };
+/** Set when the server hung up because the two speak different protocols. */
+let versionRefused = false;
+/** The served build already announced, so a reconnect does not say it again. */
+let announcedBuild = '';
+
+function versionSides(): { build: string; servedBuild: string; refused: boolean } {
+  return { build: BUILD, servedBuild: serverVersions.clientBuild, refused: versionRefused };
+}
+
+/**
+ * Whether an update could even be fetched right now.
+ *
+ * Not simply `connected`: a client refused over the protocol version has no
+ * session and is not connected by any measure this shell uses, and is also the
+ * one client that most needs the button — the server has just answered it, so
+ * the link is demonstrably there.
+ */
+function canFetchUpdate(): boolean {
+  return connected || versionRefused;
+}
+
+/** Records what a Welcome said, and says so once if it is not what we are. */
+function noteVersions(w: Welcome): void {
+  versionRefused = false;
+  serverVersions = {
+    server: w.server ?? '',
+    clientVersion: w.clientVersion ?? '',
+    clientBuild: w.clientBuild ?? '',
+  };
+  void store.writeVersions(serverVersions);
+  if (el.about.open) renderAbout();
+  if (!needsUpdate(verdict(versionSides()))) return;
+  if (announcedBuild === serverVersions.clientBuild) return;
+  announcedBuild = serverVersions.clientBuild;
+  log(`server serves client build ${serverVersions.clientBuild}; this app is ${BUILD}`);
+  toast('Skyhook can be updated to the build the server is serving.',
+    { label: 'Details', run: () => openAbout() });
+}
+
+function openAbout(): void {
+  renderAbout();
+  if (!el.about.open) el.about.showModal();
+}
+
+function renderAbout(): void {
+  const v = verdict(versionSides());
+  el.aboutRows.textContent = '';
+  const row = (term: string, value: string, stale = false): void => {
+    const dt = document.createElement('dt');
+    dt.textContent = term;
+    const dd = document.createElement('dd');
+    if (stale) {
+      const mark = document.createElement('span');
+      mark.className = 'stale';
+      mark.textContent = value;
+      dd.appendChild(mark);
+    } else {
+      dd.textContent = value;
+    }
+    el.aboutRows.append(dt, dd);
+  };
+  row('This app', `${VERSION} · ${BUILD}`, v === 'mismatch');
+  row('Server', serverVersions.server || 'not connected yet');
+  row("Server's app", serverVersions.clientBuild
+    ? `${serverVersions.clientVersion || '?'} · ${serverVersions.clientBuild}`
+    : 'not connected yet');
+  row('Protocol', String(PROTOCOL_VERSION));
+  el.aboutVerdict.textContent = versionHeadline(v);
+  el.aboutDetail.textContent = versionDetail(v, canFetchUpdate());
+  el.aboutUpdate.hidden = !needsUpdate(v);
+  el.aboutUpdate.disabled = !canFetchUpdate();
+  el.aboutUpdate.textContent = 'Update now';
+}
+
+/**
+ * Fetches the new shell and reloads onto it, reporting whichever way it goes.
+ *
+ * The reader has pressed a button that costs bytes on a link where bytes are
+ * the currency, so it says what is happening while it happens — and says so
+ * afterwards when there was nothing to fetch, because a button that silently
+ * does nothing is indistinguishable from one that is broken.
+ */
+/**
+ * Built once, on load, rather than when the button is pressed.
+ *
+ * It watches for another worker taking this page over, and that can happen
+ * before anybody presses anything: the browser runs its own update check on
+ * navigation. An env created at the moment of the click would have missed it,
+ * and missing it is the case where the page is running code its own cache no
+ * longer holds.
+ */
+const updater = browserEnv();
+
+async function runUpdate(): Promise<void> {
+  el.aboutUpdate.disabled = true;
+  el.aboutUpdate.textContent = 'Updating…';
+  el.aboutDetail.textContent = 'Fetching the app from the server. The page reloads itself '
+    + 'onto the new build as soon as it has arrived, which over this link may be a while.';
+  const outcome = await installUpdate(updater);
+  if (outcome === 'reloading') return;
+  el.aboutUpdate.disabled = false;
+  el.aboutUpdate.textContent = 'Try again';
+  if (outcome === 'unchanged') {
+    el.aboutVerdict.textContent = 'The server had nothing newer to send.';
+    el.aboutDetail.textContent = 'The app was re-fetched and is the build already installed, '
+      + 'so nothing was replaced. If the server has just been updated, its new client may not '
+      + 'be deployed beside it yet.';
+    return;
+  }
+  el.aboutVerdict.textContent = 'The update could not be fetched.';
+  el.aboutDetail.textContent = 'The request did not reach the server. The link is the usual '
+    + 'reason; nothing was changed, and this build goes on working.';
+}
+
+el.aboutUpdate.addEventListener('click', () => { void runUpdate(); });
 
 function log(message: string): void {
   console.warn('[skyhook]', message);

@@ -92,6 +92,9 @@ func buildFixtures(t *testing.T) map[string]string {
 		Tabs: []protocol.TabRef{{Tab: 1, URL: "https://example.test/", Title: "Example", Seq: 7, Active: true}},
 		Caps: []string{"zstd"}, Server: "test", KeepaliveMS: 15000,
 		Adapters: []string{"googlechat"},
+		// What the server would serve a browser asking for the app today. The
+		// client compares it against the build compiled into its own bytes.
+		ClientVersion: "0.1.0", ClientBuild: "conformance-build",
 	})
 	if err != nil {
 		t.Fatal(err)

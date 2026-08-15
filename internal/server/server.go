@@ -19,6 +19,7 @@ import (
 
 	"github.com/vrwarp/skyhook/internal/adapter"
 	"github.com/vrwarp/skyhook/internal/adapter/googlechat"
+	"github.com/vrwarp/skyhook/internal/appver"
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/config"
 	"github.com/vrwarp/skyhook/internal/diag"
@@ -135,6 +136,10 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 		HomeURL:        cfg.HomeURL,
 		Capture:        s.captureOptions(),
 		CanvasStream:   cfg.CanvasStreamEvery.Get(),
+		// So every Welcome can name the build of the client this server is
+		// serving. The listeners below resolve the same root for the handler
+		// that serves it.
+		WebRoot: resolveWebRoot(cfg),
 	}
 	if !mgrOpts.Capture.Enabled() {
 		log.Info("diagnostic captures are off (captureKeep is 0)")
@@ -359,7 +364,8 @@ func (s *Server) Start(ctx context.Context) error {
 			s.log.Warn("client app not found; build client/ and set webRoot",
 				"looked", filepath.Join(s.cfg.DataDir, "webapp"))
 		} else {
-			s.log.Info("client app served", "root", root)
+			s.log.Info("client app served", "root", root,
+				"build", appver.NewReader(root).Stamp().String())
 		}
 		if s.cfg.BehindProxy {
 			s.log.Info("http listener up (TLS terminates at the proxy)",
@@ -428,7 +434,8 @@ func (s *Server) startLoopback(ctx context.Context, host string, port int) error
 		s.log.Warn("client app not found; build client/ and set webRoot",
 			"looked", filepath.Join(s.cfg.DataDir, "webapp"))
 	} else {
-		s.log.Info("client app served", "root", root)
+		s.log.Info("client app served", "root", root,
+			"build", appver.NewReader(root).Stamp().String())
 	}
 	s.log.Warn("loopback demo mode: no TLS, no QUIC, loopback only",
 		"addr", s.cfg.FallbackListen)

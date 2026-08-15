@@ -55,7 +55,7 @@ describe('frame encoding', () => {
       token: 'tok', sessionId: 'abc', caps: ['zstd'],
       viewport: { w: 100, h: 200, dpr: 2, mobile: false },
       resume: [{ tab: 1, seq: 9, hash: 5 }],
-      client: 'test',
+      client: 'test', build: 'build-1',
     }));
     const decoded = cborDecode(bytes) as Record<number, unknown>;
     const body = decoded[F.frame.body] as Record<number, unknown>;
@@ -107,6 +107,10 @@ describe('cross-language conformance', () => {
     expect(welcome.sessionId).toBe('session-1');
     expect(welcome.tabs[0].url).toBe('https://example.test/');
     expect(welcome.caps).toContain('zstd');
+    // The build of the app the server serves, which is how this client finds
+    // out that the one it is running has been superseded.
+    expect(welcome.clientBuild).toBe('conformance-build');
+    expect(welcome.clientVersion).toBe('0.1.0');
 
     const state = decodeTabState(decodeFrame(unframeMessage(decodeB64(fixtures.tabstate)).payload).body);
     expect(state.title).toBe('Example');
@@ -162,7 +166,7 @@ describe('cross-language conformance', () => {
     const bytes = encodeFrame(FrameType.Hello, 0, helloBody({
       token: 'conformance-token', caps: ['zstd'],
       viewport: { w: 1280, h: 800, dpr: 1, mobile: false },
-      client: 'conformance',
+      client: 'conformance', build: 'conformance-build',
     }));
     const decoded = cborDecode(bytes) as Record<number, unknown>;
     const body = decoded[F.frame.body] as Record<number, unknown>;

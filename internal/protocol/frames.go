@@ -158,7 +158,13 @@ type Hello struct {
 	Viewport  Viewport `cbor:"5,keyasint"`
 	Resume    []TabAck `cbor:"6,keyasint,omitempty"` // per-tab last applied seq
 	Queued    []Frame  `cbor:"7,keyasint,omitempty"` // input queued while offline
-	Client    string   `cbor:"8,keyasint,omitempty"` // version string
+	Client    string   `cbor:"8,keyasint,omitempty"` // "skyhook-pwa/0.1.0"
+	// Build identifies the exact bytes of the plane-side app that is speaking:
+	// the same id the client's service worker keys its cache on. It is what
+	// makes "which client is that" answerable landside, where the browser
+	// holding the answer is on the other side of the bad link and may be
+	// running a shell it cached weeks ago.
+	Build string `cbor:"9,keyasint,omitempty"`
 }
 
 // Welcome answers Hello.
@@ -172,6 +178,14 @@ type Welcome struct {
 	// KeepaliveMS is how often the client should ping.
 	KeepaliveMS int      `cbor:"7,keyasint,omitempty"`
 	Adapters    []string `cbor:"8,keyasint,omitempty"`
+	// ClientVersion and ClientBuild describe the plane-side app this server is
+	// currently serving — not the one that is connected. A client compares them
+	// against its own and knows whether the shell in its cache is the shell the
+	// server would hand it today, which is the only way it can find out: the
+	// service worker answers every request for the app out of that cache, so
+	// the app cannot see the newer one merely by asking for it.
+	ClientVersion string `cbor:"9,keyasint,omitempty"`
+	ClientBuild   string `cbor:"10,keyasint,omitempty"`
 }
 
 // TabRef is a tab summary sent on resume.

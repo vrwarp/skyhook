@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vrwarp/skyhook/internal/appver"
 	"github.com/vrwarp/skyhook/internal/cdp"
 	"github.com/vrwarp/skyhook/internal/config"
 	"github.com/vrwarp/skyhook/internal/imgproc"
@@ -58,10 +59,24 @@ type pwaHarness struct {
 
 func newPWAHarness(t *testing.T) *pwaHarness {
 	t.Helper()
-	dist := clientDist(t)
+	return newPWAHarnessAt(t, clientDist(t))
+}
+
+// newPWAHarnessAt serves an arbitrary copy of the app, so a test can change
+// what the server is serving underneath a client that is already running it —
+// which is a deploy, and the whole situation the version check exists for.
+func newPWAHarnessAt(t *testing.T, dist string) *pwaHarness {
+	t.Helper()
 	// The browser client is what should cross the emulated link, so the app
 	// listener takes the shaped address and the base harness takes any port.
-	h := newHarnessOn(t, "127.0.0.1:0")
+	//
+	// The manager is told where the app is served from as well as the handler
+	// below, because that is what lets every Welcome name the build of the
+	// client on disk — the half of the version comparison the browser cannot
+	// make for itself.
+	h := newHarnessTweaked(t, "127.0.0.1:0", func(o *session.ManagerOptions) {
+		o.WebRoot = dist
+	})
 
 	ln, err := net.Listen("tcp", shapedAddr())
 	if err != nil {
@@ -553,3 +568,345 @@ const mirrorCSS = `(() => {
     && f.contentDocument.querySelector('style[data-skyhook-css]');
   return el ? el.textContent : '';
 })()`
+
+// Both halves say which build they are, and the app says so where a reader can
+// see it.
+//
+// This is the one property that cannot be unit-tested on either side alone. The
+// build id is compiled into the app's bytes by the client's build, written into
+// version.json beside it, read from there by the server, and carried back over
+// the wire in the Welcome — and the whole mechanism is worth nothing unless the
+// value that makes that round trip is the same one the running app knows about
+// itself. Every step is in a different language and three of them are in
+// different processes.
+func TestPWAReportsBothVersionsAndAgreesWithTheServer(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+
+	// What the server would hand a browser asking for the app right now.
+	served := appver.NewReader(clientDist(t)).Stamp()
+	if !served.Known() {
+		t.Fatalf("the built client has no version stamp: %+v", served)
+	}
+
+	page := h.openClient(ctx, t)
+	// Not for the HUD, which goes green when the socket opens — a whole round
+	// trip before the Welcome that carries the versions. On a LAN the two are
+	// indistinguishable; on the link this project exists for they are a second
+	// and a half apart, and the dialog in between honestly says "not connected
+	// yet". So this waits for the answer rather than for the connection.
+	waitFor(ctx, t, page, versionsDialogWhen(`/Up to date/.test(verdict)`),
+		budget(60*time.Second), "the two halves to agree about their versions")
+
+	shown := readVersionsDialog(ctx, t, page)
+
+	joined := strings.Join(shown.Rows, " | ")
+	// The build the app knows it is, which comes from its own bytes.
+	if !strings.Contains(joined, served.Build) {
+		t.Errorf("the app does not report the build it was served as: %q, want %q",
+			joined, served.Build)
+	}
+	// And the server's own version, which it can only have learnt over the link.
+	if !strings.Contains(joined, session.Version()) {
+		t.Errorf("the app does not report the server's version: %q, want %q",
+			joined, session.Version())
+	}
+	// Both halves are the build that was just built, so there is nothing to
+	// offer: an update button here would be one shown to every reader forever.
+	if shown.Update {
+		t.Errorf("a fresh build offered itself an update; dialog says %q", shown.Verdict)
+	}
+	if !strings.Contains(shown.Verdict, "Up to date") {
+		t.Errorf("verdict = %q, want the two halves to agree", shown.Verdict)
+	}
+}
+
+// A deploy while a client is running it: the app is told, and can update.
+//
+// This is the situation the whole mechanism exists for, and it is invisible
+// from inside the browser. The service worker answers every request for the app
+// out of the cache it filled on the last upgrade, so the running client cannot
+// see the new build by asking for it, and a reload — the thing anybody would
+// try — comes back as the same build it was. The server saying so over the live
+// connection is the only channel that is not the cache.
+func TestPWAIsToldWhenTheServerHasANewerBuild(t *testing.T) {
+	// A copy, because this test deploys over it and the real client/dist is
+	// the developer's build.
+	dist := copyApp(t, clientDist(t))
+	h := newPWAHarnessAt(t, dist)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(150*time.Second))
+	defer cancel()
+
+	page := h.openClient(ctx, t)
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+
+	// The deploy. Only the stamp changes: the shell on disk is the shell this
+	// client is running, which is exactly the state a client sees between a
+	// deploy landing and its own service worker catching up.
+	stamp := filepath.Join(dist, "version.json")
+	if err := os.WriteFile(stamp,
+		[]byte(`{"version":"9.9.9","build":"a-newer-build"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The server reads the stamp when it changes rather than once at startup,
+	// and a modification time that lands in the same second as the last one is
+	// the case that used to slip through.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(stamp, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh Welcome, by the most ordinary route there is. It is also the
+	// proof that a reload does not update anything: the app that comes back is
+	// the same build, served out of the same cache.
+	if err := page.Do(ctx, "Page.navigate", map[string]any{"url": h.appURL}, nil); err != nil {
+		t.Fatalf("reload the app: %v", err)
+	}
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(60*time.Second), "the client to reconnect after a reload")
+
+	// Told once, in the corner, with the way to act on it.
+	waitFor(ctx, t, page,
+		`(document.getElementById('toast').textContent || '').includes('can be updated')`,
+		budget(20*time.Second), "the notice that the server has a newer build")
+
+	// And the menu says so too, for the reader who dismissed the notice or was
+	// not looking when it appeared.
+	var label string
+	evalJSON(ctx, t, page, `(() => {
+      document.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+      const items = Array.from(document.querySelectorAll('.menu .item'));
+      const entry = items.find((i) => /Skyhook versions|Update Skyhook/.test(i.textContent));
+      return entry ? entry.textContent : '';
+    })()`, &label)
+	if !strings.Contains(label, "Update") {
+		t.Errorf("shell menu says %q, want it to offer the update", label)
+	}
+
+	waitFor(ctx, t, page, versionsDialogWhen(`/different build/.test(verdict)`),
+		budget(30*time.Second), "the versions dialog to say the two disagree")
+	shown := readVersionsDialog(ctx, t, page)
+
+	joined := strings.Join(shown.Rows, " | ")
+	if !strings.Contains(joined, "a-newer-build") || !strings.Contains(joined, "9.9.9") {
+		t.Errorf("the dialog does not say what the server is serving: %q", joined)
+	}
+	if !shown.Update {
+		t.Errorf("no way out of it was offered; verdict was %q", shown.Verdict)
+	}
+	if !strings.Contains(shown.Verdict, "different build") {
+		t.Errorf("verdict = %q", shown.Verdict)
+	}
+}
+
+// copyApp duplicates a built client so a test can deploy over it.
+func copyApp(t *testing.T, src string) string {
+	t.Helper()
+	dst := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dst, e.Name()), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dst
+}
+
+// The way out: the reader presses Update and ends up on the server's build.
+//
+// Everything before this point is diagnosis. This is the cure, and it is the
+// part with nowhere to hide a mistake: the service worker has to re-fetch its
+// own script, install a generation of the shell under a new cache name, take
+// the page over, and only then can a reload land on the new build. Get the
+// order wrong — reload first, which is what anybody writes the first time —
+// and the app comes back as the build it already was, from the cache that is
+// still in charge. That failure looks exactly like an update that "did not
+// work", and it is invisible to every test that does not run a real worker.
+func TestPWAUpdatesItselfOntoTheServersBuild(t *testing.T) {
+	dist := copyApp(t, clientDist(t))
+	was := readStamp(t, dist)
+	h := newPWAHarnessAt(t, dist)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+
+	page := h.openClient(ctx, t)
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	// The shell has to be in the worker's cache before the deploy, or this
+	// tests an install rather than an upgrade.
+	waitFor(ctx, t, page,
+		`navigator.serviceWorker.getRegistration().then(r => !!(r && r.active))`,
+		budget(30*time.Second), "the service worker to take charge")
+
+	// A deploy, in full: every file that carries the build id now carries a
+	// different one, which is what a rebuild produces and what makes the worker
+	// script differ — the only thing a browser looks at to decide there is an
+	// upgrade at all.
+	const now = "0123456789abcdef"
+	deploy(t, dist, was, now)
+
+	if err := page.Do(ctx, "Page.navigate", map[string]any{"url": h.appURL}, nil); err != nil {
+		t.Fatalf("reload the app: %v", err)
+	}
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(60*time.Second), "the client to reconnect")
+
+	// Still the old build, because a reload is served from the cache. That is
+	// the premise of this whole mechanism, so it is asserted rather than
+	// assumed.
+	var running string
+	evalJSON(ctx, t, page, `(() => {
+      document.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+      const items = Array.from(document.querySelectorAll('.menu .item'));
+      items.find((i) => /Skyhook versions|Update Skyhook/.test(i.textContent)).click();
+      return document.getElementById('about-rows').children[1].textContent;
+    })()`, &running)
+	if !strings.Contains(running, was) {
+		t.Fatalf("after a reload the app reports build %q, want the cached %q", running, was)
+	}
+
+	evalJSON(ctx, t, page, `document.getElementById('about-update').click(), true`, nil)
+
+	// The new shell has to be fetched and installed before anything can move
+	// onto it, and over this link that takes as long as it takes.
+	waitFor(ctx, t, page,
+		`caches.keys().then(k => k.includes('skyhook-shell-`+now+`'))`,
+		budget(90*time.Second), "the new generation of the shell to be cached")
+
+	// Then the page reloads itself, so the evidence is on the far side of a
+	// navigation this test did not perform. Polling for the app to report the
+	// new build is what distinguishes an update that happened from one that
+	// reloaded onto the same cache: the second is the bug, and it looks like
+	// success everywhere except here.
+	waitFor(ctx, t, page,
+		versionsDialogWhen(`rows[1].includes('`+now+`') && /Up to date/.test(verdict)`),
+		budget(90*time.Second), "the app to come back as the build the server serves")
+
+	after := readVersionsDialog(ctx, t, page)
+	if !strings.Contains(after.Rows[1], now) {
+		t.Errorf("after updating, the app is still %q; want the served build %q",
+			after.Rows[1], now)
+	}
+	if after.Update || !strings.Contains(after.Verdict, "Up to date") {
+		t.Errorf("the two halves still disagree after an update: %q", after.Verdict)
+	}
+}
+
+// dialogState is what the versions dialog is showing: the rows as a flat list
+// of terms and values, the verdict under them, and whether an update is on
+// offer.
+type dialogState struct {
+	Rows    []string `json:"rows"`
+	Verdict string   `json:"verdict"`
+	Update  bool     `json:"update"`
+}
+
+/*
+versionsDialogWhen builds a polling expression that opens the versions dialog
+the way a reader does — right-click, then the last entry in the shell menu —
+and evaluates cond against what it shows. cond may use `rows` (dt and dd text,
+interleaved) and `verdict`.
+
+It re-opens on every poll rather than opening once and reading afterwards,
+because the dialog renders what was known at the moment it opened. The moments
+that matter here are exactly the ones where that is not yet the answer: the HUD
+turns green when the socket opens, a full round trip before the Welcome that
+carries the versions, and this link's round trips are seconds. A test that
+opened once and read would be racing the link, and would win on a LAN.
+*/
+func versionsDialogWhen(cond string) string {
+	return `(() => {
+      const dialog = document.getElementById('about');
+      if (!dialog) return false;
+      if (dialog.open) dialog.close();
+      document.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+      const items = Array.from(document.querySelectorAll('.menu .item'));
+      const entry = items.find((i) => /Skyhook versions|Update Skyhook/.test(i.textContent));
+      if (!entry) return false;
+      entry.click();
+      const dl = document.getElementById('about-rows');
+      if (!dl || dl.children.length < 4) return false;
+      const rows = Array.from(dl.children).map((n) => n.textContent);
+      const verdict = document.getElementById('about-verdict').textContent;
+      return !!(` + cond + `);
+    })()`
+}
+
+// readVersionsDialog reads the dialog a versionsDialogWhen poll has just left
+// open and populated.
+func readVersionsDialog(ctx context.Context, t *testing.T, page *cdp.Session) dialogState {
+	t.Helper()
+	var shown dialogState
+	evalJSON(ctx, t, page, `(() => ({
+      rows: Array.from(document.getElementById('about-rows').children)
+        .map((n) => n.textContent),
+      verdict: document.getElementById('about-verdict').textContent,
+      update: !document.getElementById('about-update').hidden,
+    }))()`, &shown)
+	return shown
+}
+
+func readStamp(t *testing.T, dist string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dist, "version.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		Build string `json:"build"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Build) == 0 {
+		t.Fatal("the built client has no build id")
+	}
+	return s.Build
+}
+
+// deploy replaces one build id with another everywhere it appears, which is
+// what a rebuild of changed sources amounts to as far as the browser is
+// concerned: a different worker script, a different cache name, a different
+// stamp. The two ids are the same length, so the bundles and their source maps
+// stay consistent.
+func deploy(t *testing.T, dist, was, now string) {
+	t.Helper()
+	if len(was) != len(now) {
+		t.Fatalf("build ids differ in length: %q vs %q", was, now)
+	}
+	for _, name := range []string{"app.js", "net.worker.js", "sw.js", "version.json"} {
+		path := filepath.Join(dist, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		swapped := strings.ReplaceAll(string(data), was, now)
+		if swapped == string(data) && name != "net.worker.js" {
+			t.Fatalf("%s does not carry the build id, so nothing would change", name)
+		}
+		if err := os.WriteFile(path, []byte(swapped), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The server re-reads the stamp when it changes; a write inside the same
+	// second as the last one is the case worth being explicit about.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(dist, "version.json"), future, future); err != nil {
+		t.Fatal(err)
+	}
+}
