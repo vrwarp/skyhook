@@ -389,6 +389,24 @@
     if (tag === 'HEAD') return n; // head content is replaced by used-CSS
     if (CANVAS_TAGS[tag]) return n;
 
+    if (tag === 'SLOT') {
+      // A slot renders what was assigned to it, so that is what goes here. The
+      // nodes come from the host's light DOM and are skipped where they sit
+      // (see childrenToSerialize), which is the whole of what "flattened" has
+      // to mean: composed, not merely moved inside the host.
+      //
+      // Left as it was, a component's light DOM rendered next to the slot
+      // instead of in it, and everything the slot was inside stopped applying
+      // to it. Reddit hangs its tooltips off `<span slot="content">`, and the
+      // slot they belong in sits inside a `hidden` box: the mirror drew "Open
+      // navigation", "Go to Reddit Home" and "Log in to Reddit" across the top
+      // of the page, permanently, because the box that hides them was no
+      // longer an ancestor.
+      var assigned = slotContent(node);
+      for (var a = 0; a < assigned.length; a++) n += serializeNode(assigned[a], id2, rows);
+      return n;
+    }
+
     if (node.shadowRoot) {
       // Flattening the shadow tree in place keeps the client a plain patcher.
       var sk = node.shadowRoot.childNodes;
@@ -407,9 +425,46 @@
       }
       return n;
     }
-    var kids = node.childNodes;
+    var kids = childrenToSerialize(node);
     for (var i = 0; i < kids.length; i++) n += serializeNode(kids[i], id2, rows);
     return n;
+  }
+
+  /*
+   * slotContent gives what a slot actually renders.
+   *
+   * `{flatten: true}` is what makes this the rendered answer rather than the
+   * assigned one: a slot with nothing assigned draws its own children as
+   * fallback, and a slot assigned another slot resolves through it. Both are
+   * ordinary in a component library, and both are what the reader sees.
+   */
+  function slotContent(slot) {
+    try {
+      return slot.assignedNodes ? slot.assignedNodes({ flatten: true }) : slot.childNodes;
+    } catch (e) {
+      return slot.childNodes;
+    }
+  }
+
+  var NO_CHILDREN = [];
+
+  /*
+   * childrenToSerialize gives the children that render under this node.
+   *
+   * A node assigned to a slot renders there and not here, so it is left for the
+   * slot to emit. A light-DOM child of a shadow host that no slot claimed
+   * renders nowhere at all — the browser drops it — and mirroring it would put
+   * content on the reader's screen that nobody else can see.
+   */
+  function childrenToSerialize(node) {
+    // Nothing here distributes anything — including a host whose root is
+    // closed, which reads as no root at all. Its light DOM goes on being
+    // mirrored where it sits: the same guess as before, and the only one left.
+    if (!node.shadowRoot) return node.childNodes;
+    // An open host draws none of its light DOM where it sits: what a slot
+    // claimed is drawn at that slot, and what no slot claimed is drawn nowhere.
+    // The host's own subtree came from the shadow root above.
+    return NO_CHILDREN;
   }
 
   /**
@@ -1072,6 +1127,13 @@
   }
 
   function knownParentId(node) {
+    // Where the node renders, which is where it was serialised. A node the host
+    // handed to a slot belongs under that slot; asking parentNode instead would
+    // put every later mutation back beside the component rather than inside it,
+    // and undo the flattening one record at a time.
+    var slot = null;
+    try { slot = node.assignedSlot; } catch (e) { slot = null; }
+    if (slot) return idOf.get(slot) || 0;
     var p = node.parentNode;
     if (!p) return 0;
     if (p.nodeType === 11 && p.host) return idOf.get(p.host) || 0; // shadow root

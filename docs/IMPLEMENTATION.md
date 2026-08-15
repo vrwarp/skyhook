@@ -627,12 +627,10 @@ So they are re-pointed as the sheet is read, in the one place that still knows
 which element hosts it — `:host` becomes the host's tag name, `:host(S)` carries
 S's conditions onto it, `:host-context(S)` becomes the host under an ancestor
 matching S or matching it itself, and `X::part(p)` becomes `X [part~="p"]`,
-which is exactly where flattening left it. `::slotted()` is left dropped:
-flattening lands slotted content beside the slot rather than in it, so
-re-pointing it means rewriting the selector around the host, and no capture so
-far holds a rule that would gain by it. A part renamed on the way out by
-`exportparts` is matched under its inner name, because that is the name the
-flattened tree keeps. Specificity does move here — `:host` counts as a
+which is exactly where flattening left it. `::slotted()` is left dropped, and a
+part renamed on the way out by `exportparts` is matched under its inner name,
+because that is the name the flattened tree keeps. Specificity does move here —
+`:host` counts as a
 pseudo-class and lands as a type selector — but by the same amount for every
 rule in a component's sheet, so the order a component intends among its own
 rules survives; only ties against another sheet can turn over, and those were
@@ -647,11 +645,45 @@ element whose parts it styles is on the page at all, which is the question that
 actually decides it: a site ships parts for drawers and modals it is not
 currently showing, and those still go.
 
-The general rule all three are instances of: a selector whose truth differs
-between the two sides has to be answered landside and carried, never re-asked
-plane-side. `:defined` is the sharpest case because it always differs; `:host`
-is the widest, because on a site built out of web components it is most of what
-a component says about itself.
+**The composition half.** With the selectors re-pointed, the same page came back
+wearing "Open navigation", "Go to Reddit Home", "Sign up for Reddit", "Log in to
+Reddit" and "Open settings menu" across the top of itself, permanently. Those
+are tooltips. A component of that kind keeps its text in the light DOM and slots
+it wherever it wants it drawn, which for anything that opens and closes is
+inside a box that is hidden until it opens:
+
+```html
+<div part="body" class="tooltip-body" hidden>
+  <slot name="content"></slot>          <!-- where the text is drawn -->
+</div>
+…
+<span slot="content">Open navigation</span>   <!-- where the text lives -->
+```
+
+The mirror was serialising the second one where it *sits*. "Flattening the
+shadow tree in place" had been read as *move the light DOM inside the host*,
+and composing is not that: a slotted node is drawn at its slot, and everything
+the slot is inside applies to it. Emitted beside the slot instead, the text came
+out from under the box that hides it — and no CSS rewrite could have helped,
+because the box was no longer an ancestor. One capture had 974 empty slots and
+five loose captions.
+
+So the serialiser composes. A `<slot>` emits `assignedNodes({flatten: true})` —
+flattened, because a slot with nothing assigned draws its own fallback and a
+slot assigned another slot resolves through it, and both are what the reader
+sees. An open host emits none of its light DOM in place: what a slot claimed is
+emitted there, and what no slot claimed is emitted nowhere, because the browser
+draws it nowhere. `knownParentId` answers the same way, or the first mutation
+after a snapshot would put a slotted node back beside the component and undo the
+composition one record at a time.
+
+The general rule all four are instances of: what the mirror sends has to be the
+document as it is *rendered*, and every one of these was some part of the
+pipeline answering for the document as it is *written*. `:defined` is the
+sharpest case because it always differs; `:host` is the widest, because on a
+site built out of web components it is most of what a component says about
+itself; and the slot is the one that no amount of CSS could have repaired,
+because it was the tree that was wrong and not the rules.
 
 ### 20. A divergence check has to compare two documents, not two instants
 
@@ -680,6 +712,31 @@ The same lie was in the bundles. `hashesAgree` compared the last acked hash
 against a live one and reported "false" for a mirror that was merely a frame
 behind; it is now only present when the client had acknowledged the newest
 frame, and says `hashesComparable: false` otherwise.
+
+**A sequence number does not identify a frame on its own.** The anchoring above
+is only as good as the anchor, and one number is reused: a snapshot restarts a
+tab's numbering at zero, so frame 0 means one document before a re-snapshot and
+a different one after. When the client's last word was "I have frame 0" and a
+snapshot then made frame 0 mean something else, the check found an ack waiting
+with the right number and the wrong document, compared it against the new one,
+and reported the difference as a divergence — costing a resync of a page that
+was fine. Acks still in flight when the snapshot went out do the same thing:
+they were sent a round trip ago, about the document being replaced.
+
+Both are closed without a protocol change, because a snapshot is always frame 0
+and so the first ack that can belong to the new document is the one that says 0.
+Sending a snapshot retires the frame the check anchors to — `acked` and
+`lastHash` are cleared — and every ack arriving before the snapshot's own is
+dropped rather than credited. `TestASnapshotRetiresTheFrameTheCheckAnchorsTo`
+fails against the old code with "the check was answered with a hash from before
+the snapshot".
+
+This had been latent since the check was written, and surfaced only once §19's
+loading fix stopped masking it. `Loading()` used to be the state of whichever
+frame spoke last, so on any page with subframes it was stuck true — and the
+integrity check skips a loading tab. Reporting it accurately let the check run
+in windows it had been silently sitting out. A guard that works by accident
+stops working, and what it was hiding arrives all at once.
 
 ### 21. What a capture leaves out is evidence too
 
@@ -1420,11 +1477,11 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   component mirrors as its light DOM and nothing else. Late-attached *open*
   roots are handled (§19); closed ones cannot be.
 - **`::slotted()` rules are dropped, and `exportparts` renaming is ignored.**
-  Flattening puts slotted content beside its slot rather than inside it, so a
-  `::slotted()` rule cannot be re-pointed the way `:host` and `::part()` are
-  (§19) without rewriting the whole selector around the host; nothing in any
-  capture so far wants one. A part re-exported under a new name is matched under
-  the name it carries inside, which is the only one the flattened tree keeps.
+  A `::slotted()` rule cannot be re-pointed the way `:host` and `::part()` are
+  (§19): the composed tree it describes has no marker saying a node arrived by
+  assignment, and nothing in any capture so far wants one. A part re-exported
+  under a new name is matched under the name it carries inside, which is the
+  only one the flattened tree keeps.
 
 ## Measured results
 

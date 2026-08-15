@@ -66,6 +66,13 @@ type tabState struct {
 	journal  *Journal
 	acked    uint64
 	lastHash uint64
+	// A snapshot restarts this tab's frame numbering at zero, so a sequence
+	// number does not identify a frame on its own: frame 0 means one document
+	// before a re-snapshot and a different one after. awaitingSnap is true from
+	// the moment a snapshot is sent until the client acknowledges it, which is
+	// the window in which an arriving ack may still belong to the document the
+	// snapshot replaced. See Ack and EmitFrame.
+	awaitingSnap bool
 	// The integrity check anchors itself to one frame — see integrityLoop.
 	// check is the seq it is waiting for, armed only while it waits; got holds
 	// the client's hash for that seq once the ack carrying it arrives.
@@ -267,6 +274,15 @@ func (s *Session) EmitFrame(ch protocol.Channel, f *protocol.Frame) {
 	if ch == protocol.ChDom && (f.Type == protocol.TypeMutation || f.Type == protocol.TypeSnapshot) {
 		s.mu.Lock()
 		ts := s.tabs[f.Tab]
+		if ts != nil && f.Type == protocol.TypeSnapshot {
+			// The frame the client last acknowledged, and its hash, described
+			// the document this snapshot is replacing. Numbering restarts here,
+			// so that pair now names a frame 0 in one document with a hash from
+			// another, and the integrity check would compare the two and call
+			// the difference a divergence. Forget it until the client says
+			// which document it is holding.
+			ts.acked, ts.lastHash, ts.awaitingSnap = 0, 0, true
+		}
 		s.mu.Unlock()
 		if ts != nil {
 			ts.ring.Add(f, len(msg))
@@ -525,13 +541,24 @@ func (s *Session) Ack(tab uint32, seq uint64, hash uint64) {
 	s.mu.Lock()
 	ts := s.tabs[tab]
 	if ts != nil {
-		ts.acked = seq
-		ts.lastHash = hash
-		// The integrity check is waiting for exactly this frame, and acks for
-		// later ones stream past while it waits: catch the hash on its way
-		// through rather than reading whatever is current when it looks.
-		if ts.checkArmed && seq == ts.checkSeq {
-			ts.checkGot, ts.checkHash = true, hash
+		// Between sending a snapshot and hearing it acknowledged, the acks
+		// still arriving describe the document it replaced — the client is a
+		// round trip behind and is answering for frames it applied before the
+		// snapshot reached it. A snapshot is always frame 0, so the first ack
+		// that belongs to the new document is the one that says 0, and every
+		// ack before it is an answer about a document that no longer exists.
+		stale := ts.awaitingSnap && seq != 0
+		if !stale {
+			ts.awaitingSnap = false
+			ts.acked = seq
+			ts.lastHash = hash
+			// The integrity check is waiting for exactly this frame, and acks
+			// for later ones stream past while it waits: catch the hash on its
+			// way through rather than reading whatever is current when it
+			// looks.
+			if ts.checkArmed && seq == ts.checkSeq {
+				ts.checkGot, ts.checkHash = true, hash
+			}
 		}
 	}
 	s.mu.Unlock()

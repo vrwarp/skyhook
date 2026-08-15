@@ -372,6 +372,33 @@ func (m *Model) FindByText(substr string) *ModelNode {
 	return best
 }
 
+// AncestorWithAttr reports whether a node or any ancestor of it carries an
+// attribute — which is how a caller asks whether something is inside a box that
+// hides it, rather than merely near one.
+//
+// Like FindByText, the walk belongs here because it has to happen under the
+// replica's own lock.
+func (m *Model) AncestorWithAttr(id int64, attr string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	// Bounded rather than cycle-checked: a replica with a parent loop is a bug
+	// worth failing on, not one worth hanging on.
+	for depth := 0; depth < 256; depth++ {
+		n := m.Nodes[id]
+		if n == nil {
+			return false
+		}
+		if _, ok := n.Attrs[attr]; ok {
+			return true
+		}
+		if n.Parent == 0 {
+			return false
+		}
+		id = n.Parent
+	}
+	return false
+}
+
 // Hash fingerprints the replica with the same algorithm the agent uses, so a
 // mismatch means genuine divergence rather than a hashing difference.
 func (m *Model) Hash() uint64 {
