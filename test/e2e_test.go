@@ -81,6 +81,28 @@ const fixturePage = `<!DOCTYPE html>
   <div class="used">styled</div>
   <form id="login"><input id="secret" type="password" value=""></form>
   <sky-card id="card" tone="warm"></sky-card>
+  <!-- A component built the way a tooltip is: the text lives in the light DOM
+       and the slot it belongs in sits inside a box that is hidden until the
+       thing is opened. Composed, it is invisible; merely moved inside the host,
+       it is a caption printed across the page. -->
+  <sky-tip id="tip">
+    <span slot="tip">the tip nobody asked to see</span>
+    <span>plain child, no slot claims it</span>
+  </sky-tip>
+<script>
+  // Its shadow root slots the tip inside a hidden box and offers fallback text
+  // for a slot nothing fills.
+  class SkyTip extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML =
+        '<div id="anchor">hover me</div>' +
+        '<div id="bubble" hidden><slot name="tip"></slot></div>' +
+        '<div id="empty"><slot name="nothing">fallback stands in</slot></div>';
+    }
+  }
+  customElements.define('sky-tip', SkyTip);
+</script>
 <script>
   // A web component whose styles live in a constructed stylesheet, which is
   // how every Lit-based component ships CSS. These never appear in
@@ -1315,6 +1337,56 @@ func ruleCloses(rule string) bool {
 		}
 	}
 	return depth == 0
+}
+
+/*
+Flattening a shadow tree means composing it, not moving the light DOM inside the
+host.
+
+A component puts its text in the light DOM and slots it wherever the component
+wants it drawn — which, for anything that opens and closes, is inside a box that
+is hidden until it opens. Serialising that text where it *sits* rather than
+where it is *drawn* takes it out from under the box that hides it, and the
+reader gets it on screen permanently. A mirrored Reddit wore "Open navigation",
+"Go to Reddit Home" and "Log in to Reddit" across the top of the page for that
+reason: three tooltips whose slot is inside a `hidden` div.
+
+The same reading settles the other half. A light-DOM child no slot claims is
+drawn nowhere at all, and a slot nothing fills draws its own fallback.
+*/
+func TestSlottedContentIsMirroredWhereItIsDrawn(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+	tab := h.openFixture(ctx, cl)
+
+	if err := cl.WaitForText(ctx, tab, "hover me", budget(30*time.Second)); err != nil {
+		t.Fatalf("the component never arrived: %v", err)
+	}
+	// The fallback proves the slot walk ran at all, so wait for it rather than
+	// for a fixed interval.
+	if err := cl.WaitForText(ctx, tab, "fallback stands in", budget(30*time.Second)); err != nil {
+		t.Errorf("a slot nothing fills did not draw its fallback: %v", err)
+	}
+
+	model := cl.Model(tab)
+	// The tip is mirrored — it is real content the reader gets on hover — but
+	// under the box that hides it, not beside it.
+	tip := model.FindByText("the tip nobody asked to see")
+	if tip == nil {
+		t.Fatal("the slotted text never reached the client at all")
+	}
+	if !model.AncestorWithAttr(tip.ID, "hidden") {
+		t.Error("slotted text was mirrored outside the hidden box it is drawn inside: " +
+			"the reader sees a tooltip that is supposed to be closed")
+	}
+	// A child no slot claimed is drawn nowhere landside, so it is nowhere here.
+	if strings.Contains(model.Text(), "plain child, no slot claims it") {
+		t.Error("a light-DOM child that no slot claims was mirrored; " +
+			"the browser draws it nowhere and neither should the mirror")
+	}
 }
 
 // A password is the one thing on a page that must not be mirrored. The value
