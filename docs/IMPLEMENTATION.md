@@ -681,6 +681,31 @@ against a live one and reported "false" for a mirror that was merely a frame
 behind; it is now only present when the client had acknowledged the newest
 frame, and says `hashesComparable: false` otherwise.
 
+**A sequence number does not identify a frame on its own.** The anchoring above
+is only as good as the anchor, and one number is reused: a snapshot restarts a
+tab's numbering at zero, so frame 0 means one document before a re-snapshot and
+a different one after. When the client's last word was "I have frame 0" and a
+snapshot then made frame 0 mean something else, the check found an ack waiting
+with the right number and the wrong document, compared it against the new one,
+and reported the difference as a divergence — costing a resync of a page that
+was fine. Acks still in flight when the snapshot went out do the same thing:
+they were sent a round trip ago, about the document being replaced.
+
+Both are closed without a protocol change, because a snapshot is always frame 0
+and so the first ack that can belong to the new document is the one that says 0.
+Sending a snapshot retires the frame the check anchors to — `acked` and
+`lastHash` are cleared — and every ack arriving before the snapshot's own is
+dropped rather than credited. `TestASnapshotRetiresTheFrameTheCheckAnchorsTo`
+fails against the old code with "the check was answered with a hash from before
+the snapshot".
+
+This had been latent since the check was written, and surfaced only once §19's
+loading fix stopped masking it. `Loading()` used to be the state of whichever
+frame spoke last, so on any page with subframes it was stuck true — and the
+integrity check skips a loading tab. Reporting it accurately let the check run
+in windows it had been silently sitting out. A guard that works by accident
+stops working, and what it was hiding arrives all at once.
+
 ### 21. What a capture leaves out is evidence too
 
 Chasing §19 through a real bundle showed the gaps, which were all of one kind:
