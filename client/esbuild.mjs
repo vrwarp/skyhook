@@ -7,18 +7,26 @@
  * trip on the link this thing exists for.
  */
 import { build, context } from 'esbuild';
+import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { deflateSync } from 'node:zlib';
 
 const watch = process.argv.includes('--watch');
 const dev = watch || process.argv.includes('--dev');
 
+/** The two bundles the page loads. The service worker is built after them,
+ *  because what goes into it is a hash of everything else. */
 const targets = [
   { in: 'src/app/main.ts', out: 'dist/app.js', format: 'esm' },
   { in: 'src/worker/net.worker.ts', out: 'dist/net.worker.js', format: 'esm' },
-  // The service worker is a module worker; Chrome has supported that since 91.
-  { in: 'src/sw/service-worker.ts', out: 'dist/sw.js', format: 'esm' },
 ];
+
+// The service worker is a module worker; Chrome has supported that since 91.
+const swTarget = { in: 'src/sw/service-worker.ts', out: 'dist/sw.js', format: 'esm' };
+
+/** Everything the service worker precaches, and therefore everything whose
+ *  contents decide which generation of the shell this is. */
+const SHELL = ['index.html', 'app.css', 'app.js', 'net.worker.js', 'manifest.webmanifest'];
 
 const staticFiles = [
   'index.html',
@@ -27,21 +35,26 @@ const staticFiles = [
   'icon.svg',
 ];
 
+function optionsFor(t, define) {
+  return {
+    entryPoints: [t.in],
+    outfile: t.out,
+    bundle: true,
+    platform: 'browser',
+    format: t.format,
+    // Chrome-only client: WebTransport, module workers and dialog elements
+    // are all assumed present, so nothing is transpiled down.
+    target: 'chrome126',
+    sourcemap: dev ? 'inline' : true,
+    minify: !dev,
+    logLevel: 'info',
+    ...(define ? { define } : {}),
+  };
+}
+
 async function bundle() {
   for (const t of targets) {
-    const options = {
-      entryPoints: [t.in],
-      outfile: t.out,
-      bundle: true,
-      platform: 'browser',
-      format: t.format,
-      // Chrome-only client: WebTransport, module workers and dialog elements
-      // are all assumed present, so nothing is transpiled down.
-      target: 'chrome126',
-      sourcemap: dev ? 'inline' : true,
-      minify: !dev,
-      logLevel: 'info',
-    };
+    const options = optionsFor(t);
     if (watch) {
       const ctx = await context(options);
       await ctx.watch();
@@ -49,6 +62,40 @@ async function bundle() {
       await build(options);
     }
   }
+}
+
+/**
+ * Which build this is: a hash of the files the service worker precaches.
+ *
+ * Content rather than a timestamp or a version number, for two reasons. A build
+ * that changed nothing produces the same id, so a redeploy of identical bytes
+ * does not evict a cache or make a phone re-fetch a shell it already holds. And
+ * nobody has to remember to bump it — the failure mode of a hand-maintained
+ * version is that it stays at `v1` through every deploy, which is exactly what
+ * happened.
+ */
+async function buildId() {
+  // Under --watch the shell is rebuilt continuously and the worker is built
+  // once, so a content hash would go stale immediately. A per-run id means each
+  // `npm run watch` gets a worker the browser treats as new.
+  if (watch) return `dev-${Date.now().toString(36)}`;
+  const hash = createHash('sha256');
+  for (const file of SHELL) {
+    hash.update(file);
+    hash.update(await readFile(`dist/${file}`));
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
+/**
+ * The service worker, stamped with the build it precaches.
+ *
+ * Built last, and deliberately not part of its own hash: a browser installs a
+ * new worker when this file's bytes differ, so this file has to differ exactly
+ * when the rest of the shell does.
+ */
+async function bundleServiceWorker(id) {
+  await build(optionsFor(swTarget, { SKYHOOK_BUILD: JSON.stringify(id) }));
 }
 
 /**
@@ -121,11 +168,20 @@ async function assets() {
   await writeFile('dist/icon-192.png', png(192, [17, 24, 39], [56, 189, 248]));
   await writeFile('dist/icon-512.png', png(512, [17, 24, 39], [56, 189, 248]));
 
-  // A build stamp the service worker can key its cache on, so a deploy does
-  // not serve half of one version and half of another.
+}
+
+/**
+ * The build stamp, written where a person can read it.
+ *
+ * The same id the service worker keys its cache on, so "which build is that
+ * phone actually running" is answerable from the outside — by fetching
+ * /version.json — rather than by guessing from symptoms.
+ */
+async function stamp(id) {
   const pkg = JSON.parse(await readFile('package.json', 'utf8'));
   await writeFile('dist/version.json', JSON.stringify({
     version: pkg.version,
+    build: id,
     built: process.env.SOURCE_DATE_EPOCH ?? '',
   }));
 }
@@ -136,6 +192,11 @@ async function run() {
   if (!watch) await rm('dist', { recursive: true, force: true });
   await bundle();
   await assets();
+  // Last, and in this order: the id is a hash of what the two steps above just
+  // wrote, and the worker carries the id.
+  const id = await buildId();
+  await bundleServiceWorker(id);
+  await stamp(id);
   if (watch) console.log('watching for changes');
 }
 

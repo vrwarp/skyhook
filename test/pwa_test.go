@@ -252,6 +252,68 @@ func TestPWALoadsAndRegistersItsServiceWorker(t *testing.T) {
 	}
 }
 
+// A deploy must replace the shell whole, or not at all.
+//
+// The worker keyed its cache on a hard-coded "v1" and served it cache-first,
+// refreshing each file in the background as it happened to be asked for. Two
+// things followed. The worker script itself never changed between builds, so
+// the browser — which decides on an upgrade by byte-comparing it — never
+// installed a new one; and the single long-lived cache filled with whichever
+// files had been re-fetched most recently. The ordinary state after a deploy
+// was one build's markup drawn with another build's stylesheet, which on a
+// phone is a desktop chrome on a screen with no room for one.
+//
+// The fix is that the cache is named after a hash of the shell it holds, so
+// this asserts the property that makes the swap atomic: the worker on the
+// client keys its cache on exactly the build the server is serving, and no
+// other generation of the shell is still reachable.
+func TestPWAKeysItsShellCacheToTheBuildItServes(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page,
+		`navigator.serviceWorker.getRegistration().then(r => !!r.active)`,
+		budget(30*time.Second), "the service worker to activate")
+
+	// The build the server is serving, as the build itself records it.
+	var built string
+	evalJSON(ctx, t, page,
+		`fetch('/version.json').then(r => r.json()).then(v => v.build || '')`, &built)
+	if built == "" {
+		t.Fatal("version.json carries no build id: nothing keys the shell cache")
+	}
+	if built == "v1" {
+		t.Fatal("the build id is a constant; a deploy would reuse the previous cache")
+	}
+
+	// Wait for the precache: install opens the cache before it fills it.
+	waitFor(ctx, t, page,
+		`caches.keys().then(ns => ns.some(n => n.startsWith('skyhook-shell-')))`,
+		budget(30*time.Second), "the shell cache")
+
+	var shells []string
+	evalJSON(ctx, t, page,
+		`caches.keys().then(ns => ns.filter(n => n.startsWith('skyhook-shell-')))`, &shells)
+	want := "skyhook-shell-" + built
+	if len(shells) != 1 || shells[0] != want {
+		t.Fatalf("shell caches = %v, want exactly [%s]", shells, want)
+	}
+
+	// And it holds the shell, rather than being an empty cache with the right
+	// name: a generation that does not contain every file is the mixture this
+	// is meant to rule out.
+	for _, file := range []string{"/index.html", "/app.css", "/app.js", "/net.worker.js"} {
+		var held bool
+		evalJSON(ctx, t, page, fmt.Sprintf(
+			`caches.open(%q).then(c => c.match(%q)).then(r => !!r)`, want, file), &held)
+		if !held {
+			t.Errorf("%s is not in the precached shell", file)
+		}
+	}
+}
+
 // The chrome must be complete before the link is, because on this link "before"
 // can be several seconds. The new-tab button used to be drawn only when the
 // first server message arrived, so the app spent a round trip looking ready
