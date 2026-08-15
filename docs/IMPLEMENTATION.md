@@ -1279,6 +1279,104 @@ ordinary rule in the fixture and checks the ordinary rule, which is the symptom 
 reader would report. Against the old pattern it fails with the same wreckage the
 capture held: `#bracket-url{background-image:url(skyhook://img/44fee7e3).png");}`.
 
+### 30. The mirror's own wrapper was breaking every full-height layout
+
+Google Chat mirrored as a header bar, the word "Shortcuts", and eight hundred
+pixels of white. The DOM was perfect: 1238 nodes on both sides, hashes agreeing,
+every string of text present in `expected.html` — "Welcome, benson", the
+shortcut list, the three empty-state cards — and none of it on screen. A capture
+that says the two documents are identical and the reader saying the page is
+blank are both true at once only if the difference is in the box tree, and the
+box tree is the one thing neither side hashes.
+
+The patcher builds a snapshot detached and swaps it in whole, which is right: a
+resync that appends a thousand nodes into the live document lays the page out a
+thousand times and the reader watches their page empty itself and refill. What
+was wrong was the container. It was a `<div>`, and it went into the document
+with the tree still inside it.
+
+A `<div>` is a box, and its height is auto. The mirrored root is the page's own
+`<html>`, so the whole of a page's full-height layout resolves *through* that
+box:
+
+    html, body { height: 100% }      <- the page's own rule; 881px, correct
+      div (skyhook's)                <- auto
+        html                         <- 100% of auto = auto
+          body                       <- auto
+            .app { height: 100% }    <- auto, and so is everything under it
+
+One box, and every `height: 100%` below it collapses to its content. That is not
+an unusual pattern to break — it is how essentially every application on the web
+says "fill the window". Gmail, Chat, Docs, Slack.
+
+This had been true since the patcher was written and hurt nothing until
+[§25](#25-the-mirror-was-rendering-the-entire-web-in-quirks-mode). Quirks mode's
+percentage-height rule walks up the ancestors until it finds a definite height,
+so it walked straight past the wrapper to the frame's own viewport and got very
+nearly the right answer for entirely the wrong reason. Fixing the compatibility
+mode was correct and made the reCAPTCHA usable; it also removed the accident
+that had been hiding this, which is worth stating plainly because "the fix
+exposed a second bug" is the shape a regression report takes when nobody knows
+about the first one.
+
+The container is now a `DocumentFragment`. It holds a detached tree exactly as
+well and generates no box at all, so the page's root becomes a child of the
+frame's body and the chain is the one the page was written for. There is no
+replacement wrapper and no compensating stylesheet rule: the fix is that
+Skyhook stops putting anything in the middle.
+
+`TestPWAKeepsTheDocumentRootDirectlyInTheBody` asserts both halves — that
+nothing sits between the frame's body and the page's root, and that a fixture
+whose only definite height is the viewport reaches it. Against the wrapper it
+fails with `#main came out 18px in a 725px frame, wanted about 685px`.
+
+### 31. A frame the page starts is not the page still loading
+
+The same capture had the tab flagged `loading` sixteen minutes after
+`readyState` went to `complete`. `Page.frameStartedLoading` and
+`Page.frameStoppedLoading` fire for every frame in a tab and carry the
+`frameId` that says which; Skyhook subscribed to both and discarded the
+parameters, so the tab's loading flag was the state of whichever frame spoke
+last.
+
+Google's sites make that the ordinary case. chat.google.com finishes, and then
+injects a cookie-rotation frame and a contact hovercard — and over a link with a
+second of latency, something is always still in flight. The reader gets a
+spinner in the tab strip and a progress cursor over every link on a page that is
+finished and interactive.
+
+The other direction is the more expensive one. A subframe that finishes while
+the page is still coming clears the flag early, so the shell says the page has
+arrived when it has not. That is the reassurance
+[§22](#22-a-click-has-to-be-answered-before-the-page-can-be) exists to provide,
+and a false one is worse than none.
+
+Both handlers now compare the `frameId` against the tab's main frame, which is
+the distinction `onFrameNavigated` was already making with the same field.
+`Page.loadEventFired` is main-frame only and needed no change.
+
+### 32. An optimistic echo has to land where the message will
+
+Reading the same capture for what else assumed a chat app looks a particular
+way: the ghost message — the local echo that appears the instant Enter is
+pressed, seconds before the server can confirm it — was placed in the first
+element matching `[role="list"], ul, ol` anywhere in the document.
+
+On Google Chat every one of the ten `role="list"` elements on the home screen
+is in the left rail: the direct messages, the spaces, the apps. The reader's own
+message would have appeared in the sidebar, under their list of conversations.
+An echo in the wrong place is worse than no echo: it is not reassurance, it is a
+second thing to be confused by, and the real message arriving elsewhere a moment
+later does not explain it.
+
+The search now runs outwards from the composer instead of down from the
+document, which gets it right for the reason the layout is that way. A composer
+sits inside the conversation it writes to, and so does that conversation's
+transcript; the navigation is somewhere else. So the first ancestor whose
+subtree contains a list at all is the conversation pane. The walk still ends at
+the body, which is what keeps a plain message board — where the body *is* the
+container — working as before.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

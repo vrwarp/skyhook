@@ -340,3 +340,89 @@ func TestPWAMirrorsInStandardsMode(t *testing.T) {
 			"rules make it auto, about 18px", got.Inner)
 	}
 }
+
+/*
+Nothing of the mirror's own may sit between the page's root and the body.
+
+The mirrored root is the page's own <html>, and the patcher builds the tree
+detached before swapping it in — which for a long time meant building it inside
+a wrapper <div>. The wrapper is not a mirrored node, so it changes no hash and
+appears in no diff, and both sides go on agreeing about the document. What it
+changes is the box tree.
+
+`html, body { height: 100% }` is how every full-height application on the web
+says "fill the window", and every box below it asks for 100% of its parent. Put
+one auto-height box in that chain and the percentage resolves against auto,
+computes to auto, and the whole application collapses to the height of whatever
+is in normal flow. Google Chat came back as a header, the word "Shortcuts", and
+800px of white.
+
+Quirks mode hid this for as long as the mirror was in it: a percentage height
+against an auto parent walked up to the nearest definite ancestor, which found
+the frame's viewport and gave very nearly the right answer for the wrong
+reason. Standards mode is correct and unforgiving, and it made the wrapper
+visible the day it landed.
+
+The fixture asks for a viewport-height layout with no pixel height anywhere
+below <body>, so there is nothing for a broken chain to fall back on: either
+the mirror reaches the frame's height or #main is zero.
+*/
+func TestPWAKeepsTheDocumentRootDirectlyInTheBody(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/full-height"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('measure me')`,
+		budget(60*time.Second), "the mirrored page")
+	waitFor(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const main = doc.getElementById('main');
+      return !!main && main.getBoundingClientRect().height > 0;
+    })()`, budget(20*time.Second), "the mirrored layout to settle")
+
+	var got struct {
+		Main    int    `json:"main"`
+		Frame   int    `json:"frame"`
+		Between string `json:"between"`
+	}
+	evalJSON(ctx, t, page, `(() => {
+      const frame = document.querySelector('iframe.mirror');
+      const doc = frame.contentDocument;
+      const main = doc.getElementById('main');
+      // Everything the mirror put between its own <body> and the page's root.
+      const root = doc.getElementById('app').closest('html');
+      const between = [];
+      for (let el = root; el && el !== doc.body; el = el.parentElement) {
+        if (el !== root) between.push(el.tagName.toLowerCase());
+      }
+      return { main: main ? Math.round(main.getBoundingClientRect().height) : -1,
+               frame: Math.round(frame.getBoundingClientRect().height),
+               between: between.join(',') };
+    })()`, &got)
+
+	if got.Between != "" {
+		t.Errorf("the mirror put %q between its body and the page's root; every "+
+			"height:100%% chain in the page resolves through that box, and an "+
+			"auto-height one collapses all of them", got.Between)
+	}
+	// The consequence, not just the shape. #main is `calc(100% - 40px)` of a
+	// chain that starts at the viewport, so a broken chain leaves it at zero
+	// and an intact one leaves it just under the frame.
+	if want := got.Frame - 40; got.Main < want-8 {
+		t.Errorf("#main came out %dpx in a %dpx frame, wanted about %dpx: the "+
+			"page's height:100%% chain is not reaching the frame's viewport",
+			got.Main, got.Frame, want)
+	}
+}

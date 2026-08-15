@@ -84,6 +84,32 @@ describe('Patcher', () => {
     expect(document.querySelector('style[data-skyhook-css]')?.textContent).toContain('ul{margin:0}');
   });
 
+  /*
+   * The snapshot's root goes into the body directly, with nothing between.
+   *
+   * The patcher builds the tree detached and swaps it in whole, and the
+   * obvious way to hold a detached tree is a wrapper <div>. But a wrapper is a
+   * box, and its height is auto, and the mirrored root is the page's own
+   * <html>: `html, body { height: 100% }` — the way every full-height site on
+   * the web says "fill the window" — then resolves against auto, computes to
+   * auto, and the entire app collapses to the height of whatever happens to be
+   * in normal flow. Google Chat rendered as a header, the word "Shortcuts",
+   * and 800px of white.
+   *
+   * Nothing downstream can catch it: the wrapper is not a mirrored node, so
+   * both sides hash the same document and agree. It is the box tree that
+   * differs, and only the reader sees that. A DocumentFragment holds the tree
+   * just as well and leaves no box behind, so the test is on the shape.
+   */
+  it('puts the snapshot root in the body with no box in between', () => {
+    patcher.applySnapshot(snapshot());
+    const root = document.querySelector('ul')?.parentElement;
+    expect(root).not.toBeNull();
+    expect(root?.parentElement).toBe(document.body);
+    expect(patcher.rootElement).toBe(root);
+    expect(document.body.children.length).toBe(1);
+  });
+
   it('applies a move without rebuilding the subtree', () => {
     patcher.applySnapshot(snapshot());
     const before = document.querySelectorAll('li').length;

@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MirrorHost, type MenuTarget } from '../src/mirror/host.js';
+import { MirrorHost, nearestList, type MenuTarget } from '../src/mirror/host.js';
 import { imageCacheKey } from '../src/shared/caches.js';
 import {
   NodeFlags, NodeKind, OpCode, type ImageMeta, type Mutation, type Snapshot,
@@ -912,5 +912,75 @@ describe('MirrorHost', () => {
       // rasteriser inlines from Cache Storage.
       expect(host.freeze().images).toContain('abc123');
     });
+  });
+});
+
+/*
+Where an optimistically-echoed message goes.
+
+The ghost exists so a message appears the instant it is typed, seconds before
+the server can confirm it. That is only worth anything if it appears where the
+message will actually land. "The first list in the document" is not that place
+on any real chat app: Google Chat's home has ten elements at `role="list"` and
+every one is in the left rail — the direct messages, the spaces, the apps. The
+transcript is somewhere else entirely, so the reader's own message went into
+the sidebar under their list of conversations.
+
+The fixture is that shape: navigation lists first in document order, then the
+conversation pane holding a transcript and the composer that writes to it.
+*/
+describe('nearestList', () => {
+  function chatApp(): HTMLElement {
+    const app = document.createElement('div');
+    app.innerHTML = `
+      <nav>
+        <div role="list" aria-label="List of Direct Messages"><div>ada</div></div>
+        <div role="list" aria-label="List of spaces."><div>#general</div></div>
+      </nav>
+      <main>
+        <div class="pane">
+          <div role="list" class="transcript"><div>an earlier message</div></div>
+          <div class="composer" contenteditable="true"></div>
+        </div>
+      </main>`;
+    document.body.appendChild(app);
+    return app;
+  }
+
+  afterEach(() => { document.body.textContent = ''; });
+
+  it('finds the transcript beside the composer, not the navigation', () => {
+    const app = chatApp();
+    const composer = app.querySelector<HTMLElement>('.composer')!;
+    expect(nearestList(composer)?.className).toBe('transcript');
+  });
+
+  it('answers with nothing when the page has no list to join', () => {
+    const app = chatApp();
+    for (const el of Array.from(app.querySelectorAll('[role="list"]'))) el.remove();
+    const composer = app.querySelector<HTMLElement>('.composer')!;
+    expect(nearestList(composer)).toBeNull();
+  });
+
+  it('does not put the echo inside the composer it just left', () => {
+    // A rich-text composer holding the bullets the reader was typing. It is a
+    // list, it is nearest, and it is the one place the message cannot go.
+    document.body.innerHTML = `<div class="pane">
+        <div role="list" class="transcript"><div>an earlier message</div></div>
+        <div class="composer" contenteditable="true"><ul><li>a bullet</li></ul></div>
+      </div>`;
+    const composer = document.querySelector<HTMLElement>('.composer')!;
+    expect(nearestList(composer)?.className).toBe('transcript');
+  });
+
+  it('still reaches the body on a page where the body is the container', () => {
+    // Nothing between the composer and the body: a plain message board, where
+    // the only list on the page is the one the message joins. Searching
+    // outwards has to end somewhere, and ending at the body is what keeps the
+    // simple case working.
+    document.body.innerHTML = `<ul id="log"><li>an earlier message</li></ul>
+      <input id="say">`;
+    const composer = document.getElementById('say')!;
+    expect(nearestList(composer)?.id).toBe('log');
   });
 });

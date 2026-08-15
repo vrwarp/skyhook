@@ -109,6 +109,7 @@ export class Patcher {
   private styleEl: HTMLStyleElement | null = null;
   private cssRules: string[] = [];
   private hooks: PatcherHooks;
+  /** The mirrored document's root element, which is the page's own <html>. */
   private root: HTMLElement | null = null;
   /** Sequence of the last applied batch. */
   seq = 0;
@@ -173,8 +174,21 @@ export class Patcher {
     // Built detached and swapped in whole. Appending thousands of nodes into
     // the live document lays out the page again after every one of them, and
     // on a resync the reader watches their page empty itself and refill.
-    const container = this.doc.createElement('div');
-    container.setAttribute('data-skyhook-root', '1');
+    //
+    // A DocumentFragment and not a wrapper element, because a wrapper is a box
+    // and a box the page did not write breaks the one chain every full-height
+    // layout on the web is built on. The mirrored root is the page's own
+    // <html>, so `html, body { height: 100% }` — which is how a site says "fill
+    // the window" — reaches it here as it does landside, but only if nothing
+    // auto-height sits in between. A <div> holding the root is exactly that:
+    // the percentage lands on it, finds no definite height, and computes to
+    // auto, and every descendant that asked for 100% collapses to its content.
+    // Google Chat came out as a header, the word "Shortcuts", and 800px of
+    // white. Nothing else in the pipeline notices — the document hashes agree
+    // on both sides, because the DOM really is identical and it is the box tree
+    // that differs.
+    const container = this.doc.createDocumentFragment();
+    let root: HTMLElement | null = null;
 
     for (const n of snap.nodes) {
       const el = this.createNode(n);
@@ -182,8 +196,11 @@ export class Patcher {
       const parent = n.parent === 0 ? container : this.nodes.get(n.parent);
       if (!parent) continue;
       parent.appendChild(el);
+      if (n.parent === 0 && !root && el.nodeType === Node.ELEMENT_NODE) {
+        root = el as HTMLElement;
+      }
     }
-    this.root = container;
+    this.root = root;
     body.replaceChildren(container);
     this.doc.title = snap.title || this.doc.title;
     this.hooks.onApplied?.(0);
@@ -565,7 +582,7 @@ export class Patcher {
     return this.nodes.size;
   }
 
-  /** The element holding the mirrored document. */
+  /** The mirrored document's own root element — the page's <html>. */
   get rootElement(): HTMLElement | null {
     return this.root;
   }

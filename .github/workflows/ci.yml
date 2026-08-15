@@ -201,7 +201,21 @@ jobs:
           SKYHOOK_SLOW_LINK: '1'
           SKYHOOK_TEST_PORT: '45123'
           SKYHOOK_CHROME: ${{ steps.browser.outputs.path }}
-        run: go test -count=1 -timeout 25m -v ./test
+        # Every test here pays 1.2s of latency per round trip, so this suite
+        # grows with the test count far faster than the one above it, and the
+        # budget has to be a budget rather than the last measurement plus
+        # nothing. It was 25m, and on fd9b288 the suite took 24m48s and passed
+        # with twelve seconds to spare — which is not passing, it is a coin
+        # toss that had been landing the right way up. The next two changes to
+        # merge each added tests and it started timing out at 1500s, with a
+        # test three seconds in when the alarm went off; nothing was hung and
+        # nothing was slow, there was simply no room left.
+        #
+        # 45m is roughly twice what the suite costs today. When that stops
+        # being generous the answer is to make the suite cheaper, not to move
+        # this number again: a timeout that tracks the measurement never
+        # reports anything.
+        run: go test -count=1 -timeout 45m -v ./test
 
       - name: Remove the link profile
         if: always()
