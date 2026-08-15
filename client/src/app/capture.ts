@@ -198,16 +198,20 @@ interface ShotMeta {
 /**
  * Rasterises a frozen mirror document.
  *
- * Everything is done from the frozen HTML rather than from the live frame, so
+ * Everything is done from the frozen copy rather than from the live frame, so
  * the picture is of the document at the instant the capture was asked for, not
  * of whatever replaced it while this was running.
  */
 async function screenshot(frame: MirrorFreeze): Promise<Shot> {
   const notes: string[] = [];
-  const parsed = new DOMParser().parseFromString(frame.html, 'text/html');
-  if (!parsed.body) return { note: 'the mirrored document did not re-parse' };
+  const parsed = frozenDocument(frame);
+  if (!parsed?.body) return { note: 'the mirrored document did not re-parse' };
+  if (!frame.doc) {
+    notes.push('the picture was rendered from re-parsed markup rather than from a '
+      + 'clone of the document, so any inlined frame is flattened in it');
+  }
 
-  const inlined = await inlineImages(parsed, frame.images);
+  const inlined = await inlineImages(parsed, frame);
   if (inlined.missing > 0) {
     notes.push(`${inlined.missing} image(s) were not in the plane-side cache and `
       + 'are blank in the screenshot');
@@ -285,19 +289,59 @@ async function screenshot(frame: MirrorFreeze): Promise<Shot> {
 }
 
 /**
- * Replaces every mirrored image's source with a data URI from Cache Storage.
+ * Rebuilds the frozen document without going through the HTML parser.
  *
- * An SVG image is not allowed to load anything external, and the `src` a
- * mirrored `<img>` carries is a blob URL — which is external to the SVG and
- * says nothing about its content besides. So the hash is read from
- * `data-skyhook-img`, the same attribute `hashFromImage` reads, and the bytes
- * are inlined outright. They are available because the network worker put
- * every image this client has ever been sent into Cache Storage, which is the
- * same fact that lets a warm client paint a page it never downloaded.
+ * A mirrored page that inlines a frame holds that frame's document as a nested
+ * `<html>`/`<body>`, built by the patcher through `createElement`. The HTML
+ * parser cannot represent that: fed the serialised markup it discards both and
+ * promotes their children, and the frame stand-ins around them go too. The
+ * picture would then be of a box tree the reader never had — worst on exactly
+ * the pages whose framed widgets are what someone is capturing.
+ *
+ * The clone the freeze carries has none of that problem, so it is imported
+ * whole. Older freezes have only the markup, and get the parser and a note.
+ */
+export function frozenDocument(frame: MirrorFreeze): Document | null {
+  if (frame.doc) {
+    try {
+      const host = document.implementation.createHTMLDocument('');
+      host.replaceChild(host.importNode(frame.doc, true), host.documentElement);
+      if (host.body) return host;
+    } catch { /* fall through to the parser */ }
+  }
+  return new DOMParser().parseFromString(frame.html, 'text/html');
+}
+
+/**
+ * Replaces every mirrored image reference with a data URI from Cache Storage.
+ *
+ * An SVG image is not allowed to load anything external, and every image
+ * reference in a mirrored document is a blob URL — external to the SVG, and
+ * saying nothing about its content besides. For an `<img>` the hash comes from
+ * `data-skyhook-img`, the same attribute `hashFromImage` reads. For the ones
+ * only CSS names there is no element to ask, so the freeze carries the host's
+ * own blob-to-hash map; without that pass every backgrounded icon, logo and
+ * sprite is blank in the picture and nothing says so, because the `<img>` tally
+ * below has no idea they exist.
+ *
+ * The bytes are available because the network worker put every image this
+ * client has ever been sent into Cache Storage, which is the same fact that
+ * lets a warm client paint a page it never downloaded.
  */
 async function inlineImages(
-  doc: Document, hashes: string[],
+  doc: Document, frame: MirrorFreeze,
 ): Promise<{ missing: number; skipped: number }> {
+  const styles = Array.from(doc.querySelectorAll('style'));
+  const byBlob = new Map(frame.cssImages ?? []);
+  // Content first, decoration second: both draw on one byte budget, and a
+  // screenshot missing its pictures is worse than one missing its icons.
+  const hashes = [...frame.images];
+  for (const style of styles) {
+    for (const [, url] of matchBlobURLs(style.textContent ?? '')) {
+      const hash = byBlob.get(url);
+      if (hash && !hashes.includes(hash)) hashes.push(hash);
+    }
+  }
   const urls = new Map<string, string>();
   let spent = 0;
   let missing = 0;
@@ -347,7 +391,35 @@ async function inlineImages(
     }
     // Background blurhashes are inline styles and survive on their own.
   }
+
+  // The stylesheet's own references. A url() left pointing at a blob resolves
+  // to nothing inside an SVG image and paints as absence, which reads in a
+  // bundle as "the mirror never had this" — so an unresolved one is counted,
+  // the same as a missing <img>.
+  for (const style of styles) {
+    const css = style.textContent ?? '';
+    if (!css.includes('blob:')) continue;
+    style.textContent = css.replace(BLOB_URL_RE, (whole, url: string) => {
+      const hash = byBlob.get(url);
+      const data = hash ? urls.get(hash) : undefined;
+      if (!data) {
+        missing += 1;
+        return whole;
+      }
+      // Quoted: a data URI is full of characters url() would otherwise end on.
+      return `url("${data}")`;
+    });
+  }
   return { missing, skipped };
+}
+
+/** `url(blob:…)` as CSS writes it, quoted or not. */
+const BLOB_URL_RE = /url\(\s*(?:"|')?(blob:[^)"']+?)(?:"|')?\s*\)/g;
+
+/** Every distinct blob URL a stylesheet references, as [whole, url] pairs. */
+function matchBlobURLs(css: string): [string, string][] {
+  if (!css.includes('blob:')) return [];
+  return Array.from(css.matchAll(BLOB_URL_RE), (m) => [m[0], m[1]] as [string, string]);
 }
 
 function toDataURL(blob: Blob): Promise<string> {

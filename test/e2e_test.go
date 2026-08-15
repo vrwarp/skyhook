@@ -43,7 +43,10 @@ const fixturePage = `<!DOCTYPE html>
   .used { color: rgb(1, 2, 3); }
   .never-matches-anything { color: rgb(9, 9, 9); }
   #log li { padding: 2px; }
-  #tile { width: 16px; height: 16px; background-image: url(/pixel.png); }
+  /* A colour that appears nowhere else on the page, and only ever as a CSS
+     background — so a screenshot containing it proves the stylesheet's own
+     image references were resolved, which no <img> on the page can prove. */
+  #tile { width: 48px; height: 48px; background-image: url(/tile.png); }
 </style>
 </head>
 <body>
@@ -124,6 +127,34 @@ const fixturePage = `<!DOCTYPE html>
   });
 </script>
 </body></html>`
+
+// tileRGB is the colour of the CSS background image, and of nothing else in
+// the fixture. Found in a screenshot, it can only have come through the
+// stylesheet.
+var tileRGB = color.RGBA{R: 214, G: 44, B: 138, A: 255}
+
+// widgetRGB dresses the control inside the late-loading frame, and nothing
+// outside it. A screenshot containing it proves the frame's own document
+// reached the picture rather than being flattened out of it on the way.
+var widgetRGB = color.RGBA{R: 0, G: 160, B: 90, A: 255}
+
+// tilePNG is a solid block of that colour, big enough to survive both the
+// transcoder's resizing and a lossy WebP encode with its hue intact.
+var tilePNG = solidPNG(64, 64, tileRGB)
+
+func solidPNG(w, h int, c color.RGBA) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
 
 // pixelPNG is a real PNG built at init: the image pipeline decodes what it is
 // given, so a hand-written byte blob with a stale CRC would only test the
@@ -258,7 +289,7 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		w.Header().Set("Content-Type", "text/css")
 		_, _ = io.WriteString(w, `.tickbox { display: block; box-sizing: border-box; `+
 			`width: 220px; height: 60px; border: 1px solid rgb(11, 22, 33); `+
-			`background: rgb(240, 241, 242); }`)
+			`background: rgb(0, 160, 90); }`)
 	})
 	cdn := httptest.NewServer(cdnMux)
 	t.Cleanup(cdn.Close)
@@ -284,6 +315,10 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
+	})
+	mux.HandleFunc("/tile.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(tilePNG)
 	})
 	// A "logged in" page and an asset only its cookie can reach. Nothing but the
 	// browser holds that cookie, so an image arriving here proves the fetch went

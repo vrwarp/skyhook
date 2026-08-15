@@ -724,6 +724,41 @@ state, and any outstanding ask is dropped when the link goes.
 that takes three seconds to answer, which is the only way to look at a window
 that is otherwise a few milliseconds wide on loopback.
 
+### 23. The plane-side picture was a picture of something else
+
+Two faults, both found while reading a real bundle of a page whose widget lives
+in a frame, and both with the same shape: the picture was wrong in a way that
+looked like the mirror being wrong. That is worse than no picture. A bundle is
+read by someone who was not there, and a rendering artifact they cannot
+distinguish from a mirror bug sends them after a bug that does not exist — which
+is precisely what happened, for some hours, to the author of this section.
+
+**Images the stylesheet names were dropped.** An SVG image may not load anything
+external, so the rasteriser trades every mirrored image for a data URI first.
+It only ever walked `<img>`. Every reference the *stylesheet* carries — the
+backgrounded icons, logos and sprites that a widget is mostly made of — stayed a
+blob URL, which resolves to nothing inside an SVG, and painted as absence. The
+tally of missing images stayed at zero throughout, because it counted elements.
+The freeze now carries the host's blob-to-hash map, the `url()` references are
+traded in the same pass as the elements, content is served from the byte budget
+before decoration, and an unresolved one is counted.
+
+**Inlined frames were flattened.** A same-origin frame's document is inlined
+into the mirror as a nested `<html>`/`<body>`, which the patcher builds through
+`createElement`. The rasteriser worked from `frame.html` — serialised markup,
+parsed back with the HTML parser, which has nowhere to put a second `<html>`. It
+drops both, merges their attributes onto the page's own, and promotes the
+children; nested stand-ins go with them. In one real bundle that was five
+`<html>`/`<body>` pairs gone and three of seven frame stand-ins with them, so
+the picture came out of a box tree the reader never had. The freeze now carries
+a clone of the document beside the markup, and the picture is rendered from the
+clone; a freeze without one still renders, and says so in `NOTES.txt`.
+
+`mirror.html` is unchanged and still the serialised markup, because it is the
+artifact a person reads and diffs against `expected.html`. Note that *opening*
+it in a browser re-parses it, with the same losses — read it, diff it, but do
+not treat it as a rendering.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

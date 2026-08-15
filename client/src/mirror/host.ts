@@ -66,8 +66,27 @@ export interface MirrorFreeze {
   tab: number;
   /** The mirrored document as HTML — what the reader is actually looking at. */
   html: string;
+  /**
+   * The same document, as a detached clone.
+   *
+   * `html` cannot be parsed back into the tree it came from. An inlined
+   * frame's document is a nested `<html>`/`<body>`, and the HTML parser has
+   * nowhere to put those: it drops them and promotes their children, which
+   * takes the frame stand-ins with them. Anything rendered from the re-parsed
+   * markup is a picture of a box tree the reader never had — on a page built
+   * out of frames, which is the kind most worth capturing. A clone is the same
+   * copy the rest of this interface promises, without the round trip.
+   */
+  doc?: Element;
   /** Content hashes of every image the document references. */
   images: string[];
+  /**
+   * Blob URL -> content hash, for the image references the stylesheet carries.
+   *
+   * Background images reach the mirror as blob URLs, which resolve nowhere but
+   * in this browsing context; a screenshot has to trade them back for bytes.
+   */
+  cssImages?: [string, string][];
   width: number;
   height: number;
   docHeight: number;
@@ -1062,6 +1081,7 @@ export class MirrorHost {
       tab: this.tab,
       html: '',
       images: [],
+      cssImages: [],
       width: Math.max(1, Math.round(rect.width || win?.innerWidth || 0)),
       height: Math.max(1, Math.round(rect.height || win?.innerHeight || 0)),
       docHeight: doc?.documentElement.scrollHeight ?? 0,
@@ -1079,6 +1099,11 @@ export class MirrorHost {
     } catch (err) {
       base.error = `could not serialise the mirrored document: ${String(err)}`;
     }
+    // Alongside the markup, not instead of it: the markup is the artifact a
+    // person reads, and the clone is the one a renderer can trust.
+    try {
+      base.doc = doc.documentElement.cloneNode(true) as Element;
+    } catch { /* the picture falls back to the markup, with its parse losses */ }
     try {
       base.fingerprint = this.patcher.fingerprint();
     } catch (err) {
@@ -1090,6 +1115,10 @@ export class MirrorHost {
       const hash = hashFromImage(el);
       if (hash && !base.images.includes(hash)) base.images.push(hash);
     }
+    // The same trade for the images only CSS names. These have no element to
+    // read a hash off, so the map the host built on the way in is the only
+    // record of which bytes a `url(blob:…)` stands for.
+    base.cssImages = Array.from(this.blobs, ([hash, url]) => [url, hash]);
     base.state = {
       tab: this.tab,
       url: this.url,

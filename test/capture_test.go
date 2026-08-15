@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/image/webp"
+
+	"github.com/vrwarp/skyhook/internal/cdp"
 
 	"github.com/vrwarp/skyhook/internal/protocol"
 )
@@ -390,6 +393,32 @@ func TestPWACaptureSendsARealScreenshot(t *testing.T) {
 }
 
 // hasInk reports whether an image is anything other than one flat colour.
+/*
+hasColour looks for a specific colour anywhere in a picture.
+
+hasInk answers "did anything render at all", which a page of text satisfies on
+its own — so it cannot see an image that failed to paint. Asking for a colour
+that exists in exactly one place in the fixture can: either those pixels are
+there or that image did not make it into the picture.
+
+The tolerance is wide because the pixels have been through a transcode and a
+lossy WebP encode by the time they get here; the fixture colours are chosen far
+enough apart that a wide tolerance still cannot confuse two of them.
+*/
+func hasColour(img image.Image, want color.RGBA) bool {
+	b := img.Bounds()
+	wr, wg, wb := uint32(want.R)<<8, uint32(want.G)<<8, uint32(want.B)<<8
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, _ := img.At(x, y).RGBA()
+			if absDiff(r, wr)+absDiff(g, wg)+absDiff(bl, wb) < 12000 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func hasInk(img image.Image) bool {
 	b := img.Bounds()
 	if b.Dx() < 2 || b.Dy() < 2 {
@@ -432,4 +461,115 @@ func waitForCapture(t *testing.T, dir string, within time.Duration) string {
 	}
 	t.Fatalf("no capture appeared in %s within %s", dir, within)
 	return ""
+}
+
+// captureThroughTheUI drives the real client to a page and takes a capture the
+// way a reader does — Ctrl/⌘+Shift+D, the dialog, the form — and returns the
+// bundle that lands on disk. `ready` is a JavaScript expression that has to go
+// true before the capture is asked for.
+func captureThroughTheUI(
+	ctx context.Context, t *testing.T, h *pwaHarness, page *cdp.Session,
+	url, ready, note string,
+) map[string][]byte {
+	t.Helper()
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, url), nil)
+	waitFor(ctx, t, page, ready, budget(60*time.Second), "the mirrored page to settle")
+	evalJSON(ctx, t, page, `(() => { document.dispatchEvent(new KeyboardEvent('keydown',
+		{ key: 'D', ctrlKey: true, shiftKey: true, bubbles: true })); return true; })()`, nil)
+	waitFor(ctx, t, page, `document.getElementById('capture').open === true`,
+		budget(10*time.Second), "the capture dialog")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+		document.getElementById('capture-note').value = %q;
+		document.getElementById('capture-form').dispatchEvent(
+			new Event('submit', { bubbles: true, cancelable: true }));
+		return true; })()`, note), nil)
+	return openBundle(t, waitForCapture(t, h.captureDir, budget(120*time.Second)))
+}
+
+// planeSideShot decodes the picture the client took of its own mirror.
+func planeSideShot(t *testing.T, files map[string][]byte) image.Image {
+	t.Helper()
+	shot := files["planeside/tabs/1/screenshot.webp"]
+	if len(shot) == 0 {
+		t.Fatalf("the plane side sent no screenshot; bundle holds %v\nnotes: %s",
+			names(files), files["NOTES.txt"])
+	}
+	img, err := webp.Decode(bytes.NewReader(shot))
+	if err != nil {
+		t.Fatalf("the plane-side screenshot does not decode: %v", err)
+	}
+	return img
+}
+
+/*
+A picture of the mirror has to include the images only its stylesheet names.
+
+An SVG image may not load anything external, and every image reference in a
+mirrored document — `<img>` and `url(...)` alike — is a blob URL by the time it
+gets there. The `<img>` ones were traded back for bytes; the stylesheet's were
+not, so every backgrounded icon, logo and sprite painted as nothing, and the
+tally of missing images stayed at zero because it only ever counted elements.
+
+The reader of a bundle then sees a widget with its buttons apparently absent and
+goes looking for the bug in the mirror, where there is none. That is the failure
+this asserts against: the fixture's tile colour exists only as a background
+image, so a picture holding it is a picture that resolved one.
+*/
+func TestPWACaptureDrawsCSSBackgroundImages(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	// Not just the text: until the bytes arrive the rule points at a
+	// transparent placeholder, and a capture taken then is a capture of a page
+	// whose background image genuinely had not loaded yet.
+	files := captureThroughTheUI(ctx, t, h, page, h.site.URL+"/", mirrorCSS+`.includes('blob:')`,
+		"the tile lost its background")
+	img := planeSideShot(t, files)
+	if !hasColour(img, tileRGB) {
+		t.Errorf("the plane-side screenshot has no %v anywhere in %v: the CSS "+
+			"background image did not reach the picture", tileRGB, img.Bounds())
+	}
+}
+
+/*
+An inlined frame has to reach the picture as the document it is.
+
+The mirror holds a same-origin frame's document as a nested `<html>`/`<body>`,
+which the patcher builds through `createElement`. Serialising that and parsing
+it back cannot round-trip: the HTML parser has nowhere to put a second `<html>`,
+so it drops both and promotes the children, and the frame stand-ins go with
+them. The picture came out of a box tree the reader never had — on precisely the
+pages, full of framed widgets, that someone is most likely to be capturing.
+
+The widget's colour lives inside the frame and nowhere else, so a picture
+holding it is a picture in which the frame survived.
+*/
+func TestPWACapturePicturesTheContentOfAnInlinedFrame(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	// The frame's own stylesheet is recovered from the other origin a moment
+	// after the frame lands; capturing before it arrives would photograph an
+	// unstyled control and prove nothing about the frame.
+	files := captureThroughTheUI(ctx, t, h, page, h.site.URL+"/late-widget",
+		mirrorCSS+`.includes('.tickbox')`, "the widget is missing from the frame")
+	img := planeSideShot(t, files)
+	if !hasColour(img, widgetRGB) {
+		t.Errorf("the plane-side screenshot has no %v anywhere in %v: the inlined "+
+			"frame's document was flattened out of the picture", widgetRGB, img.Bounds())
+	}
 }
