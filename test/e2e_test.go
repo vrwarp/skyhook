@@ -452,6 +452,25 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			</script>
 			</body></html>`)
 	})
+	// A frame whose document lays out taller than the box the page gave it.
+	// Landside the frame clips it, as a frame does; plane-side the mirror has
+	// to leave it reachable, because the reader has no way to resize the box
+	// and no idea anything is below it.
+	mux.HandleFunc("/tall-widget", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Tall widget</title></head>
+			<body><h1>the page around the widget</h1>
+			<iframe id="tall" width="300" height="100" style="border:0" src="/tall-inner"></iframe>
+			</body></html>`)
+	})
+	mux.HandleFunc("/tall-inner", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head></head>
+			<body style="margin:0">
+			<div style="height:300px">a lot of widget</div>
+			<button id="submit-it">submit it</button>
+			</body></html>`)
+	})
 	mux.HandleFunc("/framed-inner", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		body := "inside the frame"

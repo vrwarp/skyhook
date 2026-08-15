@@ -197,3 +197,81 @@ func TestPWAFollowsAFrameThatNavigates(t *testing.T) {
 		t.Error("the frame's old document is still on screen alongside the new one")
 	}
 }
+
+/*
+A frame whose content outgrows its box has to stay reachable.
+
+The stand-in for an inlined frame is given the box the frame had landside,
+because the CSS that sized the real one selects on a tag name this element no
+longer has. What goes *inside* that box, though, is laid out here — by the
+reader's browser, in the reader's fonts, with no frame viewport for a
+percentage height to resolve against. Landside it fitted. When this side's
+layout comes out taller, clipping the difference away deletes it silently, and
+what sits at the bottom of a widget is its buttons: a reader looking at a
+captcha with no way to submit it, and nothing anywhere saying so.
+
+So the box scrolls. The overflow is still a bug wherever it comes from, but a
+scrollbar is a failure the reader can see and get past, which `hidden` is not.
+*/
+func TestPWAKeepsAnOvergrownFrameReachable(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/tall-widget"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('submit it')`,
+		budget(60*time.Second), "the tall frame's document")
+
+	var got struct {
+		Box       int    `json:"box"`
+		Content   int    `json:"content"`
+		OverflowY string `json:"overflowY"`
+		Reachable bool   `json:"reachable"`
+	}
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const btn = doc.getElementById('submit-it');
+      const stand = doc.querySelector('[data-skyhook-tag="iframe"]');
+      if (!btn || !stand) return { box: 0, content: 0, overflowY: 'none', reachable: false };
+      const overflowY = getComputedStyle(stand).overflowY;
+      // Scrolled to the bottom, the control has to be inside the box. That is
+      // the property that matters — not that a scrollbar exists, but that
+      // using it gets the reader to the button.
+      stand.scrollTop = stand.scrollHeight;
+      const b = btn.getBoundingClientRect(), s = stand.getBoundingClientRect();
+      return {
+        box: Math.round(stand.clientHeight),
+        content: Math.round(stand.scrollHeight),
+        overflowY,
+        reachable: b.height > 0 && b.top >= s.top - 0.5 && b.bottom <= s.bottom + 0.5,
+      };
+    })()`, &got)
+
+	// The fixture is built so this is true; if it stops being true the test is
+	// no longer exercising anything.
+	if got.Content <= got.Box {
+		t.Fatalf("the fixture frame did not overflow its box: %dpx of content in %dpx",
+			got.Content, got.Box)
+	}
+	if got.OverflowY == "hidden" {
+		t.Errorf("the stand-in for an overgrown frame clips its content away: overflow-y "+
+			"is %q, so the %dpx below the fold cannot be reached at all",
+			got.OverflowY, got.Content-got.Box)
+	}
+	if !got.Reachable {
+		t.Errorf("scrolling the stand-in to the bottom does not bring the control into "+
+			"it: %dpx of content in a %dpx box, overflow-y %q",
+			got.Content, got.Box, got.OverflowY)
+	}
+}

@@ -759,6 +759,33 @@ artifact a person reads and diffs against `expected.html`. Note that *opening*
 it in a browser re-parses it, with the same losses — read it, diff it, but do
 not treat it as a rendering.
 
+### 24. A frame that outgrows its box must not swallow its own controls
+
+The stand-in for an inlined frame is given the box the real frame had landside,
+because the CSS that sized the original selects on a tag name this element no
+longer has. What goes *inside* that box is laid out here, though — by the
+reader's browser, in whatever fonts the reader has (Skyhook blocks the page's
+own), against a nested `<html>`/`<body>` that is an ordinary block box and not
+a viewport, so a percentage height resolves against something else entirely.
+
+Landside the content fitted, so the clipping the stand-in inherited from
+`overflow: hidden` only ever engages when *this* side's layout has drifted —
+and then it deletes the difference without a word. What sits at the bottom of a
+widget is its buttons. The observed case was Google's reCAPTCHA: the challenge
+grid laid out taller plane-side than the 400×580 the page gave the frame, and
+the footer holding VERIFY/SKIP fell outside the box. The reader gets a captcha
+they can solve and cannot submit, with nothing on screen suggesting anything is
+missing — not a scrollbar, not a cut edge, nothing.
+
+The stand-in now scrolls. The overflow is still a bug wherever it comes from,
+but a scrollbar is a failure the reader can see and get past, and it costs
+nothing on the overwhelming majority of frames whose content does fit.
+
+Worth being clear about what this does not do: it does not make the layout
+right, and it is not a substitute for finding out why a particular frame comes
+out too tall. It converts an invisible, unrecoverable failure into a visible,
+recoverable one.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

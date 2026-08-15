@@ -24,8 +24,17 @@ const MIRROR_CSS = `
 html, body { margin: 0; padding: 0; background: #fff; color: #111; }
 .skyhook-ghost { opacity: .55; font-style: italic; }
 img { background-repeat: no-repeat; background-size: cover; }
-/* An iframe's inlined document, rendered into the box that stands in for it. */
-[data-skyhook-tag="iframe"] { display: block; overflow: hidden; }
+/* An iframe's inlined document, rendered into the box that stands in for it.
+   Scrollable rather than clipped, which a real frame with scrolling="no" is
+   not. The box is the size the frame had landside, but the document inside it
+   is laid out here — by this browser, in this browser's fonts, with no frame
+   viewport for a percentage height to resolve against. Landside it fitted, so
+   the clipping only ever bites when this side's layout has drifted, and then
+   hiding the overflow deletes it silently. What falls off the bottom of a
+   widget is its buttons: the reader is left looking at a captcha with no way
+   to submit it and no indication anything is missing. A scrollbar is the
+   honest version of the same failure, and it keeps the control reachable. */
+[data-skyhook-tag="iframe"] { display: block; overflow: auto; scrollbar-width: thin; }
 [data-skyhook-tag="iframe"] html, [data-skyhook-tag="iframe"] body { display: block; }
 [data-skyhook-static] {
   background: repeating-linear-gradient(45deg, #eee, #eee 8px, #e5e5e5 8px, #e5e5e5 16px);
