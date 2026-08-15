@@ -580,11 +580,27 @@ func TestPWARendersTheImagesAndVectorsInTheDocument(t *testing.T) {
 }
 
 /** mirrorCSS reads the stylesheet the patcher maintains inside the mirror. */
+/*
+mirrorCSS is every rule the mirror is styled by — the page's own sheet and the
+sheet of every shadow root in it.
+
+A mirrored sub-document's rules are adopted by the root its document lives in
+rather than added to the page's stylesheet, so reading only the latter would say
+a frame had arrived unstyled while it was being styled correctly.
+*/
 const mirrorCSS = `(() => {
   const f = document.querySelector('iframe.mirror');
-  const el = f && f.contentDocument
-    && f.contentDocument.querySelector('style[data-skyhook-css]');
-  return el ? el.textContent : '';
+  const doc = f && f.contentDocument;
+  if (!doc) return '';
+  const el = doc.querySelector('style[data-skyhook-css]');
+  const out = [el ? el.textContent : ''];
+  for (const host of doc.querySelectorAll('*')) {
+    if (!host.shadowRoot) continue;
+    for (const sheet of host.shadowRoot.adoptedStyleSheets) {
+      for (const rule of sheet.cssRules) out.push(rule.cssText);
+    }
+  }
+  return out.join('\n');
 })()`
 
 // Both halves say which build they are, and the app says so where a reader can

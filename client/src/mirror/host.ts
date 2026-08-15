@@ -35,7 +35,9 @@ img { background-repeat: no-repeat; background-size: cover; }
    to submit it and no indication anything is missing. A scrollbar is the
    honest version of the same failure, and it keeps the control reachable. */
 [data-skyhook-tag="iframe"] { display: block; overflow: auto; scrollbar-width: thin; }
-[data-skyhook-tag="iframe"] html, [data-skyhook-tag="iframe"] body { display: block; }
+/* The frame's own html/body are inside the root now, where a document rule
+   cannot reach them: this is delivered through Patcher.baseRootCSS instead, and
+   kept here only so the two are read together. */
 [data-skyhook-static] {
   background: repeating-linear-gradient(45deg, #eee, #eee 8px, #e5e5e5 8px, #e5e5e5 16px);
 }
@@ -825,6 +827,39 @@ export class MirrorHost {
    * addEventListener with the same function and the same options is idempotent,
    * so a root that was already bound is not bound twice.
    */
+  /*
+   * Copies every shadow root's content into the matching node of a clone.
+   *
+   * The two trees are walked in step: a clone has the same shape as its source,
+   * so the nth descendant of one is the nth of the other. Where the source has
+   * a root, the clone gets that root's rules as a <style> and its children as
+   * ordinary children — a flattened picture of a boundary that the artifact
+   * formats cannot express.
+   */
+  private flattenRootsInto(source: Element, clone: Element): void {
+    const src = [source, ...source.querySelectorAll('*')];
+    const dst = [clone, ...clone.querySelectorAll('*')];
+    for (let i = 0; i < src.length && i < dst.length; i++) {
+      const root = src[i].shadowRoot;
+      if (!root) continue;
+      const target = dst[i];
+      const rules: string[] = [];
+      for (const sheet of root.adoptedStyleSheets) {
+        try {
+          for (const rule of sheet.cssRules) rules.push(rule.cssText);
+        } catch { /* a sheet that will not enumerate is one we do without */ }
+      }
+      if (rules.length) {
+        const style = target.ownerDocument.createElement('style');
+        style.textContent = rules.join('\n');
+        target.appendChild(style);
+      }
+      for (const child of Array.from(root.childNodes)) {
+        target.appendChild(target.ownerDocument.importNode(child, true));
+      }
+    }
+  }
+
   private bindRootScroll(): void {
     for (const root of this.patcher?.shadowRoots() ?? []) {
       root.addEventListener('scroll', this.onElementScroll, { capture: true, passive: true });
@@ -1442,8 +1477,18 @@ export class MirrorHost {
     }
     // Alongside the markup, not instead of it: the markup is the artifact a
     // person reads, and the clone is the one a renderer can trust.
+    //
+    // Neither cloneNode nor importNode carries a shadow root, and XMLSerializer
+    // does not write one, so a mirrored sub-document would be absent from both
+    // the clone and the picture rendered from it. The clone is flattened on the
+    // way out instead: each root's rules go in as a <style> and its content
+    // becomes ordinary children of the stand-in. That loses the scoping, which
+    // for an artifact nobody interacts with costs nothing and is the difference
+    // between a frame being in the picture and not.
     try {
-      base.doc = doc.documentElement.cloneNode(true) as Element;
+      const clone = doc.documentElement.cloneNode(true) as Element;
+      this.flattenRootsInto(doc.documentElement, clone);
+      base.doc = clone;
     } catch { /* the picture falls back to the markup, with its parse losses */ }
     try {
       base.fingerprint = this.patcher.fingerprint();

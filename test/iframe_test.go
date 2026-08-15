@@ -66,14 +66,33 @@ func TestPWARendersAnInlinedIframeDocument(t *testing.T) {
 
 	// The frame's stylesheet has to come across too, or the content renders
 	// unstyled inside an otherwise styled page.
+	// The frame's rules are in the frame's own sheet now, adopted by the shadow
+	// root its document lives in — not in the page's stylesheet, which is where
+	// they used to land and which is exactly the leak the root closes.
 	var css string
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const out = [];
+      for (const el of doc.querySelectorAll('*')) {
+        if (!el.shadowRoot) continue;
+        for (const sheet of el.shadowRoot.adoptedStyleSheets) {
+          for (const rule of sheet.cssRules) out.push(rule.cssText);
+        }
+      }
+      return out.join('\n');
+    })()`, &css)
+	if !strings.Contains(css, ".framed") {
+		t.Errorf("the iframe document's CSS did not reach its own root: %q", css)
+	}
+	// And it stayed there: the page's sheet is not the frame's to write to.
+	var pageCSS string
 	evalJSON(ctx, t, page, `(() => {
       const doc = document.querySelector('iframe.mirror').contentDocument;
       const el = doc.querySelector('style[data-skyhook-css]');
       return el ? el.textContent : '';
-    })()`, &css)
-	if !strings.Contains(css, ".framed") {
-		t.Errorf("the iframe document's CSS did not cross: %q", css)
+    })()`, &pageCSS)
+	if strings.Contains(pageCSS, ".framed") {
+		t.Error("the frame's rule reached the page's stylesheet, where it dresses the page")
 	}
 }
 
@@ -110,10 +129,19 @@ func TestPWARecoversAStylesheetThatArrivesAfterLoad(t *testing.T) {
 	page := h.openClient(ctx, t)
 	openWidget(ctx, t, h, page)
 
+	// The recovered sheet belongs to the frame, so it arrives in the frame's own
+	// root rather than in the page's stylesheet.
 	waitFor(ctx, t, page, `(() => {
       const doc = document.querySelector('iframe.mirror').contentDocument;
-      const el = doc.querySelector('style[data-skyhook-css]');
-      return !!el && el.textContent.includes('.tickbox');
+      for (const el of doc.querySelectorAll('*')) {
+        if (!el.shadowRoot) continue;
+        for (const sheet of el.shadowRoot.adoptedStyleSheets) {
+          for (const rule of sheet.cssRules) {
+            if (rule.cssText.includes('.tickbox')) return true;
+          }
+        }
+      }
+      return false;
     })()`, budget(60*time.Second), "the late frame's stylesheet")
 
 	// The rule has to have reached the element, not merely the document: this is
@@ -121,7 +149,11 @@ func TestPWARecoversAStylesheetThatArrivesAfterLoad(t *testing.T) {
 	var h2 int
 	evalJSON(ctx, t, page, `(() => {
       const doc = document.querySelector('iframe.mirror').contentDocument;
-      const el = doc.getElementById('tick');
+      let el = doc.getElementById('tick');
+      for (const host of doc.querySelectorAll('*')) {
+        if (el) break;
+        if (host.shadowRoot) el = host.shadowRoot.getElementById('tick');
+      }
       return el ? Math.round(el.getBoundingClientRect().height) : 0;
     })()`, &h2)
 	if h2 != 60 {
@@ -144,10 +176,19 @@ func TestPWAClicksAControlInsideAnInlinedFrame(t *testing.T) {
 	page := h.openClient(ctx, t)
 	openWidget(ctx, t, h, page)
 
+	// The control is inside the frame's shadow root, so the click has to be aimed
+	// there. It is composed, which is how it reaches the client's own listener on
+	// the document at all.
 	evalJSON(ctx, t, page, `(() => {
       const doc = document.querySelector('iframe.mirror').contentDocument;
-      doc.getElementById('tick').dispatchEvent(
-        new doc.defaultView.MouseEvent('click', { bubbles: true }));
+      let tick = doc.getElementById('tick');
+      for (const el of doc.querySelectorAll('*')) {
+        if (tick) break;
+        if (el.shadowRoot) tick = el.shadowRoot.getElementById('tick');
+      }
+      if (!tick) throw new Error('no #tick anywhere in the mirror');
+      tick.dispatchEvent(new doc.defaultView.MouseEvent(
+        'click', { bubbles: true, composed: true }));
       return true;
     })()`, nil)
 
@@ -241,8 +282,12 @@ func TestPWAKeepsAnOvergrownFrameReachable(t *testing.T) {
 	}
 	evalJSON(ctx, t, page, `(() => {
       const doc = document.querySelector('iframe.mirror').contentDocument;
-      const btn = doc.getElementById('submit-it');
       const stand = doc.querySelector('[data-skyhook-tag="iframe"]');
+      // The control is inside the frame's root; the box that has to hold it is
+      // the stand-in outside.
+      const btn = stand && stand.shadowRoot
+        ? stand.shadowRoot.getElementById('submit-it')
+        : doc.getElementById('submit-it');
       if (!btn || !stand) return { box: 0, content: 0, overflowY: 'none', reachable: false };
       const overflowY = getComputedStyle(stand).overflowY;
       // Scrolled to the bottom, the control has to be inside the box. That is

@@ -344,25 +344,37 @@ export class Patcher {
          * says, and the reason the rules for it arrive separately.
          */
         const host = this.nodes.get(n.parent);
-        if (!(host instanceof Element)) return null;
+        // nodeType rather than `instanceof Element`: the host was built by the
+        // mirror frame's document and belongs to that realm, and an object from
+        // another realm is not an instance of this one's constructors. The
+        // check silently answered "no" for every host, so every frame arrived
+        // as an empty box — and jsdom, where the tests share one realm, said it
+        // was fine.
+        if (!host || host.nodeType !== 1 /* ELEMENT_NODE */) return null;
+        const el = host as Element;
         try {
           // Already attached — a resnapshot re-walking the same element, or an
           // element the page had opened a root on before we reached it.
-          const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
+          const root = el.shadowRoot ?? el.attachShadow({ mode: 'open' });
           this.roots.add(root);
           // A root has no tag name, and the hash is taken over names: say so
           // explicitly rather than leaving the three implementations to agree
           // by accident on what a nameless node is worth.
           this.names.set(n.id, '');
-          return root;
+          this.adoptBaseSheet(root);
+          node = root;
         } catch {
           // Not every element may host one: the tag list is the browser's, and
           // it is the same list landside, so this is the substituted-tag case
           // rather than a page doing something exotic. Falling back to a plain
           // box loses the scoping and keeps the content, which is the right way
           // round.
-          return this.doc.createElement(SUBSTITUTE_TAG);
+          node = this.doc.createElement(SUBSTITUTE_TAG);
         }
+        // Falls through to the registration every node gets. Returning from
+        // here instead left the root out of the node map, and with it every
+        // child that named it as a parent: an inlined frame arrived empty.
+        break;
       }
       case NodeKind.Text:
         node = this.doc.createTextNode(this.str(n.ref));
@@ -505,6 +517,26 @@ export class Patcher {
     this.renderCSS();
   }
 
+  /*
+   * What the client itself needs said inside every root.
+   *
+   * A mirrored sub-document brings a real <html> and <body>, which are ordinary
+   * elements here rather than a document's root and its body — and the rule
+   * that says so lives in the shell's own stylesheet, which stops at the
+   * boundary like any other document rule. Said again inside, it reaches them.
+   */
+  private static readonly baseRootCSS = 'html, body { display: block; }';
+
+  private adoptBaseSheet(root: ShadowRoot): void {
+    const win = this.doc.defaultView as (Window & typeof globalThis) | null;
+    const Ctor = win?.CSSStyleSheet ?? CSSStyleSheet;
+    try {
+      const sheet = new Ctor();
+      sheet.replaceSync(Patcher.baseRootCSS);
+      root.adoptedStyleSheets = [sheet, ...root.adoptedStyleSheets];
+    } catch { /* a root without it renders; it just renders less well */ }
+  }
+
   /**
    * Appends rules to one shadow root's own stylesheet.
    *
@@ -519,16 +551,13 @@ export class Patcher {
   setScopedCSS(rootID: number, rules: string[]): void {
     if (!rules.length) return;
     const root = this.nodes.get(rootID);
-    if (!root || !(root instanceof this.shadowRootCtor())) return;
+    // Realm-safe again: DOCUMENT_FRAGMENT_NODE is what a shadow root reports
+    // wherever it was built.
+    if (!root || root.nodeType !== 11 /* DOCUMENT_FRAGMENT_NODE */) return;
     const kept = this.scopedRules.get(rootID) ?? [];
     kept.push(...rules);
     this.scopedRules.set(rootID, kept);
     this.renderScopedCSS(rootID, root as unknown as ShadowRoot);
-  }
-
-  private shadowRootCtor(): typeof ShadowRoot {
-    const win = this.doc.defaultView as (Window & typeof globalThis) | null;
-    return (win?.ShadowRoot ?? ShadowRoot) as typeof ShadowRoot;
   }
 
   private renderScopedCSS(rootID: number, root: ShadowRoot): void {

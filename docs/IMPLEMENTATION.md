@@ -1499,8 +1499,35 @@ wrappers inside it still do not.
 **The order.** Iframes first. An inlined frame is one root per frame rather than
 a thousand per page, it exercises every part of the mechanism — the node kind,
 `attachShadow`, frame-realm sheet construction, `composedPath` input routing,
-declarative serialisation in the capture — and it independently closes the
-iframe half of the leak. Components second, where the seventy-seven rules are.
+serialisation in the capture — and it independently closes the iframe half of
+the leak. Components second, where the seventy-seven rules are.
+
+**What the first increment cost, which is the argument for doing it first.**
+Three of the four things that broke were not on the list above:
+
+- **`instanceof` does not cross a realm.** The patcher builds nodes with the
+  mirror frame's document, so a host element belongs to that frame's realm and
+  `host instanceof Element` — `Element` being the shell's — is false for every
+  host there is. Every frame arrived as an empty box, and jsdom, where the unit
+  tests share one realm, said it was fine. `nodeType` is a number and does not
+  care whose realm it came from.
+- **A shadow root is attached, not inserted.** `appendChild` on one throws, and
+  a throw inside the snapshot loop takes the rest of the document with it.
+- **The client's own compensating CSS stops at the boundary like anyone's.**
+  `[data-skyhook-tag="iframe"] html, body { display: block }` was a document
+  rule about nodes that are now inside a root. It is adopted into each root
+  instead.
+- **Neither `cloneNode` nor `importNode` carries a root, and `XMLSerializer`
+  does not write one.** A capture's clone and the picture rendered from it both
+  lost the frame. The freeze flattens roots into the clone on the way out —
+  rules as a `<style>`, content as ordinary children — because an artifact
+  nobody interacts with loses nothing by being flat, and losing the frame
+  entirely is not a trade.
+
+Six end-to-end tests reached into frame content with document-level queries and
+had to learn to descend through the root. That is not a cost of the change so
+much as a measure of it: every one of them was written against a tree where the
+boundary did not exist.
 
 ## Known gaps
 
