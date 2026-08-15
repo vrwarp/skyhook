@@ -483,3 +483,11 @@ func TestPWARendersTheImagesAndVectorsInTheDocument(t *testing.T) {
 		t.Errorf("the drawing has no box: width = %v", svg.Width)
 	}
 }
+
+/** mirrorCSS reads the stylesheet the patcher maintains inside the mirror. */
+const mirrorCSS = `(() => {
+  const f = document.querySelector('iframe.mirror');
+  const el = f && f.contentDocument
+    && f.contentDocument.querySelector('style[data-skyhook-css]');
+  return el ? el.textContent : '';
+})()`

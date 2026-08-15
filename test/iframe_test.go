@@ -197,3 +197,146 @@ func TestPWAFollowsAFrameThatNavigates(t *testing.T) {
 		t.Error("the frame's old document is still on screen alongside the new one")
 	}
 }
+
+/*
+A frame whose content outgrows its box has to stay reachable.
+
+The stand-in for an inlined frame is given the box the frame had landside,
+because the CSS that sized the real one selects on a tag name this element no
+longer has. What goes *inside* that box, though, is laid out here — by the
+reader's browser, in the reader's fonts, with no frame viewport for a
+percentage height to resolve against. Landside it fitted. When this side's
+layout comes out taller, clipping the difference away deletes it silently, and
+what sits at the bottom of a widget is its buttons: a reader looking at a
+captcha with no way to submit it, and nothing anywhere saying so.
+
+So the box scrolls. The overflow is still a bug wherever it comes from, but a
+scrollbar is a failure the reader can see and get past, which `hidden` is not.
+*/
+func TestPWAKeepsAnOvergrownFrameReachable(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/tall-widget"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('submit it')`,
+		budget(60*time.Second), "the tall frame's document")
+
+	var got struct {
+		Box       int    `json:"box"`
+		Content   int    `json:"content"`
+		OverflowY string `json:"overflowY"`
+		Reachable bool   `json:"reachable"`
+	}
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const btn = doc.getElementById('submit-it');
+      const stand = doc.querySelector('[data-skyhook-tag="iframe"]');
+      if (!btn || !stand) return { box: 0, content: 0, overflowY: 'none', reachable: false };
+      const overflowY = getComputedStyle(stand).overflowY;
+      // Scrolled to the bottom, the control has to be inside the box. That is
+      // the property that matters — not that a scrollbar exists, but that
+      // using it gets the reader to the button.
+      stand.scrollTop = stand.scrollHeight;
+      const b = btn.getBoundingClientRect(), s = stand.getBoundingClientRect();
+      return {
+        box: Math.round(stand.clientHeight),
+        content: Math.round(stand.scrollHeight),
+        overflowY,
+        reachable: b.height > 0 && b.top >= s.top - 0.5 && b.bottom <= s.bottom + 0.5,
+      };
+    })()`, &got)
+
+	// The fixture is built so this is true; if it stops being true the test is
+	// no longer exercising anything.
+	if got.Content <= got.Box {
+		t.Fatalf("the fixture frame did not overflow its box: %dpx of content in %dpx",
+			got.Content, got.Box)
+	}
+	if got.OverflowY == "hidden" {
+		t.Errorf("the stand-in for an overgrown frame clips its content away: overflow-y "+
+			"is %q, so the %dpx below the fold cannot be reached at all",
+			got.OverflowY, got.Content-got.Box)
+	}
+	if !got.Reachable {
+		t.Errorf("scrolling the stand-in to the bottom does not bring the control into "+
+			"it: %dpx of content in a %dpx box, overflow-y %q",
+			got.Content, got.Box, got.OverflowY)
+	}
+}
+
+/*
+The mirror has to render under the same rules the page was written for.
+
+A frame at about:blank has no doctype, and a document with no doctype is in
+quirks mode. Every page worth mirroring declared one, so until this was fixed
+the mirror rendered the whole web under rules none of its pages were written
+for, and nothing said so: quirks mode is not a parse error, it is a different
+and quietly wrong answer.
+
+The clause that bites a mirror hardest is percentage heights. Standards: a
+`height: 100%` against an auto-height parent computes to auto. Quirks: it walks
+up the ancestors until it finds a definite height and uses that. On Google's
+reCAPTCHA that is the whole bug — the challenge grid is a table at height:100%
+inside auto-height containers, so in the mirror it reached the frame's own
+580px box, stretched its four rows from 97px to 145px, and pushed the footer
+holding VERIFY and SKIP outside the frame.
+
+The fixture makes the two answers 18px and 200px so neither can be mistaken for
+the other, and the mode itself is asserted beside it.
+*/
+func TestPWAMirrorsInStandardsMode(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/percent-height"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('measure me')`,
+		budget(60*time.Second), "the mirrored page")
+
+	var got struct {
+		Mode  string `json:"mode"`
+		Inner int    `json:"inner"`
+	}
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const inner = doc.getElementById('inner');
+      return { mode: doc.compatMode,
+               inner: inner ? Math.round(inner.getBoundingClientRect().height) : -1 };
+    })()`, &got)
+
+	if got.Mode != "CSS1Compat" {
+		t.Errorf("the mirror document is in %q, not standards mode: every page it "+
+			"renders declared a doctype and is being laid out as though it had not",
+			got.Mode)
+	}
+	// The consequence, not just the flag: the mode is only worth asserting
+	// because of what it does to the layout.
+	if got.Inner > 100 {
+		t.Errorf("a percentage height against an auto-height parent came out %dpx, "+
+			"which is the quirks-mode answer (the definite 200px ancestor); standards "+
+			"rules make it auto, about 18px", got.Inner)
+	}
+}

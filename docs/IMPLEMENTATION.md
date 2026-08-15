@@ -896,6 +896,108 @@ tab offers the list, the star keeps a page, the list survives a reload of the
 app, one click brings the page back into the tab in front, and the undo restores
 what a removal took.
 
+### 23. The plane-side picture was a picture of something else
+
+Two faults, both found while reading a real bundle of a page whose widget lives
+in a frame, and both with the same shape: the picture was wrong in a way that
+looked like the mirror being wrong. That is worse than no picture. A bundle is
+read by someone who was not there, and a rendering artifact they cannot
+distinguish from a mirror bug sends them after a bug that does not exist — which
+is precisely what happened, for some hours, to the author of this section.
+
+**Images the stylesheet names were dropped.** An SVG image may not load anything
+external, so the rasteriser trades every mirrored image for a data URI first.
+It only ever walked `<img>`. Every reference the *stylesheet* carries — the
+backgrounded icons, logos and sprites that a widget is mostly made of — stayed a
+blob URL, which resolves to nothing inside an SVG, and painted as absence. The
+tally of missing images stayed at zero throughout, because it counted elements.
+The freeze now carries the host's blob-to-hash map, the `url()` references are
+traded in the same pass as the elements, content is served from the byte budget
+before decoration, and an unresolved one is counted.
+
+**Inlined frames were flattened.** A same-origin frame's document is inlined
+into the mirror as a nested `<html>`/`<body>`, which the patcher builds through
+`createElement`. The rasteriser worked from `frame.html` — serialised markup,
+parsed back with the HTML parser, which has nowhere to put a second `<html>`. It
+drops both, merges their attributes onto the page's own, and promotes the
+children; nested stand-ins go with them. In one real bundle that was five
+`<html>`/`<body>` pairs gone and three of seven frame stand-ins with them, so
+the picture came out of a box tree the reader never had. The freeze now carries
+a clone of the document beside the markup, and the picture is rendered from the
+clone; a freeze without one still renders, and says so in `NOTES.txt`.
+
+`mirror.html` is unchanged and still the serialised markup, because it is the
+artifact a person reads and diffs against `expected.html`. Note that *opening*
+it in a browser re-parses it, with the same losses — read it, diff it, but do
+not treat it as a rendering.
+
+### 24. A frame that outgrows its box must not swallow its own controls
+
+The stand-in for an inlined frame is given the box the real frame had landside,
+because the CSS that sized the original selects on a tag name this element no
+longer has. What goes *inside* that box is laid out here, though — by the
+reader's browser, in whatever fonts the reader has (Skyhook blocks the page's
+own), against a nested `<html>`/`<body>` that is an ordinary block box and not
+a viewport, so a percentage height resolves against something else entirely.
+
+Landside the content fitted, so the clipping the stand-in inherited from
+`overflow: hidden` only ever engages when *this* side's layout has drifted —
+and then it deletes the difference without a word. What sits at the bottom of a
+widget is its buttons. The observed case was Google's reCAPTCHA: the challenge
+grid laid out taller plane-side than the 400×580 the page gave the frame, and
+the footer holding VERIFY/SKIP fell outside the box. The reader gets a captcha
+they can solve and cannot submit, with nothing on screen suggesting anything is
+missing — not a scrollbar, not a cut edge, nothing.
+
+The stand-in now scrolls. The overflow is still a bug wherever it comes from,
+but a scrollbar is a failure the reader can see and get past, and it costs
+nothing on the overwhelming majority of frames whose content does fit.
+
+Worth being clear about what this does not do: it does not make the layout
+right, and it is not a substitute for finding out why a particular frame comes
+out too tall. It converts an invisible, unrecoverable failure into a visible,
+recoverable one.
+
+### 25. The mirror was rendering the entire web in quirks mode
+
+A frame at `about:blank` has no doctype, and a document parsed without one is
+in quirks mode. The mirror frame was created that way and never given one, so
+every page Skyhook has ever shown was laid out under rules none of those pages
+were written for. Nothing reported it: quirks mode is not an error, it is a
+different and quietly wrong answer, and most of the time the difference is
+small enough to read past.
+
+The clause that matters here is percentage heights. Under standards rules a
+`height: 100%` whose parent has an auto height computes to auto; in quirks mode
+it walks up the ancestors until it finds a definite height and uses that
+instead. Google's reCAPTCHA challenge is a table at `height: 100%` inside
+containers that are all auto-height, so landside it is content-sized and square
+— and in the mirror the percentage reached past all of them to the frame's own
+580px box. The table stretched to fill it and its four rows went from 97px to
+145px each. The 192px of surplus that appears between the tiles pushes the
+challenge's footer outside the frame, and the footer is where VERIFY and SKIP
+live: a captcha the reader can solve and cannot submit.
+
+Two things made this hard to see, and both are worth remembering:
+
+- **Every diagnostic path renders in standards mode.** The capture screenshot
+  goes through an SVG `foreignObject`, and anyone re-opening `mirror.html` gets
+  a file with a doctype. Both produce the correct layout, so the bundle's own
+  picture showed a working challenge while the reader was looking at a broken
+  one. The frozen DOM and CSS were correct, the two halves' hashes agreed, and
+  the artifact disagreed with the reader — which reads as the reader being
+  wrong.
+- **`compatMode` is fixed when the document is parsed.** Appending a
+  DocumentType node afterwards does nothing at all. The document has to be
+  re-opened and rewritten, which is what `forceStandardsMode` does.
+
+`srcdoc` would carry the doctype without rewriting anything, and was tried
+first. It loses a race with the frame's own initial about:blank and lands the
+patcher on a document that is about to be replaced. Re-opening in place is the
+boring option that works; its one visible effect is that the frame's URL
+becomes the shell's, which changes no resolution because an about:blank frame
+had already inherited that same base URL from its creator.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

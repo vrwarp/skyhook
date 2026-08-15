@@ -13,7 +13,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { gunzipSync } from 'node:zlib';
 
-import { gather, type CaptureArtifact } from '../src/app/capture.js';
+import { frozenDocument, gather, type CaptureArtifact } from '../src/app/capture.js';
 import type { MirrorFreeze } from '../src/mirror/host.js';
 import type { CaptureRequest } from '../src/shared/protocol.js';
 
@@ -138,5 +138,56 @@ describe('plane-side capture', () => {
     expect(byName(artifacts, 'tabs/1/mirror.html')).toBeDefined();
     const log = byName(artifacts, 'client.log');
     expect(body(log!)).toMatch(/capture:/);
+  });
+});
+
+/*
+ * A mirrored page that inlines a same-origin frame holds that frame's document
+ * as a nested <html>/<body>, which the patcher builds through `createElement`.
+ * Serialising the mirror and parsing it back cannot round-trip that: the HTML
+ * parser has nowhere to put a second <html>, so it drops both, merges their
+ * attributes onto the real ones, and promotes the children — which on a page of
+ * nested frames loses the stand-ins too. Anything rendered from the result is a
+ * picture of a box tree the reader never had.
+ */
+describe('the frozen document a picture is rendered from', () => {
+  /** A mirror holding one inlined frame, built the way the patcher builds it. */
+  function withInlinedFrame(): Element {
+    const root = document.createElement('html');
+    const head = document.createElement('head');
+    const body = document.createElement('body');
+    const stand = document.createElement('div');
+    stand.setAttribute('data-skyhook-tag', 'iframe');
+    const inner = document.createElement('html');
+    const innerBody = document.createElement('body');
+    innerBody.setAttribute('class', 'inside-the-frame');
+    innerBody.textContent = 'framed';
+    inner.appendChild(document.createElement('head'));
+    inner.appendChild(innerBody);
+    stand.appendChild(inner);
+    body.appendChild(stand);
+    root.appendChild(head);
+    root.appendChild(body);
+    return root;
+  }
+
+  it('keeps an inlined frame whole when the freeze carried a clone', () => {
+    const doc = withInlinedFrame();
+    const out = frozenDocument(freeze(1, doc.outerHTML, { doc }));
+    expect(out?.querySelectorAll('[data-skyhook-tag="iframe"]').length).toBe(1);
+    expect(out?.querySelectorAll('[data-skyhook-tag="iframe"] html').length).toBe(1);
+    expect(out?.querySelector('body.inside-the-frame')?.parentElement?.tagName)
+      .toBe('HTML');
+    expect(out?.body.textContent).toContain('framed');
+  });
+
+  // The other half of the same fact, so the reason for carrying a clone is
+  // pinned rather than asserted: fed only markup, the parser flattens it.
+  it('loses the frame when only the markup survives', () => {
+    const doc = withInlinedFrame();
+    const out = frozenDocument(freeze(1, doc.outerHTML));
+    expect(out?.querySelectorAll('[data-skyhook-tag="iframe"] html').length).toBe(0);
+    // Worse than dropped: the frame body's attributes land on the page's own.
+    expect(out?.body.className).toBe('inside-the-frame');
   });
 });

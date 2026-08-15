@@ -8,6 +8,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,13 +79,19 @@ func TestPWAReadsAnAggregatorAndComesBack(t *testing.T) {
 
 	// Whatever else happened, the frame must still be the frame: a mirror that
 	// followed a link would be sitting on the real page, fetched plane-side.
-	var sameOrigin bool
+	//
+	// Stated as "not a page off this site", which is the thing that would be
+	// wrong, rather than as one exact sentinel. The frame starts at about:blank
+	// and is then re-opened in place to give it a doctype — without which the
+	// mirror renders in quirks mode — and re-opening moves the document's URL to
+	// the shell's own. Either of those is fine; the site's URL is not.
+	var parked string
 	evalJSON(ctx, t, page, `(() => {
       const f = document.querySelector('iframe.mirror');
-      try { return f.contentWindow.location.href === 'about:blank'; } catch (e) { return false; }
-    })()`, &sameOrigin)
-	if !sameOrigin {
-		t.Fatal("the mirror frame navigated itself: the plane side fetched a page")
+      try { return f.contentWindow.location.href; } catch (e) { return 'unreadable: ' + e; }
+    })()`, &parked)
+	if strings.HasPrefix(parked, h.site.URL) {
+		t.Fatalf("the mirror frame navigated itself to %q: the plane side fetched a page", parked)
 	}
 
 	// And back, twice. The back button used to go dead as soon as a navigation
