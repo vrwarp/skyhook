@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # Only main on push. A branch push and its pull request are the same commit,
+  # so listening to both ran the whole suite — e2e and netem included — twice
+  # for every commit on a branch with a PR open. The pull_request event covers
+  # branch work; this covers what lands.
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
