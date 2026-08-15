@@ -274,6 +274,42 @@ function fragmentTarget(doc: Document, fragment: string): Element | null {
   return null;
 }
 
+/** Lists a message could plausibly belong to, best first. */
+const LIST_SELECTOR = '[role="log"], [role="list"], [role="feed"], ul, ol';
+
+/**
+ * The list a message typed into this composer would join.
+ *
+ * Searched outwards from the composer rather than down from the document,
+ * because "the first list on the page" is not the transcript on any real chat
+ * app — it is the navigation. Google Chat has ten elements at `role="list"` and
+ * every one of them is in the left rail: the direct messages, the spaces, the
+ * apps. Taking the first put the reader's own message in the sidebar, under
+ * their list of conversations, which is a worse answer than not showing it at
+ * all: an echo that appears somewhere the message will never be is not
+ * reassurance, it is a second thing to be confused by.
+ *
+ * Outwards gets it right for the reason the layout is the way it is. A composer
+ * sits inside the conversation it belongs to, and so does that conversation's
+ * transcript; the sidebar is somewhere else entirely. So the first ancestor
+ * whose subtree holds a list at all is the conversation pane, and the list
+ * inside it is the transcript. If the walk reaches the body without finding
+ * one, the page has no list this message could join, and the caller falls back
+ * to no ghost.
+ */
+export function nearestList(from: HTMLElement): Element | null {
+  for (let el: HTMLElement | null = from.parentElement; el; el = el.parentElement) {
+    for (const found of Array.from(el.querySelectorAll?.(LIST_SELECTOR) ?? [])) {
+      // A rich-text composer can hold a list of its own — the bullets the
+      // reader is part-way through typing. Putting the echo inside the box the
+      // message just left is the one place it certainly does not belong.
+      if (!from.contains(found)) return found;
+    }
+    if (el.tagName === 'BODY') break;
+  }
+  return null;
+}
+
 export class MirrorHost {
   readonly tab: number;
   readonly frame: HTMLIFrameElement;
@@ -1303,11 +1339,7 @@ export class MirrorHost {
   // --------------------------------------------------------------- optimistic
 
   private placeGhost(composer: Node, text: string): boolean {
-    // The mirrored page's own <body>, which is a node inside this document
-    // rather than this document's body — the snapshot is rooted at the page's
-    // <html> and that whole element is a child of the frame's real body.
-    const root = (composer as HTMLElement).closest?.('body') ?? this.doc?.body;
-    const list = root?.querySelector('[role="list"], ul, ol');
+    const list = nearestList(composer as HTMLElement);
     if (!list || !this.doc) return false;
     const ghost = this.doc.createElement('div');
     ghost.className = 'skyhook-ghost';

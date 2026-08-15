@@ -1355,6 +1355,28 @@ Both handlers now compare the `frameId` against the tab's main frame, which is
 the distinction `onFrameNavigated` was already making with the same field.
 `Page.loadEventFired` is main-frame only and needed no change.
 
+### 32. An optimistic echo has to land where the message will
+
+Reading the same capture for what else assumed a chat app looks a particular
+way: the ghost message — the local echo that appears the instant Enter is
+pressed, seconds before the server can confirm it — was placed in the first
+element matching `[role="list"], ul, ol` anywhere in the document.
+
+On Google Chat every one of the ten `role="list"` elements on the home screen
+is in the left rail: the direct messages, the spaces, the apps. The reader's own
+message would have appeared in the sidebar, under their list of conversations.
+An echo in the wrong place is worse than no echo: it is not reassurance, it is a
+second thing to be confused by, and the real message arriving elsewhere a moment
+later does not explain it.
+
+The search now runs outwards from the composer instead of down from the
+document, which gets it right for the reason the layout is that way. A composer
+sits inside the conversation it writes to, and so does that conversation's
+transcript; the navigation is somewhere else. So the first ancestor whose
+subtree contains a list at all is the conversation pane. The walk still ends at
+the body, which is what keeps a plain message board — where the body *is* the
+container — working as before.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
