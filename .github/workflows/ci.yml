@@ -201,7 +201,12 @@ jobs:
           SKYHOOK_SLOW_LINK: '1'
           SKYHOOK_TEST_PORT: '45123'
           SKYHOOK_CHROME: ${{ steps.browser.outputs.path }}
-        run: go test -count=1 -timeout 25m -v ./test
+        # Headroom, not slack. This suite spends most of its wall clock waiting
+        # on a 1.2s round trip, so it grows with the number of tests rather than
+        # with how hard any of them work, and it had been running at 24m48s of a
+        # 25m ceiling — close enough that whatever landed next was going to hit
+        # it, which is what happened.
+        run: go test -count=1 -timeout 40m -v ./test
 
       - name: Remove the link profile
         if: always()
