@@ -211,18 +211,18 @@ it is not a close call.
 func wellFormedRule(rule string) bool {
 	depth := 0
 	for i := 0; i < len(rule); i++ {
-		switch c := rule[i]; {
-		case c == '\\':
+		switch c := rule[i]; c {
+		case '\\':
 			i++ // escaped: whatever it is, it is not structure
-		case c == '"' || c == '\'':
+		case '"', '\'':
 			j := scanCSSString(rule, i)
 			if j > len(rule) || j-1 <= i || rule[j-1] != c {
 				return false // unterminated string
 			}
 			i = j - 1
-		case c == '{':
+		case '{':
 			depth++
-		case c == '}':
+		case '}':
 			if depth--; depth < 0 {
 				return false // closes a block it never opened
 			}
