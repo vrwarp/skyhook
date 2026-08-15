@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/vrwarp/skyhook/internal/protocol"
 )
@@ -16,6 +17,16 @@ import (
 // It is deliberately the same algorithm the TypeScript patcher implements; if
 // the two ever disagree, one of them has a bug worth finding.
 type Model struct {
+	// mu guards everything below.
+	//
+	// A replica is written by whichever goroutine is feeding it frames and read
+	// by whoever is asking what the page says — in the end-to-end client those
+	// are always two different goroutines, because frames keep arriving for as
+	// long as a test polls. Unsynchronised, `WaitForText` walking `Nodes` while
+	// a mutation inserts into it is a "concurrent map read and map write",
+	// which is not a test failure but a runtime fatal: it takes the whole suite
+	// down, in whichever test happened to be running.
+	mu      sync.RWMutex
 	Strings []string
 	Nodes   map[int64]*ModelNode
 	Root    int64
@@ -51,6 +62,8 @@ func (m *Model) str(ref int32) string {
 
 // ApplySnapshot resets the replica to a full document.
 func (m *Model) ApplySnapshot(s *protocol.Snapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Strings = append([]string{}, s.Strings...)
 	m.Nodes = make(map[int64]*ModelNode, len(s.Nodes))
 	m.CSS = append([]string{}, s.CSS...)
@@ -88,6 +101,8 @@ func (m *Model) ApplySnapshot(s *protocol.Snapshot) error {
 
 // ApplyMutation applies one mutation batch.
 func (m *Model) ApplyMutation(mu *protocol.Mutation, seq uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Strings = append(m.Strings, mu.Strings...)
 	for i := range mu.Ops {
 		if err := m.applyOp(&mu.Ops[i]); err != nil {
@@ -241,6 +256,8 @@ func removeID(list []int64, id int64) []int64 {
 
 // Text renders the replica's visible text, which is what tests assert on.
 func (m *Model) Text() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	var b strings.Builder
 	var walk func(int64)
 	walk = func(id int64) {
@@ -262,6 +279,8 @@ func (m *Model) Text() string {
 // HTML renders the replica as HTML. The client builds real DOM nodes rather
 // than parsing HTML, but this is invaluable for debugging a divergence.
 func (m *Model) HTML() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	var b strings.Builder
 	var walk func(int64)
 	walk = func(id int64) {
@@ -298,6 +317,8 @@ func (m *Model) HTML() string {
 
 // Find returns the first node matching a tag and attribute value.
 func (m *Model) Find(tag, attr, value string) *ModelNode {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	ids := make([]int64, 0, len(m.Nodes))
 	for id := range m.Nodes {
 		ids = append(ids, id)
@@ -318,9 +339,44 @@ func (m *Model) Find(tag, attr, value string) *ModelNode {
 	return nil
 }
 
+// FindByText returns the innermost element whose text contains a substring.
+//
+// It lives here rather than in the client that wants it because the walk has to
+// happen under the replica's own lock: a caller iterating `Nodes` from outside
+// is the exact race this type exists to prevent.
+func (m *Model) FindByText(substr string) *ModelNode {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var best *ModelNode
+	var bestLen int
+	var walk func(id int64) string
+	walk = func(id int64) string {
+		n := m.Nodes[id]
+		if n == nil {
+			return ""
+		}
+		if n.Kind == protocol.KindText {
+			return n.Text
+		}
+		var sb strings.Builder
+		for _, ch := range n.Children {
+			sb.WriteString(walk(ch))
+		}
+		text := sb.String()
+		if strings.Contains(text, substr) && (best == nil || len(text) < bestLen) {
+			best, bestLen = n, len(text)
+		}
+		return text
+	}
+	walk(m.Root)
+	return best
+}
+
 // Hash fingerprints the replica with the same algorithm the agent uses, so a
 // mismatch means genuine divergence rather than a hashing difference.
 func (m *Model) Hash() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	var h uint32 = 0x811c9dc5
 	ids := make([]int64, 0, len(m.Nodes))
 	for id := range m.Nodes {

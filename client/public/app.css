@@ -86,6 +86,10 @@ body {
 }
 
 #toolbar button:disabled { color: #4b5563; }
+/* A saved page is the one thing in this chrome worth a colour of its own: it is
+   how the reader tells, at a glance, whether the page they are on is one they
+   can get back to for free. */
+#bookmark.on { color: var(--warn); border-color: #4b5563; }
 
 #urlbar {
   flex: 1;
@@ -145,6 +149,132 @@ body {
 
 #composer { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #374151; }
 #composer input { flex: 1; background: #111827; color: var(--fg); border: 1px solid #374151; border-radius: 6px; padding: 6px; }
+
+/* --- saved pages ---------------------------------------------------------- */
+
+/* The panel's list. Two lines per row — what it is called, and where it goes —
+   because a title alone is not enough to tell two saved pages apart, and an
+   address alone is not enough to recognise either of them. */
+.marks { display: flex; flex-direction: column; height: 100%; gap: 6px; }
+
+.marks-search {
+  background: #111827;
+  color: var(--fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.marks-note { margin: 0; color: var(--warn); font-size: 12px; }
+.marks-list { flex: 1; overflow-y: auto; margin: 0 -4px; }
+
+.mark {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: default;
+}
+
+.mark:hover, .mark:focus-visible { background: #1f2937; outline: none; }
+.mark-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mark-host { color: var(--muted); font-size: 11px; }
+
+.mark-rename {
+  width: 100%;
+  background: #111827;
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+}
+
+.marks-empty { color: var(--muted); padding: 8px; margin: 0; }
+
+.marks-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #374151;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.marks-count { flex: 1; }
+.marks-act {
+  background: transparent;
+  color: var(--accent);
+  border: 0;
+  padding: 2px 4px;
+  font: inherit;
+}
+
+/* The start page: what a tab shows before it has been anywhere. It covers the
+   frame area rather than living inside a mirror frame — no script runs there,
+   and a document the server never sent has no business in a mirror. */
+#start {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  background: var(--bg);
+  padding: 28px 24px;
+}
+
+#start[hidden] { display: none; }
+.start-inner { max-width: 720px; margin: 0 auto; }
+.start-inner h1 { font-size: 16px; margin: 0 0 6px; }
+.start-note { color: var(--muted); margin: 0 0 16px; max-width: 60ch; }
+
+.start-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px;
+}
+
+.start-mark {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  background: #1f2937;
+  cursor: default;
+  overflow: hidden;
+}
+
+.start-mark:hover, .start-mark:focus-visible { border-color: var(--accent); outline: none; }
+
+/* Address-bar completions. Fixed, like the menu: the coordinates handed over
+   are already the right ones. */
+.suggest {
+  position: fixed;
+  z-index: 40;
+  padding: 4px;
+  background: #0b1220;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .5);
+}
+
+.suggest[hidden] { display: none; }
+
+.suggest-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.suggest-item.on { background: #1f2937; }
+.suggest-title { overflow: hidden; text-overflow: ellipsis; }
+.suggest-host { color: var(--muted); font-size: 11px; flex: none; }
 
 /* --- PWA shell ------------------------------------------------------------ */
 
@@ -331,6 +461,9 @@ body {
 
 #toast {
   position: fixed;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   right: 16px;
   bottom: 16px;
   z-index: 20;
@@ -345,3 +478,11 @@ body {
 }
 
 #toast[hidden] { display: none; }
+.toast-act {
+  background: transparent;
+  color: var(--accent);
+  border: 0;
+  padding: 2px 4px;
+  font: inherit;
+  flex: none;
+}

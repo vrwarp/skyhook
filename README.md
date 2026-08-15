@@ -49,6 +49,12 @@ queue depth and the bytes actually spent. Middle-click a link for a background
 tab, and right-click anywhere for Skyhook's own menu — the browser's would act
 on the sandboxed frame rather than on the page it is showing.
 
+Press **★** (or Ctrl/⌘+D) to keep a page. Saved pages are the only way of
+getting somewhere here that does not spend the link: the list is on your device,
+so it opens instantly, searches for free and stays readable through an outage —
+it is what a new tab shows, what Ctrl/⌘+B opens beside the page, and what the
+address bar completes from as you type.
+
 The demo runs in loopback mode — plain HTTP on `127.0.0.1`, no TLS, no QUIC.
 That is deliberate rather than lazy: Chrome will not register a service worker
 behind a self-signed certificate, so a local demo over TLS could not install or
