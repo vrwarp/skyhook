@@ -17,7 +17,8 @@ this is what survived contact.
 
 The client is a Chrome-targeted PWA served by the server itself; the Electron
 shell the design called for was built first and then pivoted away from
-(deviation 6).
+(deviation 6). It draws two chromes — a wide one for a mouse and a one-row one
+for a phone, in either orientation — from the same behaviour (deviation 27).
 
 ## Deviations from the design, and why
 
@@ -1060,6 +1061,84 @@ tabs come back, in order, with their documents in them, in the one session that
 was there before; the active tab is the one on screen, and the tab with history
 knows it has it. Without the fix the test fails with the symptom it was written
 for: `+ ← → ↻ ★ Chat` and nothing else.
+
+### 27. The chrome was drawn for a mouse on a wide screen
+
+The client is a PWA and a PWA installs on a phone, which is the device most
+likely to be the only one somebody has out at 35,000 feet. What it installed
+was a desktop browser's chrome, scaled to nothing.
+
+Measured on a 393-pixel screen, before any of this: the toolbar wanted 600
+pixels and got 393, so the star was clipped, the saved-pages button was cut off
+mid-word, and the Chat button and the entire HUD — the link state, the round
+trip, the queue depth, the bytes spent, which is the instrument this whole
+product is built around — were off the right-hand edge with no way to scroll to
+them. Past three tabs the strip pushed its own "+" off the end, so a browser
+whose tabs are its session had no way to open one. The side panel is 380 pixels
+wide; opening it on a 393-pixel screen scrolled the whole document sideways and
+took the chrome with it. Every control was 27 to 34 pixels tall against a
+44-pixel guideline, and the tab close button was 15 by 18. The context menu —
+the only route to "open in a new tab", "copy link address" and "report a
+rendering problem" — was drawn at a mouse position, offered 30-pixel rows, and
+hinted `Ctrl+D` and `Middle click` at a device with neither.
+
+And under all of it, `viewport.mobile` was hard-coded `false`. The flag has been
+in the wire format and honoured by `Tab.SetViewport` since the beginning; the
+client never set it. So a phone reader got every site's *desktop* layout, laid
+out landside at 393 pixels because that is what the client reported, and
+mirrored at that scale. That is the one failure this client cannot pinch-zoom
+its way out of, and it was a one-line fix behind everything else.
+
+The shell now has two forms. They share every line of behaviour and differ in
+what is on screen:
+
+- **The chrome is one row instead of two**, which is 56 pixels rather than 88 —
+  a tenth of the page back on a phone held sideways. The strip goes, and back,
+  forward and reload go with it: the system back gesture is already caught and
+  spent on the tab's own history ([§14](#14-the-browsers-own-back-and-forward-drive-the-tab-not-the-shell)),
+  and all three are in the ⋯ menu, one tap away and not a tap made on every page.
+- **The tabs become a list** behind a count in the toolbar, the way every phone
+  browser has done it for fifteen years. The count spins when a tab that is not
+  on screen is still fetching, which with the strip gone is the only thing that
+  says a background tab is doing anything. "New tab" is a row in that list and
+  cannot scroll off it.
+- **The HUD collapses to its colour** — a dot, tappable for the three numbers it
+  drops — and spells itself back out when the answer is *offline* or *slow*,
+  which are exactly the states where the reader is about to waste a gesture.
+- **The panel and the menu become sheets**, up from the bottom where the thumb
+  is, dismissed by touching the page they cover.
+- **Nothing worth hitting is under 44 pixels**, and no entry hints a chord at a
+  device with no keys: `MenuItem.chord` is a gesture and is hidden from a coarse
+  pointer, while `MenuItem.hint` is what the entry *costs* and is shown
+  everywhere, because a phone reader is on the same link as everyone else.
+- **The address bar drops the scheme** while nobody is typing in it and puts the
+  full URL back on focus, so what is edited and sent is always the address and
+  never a description of it. Enter blurs it, which sends the on-screen keyboard
+  away from the page that is arriving.
+
+Two things it does not do, deliberately. It does not report `mobile` for a touch
+laptop or a narrow desktop window — both halves of the question have to be true,
+because a desktop screen wants the desktop web. And `interactive-widget` is
+pinned to `resizes-visual` in the viewport meta rather than left to the browser
+default: the other behaviour resizes the layout viewport when the keyboard
+opens, which this shell answers by reporting a new viewport, which the server
+answers by laying the real page out again and sending a fresh snapshot. Tapping
+into a search box would cost a page.
+
+The wide shell is untouched, and that is a property rather than a hope: every
+rule is inside `@media (max-width: 600px)` or `(max-height: 500px)` for layout,
+or `(pointer: coarse)` for target sizes, and the end-to-end suite — which drives
+the real PWA at 1280x900 — measures the same chrome, byte for byte, as before.
+
+The loop that produced it also found a bug that was never about phones. The
+status line named where a page was coming from by falling back to the tab's own
+URL once the server confirmed the navigation had started — and between that
+confirmation and the commit, which is seconds on this link, the tab's own URL is
+still the page being *left*. So the one affordance that answers "where am I
+going" spent the whole wait naming the one page the reader was definitely not
+going to. `Progress` now keeps the destination for as long as the tab has not
+got there ([progress.ts](../client/src/app/progress.ts)), and the label is drawn
+from somewhere this side actually asked to go or from nothing at all.
 
 ## Known gaps
 

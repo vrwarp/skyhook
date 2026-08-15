@@ -14,6 +14,7 @@
  */
 
 import { displayHost, search, type Bookmark } from './bookmarks.js';
+import { isTouch } from './layout.js';
 
 /** Everything a row can ask the shell to do. */
 export interface BookmarkActions {
@@ -322,8 +323,16 @@ export class StartPage {
         + 'the list lives on this device, opens instantly, and is readable during an outage.';
       return;
     }
-    this.note.textContent = opts.online
-      ? 'Opening one of these costs a single round trip. Middle-click for a background tab.'
-      : OFFLINE_NOTE;
+    if (!opts.online) {
+      this.note.textContent = OFFLINE_NOTE;
+      return;
+    }
+    // The second sentence names a gesture, so it has to name one the reader
+    // has. Told to press a middle button it does not have, a phone stops
+    // believing the rest of the sentence too — and the rest of the sentence is
+    // the only place this app says what a page costs.
+    this.note.textContent = isTouch()
+      ? 'Opening one of these costs a single round trip. Touch and hold for more.'
+      : 'Opening one of these costs a single round trip. Middle-click for a background tab.';
   }
 }

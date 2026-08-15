@@ -16,6 +16,8 @@ import {
   BOOKMARK_LIMIT, Bookmarks, exportText, parseImport, search, type Bookmark,
 } from './bookmarks.js';
 import { BookmarkPanel, StartPage } from './bookmarkview.js';
+import { TabList } from './tabsview.js';
+import { isPhone, isTouch } from './layout.js';
 import { Suggest } from './suggest.js';
 import { Store, type Pairing } from '../store/store.js';
 import type {
@@ -65,6 +67,9 @@ const el = {
   bookmark: byId<HTMLButtonElement>('bookmark'),
   marks: byId<HTMLButtonElement>('marks'),
   chat: byId<HTMLButtonElement>('chat'),
+  tabs: byId<HTMLButtonElement>('tabs'),
+  more: byId<HTMLButtonElement>('more'),
+  hud: byId<HTMLButtonElement>('hud'),
   frames: byId<HTMLDivElement>('frames'),
   progress: byId<HTMLDivElement>('progress'),
   status: byId<HTMLDivElement>('status'),
@@ -179,13 +184,28 @@ function send(name: string, args: Record<string, unknown>): void {
   worker?.postMessage({ name, args });
 }
 
+/**
+ * What the landside tab is laid out against.
+ *
+ * The `mobile` flag is the difference between a site's phone layout and its
+ * desktop one squeezed into 393 pixels, and it is not a small difference: it is
+ * whether Chromium honours the page's own `<meta name=viewport>` at all. Left
+ * false — as it was — a phone reader got a 1000-pixel-wide desktop page
+ * rendered into a 393-pixel window and mirrored at that scale, which is the
+ * one failure this client cannot pinch-zoom its way out of.
+ *
+ * Both halves of the question have to be true. A touch laptop is a real device
+ * with a real desktop screen, and telling the server it is a phone would trade
+ * a good layout for a narrow one; a desktop window dragged narrow is still
+ * being read by somebody who asked for the desktop web.
+ */
 function viewport(): { w: number; h: number; dpr: number; mobile: boolean } {
   const rect = el.frames.getBoundingClientRect();
   return {
     w: Math.max(320, Math.round(rect.width)),
     h: Math.max(320, Math.round(rect.height)),
     dpr: window.devicePixelRatio || 1,
-    mobile: false,
+    mobile: isPhone() && isTouch(),
   };
 }
 
@@ -375,6 +395,11 @@ async function hostFor(tab: number): Promise<MirrorHost> {
     dismiss: () => {
       const was = menuIsOpen();
       closeMenu();
+      // A sheet covers the page rather than sitting beside it, so touching the
+      // page is how a phone says "not that, this". Reaching the × in the far
+      // corner of a six-inch screen to get back to what is already on screen
+      // is a gesture nobody makes twice.
+      dismissSheet();
       return was;
     },
   });
@@ -422,12 +447,7 @@ function renderTabs(): void {
     });
     node.appendChild(close);
 
-    node.addEventListener('click', () => {
-      active = tab.id;
-      renderProgress();
-      layout();
-      syncToolbar();
-    });
+    node.addEventListener('click', () => selectTab(tab.id));
     node.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
       // The shell's own menu below would offer page actions; on a tab the
@@ -461,7 +481,48 @@ function renderTabs(): void {
   add.disabled = !connected;
   add.addEventListener('click', () => openTab('', 'focus'));
   el.strip.appendChild(add);
+  syncTabsButton();
   syncToolbar();
+}
+
+/** Brings a tab to the front, from the strip or from the list that replaces it. */
+function selectTab(id: number): void {
+  active = id;
+  renderProgress();
+  layout();
+  syncToolbar();
+}
+
+/**
+ * The phone's whole tab strip: a count, and whether any of them is waiting.
+ *
+ * With the strip gone, this spinner is the only thing on screen that says a
+ * background tab is still fetching — which on this link is a fact worth
+ * minutes, because the answer to "is it here yet" decides whether the reader
+ * switches to it or keeps reading.
+ */
+function syncTabsButton(): void {
+  const count = tabs.size + progress.opening.length;
+  el.tabs.textContent = String(count);
+  const busy = Array.from(tabs.keys()).some(isBusy) || progress.opening.length > 0;
+  el.tabs.classList.toggle('loading', busy);
+  el.tabs.setAttribute(
+    'aria-label',
+    busy ? `${count} tabs, one still loading` : `${count} tabs`,
+  );
+  el.tabs.setAttribute('aria-expanded', String(!el.panel.hidden && panelView === 'tabs'));
+  if (!el.panel.hidden && panelView === 'tabs') renderTabList();
+}
+
+function renderTabList(): void {
+  tabList.render(
+    Array.from(tabs.values()).map((t) => ({
+      id: t.id, title: t.title, url: t.url, loading: isBusy(t.id),
+    })),
+    progress.opening.map((o) => ({ url: o.url })),
+    active,
+    connected,
+  );
 }
 
 /** The one moving thing in the chrome: a tab, or a tab-to-be, is waiting. */
@@ -499,7 +560,7 @@ function syncToolbar(): void {
   // A tab that has not been anywhere shows an empty address bar rather than
   // `about:blank`: the reader is about to type over it, and a placeholder that
   // has to be cleared first is a placeholder in the way.
-  if (document.activeElement !== el.urlbar) el.urlbar.value = isBlank(url) ? '' : url;
+  if (document.activeElement !== el.urlbar) el.urlbar.value = addressText(url);
   el.back.disabled = !tab?.canBack;
   el.forward.disabled = !tab?.canForward;
   // A back gesture let through earlier spent the trap. Now that there is a page
@@ -511,6 +572,24 @@ function syncToolbar(): void {
 /** A tab that has not been anywhere yet. `about:blank` is not a page. */
 function isBlank(url: string): boolean {
   return !url || url.startsWith('about:');
+}
+
+/**
+ * What the address bar reads while nobody is typing in it.
+ *
+ * On the phone shell that field is about two hundred pixels wide, and the
+ * first fifty of them used to be spent on `https://` — a prefix that is the
+ * same on every page the reader will ever see here, clipping the part that is
+ * not: the host. So the scheme goes, the way every phone browser drops it, and
+ * the field is left showing the thing the reader is checking.
+ *
+ * Only while it is not focused. The moment the caret lands, the real address
+ * comes back (see below): what is edited, copied and sent on Enter must be the
+ * URL and never a description of it.
+ */
+function addressText(url: string): string {
+  if (isBlank(url)) return '';
+  return isPhone() ? plainUrl(url) : url;
 }
 
 function layout(): void {
@@ -573,12 +652,13 @@ function renderProgress(): void {
 /** What the status line says: the verb the gesture meant, and where it points. */
 function busyLabel(tab: number): string {
   const ask = progress.waiting(tab);
-  // While there is an ask, only the ask's own destination. A gesture whose
-  // destination this side does not know — back, forward, a form submitted —
-  // would otherwise be labelled with the tab's current URL, which is the one
-  // page the reader is definitely not going to. Once the server has taken over
-  // the tab's URL is the newer truth, and by then it is the page arriving.
-  const url = ask ? ask.url ?? '' : tabs.get(tab)?.url ?? '';
+  // Only ever somewhere this side actually asked to go. A gesture whose
+  // destination it does not know — back, forward, a form submitted — is
+  // labelled with the verb alone, because the tab's current URL is the one
+  // page the reader is definitely not going to, and it stays the tab's current
+  // URL for the whole of the wait: the server confirms a navigation has
+  // started long before it says where it landed.
+  const url = ask?.url ?? progress.destination(tab);
   const verb = ask?.verb ?? 'Loading';
   return url ? `${verb} ${plainUrl(url)}…` : `${verb}…`;
 }
@@ -726,6 +806,23 @@ const startPage = new StartPage({
 });
 el.frames.appendChild(startPage.root);
 
+/**
+ * The phone's tab strip. Selecting one closes the sheet: the reader asked for
+ * a page, and leaving the list over it would cover the thing they asked for.
+ */
+const tabList = new TabList({
+  select: (id) => {
+    selectTab(id);
+    closePanel();
+  },
+  close: (id) => closeTab(id),
+  menu: (id, x, y) => showMenu(x, y, tabMenu(id)),
+  open: () => {
+    openTab('', 'focus');
+    closePanel();
+  },
+});
+
 const suggest = new Suggest(el.urlbar, {
   source: (query, limit) => search(bookmarks.all(), query, limit),
   pick: (mark) => openBookmark(mark, 'here'),
@@ -857,7 +954,7 @@ function bookmarkMenu(mark: Bookmark, x: number, y: number, from: 'panel' | 'sta
       { label: 'Open', disabled: !connected, run: () => openBookmark(mark, 'here') },
       {
         label: 'Open in new tab',
-        hint: 'Middle click',
+        chord: 'Middle click',
         disabled: !connected,
         run: () => openBookmark(mark, 'newTab'),
       },
@@ -1000,11 +1097,11 @@ function pageGroups(tab: number): MenuGroups {
         // that reads "Bookmark page" on a page already bookmarked is an
         // invitation to make a second copy of it.
         label: bookmarks.has(url) ? 'Remove bookmark' : 'Bookmark page',
-        hint: 'Ctrl+D',
+        chord: 'Ctrl+D',
         disabled: isBlank(url),
         run: () => toggleBookmark(tab),
       },
-      { label: 'Saved pages…', hint: 'Ctrl+B', run: () => showPanel('marks') },
+      { label: 'Saved pages…', chord: 'Ctrl+B', run: () => showPanel('marks') },
       {
         label: 'Duplicate tab',
         disabled: !url || !connected,
@@ -1034,7 +1131,7 @@ function mirrorMenu(tab: number, target: MenuTarget): MenuGroups {
     groups.push([
       {
         label: 'Open link in new tab',
-        hint: 'Middle click',
+        chord: 'Middle click',
         disabled: !connected,
         run: () => openInNewTab(link),
       },
@@ -1154,11 +1251,36 @@ document.addEventListener('contextmenu', (ev) => {
 
 // -------------------------------------------------------------------- toolbar
 
+// The full address while it is being worked on, the short one while it is only
+// being read. Selecting it as well is what the field being tapped means on a
+// phone: the reader who wanted to edit one character can still do it, and the
+// far more common one who is replacing the whole address has it gone already.
+el.urlbar.addEventListener('focus', () => {
+  const url = tabs.get(active)?.url ?? '';
+  if (isBlank(url) || el.urlbar.value === url) return;
+  el.urlbar.value = url;
+  el.urlbar.select();
+});
+
+el.urlbar.addEventListener('blur', () => {
+  // Not over something half-typed: a reader who tapped away mid-address is
+  // coming back to it, and replacing it with where they currently are would
+  // throw the typing away.
+  const url = tabs.get(active)?.url ?? '';
+  if (el.urlbar.value === url) el.urlbar.value = addressText(url);
+});
+
 el.urlbar.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Enter') return;
   const url = el.urlbar.value.trim();
   if (!url) return;
   suggest.close();
+  // The address has been sent, so the field is done with. Left focused on a
+  // phone it keeps the on-screen keyboard up over the bottom half of a page
+  // that is about to cost seconds to arrive, and holds the caret at the end of
+  // a URL whose beginning — the host — is the part worth looking at while
+  // waiting for it.
+  if (isPhone()) el.urlbar.blur();
   navigateTo(active, url);
 });
 
@@ -1333,8 +1455,24 @@ function toast(message: string, action?: { label: string; run(): void }): void {
     el.toast.appendChild(button);
   }
   el.toast.hidden = false;
+  placeToast();
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(hideToast, 8000);
+}
+
+/**
+ * Keeps the notice clear of the sheet.
+ *
+ * Both live at the bottom of a phone, which is where a thumb is and therefore
+ * where both belong; a notice pinned there while a sheet is open lands on the
+ * sheet's last row, and the last row of the saved list is the count and the
+ * two buttons that get the list off the device. So the notice stands on top of
+ * the sheet rather than in front of it. On a wide screen the panel is a column
+ * beside the page and the corner is free, so nothing moves.
+ */
+function placeToast(): void {
+  const sheet = isPhone() && !el.panel.hidden ? el.panel.getBoundingClientRect().height : 0;
+  el.toast.style.bottom = sheet ? `calc(${Math.round(sheet)}px + 12px)` : '';
 }
 
 function hideToast(): void {
@@ -1463,10 +1601,12 @@ function shellReport(): Record<string, unknown> {
 // read beside a page rather than instead of it, so they share the strip of
 // screen that is already the cost of not being the page.
 
-type PanelView = 'chat' | 'marks';
+type PanelView = 'chat' | 'marks' | 'tabs';
 let panelView: PanelView = 'chat';
 
-const PANEL_TITLES: Record<PanelView, string> = { chat: 'Chat', marks: 'Saved pages' };
+const PANEL_TITLES: Record<PanelView, string> = {
+  chat: 'Chat', marks: 'Saved pages', tabs: 'Tabs',
+};
 
 /** Opens a view, or closes the panel if that view is already the one showing. */
 function showPanel(view: PanelView): void {
@@ -1489,21 +1629,90 @@ function openPanel(view: PanelView): void {
   el.panelBody.textContent = '';
   if (view === 'chat') {
     void openChat();
+  } else if (view === 'tabs') {
+    el.panelBody.appendChild(tabList.root);
+    renderTabList();
   } else {
     el.panelBody.appendChild(marksPanel.root);
     marksPanel.render(bookmarks.all(), connected);
-    marksPanel.focusSearch();
+    // Not on a phone: the on-screen keyboard would come up over the list the
+    // reader opened the sheet to look at, and there is no Escape key to send
+    // it away again.
+    if (!isPhone()) marksPanel.focusSearch();
   }
   syncBookmarkButton();
+  syncTabsButton();
+  // The sheet has just taken the bottom of the screen; a notice already down
+  // there is now standing on the list it is about to be read against.
+  placeToast();
 }
 
 function closePanel(): void {
   el.panel.hidden = true;
   syncBookmarkButton();
+  syncTabsButton();
+  placeToast();
 }
+
+/**
+ * Closes the panel when it is a sheet and the reader has touched what it is
+ * covering. On a wide screen the panel sits beside the page rather than over
+ * it, so nothing about touching the page means "put that away".
+ */
+function dismissSheet(): void {
+  if (isPhone() && !el.panel.hidden) closePanel();
+}
+
+// The other half of the same gesture. A touch inside a mirror frame never
+// reaches this document — it is answered by the host's dismiss hook above —
+// but the start page, the empty area beside a short page and the chrome
+// itself all do.
+document.addEventListener('pointerdown', (ev) => {
+  if (el.panel.hidden || !isPhone()) return;
+  const target = ev.target as HTMLElement | null;
+  // Not the panel itself, and not the buttons that open it: those toggle, and
+  // closing here first would make the second half of the toggle reopen it.
+  if (target?.closest('#panel, #tabs, #more, .menu')) return;
+  closePanel();
+}, true);
 
 el.chat.addEventListener('click', () => showPanel('chat'));
 el.panelClose.addEventListener('click', () => closePanel());
+el.tabs.addEventListener('click', () => showPanel('tabs'));
+
+/**
+ * The phone's ⋯, which carries everything the one-row toolbar had to drop.
+ *
+ * The shell menu already offers the saved list — it is one of the entries a
+ * right click has always had — so the only thing this adds is chat, whose
+ * button is the other one off the toolbar when there is room for four controls
+ * and not eight.
+ */
+el.more.addEventListener('click', () => {
+  const rect = el.more.getBoundingClientRect();
+  showMenu(rect.left, rect.bottom + 4, [
+    ...shellMenu(),
+    [{ label: 'Chat', run: () => showPanel('chat') }],
+  ]);
+});
+
+/**
+ * The three numbers the phone HUD drops, on request.
+ *
+ * Collapsing the HUD to a coloured dot is the right trade for a glance — is
+ * the link there — and the wrong one for the moment a reader is deciding
+ * whether a page is worth asking for. That decision is made in round trips and
+ * kilobytes, so the dot has to be able to say them, and saying them costs
+ * nothing: every figure is already plane-side.
+ */
+el.hud.addEventListener('click', () => {
+  if (!isPhone()) return;
+  const state = el.hudState.textContent ?? '';
+  const reason = el.hudState.title;
+  const detail = [state, el.hudRtt.textContent, el.hudQueue.textContent, el.hudBytes.textContent]
+    .filter(Boolean).join(' · ');
+  toast(reason ? `${detail} — ${reason}` : detail);
+});
 
 async function openChat(): Promise<void> {
   // Cold open comes from the local archive, not from the network: the

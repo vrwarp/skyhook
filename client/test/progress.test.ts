@@ -136,4 +136,54 @@ describe('Progress', () => {
     expect(p.forget(1)).toBe(true);
     expect(p.waiting(1)).toBeUndefined();
   });
+
+  it('remembers where a tab is going after the server takes the ask over', () => {
+    const p = new Progress();
+    p.ask(1, { verb: 'Loading', url: 'https://example.test/next', from: 'https://example.test/' },
+      0, RTT);
+    // The tab-state frame that says "loading" retires the ask, and for the rest
+    // of the wait the tab's own URL is still the page being left. Without the
+    // destination the status line names that page, which is the one place the
+    // reader is not going.
+    expect(p.serverLoading(1, true)).toBe(true);
+    expect(p.waiting(1)).toBeUndefined();
+    expect(p.destination(1)).toBe('https://example.test/next');
+  });
+
+  it('forgets the destination once a document lands', () => {
+    const p = new Progress();
+    p.ask(1, { verb: 'Loading', url: 'https://example.test/next', from: 'https://example.test/' },
+      0, RTT);
+    p.serverLoading(1, true);
+    p.arrived(1, 'https://example.test/next');
+    expect(p.destination(1)).toBe('');
+  });
+
+  it('forgets the destination on a resync too', () => {
+    const p = new Progress();
+    p.ask(1, { verb: 'Loading', url: 'https://example.test/next', from: 'https://example.test/' },
+      0, RTT);
+    // A snapshot for the page the tab is already on is the server closing a gap
+    // it could not close with diffs. It is still a document on screen, so the
+    // tab is no longer on its way anywhere.
+    expect(p.arrived(1, 'https://example.test/')).toBe(false);
+    expect(p.destination(1)).toBe('');
+  });
+
+  it('names nowhere for a gesture that named nowhere', () => {
+    const p = new Progress();
+    p.ask(1, { verb: 'Going back' }, 0, RTT);
+    p.serverLoading(1, true);
+    expect(p.destination(1)).toBe('');
+  });
+
+  it('drops destinations with everything else', () => {
+    const p = new Progress();
+    p.ask(1, { verb: 'Loading', url: 'https://example.test/next' }, 0, RTT);
+    p.clear();
+    expect(p.destination(1)).toBe('');
+    p.ask(2, { verb: 'Loading', url: 'https://example.test/next' }, 0, RTT);
+    p.forget(2);
+    expect(p.destination(2)).toBe('');
+  });
 });

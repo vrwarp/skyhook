@@ -12,12 +12,22 @@
  * It is deliberately one menu at a time, drawn into the shell's document: the
  * frame cannot host it (no script runs there) and would clip it anyway.
  */
+import { isPhone } from './layout.js';
 
 /** One row. `run` is called after the menu closes, so it can move focus. */
 export interface MenuItem {
   label: string;
-  /** Right-aligned hint: the gesture that does the same thing, usually. */
+  /**
+   * Right-aligned note about the entry itself — usually what it costs. Shown
+   * on every device, because a phone reader is on the same link as everyone
+   * else and "sends a screenshot" is the whole reason to hesitate.
+   */
   hint?: string;
+  /**
+   * Right-aligned gesture that does the same thing: a keyboard chord, a middle
+   * click. Hidden from a coarse pointer, which has neither — see layout.ts.
+   */
+  chord?: string;
   disabled?: boolean;
   run(): void;
 }
@@ -94,6 +104,13 @@ function row(item: MenuItem): HTMLElement {
     button.appendChild(hint);
   }
 
+  if (item.chord) {
+    const chord = document.createElement('span');
+    chord.className = 'hint chord';
+    chord.textContent = item.chord;
+    button.appendChild(chord);
+  }
+
   button.addEventListener('click', () => {
     closeMenu();
     try {
@@ -105,8 +122,21 @@ function row(item: MenuItem): HTMLElement {
   return button;
 }
 
-/** Keeps the menu inside the window, the way a native one does. */
+/**
+ * Puts the menu where the gesture can be answered.
+ *
+ * On a wide screen that is next to the pointer, kept inside the window the way
+ * a native menu is. On a phone it is the bottom of the screen, full width: the
+ * point a long press reports is under the finger that made it, which is the one
+ * place on the screen the reader cannot see, and half a menu drawn from there
+ * runs off the edge. The sheet also puts the entries where the thumb already
+ * is, which the top of a 6-inch screen is not.
+ */
 function place(menu: HTMLElement, x: number, y: number): void {
+  if (isPhone()) {
+    menu.classList.add('sheet');
+    return;
+  }
   const w = menu.offsetWidth || 220;
   const h = menu.offsetHeight || 0;
   const maxX = Math.max(0, window.innerWidth - w - 4);

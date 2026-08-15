@@ -72,6 +72,17 @@ export function patience(rttMs: number): number {
 export class Progress {
   private asks = new Map<number, Ask>();
   private opens: Ask[] = [];
+  /**
+   * Where each tab was last asked to go, kept from the moment of asking until
+   * a document actually arrives.
+   *
+   * It outlives the ask on purpose. An ask is retired the moment the server
+   * confirms the tab is loading, and from then until the navigation commits —
+   * seconds, on this link — the tab's own URL is still the page being left. A
+   * status line drawn from it in that window reads "Loading <where you already
+   * are>", which is the one page the reader is certainly not going to.
+   */
+  private going = new Map<number, string>();
 
   /** Records a navigation asked for on an existing tab. */
   ask(tab: number, init: AskInit, now: number, rttMs: number): void {
@@ -83,6 +94,19 @@ export class Progress {
       at: now,
       until: now + patience(rttMs),
     });
+    if (init.url) this.going.set(tab, init.url);
+    else this.going.delete(tab);
+  }
+
+  /**
+   * Where a tab is headed, for as long as it has not got there.
+   *
+   * Empty for a gesture that named nowhere — back, forward, a form submitted —
+   * because this side genuinely does not know where those land, and guessing
+   * is what produced the wrong answer in the first place.
+   */
+  destination(tab: number): string {
+    return this.going.get(tab) ?? '';
   }
 
   /** Records a tab asked for that the server has not yet opened. */
@@ -130,6 +154,12 @@ export class Progress {
    * where the reader asked to go.
    */
   arrived(tab: number, url: string): boolean {
+    // A document has landed, whatever it is, so wherever the tab was headed it
+    // is no longer on its way there. This happens even for a resync, which is
+    // the server replacing a document with the same one: the tab is showing a
+    // real page either way, and a destination kept past that is a destination
+    // that will label the tab's next unlabelled wait.
+    if (url) this.going.delete(tab);
     const ask = this.asks.get(tab);
     if (!ask || !url || url === ask.from) return false;
     return this.asks.delete(tab);
@@ -142,6 +172,7 @@ export class Progress {
 
   /** Forgets a closed tab. */
   forget(tab: number): boolean {
+    this.going.delete(tab);
     return this.asks.delete(tab);
   }
 
@@ -150,6 +181,7 @@ export class Progress {
     const had = this.asks.size > 0 || this.opens.length > 0;
     this.asks.clear();
     this.opens = [];
+    this.going.clear();
     return had;
   }
 
