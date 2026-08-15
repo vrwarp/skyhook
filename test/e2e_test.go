@@ -1174,33 +1174,36 @@ func TestConstructedStylesheetsReachTheClient(t *testing.T) {
 		t.Fatalf("shadow content never arrived: %v", err)
 	}
 	// Rules arrive minified, so match the minified form rather than the source.
+	// They arrive in the component's own root: a constructed sheet is a
+	// component's sheet, and that is where a component's sheet belongs.
 	deadline := time.Now().Add(budget(20 * time.Second))
 	for time.Now().Before(deadline) {
-		for _, rule := range cl.Model(tab).CSS {
-			if strings.Contains(rule, "rgb(4,5,6)") {
-				return
+		for _, rules := range cl.Model(tab).Scoped {
+			for _, rule := range rules {
+				if strings.Contains(rule, "rgb(4,5,6)") {
+					return
+				}
 			}
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	t.Fatalf("the component's adopted stylesheet never reached the client; CSS = %q",
+	t.Fatalf("the component's adopted stylesheet never reached any root; CSS = %q",
 		strings.Join(cl.Model(tab).CSS, " "))
 }
 
 /*
-The mirror flattens shadow trees into their hosts, which leaves a component's
-own stylesheet talking about a boundary that is no longer there: `:host` matches
-nothing outside a shadow tree, and `::part()` names a part of one. Shipped as
-written those rules cross the link and do nothing, and a component-heavy page
-arrives with its structure intact and its own layout missing — which is how a
-mirrored Reddit came to spell "Find anything" down the screen a letter per line,
-the search field having lost every rule that gave it a shape.
+A component's stylesheet belongs to the component, and arrives in its own root.
 
-So they arrive re-pointed at the flattened tree. The fixture's component says
-most of what it says about itself through :host, and the page dresses one of its
-parts from outside.
+`:host`, `:host(S)`, `::part()` and `::slotted()` all name the boundary, and the
+rules that name nothing still lean on it — `.card {}` inside a card means that
+card's, and `label {}` inside a text input means that input's label and no
+other. The boundary is mirrored, so all of it means what it meant, and none of
+it is rewritten on the way.
+
+The measure that matters is the one no rewrite could have reached: a rule scoped
+to a component does not turn up in the sheet that governs the page.
 */
-func TestShadowScopedSelectorsSurviveFlattening(t *testing.T) {
+func TestAComponentsSheetArrivesInItsOwnRoot(t *testing.T) {
 	h := newHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
 	defer cancel()
@@ -1212,56 +1215,50 @@ func TestShadowScopedSelectorsSurviveFlattening(t *testing.T) {
 		t.Fatalf("shadow content never arrived: %v", err)
 	}
 
-	// Rules arrive minified, so these are the minified spellings. Each pairs a
-	// rewritten selector with a colour that appears nowhere else, so a match
-	// proves the declarations travelled with it rather than some other rule
-	// happening to mention the same element.
-	want := []struct{ what, css string }{
-		{":host", "sky-card{"},
-		{":host declarations", "rgb(7,8,9)"},
-		{":host(S) descendant", `sky-card:is([tone="warm"]) .card{`},
-		{":host(S) declarations", "rgb(10,11,12)"},
-		{":host descendant", "sky-card .card{"},
-		{":host descendant declarations", "rgb(13,14,15)"},
-		{"::part()", `sky-card [part~="face"]{`},
-	}
-
-	var css string
+	var scoped, page string
 	deadline := time.Now().Add(budget(20 * time.Second))
 	for time.Now().Before(deadline) {
-		css = strings.Join(cl.Model(tab).CSS, "\n")
-		ok := true
-		for _, w := range want {
-			if !strings.Contains(css, w.css) {
-				ok = false
-				break
-			}
+		model := cl.Model(tab)
+		scoped = ""
+		for _, rules := range model.Scoped {
+			scoped += strings.Join(rules, "\n") + "\n"
 		}
-		if ok {
+		page = strings.Join(model.CSS, "\n")
+		if strings.Contains(scoped, ":host") {
 			break
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 
-	for _, w := range want {
-		if !strings.Contains(css, w.css) {
-			t.Errorf("%s did not survive flattening: no %q in the client's CSS", w.what, w.css)
+	// Verbatim, because there is a boundary for them to mean something against.
+	for _, want := range []string{
+		":host",      // the component's own box
+		"rgb(7,8,9)", // and what it says about it
+		`:host([tone="warm"])`,
+		"rgb(10,11,12)",
+		"rgb(4,5,6)", // an unscoped rule of the component's
+	} {
+		if !strings.Contains(scoped, want) {
+			t.Errorf("the component's sheet is missing %q; scoped = %q", want, scoped)
 		}
 	}
-	// Nothing shadow-scoped should still be spelled the way it was landside: a
-	// rule that arrives saying :host is a rule that arrives doing nothing.
-	for _, dead := range []string{":host", "::part("} {
-		if strings.Contains(css, dead) {
-			t.Errorf("%q reached the client unrewritten, where it matches nothing", dead)
-		}
+
+	// The part no rewrite could have managed: `.card {}` is the component's and
+	// stays there. Hoisted into the page's sheet it would dress every .card on
+	// the page, and 77 rules on a real Reddit capture are this shape.
+	if strings.Contains(page, "rgb(4,5,6)") || strings.Contains(page, "rgb(7,8,9)") {
+		t.Errorf("a component's rule reached the sheet that governs the page: %q", page)
 	}
-	// Re-pointing must not turn the used-CSS filter off: a rule matching nothing
-	// inside the shadow tree is still dead weight, and still goes.
-	if strings.Contains(css, "rgb(19,20,21)") {
-		t.Error("a shadow rule that matches nothing in the component was sent anyway")
+
+	// A page styling a part of a component it does not own works natively now,
+	// so it arrives as written rather than as an approximation of itself.
+	if !strings.Contains(page, "sky-card::part(face)") {
+		t.Errorf("the page's ::part() rule did not arrive as written: %q", page)
 	}
-	if t.Failed() {
-		t.Logf("client CSS was:\n%s", css)
+
+	// And the used-CSS filter still earns its keep inside a root.
+	if strings.Contains(scoped, "rgb(19,20,21)") {
+		t.Error("a rule matching nothing in the component was sent anyway")
 	}
 }
 
@@ -1346,21 +1343,20 @@ func ruleCloses(rule string) bool {
 }
 
 /*
-Flattening a shadow tree means composing it, not moving the light DOM inside the
-host.
+Slot assignment comes free with the boundary.
 
-A component puts its text in the light DOM and slots it wherever the component
-wants it drawn — which, for anything that opens and closes, is inside a box that
-is hidden until it opens. Serialising that text where it *sits* rather than
-where it is *drawn* takes it out from under the box that hides it, and the
-reader gets it on screen permanently. A mirrored Reddit wore "Open navigation",
-"Go to Reddit Home" and "Log in to Reddit" across the top of the page for that
-reason: three tooltips whose slot is inside a `hidden` div.
+A component keeps its text in the light DOM and slots it wherever it wants it
+drawn — for anything that opens and closes, inside a box that is hidden until it
+opens. Flattening had to compose that by hand, and got it wrong first: the text
+was serialised where it sat rather than where it was drawn, and a mirrored
+Reddit wore "Open navigation" and four more captions across the top of itself,
+because the box that hides them was no longer an ancestor.
 
-The same reading settles the other half. A light-DOM child no slot claims is
-drawn nowhere at all, and a slot nothing fills draws its own fallback.
+With the root mirrored there is nothing to compose. The light DOM stays where it
+sits, the slot is in the root where the component put it, and the browser does
+what it does everywhere else.
 */
-func TestSlottedContentIsMirroredWhereItIsDrawn(t *testing.T) {
+func TestSlottedContentIsDrawnWhereTheComponentPutIt(t *testing.T) {
 	h := newHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
 	defer cancel()
@@ -1371,78 +1367,28 @@ func TestSlottedContentIsMirroredWhereItIsDrawn(t *testing.T) {
 	if err := cl.WaitForText(ctx, tab, "hover me", budget(30*time.Second)); err != nil {
 		t.Fatalf("the component never arrived: %v", err)
 	}
-	// The fallback proves the slot walk ran at all, so wait for it rather than
-	// for a fixed interval.
+	// Fallback content lives in the root and arrives with it.
 	if err := cl.WaitForText(ctx, tab, "fallback stands in", budget(30*time.Second)); err != nil {
-		t.Errorf("a slot nothing fills did not draw its fallback: %v", err)
+		t.Errorf("a slot's fallback content did not arrive: %v", err)
 	}
 
 	model := cl.Model(tab)
-	// The tip is mirrored — it is real content the reader gets on hover — but
-	// under the box that hides it, not beside it.
+	// Both halves are mirrored: the text in the light DOM where the page wrote
+	// it, and the slot in the root where the component put it. Composition is
+	// the browser's job once both are there.
 	tip := model.FindByText("the tip nobody asked to see")
 	if tip == nil {
-		t.Fatal("the slotted text never reached the client at all")
+		t.Fatal("the slotted text never reached the client")
 	}
-	if !model.AncestorWithAttr(tip.ID, "hidden") {
-		t.Error("slotted text was mirrored outside the hidden box it is drawn inside: " +
-			"the reader sees a tooltip that is supposed to be closed")
+	host := model.Find("sky-tip", "", "")
+	if host == nil {
+		t.Fatal("the component itself never reached the client")
 	}
-	// A child no slot claimed is drawn nowhere landside, so it is nowhere here.
-	if strings.Contains(model.Text(), "plain child, no slot claims it") {
-		t.Error("a light-DOM child that no slot claims was mirrored; " +
-			"the browser draws it nowhere and neither should the mirror")
+	if !model.AncestorWithAttr(tip.ID, "slot") {
+		t.Error("the slotted text lost the slot= that says where it is drawn")
 	}
-}
-
-/*
-A mirrored frame's stylesheet is the frame's, not the page's.
-
-An inlined document brings its own sheet, and that sheet is written by someone
-who believed they were styling a document: `body { … }` means this frame's body,
-and a class name is only as unique as the frame needed it to be. Hoisted into
-the page's own sheet — which is what flattening did — both reach the page. The
-frame goes inside a real shadow root instead, and its rules go into that root's
-sheet, where they say what their author meant. See §31.
-*/
-func TestAFramesStylesheetStaysInTheFrame(t *testing.T) {
-	h := newHarness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
-	defer cancel()
-	cl := h.connect(ctx, "")
-	defer func() { _ = cl.Close() }()
-
-	tab := h.openPage(ctx, cl, "/framed", "outside the frame")
-	if err := cl.WaitForText(ctx, tab, "inside the frame", budget(30*time.Second)); err != nil {
-		t.Fatalf("the frame's document never arrived: %v", err)
-	}
-
-	model := cl.Model(tab)
-	doc := strings.Join(model.CSS, "\n")
-
-	// The frame's rules are somewhere, but not in the sheet that governs the
-	// page: `.shared` outside the frame is not the frame's to colour.
-	if strings.Contains(doc, "rgb(41,42,43)") || strings.Contains(doc, "rgb(41, 42, 43)") {
-		t.Error("a rule from inside the frame reached the page's own stylesheet, " +
-			"where it dresses every .shared on the page")
-	}
-	if strings.Contains(doc, "rgb(51,52,53)") || strings.Contains(doc, "rgb(51, 52, 53)") {
-		t.Error("the frame's `body` rule reached the page's own stylesheet, " +
-			"where it applies to the page's body")
-	}
-
-	// And they did arrive — scoped to a root, which is the only place they can
-	// do what the frame asked without doing it to everyone else.
-	var scoped string
-	for _, rules := range model.Scoped {
-		scoped += strings.Join(rules, "\n") + "\n"
-	}
-	if !strings.Contains(scoped, "rgb(41,42,43)") && !strings.Contains(scoped, "rgb(41, 42, 43)") {
-		t.Errorf("the frame's own rule never arrived at all; scoped sheets = %q", scoped)
-	}
-
-	// The boundary has to actually be there: a scoped sheet with no root to
-	// adopt it is rules that reach nothing.
+	// The boundary is there, which is the whole of why none of this needs
+	// composing by hand.
 	roots := 0
 	for _, n := range model.Nodes {
 		if n.Kind == protocol.KindFragment {
@@ -1450,10 +1396,7 @@ func TestAFramesStylesheetStaysInTheFrame(t *testing.T) {
 		}
 	}
 	if roots == 0 {
-		t.Error("the frame was inlined without a shadow root to scope it")
-	}
-	if t.Failed() {
-		t.Logf("document sheet was:\n%s", doc)
+		t.Error("the component was mirrored with no shadow root, so nothing composes")
 	}
 }
 

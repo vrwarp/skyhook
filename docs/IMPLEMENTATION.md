@@ -679,6 +679,14 @@ draws it nowhere. `knownParentId` answers the same way, or the first mutation
 after a snapshot would put a slotted node back beside the component and undo the
 composition one record at a time.
 
+**Both of those are gone now, and §31 is why.** The selector rewriting and the
+composition walk were reconstructions of a boundary the mirror had thrown away,
+and the boundary is mirrored instead: a shadow root crosses the link as a node
+of its own, the component's sheet is adopted by it, and `:host`, `::part()`,
+`::slotted()` and slot assignment all mean what they meant without anything
+being rewritten. What is recorded above is what it cost to do without one, which
+is the argument for keeping it.
+
 The general rule all four are instances of: what the mirror sends has to be the
 document as it is *rendered*, and every one of these was some part of the
 pipeline answering for the document as it is *written*. `:defined` is the
@@ -1496,6 +1504,15 @@ wrappers inside it still do not.
 - **Scoping is not isolation.** Inherited properties — `color`, `font` — cross
   the boundary as they do anywhere else.
 
+**Both halves are done.** Frames first, components second, and the second was
+much the smaller change because the first had found everything. What components
+added was the boundary for every shadow host rather than only for a frame; what
+they *removed* was larger — the selector rewriting, the `:host`/`::part()`
+re-pointing, the slot composition walk and the `knownParentId` special case all
+went, because each existed only to stand in for the boundary. `::slotted()` and
+`exportparts`, both listed under known gaps for want of anything to mean, now
+work because there is something for them to mean.
+
 **The order.** Iframes first. An inlined frame is one root per frame rather than
 a thousand per page, it exercises every part of the mechanism — the node kind,
 `attachShadow`, frame-realm sheet construction, `composedPath` input routing,
@@ -1571,12 +1588,6 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   be read from an isolated world any more than it can from the page, so such a
   component mirrors as its light DOM and nothing else. Late-attached *open*
   roots are handled (§19); closed ones cannot be.
-- **`::slotted()` rules are dropped, and `exportparts` renaming is ignored.**
-  A `::slotted()` rule cannot be re-pointed the way `:host` and `::part()` are
-  (§19): the composed tree it describes has no marker saying a node arrived by
-  assignment, and nothing in any capture so far wants one. A part re-exported
-  under a new name is matched under the name it carries inside, which is the
-  only one the flattened tree keeps.
 
 ### 33. A client that runs from its own cache cannot see that it is old
 
