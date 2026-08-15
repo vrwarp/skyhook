@@ -136,14 +136,30 @@ func TestAskingForATabPutsItInTheStripBeforeItExists(t *testing.T) {
 		t.Fatal("no link to /slow in the mirrored waiting room")
 	}
 
-	waitFor(ctx, t, page, `!!document.querySelector('#tabstrip .tab.ghost')`,
-		budget(20*time.Second), "a placeholder for the tab being opened")
+	// Deliberately not scaled to the link: the tab is drawn plane-side, so it
+	// owes nothing to the round trip. /slow takes three seconds to answer, so a
+	// strip that waited for the page — or for the server to name the tab —
+	// would still be showing one tab when this expires.
+	waitFor(ctx, t, page, `document.querySelectorAll('#tabstrip .tab').length === 2`,
+		2*time.Second, "a placeholder for the tab being opened")
 
-	// The placeholder is a placeholder: when the real tab arrives it takes its
-	// place rather than sitting beside it.
+	// It is a placeholder while it lasts: a tab this side is holding open until
+	// the server names it.
+	var provisional bool
+	evalJSON(ctx, t, page,
+		`document.querySelectorAll('#tabstrip .tab')[1].title === 'Waiting for the server to open this tab'`,
+		&provisional)
+
+	// And it is the tab, not a stand-in beside it: when the server's answer
+	// arrives it takes the placeholder's place rather than adding to it.
 	waitFor(ctx, t, page, `document.querySelectorAll('#tabstrip .tab').length === 2
       && !document.querySelector('#tabstrip .tab.ghost')`,
 		budget(60*time.Second), "the tab the server opened")
+	if !provisional {
+		// Not fatal on its own: the server can name the tab before the poll
+		// above runs, and an adopted tab is the good outcome.
+		t.Log("the placeholder was adopted before it could be observed as one")
+	}
 }
 
 /*
