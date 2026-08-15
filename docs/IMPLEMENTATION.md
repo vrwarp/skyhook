@@ -786,6 +786,46 @@ right, and it is not a substitute for finding out why a particular frame comes
 out too tall. It converts an invisible, unrecoverable failure into a visible,
 recoverable one.
 
+### 25. The mirror was rendering the entire web in quirks mode
+
+A frame at `about:blank` has no doctype, and a document parsed without one is
+in quirks mode. The mirror frame was created that way and never given one, so
+every page Skyhook has ever shown was laid out under rules none of those pages
+were written for. Nothing reported it: quirks mode is not an error, it is a
+different and quietly wrong answer, and most of the time the difference is
+small enough to read past.
+
+The clause that matters here is percentage heights. Under standards rules a
+`height: 100%` whose parent has an auto height computes to auto; in quirks mode
+it walks up the ancestors until it finds a definite height and uses that
+instead. Google's reCAPTCHA challenge is a table at `height: 100%` inside
+containers that are all auto-height, so landside it is content-sized and square
+— and in the mirror the percentage reached past all of them to the frame's own
+580px box. The table stretched to fill it and its four rows went from 97px to
+145px each. The 192px of surplus that appears between the tiles pushes the
+challenge's footer outside the frame, and the footer is where VERIFY and SKIP
+live: a captcha the reader can solve and cannot submit.
+
+Two things made this hard to see, and both are worth remembering:
+
+- **Every diagnostic path renders in standards mode.** The capture screenshot
+  goes through an SVG `foreignObject`, and anyone re-opening `mirror.html` gets
+  a file with a doctype. Both produce the correct layout, so the bundle's own
+  picture showed a working challenge while the reader was looking at a broken
+  one. The frozen DOM and CSS were correct, the two halves' hashes agreed, and
+  the artifact disagreed with the reader — which reads as the reader being
+  wrong.
+- **`compatMode` is fixed when the document is parsed.** Appending a
+  DocumentType node afterwards does nothing at all. The document has to be
+  re-opened and rewritten, which is what `forceStandardsMode` does.
+
+`srcdoc` would carry the doctype without rewriting anything, and was tried
+first. It loses a race with the frame's own initial about:blank and lands the
+patcher on a document that is about to be replaced. Re-opening in place is the
+boring option that works; its one visible effect is that the frame's URL
+becomes the shell's, which changes no resolution because an about:blank frame
+had already inherited that same base URL from its creator.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

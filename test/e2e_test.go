@@ -452,6 +452,19 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			</script>
 			</body></html>`)
 	})
+	// A percentage height against an auto-height parent: computes to auto under
+	// standards rules, and in quirks mode walks up the ancestors to the nearest
+	// definite height instead. The two answers are 18px and 200px, so a mirror
+	// rendering in the wrong mode cannot hide it.
+	mux.HandleFunc("/percent-height", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Percent</title></head>
+			<body style="margin:0">
+			<div id="outer" style="height:200px">
+			  <div id="middle"><div id="inner" style="height:100%">measure me</div></div>
+			</div>
+			</body></html>`)
+	})
 	// A frame whose document lays out taller than the box the page gave it.
 	// Landside the frame clips it, as a frame does; plane-side the mirror has
 	// to leave it reachable, because the reader has no way to resize the box

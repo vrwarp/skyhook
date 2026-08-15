@@ -275,3 +275,68 @@ func TestPWAKeepsAnOvergrownFrameReachable(t *testing.T) {
 			got.Content, got.Box, got.OverflowY)
 	}
 }
+
+/*
+The mirror has to render under the same rules the page was written for.
+
+A frame at about:blank has no doctype, and a document with no doctype is in
+quirks mode. Every page worth mirroring declared one, so until this was fixed
+the mirror rendered the whole web under rules none of its pages were written
+for, and nothing said so: quirks mode is not a parse error, it is a different
+and quietly wrong answer.
+
+The clause that bites a mirror hardest is percentage heights. Standards: a
+`height: 100%` against an auto-height parent computes to auto. Quirks: it walks
+up the ancestors until it finds a definite height and uses that. On Google's
+reCAPTCHA that is the whole bug — the challenge grid is a table at height:100%
+inside auto-height containers, so in the mirror it reached the frame's own
+580px box, stretched its four rows from 97px to 145px, and pushed the footer
+holding VERIFY and SKIP outside the frame.
+
+The fixture makes the two answers 18px and 200px so neither can be mistaken for
+the other, and the mode itself is asserted beside it.
+*/
+func TestPWAMirrorsInStandardsMode(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/percent-height"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('measure me')`,
+		budget(60*time.Second), "the mirrored page")
+
+	var got struct {
+		Mode  string `json:"mode"`
+		Inner int    `json:"inner"`
+	}
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const inner = doc.getElementById('inner');
+      return { mode: doc.compatMode,
+               inner: inner ? Math.round(inner.getBoundingClientRect().height) : -1 };
+    })()`, &got)
+
+	if got.Mode != "CSS1Compat" {
+		t.Errorf("the mirror document is in %q, not standards mode: every page it "+
+			"renders declared a doctype and is being laid out as though it had not",
+			got.Mode)
+	}
+	// The consequence, not just the flag: the mode is only worth asserting
+	// because of what it does to the layout.
+	if got.Inner > 100 {
+		t.Errorf("a percentage height against an auto-height parent came out %dpx, "+
+			"which is the quirks-mode answer (the definite 200px ancestor); standards "+
+			"rules make it auto, about 18px", got.Inner)
+	}
+}

@@ -46,6 +46,49 @@ img { background-repeat: no-repeat; background-size: cover; }
 html.skyhook-busy, html.skyhook-busy a[href] { cursor: progress; }
 `;
 
+/**
+ * Puts the mirror's document into standards mode, which it is not born in.
+ *
+ * A frame at `about:blank` has no doctype, and a document with no doctype is
+ * in quirks mode. Every page Skyhook mirrors is a modern page that declared
+ * one, so the mirror renders the whole web under rules its own pages were
+ * never written for — and quirks mode is not a rounding error. Its worst
+ * clause for a mirror is percentage heights: in standards mode `height: 100%`
+ * against an auto-height parent computes to auto, and in quirks mode it walks
+ * up the ancestors until it finds a definite height and uses that.
+ *
+ * On Google's reCAPTCHA that one rule is the difference between a working
+ * challenge and an unusable one. The grid is a table at `height: 100%` inside
+ * containers that are all auto; landside it is content-sized and square, and
+ * in the mirror the percentage reaches the frame's own 580px box, the table
+ * stretches to fill it, and the four rows go from 97px to 145px. The 192px
+ * that appears between the tiles pushes the footer out of the frame, and the
+ * footer is where VERIFY and SKIP live. The reader gets a captcha they can
+ * solve and cannot submit.
+ *
+ * The doctype has to be written rather than appended: `compatMode` is fixed
+ * when the document is parsed, so inserting a DocumentType node afterwards
+ * changes nothing. Re-opening the document reparses it, and keeps the same
+ * Document object the caller is holding.
+ *
+ * `srcdoc` would carry a doctype without this, but it loses a race with the
+ * frame's own initial about:blank and lands the patcher on a document that is
+ * about to be replaced. Re-opening in place is the boring option that works.
+ * Its one visible effect is that the document's URL becomes the shell's rather
+ * than `about:blank`; nothing resolves differently, because an about:blank
+ * frame already inherited that same base URL from its creator.
+ */
+const STANDARDS_SHELL = '<!DOCTYPE html><html><head></head><body></body></html>';
+
+function forceStandardsMode(doc: Document): void {
+  if (doc.compatMode === 'CSS1Compat') return;
+  try {
+    doc.open();
+    doc.write(STANDARDS_SHELL);
+    doc.close();
+  } catch { /* a mirror in quirks mode still beats no mirror at all */ }
+}
+
 /** What the shell needs to know to draw a context menu for a right click. */
 export interface MenuTarget {
   /** Mirror id of the node under the pointer, 0 if it has none. */
@@ -309,6 +352,7 @@ export class MirrorHost {
 
   private attach(doc: Document): void {
     if (this.doc === doc && this.patcher) return;
+    forceStandardsMode(doc);
     this.doc = doc;
 
     const style = doc.createElement('style');
