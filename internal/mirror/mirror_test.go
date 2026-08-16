@@ -280,6 +280,41 @@ func TestMinifyCSSPreservesMeaning(t *testing.T) {
 	}
 }
 
+// A conditional group at-rule arrives with its contents inside it, so the
+// selectors in one are not at the top of the rule they came in — and a
+// descendant combinator is a descendant combinator wherever it is written.
+// @tailwindcss/typography emits every rule it has inside `@layer utilities`,
+// and `.prose :where(h2)` closed up to `.prose:where(h2)` asks for an article
+// that is also a heading: the page kept its structure and lost its typography.
+func TestMinifyCSSKeepsCombinatorsInsideAtRules(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{
+			`@layer utilities { .prose :where(h2):not(:where([class~="not-prose"] *)) { font-size : 1.5em } }`,
+			`@layer utilities{.prose :where(h2):not(:where([class~="not-prose"] *)){font-size:1.5em}}`,
+		},
+		{
+			"@media (hover: hover) { .menu :hover { color : red } }",
+			"@media (hover:hover){.menu :hover{color:red}}",
+		},
+		{
+			"@supports (display: grid) { @layer base { .a :focus { outline : none } } }",
+			"@supports (display:grid){@layer base{.a :focus{outline:none}}}",
+		},
+		// Native nesting puts a selector inside a declaration body, which is
+		// the same question asked from the other side.
+		{".card { color : red; & :hover { color : blue } }", ".card{color:red;& :hover{color:blue}}"},
+		// A media feature's colon is neither a combinator's neighbour nor a
+		// declaration's, and a feature query takes space on either side of it.
+		// It keeps the byte, which is the reading that cannot be wrong.
+		{"@media (min-width : 40rem) { .a { color : red } }", "@media (min-width :40rem){.a{color:red}}"},
+	} {
+		got := minifyCSS([]string{tc.in})
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("minify(%q) = %v, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // Nothing plane-side ever upgrades a custom element, so `:defined` has to be
 // asked of the landside document instead — through the mark the agent leaves
 // on the elements that had not upgraded there.

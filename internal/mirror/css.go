@@ -365,9 +365,8 @@ func minifyRule(rule string) string {
 	var b strings.Builder
 	b.Grow(len(rule))
 	// pendingSpace defers a run of whitespace until we know whether the next
-	// character wants it. depth tells a selector from a declaration body, which
-	// is the whole difference between `a :hover` and `color : red`.
-	pendingSpace, depth := false, 0
+	// character wants it.
+	pendingSpace := false
 	for i := 0; i < len(rule); i++ {
 		c := rule[i]
 		if c == '/' && i+1 < len(rule) && rule[i+1] == '*' {
@@ -385,11 +384,12 @@ func minifyRule(rule string) string {
 		}
 		if pendingSpace {
 			pendingSpace = false
-			// Drop the space if it sits against structural punctuation. In a
-			// selector a colon is not structural — the space in `a :hover` is a
-			// descendant combinator — but inside a declaration body it is.
+			// Drop the space if it sits against structural punctuation. A colon
+			// is structural only where it separates a property from its value:
+			// the space in `a :hover` is a descendant combinator. See
+			// declarationColon.
 			structural := c == '{' || c == '}' || c == ';' || c == ',' || c == ')' ||
-				(c == ':' && depth > 0)
+				(c == ':' && declarationColon(rule, i))
 			if b.Len() > 0 && !structural {
 				if last := b.String()[b.Len()-1]; !isTrailingTrimmable(last) {
 					b.WriteByte(' ')
@@ -408,17 +408,71 @@ func minifyRule(rule string) string {
 		if (c == ';' || c == '}') && b.Len() > 0 && b.String()[b.Len()-1] == ':' {
 			b.WriteByte(' ')
 		}
-		switch c {
-		case '{':
-			depth++
-		case '}':
-			if depth > 0 {
-				depth--
-			}
-		}
 		b.WriteByte(c)
 	}
 	return b.String()
+}
+
+/*
+declarationColon reports whether the colon at i separates a property from its
+value rather than introducing a pseudo-class in a selector.
+
+That is the whole difference between `color : red`, whose space is padding, and
+`.prose :where(p)`, whose space is a descendant combinator — closing the second
+one up asks for an element that is the `.prose` and the paragraph at once, and
+that element does not exist.
+
+Nesting depth was the first answer to this: a colon inside a block belongs to a
+declaration, one outside it belongs to a selector. It is right only while a
+rule arrives on its own, and rules do not always arrive on their own. A
+conditional group at-rule comes over whole — the agent hands back
+`@layer utilities{…}` and `@media (hover:hover){…}` with their contents inside
+them — so every selector in one is read at depth 1 and every descendant
+combinator standing before a pseudo-class is closed up.
+
+A captured page lost the whole of @tailwindcss/typography that way. The plugin
+emits its ninety-five rules inside `@layer utilities`, each of the form
+
+	.prose :where(h2):not(:where([class~="not-prose"] *)){font-size:1.5em;…}
+
+and each arrived as `.prose:where(h2)`. The article kept the colour and measure
+that its own `.prose` rule sets and lost every heading size, paragraph margin,
+list marker and link colour beneath it: body text where the headings were.
+Nothing in the bundle showed a rule missing — the rules were all there, and
+every one of them selected nothing.
+
+So the text is asked instead of the depth counter, and it answers exactly:
+whichever of `{`, `;` or `}` ends this run says what the run was, and a run
+that ends by opening a block was a selector. Bracket depth is counted along the
+way so that punctuation inside `:is(…)` or an attribute selector cannot end the
+run early.
+*/
+func declarationColon(rule string, i int) bool {
+	for depth := 0; i < len(rule); i++ {
+		switch c := rule[i]; c {
+		case '\\':
+			i++ // escaped: whatever it is, it is not structure
+		case '"', '\'':
+			i = scanCSSString(rule, i) - 1
+		case '(', '[':
+			depth++
+		case ')', ']':
+			if depth > 0 {
+				depth--
+			}
+		case '{':
+			if depth == 0 {
+				return false // the run opens a block: it was a selector
+			}
+		case ';', '}':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	// Nothing ended the run, so this is a fragment rather than a rule. Keeping
+	// the space costs a byte; dropping one that was a combinator costs the rule.
+	return false
 }
 
 // isTrailingTrimmable reports whether a space following this character can go.

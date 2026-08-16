@@ -262,6 +262,37 @@ const fontPage = `<!DOCTYPE html><html><head><title>Fonts</title>
 </body></html>`
 
 /*
+layeredCSSPage is a typography plugin's output, which is to say a sheet whose
+rules are all written inside something else.
+
+Tailwind's typography plugin puts every rule it has inside `@layer utilities`
+and selects into the article rather than onto it: `.prose` carries the colours
+and the measure, and `.prose :where(h2)` — a descendant combinator, then a
+zero-specificity `:where()` so the page can override it — carries the heading
+sizes, the paragraph margins and the link colours. A group at-rule crosses
+whole, so those selectors arrive one block deep in the rule that holds them,
+and anything reading depth to tell a selector from a declaration reads them
+wrong.
+*/
+const layeredCSSPage = `<!DOCTYPE html><html><head><title>Layered</title>
+<style>
+  .prose { color: rgb(1,2,3); max-width: 65ch }
+  @layer utilities {
+    .prose :where(h2):not(:where([class~="not-prose"] *)) { font-size : 30px }
+    .prose :where(p) { margin-top : 20px }
+  }
+  @media (min-width: 1px) {
+    .prose :where(a) { color : rgb(4,5,6) }
+  }
+</style></head>
+<body>
+  <article class="prose">
+    <h2>the layered heading</h2>
+    <p>a paragraph under it, with <a href="/second">a link</a> in it</p>
+  </article>
+</body></html>`
+
+/*
 utilityCSSPage is the shape the used-CSS filter exists for and the shape that
 used to defeat it: a utility bundle where all but a handful of rules match
 nothing.
@@ -663,6 +694,10 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	mux.HandleFunc("/fonts", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, fontPage)
+	})
+	mux.HandleFunc("/layered-css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, layeredCSSPage)
 	})
 	mux.HandleFunc("/utility-css", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1509,6 +1544,68 @@ func TestABracketInAURLDoesNotTruncateTheSheet(t *testing.T) {
 		if !ruleCloses(rule) {
 			t.Errorf("a rule that cannot close itself reached the client: %q", rule)
 		}
+	}
+}
+
+/*
+The space between a class and a pseudo-class is a selector, not padding.
+
+Minifying dropped it wherever the rule arrived inside another one — a group
+at-rule crosses whole, so `@layer utilities{.prose :where(h2){…}}` put its
+selectors a block deep, and one block deep read as "inside a declaration body,
+where a colon separates a property from its value". `.prose :where(h2)` came
+out as `.prose:where(h2)`, which asks for an <article class="prose"> that is
+also an <h2>.
+
+@tailwindcss/typography writes all ninety-five of its rules that way, so the
+page it dressed arrived with the colour and measure its own `.prose` rule sets
+and nothing else: every heading at body size, every paragraph unspaced, every
+link the colour of the text around it. The bundle showed no rule missing, and
+the capture's rejected-selector list — which is where a missing rule is meant
+to be explained — had nothing to say about it either, because nothing was
+rejected. The rules were all there, and every one of them selected nothing.
+*/
+func TestALayeredSheetKeepsItsDescendantCombinators(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/layered-css"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the layered heading", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, ":where(h2)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// Inside @layer, inside @media, and — for the rule that was never nested —
+	// at the top of its own.
+	for _, want := range []string{".prose :where(h2)", ".prose :where(p)", ".prose :where(a)"} {
+		if !strings.Contains(css, want) {
+			t.Errorf("selector %q never arrived intact: %q", want, css)
+		}
+	}
+	if strings.Contains(css, ".prose:where(") {
+		t.Errorf("a descendant combinator was minified away: %q", css)
+	}
+	// The declaration padding beside it is still worth dropping.
+	if !strings.Contains(css, "font-size:30px") {
+		t.Errorf("declarations went unminified: %q", css)
 	}
 }
 
