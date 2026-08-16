@@ -5,6 +5,7 @@ package mirror
 import (
 	"context"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -926,6 +927,84 @@ func (t *Tab) FetchResource(ctx context.Context, url string, limit int) ([]byte,
 	frame := t.frameID
 	t.mu.Unlock()
 	return t.sess.FetchResource(ctx, frame, url, limit)
+}
+
+// rasterMaxBytes caps what is worth sending back into the browser to be read.
+//
+// The bytes make the trip base64'd, so the cap is really about what the CDP
+// socket should be asked to carry for one picture. Four megabytes is well past
+// any photograph a page lays out and comfortably under the transcoder's own
+// 24 MB source limit, which is the number this would otherwise inherit — and a
+// source that large is one the reader is better served an empty box for than a
+// stall.
+const rasterMaxBytes = 4 << 20
+
+/*
+rasterJS decodes bytes in the page's own browser and hands the pixels back.
+
+Nothing here touches the network or the page. The bytes travel in, become a
+Blob made in this world, and `createImageBitmap` decodes that Blob with the
+same decoders Chromium paints the real page with — so it reads whatever the
+page reads, including the formats Go has never heard of. A canvas drawn from a
+same-origin Blob is not tainted, which is what makes reading the pixels back
+out legal at all.
+
+The scale happens here rather than landside because of what crosses the socket:
+a 4000px hero re-encoded as an untouched PNG is tens of megabytes, and the box
+the page actually lays it out in is usually a tenth of that on a side. The box
+is a ceiling and never a target — upscaling an image to fill a layout hint
+would spend bytes inventing detail.
+
+PNG is the handoff format because it is the one Go reads losslessly: whatever
+quality decision is worth making is made once, by the transcoder, against the
+same policy every other image on the page is held to.
+*/
+const rasterJS = `(async () => {
+  const raw = atob("%s");
+  const src = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) src[i] = raw.charCodeAt(i);
+  const bmp = await createImageBitmap(new Blob([src]));
+  let w = bmp.width, h = bmp.height;
+  const boxW = %d, boxH = %d;
+  if ((boxW > 0 || boxH > 0) && w > 0 && h > 0) {
+    const scale = Math.min(boxW > 0 ? boxW / w : Infinity, boxH > 0 ? boxH / h : Infinity, 1);
+    w = Math.max(1, Math.round(w * scale));
+    h = Math.max(1, Math.round(h * scale));
+  }
+  const canvas = new OffscreenCanvas(w, h);
+  const cx = canvas.getContext('2d');
+  cx.imageSmoothingEnabled = true;
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(bmp, 0, 0, w, h);
+  bmp.close();
+  const out = new Uint8Array(await (await canvas.convertToBlob({type: 'image/png'})).arrayBuffer());
+  let s = '';
+  for (let i = 0; i < out.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+})()`
+
+// RasterizeImage implements imgproc.Rasterizer: it asks this tab's browser to
+// decode bytes the server has no decoder for, scaled into the box the page lays
+// the image out in, and returns them as PNG.
+func (t *Tab) RasterizeImage(ctx context.Context, src []byte, w, h int) ([]byte, error) {
+	if len(src) == 0 {
+		return nil, fmt.Errorf("mirror: nothing to rasterize")
+	}
+	if len(src) > rasterMaxBytes {
+		return nil, fmt.Errorf("mirror: %d bytes is more than this path will carry", len(src))
+	}
+	expr := fmt.Sprintf(rasterJS, base64.StdEncoding.EncodeToString(src), w, h)
+	val, err := t.eval(ctx, expr)
+	if err != nil {
+		return nil, err
+	}
+	var b64 string
+	if err := json.Unmarshal(val, &b64); err != nil || b64 == "" {
+		return nil, fmt.Errorf("mirror: the browser returned no pixels for %d bytes", len(src))
+	}
+	return base64.StdEncoding.DecodeString(b64)
 }
 
 func (t *Tab) requestImages(imgs []agentImage) {

@@ -119,6 +119,57 @@ func (t *Transcoder) probe() {
 // ErrTooLarge means the source exceeded the configured limits.
 var ErrTooLarge = errors.New("imgproc: source image too large")
 
+// ErrNoDecoder means the bytes are a picture in a container this process has no
+// decoder for.
+//
+// It is worth telling apart from a plain decode failure because it is the only
+// decode failure something else can still answer. Corrupt JPEG is corrupt
+// everywhere; AVIF is merely a format Go never shipped and every browser did —
+// including the one landside holding the page that asked for it.
+var ErrNoDecoder = errors.New("imgproc: no decoder for this format")
+
+/*
+UndecodableFormat names a picture container Go's registered decoders cannot
+read, and returns "" for everything else — including bytes that are no picture
+at all.
+
+The list is deliberately short. Every entry is a format a browser has shipped a
+decoder for and the standard library has not, which is exactly the set worth
+handing back to a browser; anything else that fails to decode is either damaged
+or was never an image, and a round trip would only turn one failure into two.
+
+AVIF is why this exists. A site that serves it usually serves nothing else —
+the whole gallery is .avif, the icons are .avif — so "the format Go can't read"
+and "every picture on the page" are the same set, and the reader is left with a
+page of empty boxes that never fill in, whatever they click.
+*/
+func UndecodableFormat(src []byte) string {
+	if len(src) >= 12 && string(src[4:8]) == "ftyp" {
+		// ISO base media: AVIF and HEIF both live in it, and both are told
+		// apart from an MP4 only by the brand that follows.
+		switch string(src[8:12]) {
+		case "avif", "avis":
+			return "avif"
+		case "heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1", "msf1":
+			return "heif"
+		}
+		return ""
+	}
+	switch {
+	case len(src) >= 12 && string(src[0:12]) == "\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a":
+		return "jxl"
+	case len(src) >= 2 && src[0] == 0xff && src[1] == 0x0a:
+		return "jxl"
+	case len(src) >= 2 && string(src[0:2]) == "BM":
+		return "bmp"
+	case len(src) >= 4 && string(src[0:4]) == "\x00\x00\x01\x00":
+		return "ico"
+	case len(src) >= 4 && (string(src[0:4]) == "II*\x00" || string(src[0:4]) == "MM\x00*"):
+		return "tiff"
+	}
+	return ""
+}
+
 var svgSize = regexp.MustCompile(`(?is)<svg\b[^>]*?\bviewBox\s*=\s*["']\s*[-\d.eE]+[\s,]+[-\d.eE]+[\s,]+([\d.eE]+)[\s,]+([\d.eE]+)`)
 
 /*
@@ -201,6 +252,9 @@ func (t *Transcoder) Transcode(ctx context.Context, src []byte, w, h int) (*Resu
 	}
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(src))
 	if err != nil {
+		if name := UndecodableFormat(src); name != "" {
+			return nil, fmt.Errorf("%w: %s", ErrNoDecoder, name)
+		}
 		return nil, fmt.Errorf("imgproc: decode config: %w", err)
 	}
 	if cfg.Width*cfg.Height > t.opts.MaxPixels {
