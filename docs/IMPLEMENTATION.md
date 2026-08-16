@@ -2000,6 +2000,43 @@ once, a genuinely different gap is still answered, a gap arriving while a
 snapshot is in flight is not, and the mute lifts after the cooldown so a request
 that really was lost is asked again.
 
+### 38. A frame nobody misses
+
+The plane side notices a missing batch when a *later* one arrives and does not
+fit. That works for as long as the page keeps producing, and fails completely
+the moment it stops: on a page that has gone quiet, a frame that never landed is
+never missed. There is no later frame to not fit.
+
+The server is the only half that can see it. It knows what it sent and what was
+acknowledged, and the integrity check already compares the two every thirty
+seconds — but an inconclusive check did nothing at all. It logged, and returned.
+One netem run recorded exactly that: `the client never reached the frame it was
+checked against`, seq 1 against acked 0, **five times over three minutes**, while
+the reader looked at a page whose late stylesheet had not arrived and the tab sat
+idle. The server said the right thing five times and never acted on it.
+
+Doing nothing was deliberate, and half right. A client that is behind and
+catching up must be left alone: resyncing it puts a document on the link in
+competition with the very frames that made it late, which is how a check meant
+to protect the mirror becomes the reason it never converges. What the old code
+missed is that *behind* and *stopped* are different conditions, and the second
+one only the server can end.
+
+`noteStuck` separates them. A repair is asked for only when the same frame is
+outstanding, against the same acknowledgement, on a page that has produced
+nothing new in between — and only on the second consecutive check, because one
+sample cannot tell a stalled client from one that was mid-flight when it was
+taken. Anything moving on either side resets the tally.
+
+The repair is an ordinary resync, so it costs what it should: the missing frames
+if the ring still holds them, a document only if it does not.
+
+`internal/session/stalled_test.go` pins the distinction from both sides — a
+stalled client is repaired on the second check and not the first or third, a
+client working through a backlog is left alone however far behind it is, a
+client behind a page that is still emitting is left alone, and a caught-up
+client is never considered at all.
+
 ## Measured results
 
 From the end-to-end suite. The design asks for every milestone to be measured
