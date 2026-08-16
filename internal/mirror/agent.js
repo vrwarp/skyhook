@@ -827,7 +827,173 @@
     }
   }
 
-  function collectRules(doc, list, out, depth) {
+  /*
+   * Every url() a rule carries, resolved against the sheet that wrote it.
+   *
+   * `cssText` hands back the reference as authored — `url(../images/logo.svg)` —
+   * and carries no trace of which sheet authored it. Downstream there is nothing
+   * left to resolve that against but the document, and for any sheet not sitting
+   * beside the page that is the wrong base. A WordPress theme keeps its
+   * stylesheet at /blog/wp-content/themes/fem-v3/dist/style.css and its logo one
+   * directory above that; resolved against the article's own address instead,
+   * `../images/logo-dark.svg` asked for /blog/images/logo-dark.svg, which is the
+   * site's 404 page. HTML decodes as no image, so the bytes were never shipped,
+   * and the mirror drew the masthead as an empty 320px box — the styling was all
+   * there, and the picture it named was somebody else's.
+   *
+   * Doing it here is what makes it possible at all: this is the last place the
+   * sheet and its rules are in hand at the same time. It also settles the two
+   * quieter cases with the same answer — a `<base href>`, and a stylesheet
+   * inside an inlined same-origin frame, both of which resolve against something
+   * that is not the top-level document's URL.
+   *
+   * The scanning is deliberately the server's, in another language: see
+   * replaceCSSURLs in internal/mirror/css.go. A `url(` inside a string is text
+   * the page means to display, and a quoted token may hold the `)` that a
+   * pattern would stop at — one of those cost a mirrored Gmail four fifths of
+   * its stylesheet.
+   */
+  var URL_CALL_RE = /url\(/i;
+
+  function isCSSSpaceChar(c) {
+    return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+  }
+
+  function isURLIdentChar(c) {
+    return c === '-' || c === '_' ||
+      (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+  }
+
+  function isHexChar(c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+  }
+
+  // unescapeCSSURL resolves the `\x` escapes that let a URL carry a quote or a
+  // bracket. A hex escape is left as written: reading one means knowing where
+  // the digits stop, and no address in any capture has ever used one.
+  function unescapeCSSURL(s) {
+    if (s.indexOf('\\') < 0) return s;
+    var out = '';
+    for (var i = 0; i < s.length; i++) {
+      if (s.charAt(i) !== '\\' || i + 1 >= s.length || isHexChar(s.charAt(i + 1))) {
+        out += s.charAt(i);
+        continue;
+      }
+      i++;
+      out += s.charAt(i);
+    }
+    return out;
+  }
+
+  // scanURLToken reads the url token starting at i, which must be at its
+  // `url(`, and returns the address it names with the index just past its `)`.
+  // Null means the token does not end, which is left alone rather than guessed
+  // at.
+  function scanURLToken(s, i) {
+    var j = i + 4; // past `url(`
+    while (j < s.length && isCSSSpaceChar(s.charAt(j))) j++;
+    if (j >= s.length) return null;
+    var q = s.charAt(j);
+    if (q === '"' || q === "'") {
+      var k = scanSelString(s, j);
+      if (k - 1 <= j || s.charAt(k - 1) !== q) return null; // unterminated
+      var quoted = unescapeCSSURL(s.slice(j + 1, k - 1));
+      while (k < s.length && isCSSSpaceChar(s.charAt(k))) k++;
+      if (k >= s.length || s.charAt(k) !== ')') return null;
+      return { raw: quoted, end: k + 1 };
+    }
+    // Unquoted, so it runs to the first `)` that is not escaped. A token of
+    // this kind may hold neither whitespace nor brackets unescaped, which is
+    // what makes reading it this way safe.
+    var start = j;
+    while (j < s.length) {
+      if (s.charAt(j) === '\\' && j + 1 < s.length) { j += 2; continue; }
+      if (s.charAt(j) === ')') break;
+      j++;
+    }
+    if (j >= s.length) return null;
+    return {
+      raw: unescapeCSSURL(s.slice(start, j).replace(/[ \t\n\r\f]+$/, '')),
+      end: j + 1
+    };
+  }
+
+  // cssURLToken writes an address back out as a url token. The address decides
+  // the quoting, not the form the site happened to use: one holding a bracket,
+  // a quote or a space is only a url token at all inside quotes.
+  function cssURLToken(raw) {
+    if (!/["'()\\ \t\n\r\f]/.test(raw)) return 'url(' + raw + ')';
+    return 'url("' + raw.replace(/["\\]/g, '\\$&') + '")';
+  }
+
+  // resolveCSSURL returns the absolute form of one reference, or '' for one to
+  // leave exactly as it stands. A fragment names an SVG filter, clip path or
+  // gradient in the document rather than a file, and giving it a path is how it
+  // stops resolving; a data: URL is already the bytes.
+  function resolveCSSURL(ref, base) {
+    // Trimmed first, and empty means leave it: `new URL('  ', base)` is the
+    // sheet's own address, so a blank reference would be rewritten into a
+    // request for the stylesheet as an image.
+    ref = ref.replace(/^[ \t\n\r\f]+|[ \t\n\r\f]+$/g, '');
+    if (!ref || ref.charAt(0) === '#') return '';
+    var head = ref.slice(0, 8).toLowerCase();
+    if (head.indexOf('data:') === 0 || head.indexOf('skyhook:') === 0) return '';
+    try {
+      var abs = new URL(ref, base).href;
+      return abs === ref ? '' : abs;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function absolutizeCSSURLs(text, base) {
+    if (!base || typeof text !== 'string' || !URL_CALL_RE.test(text)) return text;
+    var out = '';
+    for (var i = 0; i < text.length;) {
+      var c = text.charAt(i);
+      if (c === '\\' && i + 1 < text.length) {
+        out += text.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        var j = scanSelString(text, i);
+        out += text.slice(i, j);
+        i = j;
+        continue;
+      }
+      // `url(` is only a url token where an identifier does not run into it:
+      // `-webkit-url(` would be some other function.
+      if (text.substr(i, 4).toLowerCase() !== 'url(' ||
+          (i > 0 && isURLIdentChar(text.charAt(i - 1)))) {
+        out += c;
+        i++;
+        continue;
+      }
+      var tok = scanURLToken(text, i);
+      if (!tok) {
+        out += c;
+        i++;
+        continue;
+      }
+      var abs = resolveCSSURL(tok.raw, base);
+      out += abs ? cssURLToken(abs) : text.slice(i, tok.end);
+      i = tok.end;
+    }
+    return out;
+  }
+
+  // sheetBase is the address a sheet's references resolve against: its own, or
+  // the document's for a sheet that has none — an inline <style>, or the
+  // constructed sheet a web component ships.
+  function sheetBase(doc, sheet) {
+    var href = null;
+    try { href = sheet.href; } catch (e) { href = null; } // cross-origin
+    if (href) return href;
+    try { return doc.baseURI || null; } catch (e) { return null; }
+  }
+
+  function collectRules(doc, list, out, depth, base) {
     if (!list || depth > 8) return;
     for (var i = 0; i < list.length; i++) {
       var rule = list[i];
@@ -836,7 +1002,7 @@
           case 1: // style rule
             cssSeen++;
             if (selectorMatches(doc, rule.selectorText)) {
-              out.push(rule.cssText);
+              out.push(absolutizeCSSURLs(rule.cssText, base));
             } else {
               noteRejected(rule.selectorText);
             }
@@ -844,7 +1010,7 @@
           case 4: // media
           case 12: // supports
             var inner = [];
-            collectRules(doc, rule.cssRules, inner, depth + 1);
+            collectRules(doc, rule.cssRules, inner, depth + 1, base);
             if (inner.length) {
               var cond = rule.type === 4 ? '@media ' + rule.conditionText
                 : '@supports ' + rule.conditionText;
@@ -852,7 +1018,7 @@
             }
             break;
           case 7: // keyframes: small, and cheap insurance for CSS animations
-            out.push(rule.cssText);
+            out.push(absolutizeCSSURLs(rule.cssText, base));
             break;
           case 5: // font-face
             // Substituting from the system is the right trade for a font that
@@ -862,7 +1028,7 @@
             // file the way it ships any other url() in a stylesheet.
             var fam = firstFamily(rule.style && rule.style.fontFamily);
             if (fam && fontsWanted[fam]) {
-              out.push(rule.cssText);
+              out.push(absolutizeCSSURLs(rule.cssText, base));
             } else {
               noteRejected('@font-face ' + (fam || '?'));
             }
@@ -870,7 +1036,7 @@
           default:
             if (rule.cssText && rule.cssText.charAt(0) === '@' &&
                 rule.cssText.indexOf('@import') !== 0) {
-              out.push(rule.cssText);
+              out.push(absolutizeCSSURLs(rule.cssText, base));
             }
         }
       } catch (e) { /* cross-origin sheet, skip */ }
@@ -902,7 +1068,7 @@
         }
       }
       if (!rules) continue;
-      collectRules(doc, rules, out, 0);
+      collectRules(doc, rules, out, 0, sheetBase(doc, sheet));
     }
   }
 

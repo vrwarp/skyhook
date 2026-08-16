@@ -1525,6 +1525,12 @@ export class MirrorHost {
       inputSeq: this.inputSeq,
       patcher: this.patcher.diag(),
       pendingImages: Array.from(this.pendingImages.keys()),
+      // The images only the stylesheet names, which have no element to hang a
+      // hash on and so appear nowhere else in a bundle. A logo the server
+      // fetched from the wrong address is a transparent pixel here and a
+      // complete-looking rule landside; without this list the capture shows a
+      // blank box and nothing at all to say the client was still waiting.
+      pendingCSSImages: Array.from(this.pendingCSS),
       // A canvas is the one element whose emptiness a capture cannot show:
       // the mirrored markup is identical whether or not its photograph
       // arrived. These two say which it was.
