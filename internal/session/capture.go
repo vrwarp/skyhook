@@ -129,6 +129,10 @@ type frozenTab struct {
 	ringFrames   int
 	ringBytes    int
 	journalBound bool
+	// resyncDropped is how many repeat resync requests this tab absorbed. A
+	// client asking faster than the link can answer is a real condition with no
+	// other trace: the storm it used to cause is gone, and so is the evidence.
+	resyncDropped int
 }
 
 // freezeTabs copies the perishable state of every tab, right now.
@@ -151,6 +155,7 @@ func (s *Session) freezeTabs() []frozenTab {
 		}
 		s.mu.Lock()
 		f.acked, f.clientHash = ts.acked, ts.lastHash
+		f.resyncDropped = ts.resyncDropped
 		s.mu.Unlock()
 		out = append(out, f)
 	}
@@ -394,6 +399,9 @@ func (c *capture) gatherTab(f *frozenTab) {
 		"clientHash": f.clientHash,
 		"ringFrames": f.ringFrames,
 		"ringBytes":  f.ringBytes,
+		// Zero is the ordinary answer. Anything large says the client was
+		// asking for repairs faster than the link could deliver them.
+		"resyncDropped": f.resyncDropped,
 	}
 	fail := map[string]string{}
 

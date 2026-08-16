@@ -1930,6 +1930,76 @@ session drops its handlers and its queue, and that forgetting cannot be aimed
 at the browser-level queue — whose key is the empty string, and whose prefix
 would otherwise match every global handler there is.
 
+### 37. A repair that grew geometrically each time it failed to repair anything
+
+From a capture of one Reddit session, five minutes long, which sent **12.3 MB**
+and received 9 kB. At the 250 kbps this project targets that is 6.6 minutes of
+solid transmission inside a 5-minute session: the link was never not saturated.
+Three faults, each amplifying the next.
+
+**A replay was recorded as output.** `Resync` replayed through `EmitFrame`,
+which is the path a tab's *own* frames take — into the replay ring, the journal
+and the compression trainer. So every replayed frame was appended to the ring it
+had just been read from, the ring came to hold each frame twice, and the next
+request from the same point returned twice as many. The session log shows it
+against an unmoving `haveTo`:
+
+| haveTo | frames | bytes |
+|---|---|---|
+| 13 | 8 | 16,508 |
+| 13 | 16 | 33,016 |
+| 13 | 32 | 66,032 |
+| 20 | 96 | 35,360 |
+| 20 | 192 | 70,720 |
+| 20 | 384 | 141,440 |
+
+Exact powers of two, which is what distinguishes this from a page that was
+merely busy — real activity gives irregular increments. Every doubling was
+re-sent over a link the client was already behind on, and every byte of it
+discarded plane-side as a duplicate.
+
+**A replay of nothing was treated as a repair.** `Ring.Since` answers an empty
+ring with "I can serve this" and no frames, which is true for a client that has
+missed nothing. But a client only asks after seeing a frame it cannot apply, so
+an empty ring means the frames it needs are gone, and replaying zero of them
+leaves it exactly as broken. It asks again on the next mutation, and the next:
+**78 "resync by replay frames=0" inside three milliseconds**. Only
+`hash-mismatch` escaped this, on the reasoning that "coming back with nothing
+missed is the good case, and it must stay free" — but that case never reaches
+here. A client that reconnects with nothing missing sends no resync at all, and
+one resuming a tab it does not hold sends `cold`, which asks for a snapshot
+outright.
+
+**Nothing throttled the asking.** A client that is behind asks on every frame
+that arrives while it is behind, which on a page mutating faster than the link
+drains is far quicker than any answer can reach it.
+
+The fixes are one each. Replays go out through `replayFrame`, which sends and
+records nothing, because a replay produces nothing. `planResync` — the decision,
+separated from the doing, so it is testable without a browser — treats an empty
+ring as a snapshot for every reason. And a tab ignores a request it has already
+answered within `resyncCooldown`, which is longer than a round trip on the link
+this targets, because the request that matters is the one sent *after* the
+answer arrived.
+
+The cooldown covers two shapes, and the second is why exact-repeat suppression
+alone is not enough: a client that is behind keeps applying what it holds, so
+its `haveTo` creeps forward and every request looks new — in this capture it
+walked 20 → 21 while two snapshots were already in flight. So while a whole
+document is on its way, any further request for that tab is that document's job.
+
+What was suppressed is counted per tab and rides into a capture as
+`resyncDropped`, because a storm being absorbed correctly is otherwise
+invisible, and "the link went quiet" is the report it would arrive as.
+
+`internal/session/resync_test.go` pins all of it, and each test was checked to
+fail against the code it guards: the ring is the same size after three replays
+of the same ground (it reproduces the doubling as `[3 6 12]` on the wire), an
+empty ring plans a snapshot for every reason, 78 identical requests are answered
+once, a genuinely different gap is still answered, a gap arriving while a
+snapshot is in flight is not, and the mute lifts after the cooldown so a request
+that really was lost is asked again.
+
 ## Measured results
 
 From the end-to-end suite. The design asks for every milestone to be measured
