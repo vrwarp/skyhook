@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,47 @@ func agentWorld(t *testing.T, ctx context.Context, br *cdp.Browser, url, source 
 		t.Fatalf("addBinding: %v", err)
 	}
 
+	deadline := time.Now().Add(budget(30 * time.Second))
+
+	/*
+		Wait for the document *before* making a world to look at it.
+
+		A target begins on an initial empty document, and that document is
+		already `complete` — so a readiness check made after the isolated world
+		exists answers about the wrong page and answers instantly. Then
+		`document.styleSheets[0]` is undefined, and the test fails on a page it
+		was never meant to be looking at. On CI that read as a used-CSS
+		regression, which it was not.
+
+		Asking in the page's own world costs nothing (no `contextId` is the
+		default context) and settles it: this returns only once the fixture is
+		the document, parsed, with the stylesheet these tests are entirely about.
+	*/
+	ready := fmt.Sprintf(`(function () {
+	  return document.readyState === 'complete' &&
+	         location.href === %q &&
+	         document.styleSheets.length > 0;
+	})()`, url)
+	for {
+		var res struct {
+			Result struct {
+				Value bool `json:"value"`
+			} `json:"result"`
+		}
+		err := sess.Do(ctx, "Runtime.evaluate", map[string]any{
+			"expression": ready, "returnByValue": true,
+		}, &res)
+		if err == nil && res.Result.Value {
+			break
+		}
+		if time.Now().After(deadline) {
+			// Loudly: falling through to run the tests anyway is how this cost a
+			// red main to diagnose the first time.
+			t.Fatalf("%s never finished loading with a stylesheet (last error: %v)", url, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	var tree struct {
 		FrameTree struct {
 			Frame struct {
@@ -38,18 +80,11 @@ func agentWorld(t *testing.T, ctx context.Context, br *cdp.Browser, url, source 
 			} `json:"frame"`
 		} `json:"frameTree"`
 	}
-	deadline := time.Now().Add(budget(30 * time.Second))
-	for {
-		if err := sess.Do(ctx, "Page.getFrameTree", nil, &tree); err != nil {
-			t.Fatalf("frame tree: %v", err)
-		}
-		if tree.FrameTree.Frame.ID != "" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the page never reported a frame")
-		}
-		time.Sleep(100 * time.Millisecond)
+	if err := sess.Do(ctx, "Page.getFrameTree", nil, &tree); err != nil {
+		t.Fatalf("frame tree: %v", err)
+	}
+	if tree.FrameTree.Frame.ID == "" {
+		t.Fatal("the page reported no frame after it had finished loading")
 	}
 	var world struct {
 		ExecutionContextID int64 `json:"executionContextId"`
@@ -68,7 +103,10 @@ func agentWorld(t *testing.T, ctx context.Context, br *cdp.Browser, url, source 
 				Value json.RawMessage `json:"value"`
 			} `json:"result"`
 			Exception *struct {
-				Text string `json:"text"`
+				Text      string `json:"text"`
+				Exception *struct {
+					Description string `json:"description"`
+				} `json:"exception"`
 			} `json:"exceptionDetails"`
 		}
 		if err := sess.Do(ctx, "Runtime.evaluate", map[string]any{
@@ -78,18 +116,16 @@ func agentWorld(t *testing.T, ctx context.Context, br *cdp.Browser, url, source 
 			t.Fatalf("evaluate: %v", err)
 		}
 		if res.Exception != nil {
-			t.Fatalf("evaluate threw: %s", res.Exception.Text)
+			// The description, not just the text: `text` is the word "Uncaught"
+			// and nothing else, which says only that something went wrong and
+			// costs a round trip through CI to find out what.
+			why := res.Exception.Text
+			if res.Exception.Exception != nil && res.Exception.Exception.Description != "" {
+				why = res.Exception.Exception.Description
+			}
+			t.Fatalf("evaluate threw: %s", why)
 		}
 		return res.Result.Value
-	}
-	// Wait for the document before installing: the filter's whole answer is a
-	// function of what is on the page.
-	for time.Now().Before(deadline) {
-		var ready string
-		if err := json.Unmarshal(eval(`document.readyState`), &ready); err == nil && ready == "complete" {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
 	}
 	eval(source)
 	return eval
