@@ -102,6 +102,11 @@ type tabState struct {
 	// capture because a storm that is being absorbed correctly is invisible
 	// otherwise, and "the link went quiet" is the report it would arrive as.
 	resyncDropped int
+	// What the integrity check saw last time it found the client short of the
+	// frame it was anchored to. See noteStuck.
+	stuckSeq   uint64
+	stuckAcked uint64
+	stuckTimes int
 }
 
 type outbound struct {
@@ -836,8 +841,17 @@ func (s *Session) checkTab(id uint32, ts *tabState) {
 		// arrive. Saying so would be a lie that costs a whole document.
 		s.log.Debug("integrity check inconclusive: the client never reached the frame it was checked against",
 			"tab", id, "seq", cp.Seq, "acked", s.ackedSeq(ts))
+		if acked, stuck := s.noteStuck(ts, cp.Seq); stuck {
+			s.log.Warn("the client has stopped short of a page that has stopped changing; resyncing",
+				"tab", id, "seq", cp.Seq, "acked", acked)
+			s.events.Add("stalled", id, map[string]any{"seq": cp.Seq, "acked": acked})
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Second)
+			s.Resync(ctx2, id, acked, "stalled")
+			cancel2()
+		}
 		return
 	}
+	s.clearStuck(ts)
 	if clientHash == cp.Hash {
 		s.log.Debug("integrity check passed", "tab", id, "seq", cp.Seq)
 		return
@@ -855,6 +869,65 @@ func (s *Session) checkTab(id uint32, ts *tabState) {
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Second)
 	s.Resync(ctx2, id, s.ackedSeq(ts), "hash-mismatch")
 	cancel2()
+}
+
+// stuckChecks is how many consecutive inconclusive checks — a minute, at the
+// default interval — make a client behind into a client stopped.
+const stuckChecks = 2
+
+/*
+noteStuck decides whether a client that has not reached the frame it was checked
+against is behind or stopped.
+
+The difference is everything, and it is why an inconclusive check used to do
+nothing at all. A client that is behind and catching up must be left alone:
+resyncing it puts a document on the link in competition with the very frames
+that made it late, which is how a check meant to protect the mirror becomes the
+reason it never converges.
+
+A client that is behind on a page that has stopped changing is not catching up.
+Nothing is coming to close the gap: the plane side only notices a missing frame
+when a *later* one arrives and does not fit, so on a page that has gone quiet a
+frame that never landed is never missed. It went unnoticed for three minutes in
+one capture — the server logging "the client never reached the frame it was
+checked against", seq 1 against acked 0, five times, while the reader looked at a
+page whose stylesheet had not arrived.
+
+So: the same frame outstanding, the same acknowledgement, and a page that has
+produced nothing new in between. Two checks rather than one, because a single
+sample cannot tell a stalled client from one that was mid-flight when it was
+taken.
+*/
+func (s *Session) noteStuck(ts *tabState, seq uint64) (acked uint64, stuck bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acked = ts.acked
+	if acked >= seq {
+		ts.stuckTimes = 0
+		return acked, false
+	}
+	if ts.stuckSeq != seq || ts.stuckAcked != acked {
+		// Either side moved: the page produced a frame, or the client applied
+		// one. Whatever this is, it is not stopped.
+		ts.stuckSeq, ts.stuckAcked, ts.stuckTimes = seq, acked, 1
+		return acked, false
+	}
+	ts.stuckTimes++
+	if ts.stuckTimes < stuckChecks {
+		return acked, false
+	}
+	// Repaired, or about to be. Start counting again rather than resyncing on
+	// every check from here on.
+	ts.stuckTimes = 0
+	return acked, true
+}
+
+// clearStuck forgets the tally, for a client that has answered for the frame it
+// was checked against.
+func (s *Session) clearStuck(ts *tabState) {
+	s.mu.Lock()
+	ts.stuckTimes = 0
+	s.mu.Unlock()
 }
 
 // awaitCheck arms the tab for one sequence number and waits for the ack that
