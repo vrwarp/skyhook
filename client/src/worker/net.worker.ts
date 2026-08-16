@@ -42,6 +42,41 @@ let pairing: Pairing | null = null;
 let sessionId = '';
 let viewport: Viewport = { w: 1280, h: 800, dpr: 1, mobile: false };
 const progress = new Map<number, TabProgress>();
+/**
+ * Per tab, the highest mutation sequence handed to the shell — which is not the
+ * same number as the one the shell has acknowledged.
+ *
+ * A batch goes to the shell by postMessage, is applied against a document in an
+ * iframe, and only then comes back as an ack. Several more batches arrive over
+ * the link inside that round trip, so `progress` — which only moves on an ack —
+ * describes the client as it was several frames ago. Deciding anything about an
+ * arriving frame from it gets two things wrong at once: every in-flight batch
+ * looks like a gap, and every batch the server replays in answer to that
+ * supposed gap looks new.
+ *
+ * Applying one twice is not a harmless repeat. A mutation's strings extend an
+ * append-only intern table by position, so a duplicated batch leaves the
+ * client's table one entry longer than the server's and every string reference
+ * after it resolves to its neighbour: streamed text arrives shredded, three
+ * characters at a time, into the wrong nodes. Nothing detects it — the document
+ * hash is computed over nodes the client still holds, and both copies of a
+ * re-inserted node carry the same id — so the page stays wrong until it is
+ * reloaded.
+ *
+ * This is the number those decisions are made from: a batch is dropped if it
+ * has already been handed over, and a gap is only a gap if it is one.
+ */
+const delivered = new Map<number, number>();
+/**
+ * When each tab last asked for a resync, so a gap costs one request rather than
+ * one per frame that streams in behind it. A page mid-render emits a batch
+ * every hundred milliseconds; without this, a single missed frame turned into
+ * two thousand resync requests in one session.
+ */
+const resyncAsked = new Map<number, number>();
+
+/** The shortest gap between two resync requests for the same tab. */
+const RESYNC_MIN_GAP_MS = 1000;
 /** Input frames captured while offline, replayed in the next Hello. */
 const outbox: Map<number, unknown>[] = [];
 let online = false;
@@ -217,6 +252,24 @@ async function send(channel: Channel, payload: Uint8Array): Promise<void> {
   }
 }
 
+/**
+ * Asks the server to close a gap, at most once per second per tab.
+ *
+ * The answer takes a round trip, and on this link that is seconds; the frames
+ * already in flight keep arriving throughout, each one looking like the same
+ * gap. Asking again for every one of them buries the ctrl channel under
+ * requests for a repair that is already on its way, and the server answers each
+ * of them — which is how one missed frame became a replay storm. Repeating on a
+ * timer rather than never means a lost request still gets retried.
+ */
+function askResync(tab: number, haveTo: number, reason: string): void {
+  const now = Date.now();
+  const asked = resyncAsked.get(tab);
+  if (asked !== undefined && now - asked < RESYNC_MIN_GAP_MS) return;
+  resyncAsked.set(tab, now);
+  void send(Channel.Ctrl, encodeFrame(FrameType.Resync, tab, resyncBody(tab, haveTo, reason)));
+}
+
 function handleMessage(msg: Uint8Array): void {
   let payload: Uint8Array;
   try {
@@ -257,21 +310,30 @@ function handleMessage(msg: Uint8Array): void {
     }
     case FrameType.Snapshot:
       progress.set(frame.tab, { seq: 0, hash: 0 });
+      // A snapshot restarts the numbering and resets the intern table, so
+      // everything handed over before it is about a document that is gone.
+      delivered.set(frame.tab, 0);
+      resyncAsked.delete(frame.tab);
       post('snapshot', { tab: frame.tab, snapshot: decodeSnapshot(frame.body) });
       break;
     case FrameType.Mutation: {
       const have = progress.get(frame.tab);
       if (!have) {
-        void send(Channel.Ctrl,
-          encodeFrame(FrameType.Resync, frame.tab, resyncBody(frame.tab, 0, 'cold')));
+        askResync(frame.tab, 0, 'cold');
         break;
       }
-      if (frame.base && frame.base > have.seq) {
-        void send(Channel.Ctrl,
-          encodeFrame(FrameType.Resync, frame.tab, resyncBody(frame.tab, have.seq, 'gap')));
+      const held = delivered.get(frame.tab) ?? have.seq;
+      // Already handed over: a replay the server sent in answer to a resync,
+      // or a duplicate off a reconnect. Dropping it is the whole point of
+      // tracking this separately — see `delivered`. Checked before the gap
+      // below, because a repeat is a repeat whatever its base says.
+      if (frame.seq <= held) break;
+      if (frame.base && frame.base > held) {
+        askResync(frame.tab, held, 'gap');
         break;
       }
-      if (frame.seq <= have.seq) break; // duplicate from a replay
+      delivered.set(frame.tab, frame.seq);
+      resyncAsked.delete(frame.tab);
       post('mutation', {
         tab: frame.tab, seq: frame.seq, cause: frame.cause,
         mutation: decodeMutation(frame.body),
@@ -403,8 +465,13 @@ function workerReport(): Record<string, unknown> {
     // Per tab: the sequence this client has acknowledged and the document hash
     // it reported for it. Put beside the server's view of the same two numbers,
     // this is where a divergence is either explained or narrowed.
+    //
+    // deliveredSeq is what the worker has handed the shell. It runs ahead of
+    // appliedSeq by whatever is in the postMessage pipeline, and a capture taken
+    // mid-stream will show them apart; a lasting gap between them means batches
+    // are going into the shell and not coming back out.
     progress: Array.from(progress.entries()).map(([tab, p]) => ({
-      tab, appliedSeq: p.seq, docHash: p.hash,
+      tab, appliedSeq: p.seq, deliveredSeq: delivered.get(tab) ?? p.seq, docHash: p.hash,
     })),
   };
 }
@@ -465,6 +532,8 @@ self.addEventListener('message', (event: MessageEvent) => {
       break;
     case 'closeTab':
       progress.delete(Number(cmd.args.tab));
+      delivered.delete(Number(cmd.args.tab));
+      resyncAsked.delete(Number(cmd.args.tab));
       void send(Channel.Ctrl, encodeFrame(FrameType.TabClose, Number(cmd.args.tab)));
       break;
     case 'navigate':
@@ -489,7 +558,12 @@ self.addEventListener('message', (event: MessageEvent) => {
       break;
     case 'ack': {
       const tab = Number(cmd.args.tab);
-      progress.set(tab, { seq: Number(cmd.args.seq), hash: Number(cmd.args.hash) });
+      const seq = Number(cmd.args.seq);
+      progress.set(tab, { seq, hash: Number(cmd.args.hash) });
+      // The shell can only acknowledge what it was given, so this is normally
+      // already true. It is not after a snapshot the shell applied and this
+      // side never saw, and an ack is the more recent of the two answers.
+      if (seq > (delivered.get(tab) ?? 0)) delivered.set(tab, seq);
       void send(Channel.Ctrl, encodeFrame(FrameType.Ack, tab,
         ackBody(tab, Number(cmd.args.seq), Number(cmd.args.hash))));
       break;

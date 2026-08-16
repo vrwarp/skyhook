@@ -1158,6 +1158,18 @@ export class MirrorHost {
 
   applyMutation(m: Mutation, seq: number): void {
     if (!this.patcher) return;
+    // A batch this document has already had. The worker drops replays before
+    // they get here, but it decides from what it has handed over and this is
+    // what has actually been applied — the two differ across a reconnect, where
+    // the server replays from the last sequence it was told about and the
+    // batches after it were applied but never acknowledged.
+    //
+    // Applying one twice appends its strings to the intern table a second time,
+    // which shifts every reference after it by one and turns the rest of the
+    // session's text into someone else's. Silently: the table is not hashed,
+    // and re-inserting a node the document already has reuses its id. Cheaper
+    // to refuse the batch than to detect the damage later.
+    if (seq > 0 && seq <= this.lastSeq) return;
     const ops = m.ops.filter((op) => {
       if (op.op === OpCode.Attr) this.reconcileAttr(op);
       return !this.echo?.defer(op, (id) => this.patcher?.nodeFor(id));
