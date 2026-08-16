@@ -153,12 +153,13 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 	// resolves sessions lazily.
 	router := &deliveryRouter{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{
-		Workers:   cfg.ImageWorkers,
-		CacheDir:  cfg.ImageCacheDir(),
-		CacheSize: cfg.ImageCacheBytes,
-		Logger:    log,
-		Fetcher:   router,
-		UserAgent: userAgent,
+		Workers:    cfg.ImageWorkers,
+		CacheDir:   cfg.ImageCacheDir(),
+		CacheSize:  cfg.ImageCacheBytes,
+		Logger:     log,
+		Fetcher:    router,
+		Rasterizer: router,
+		UserAgent:  userAgent,
 		Transcode: imgproc.Options{
 			Encoder:      imgproc.EncoderAuto,
 			PhotoQuality: cfg.ImageQuality,
@@ -284,6 +285,21 @@ func (d *deliveryRouter) FetchImage(ctx context.Context, tab uint32, url string,
 	for _, s := range d.mgr.Sessions() {
 		if t := s.Tab(tab); t != nil {
 			return t.FetchResource(ctx, url, limit)
+		}
+	}
+	return nil, errNoTabForImage
+}
+
+// RasterizeImage implements imgproc.Rasterizer: a format the server has no
+// decoder for goes back to the browser that already painted it, which is the
+// same tab, so the answer comes from the decoders that rendered the page.
+func (d *deliveryRouter) RasterizeImage(ctx context.Context, tab uint32, src []byte, w, h int) ([]byte, error) {
+	if d.mgr == nil {
+		return nil, errNoTabForImage
+	}
+	for _, s := range d.mgr.Sessions() {
+		if t := s.Tab(tab); t != nil {
+			return t.RasterizeImage(ctx, src, w, h)
 		}
 	}
 	return nil, errNoTabForImage

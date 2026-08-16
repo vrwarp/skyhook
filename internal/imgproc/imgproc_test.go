@@ -487,3 +487,205 @@ func TestSVGIsShippedAsItIs(t *testing.T) {
 		t.Fatal("a PNG was mistaken for markup")
 	}
 }
+
+// avifBytes is the head of a real AVIF file and nothing else.
+//
+// The point of the fixture is the eight bytes a decoder dispatches on: nothing
+// in this package can read past them, which is exactly the state a reader on
+// an all-AVIF page is left in.
+func avifBytes() []byte {
+	return append([]byte("\x00\x00\x00\x20ftypavifavifmif1miaf"), make([]byte, 256)...)
+}
+
+// browserDecoder stands in for the landside Chromium, which reads what this
+// process cannot and hands back pixels.
+type browserDecoder struct {
+	mu   sync.Mutex
+	png  []byte
+	err  error
+	saw  [][]byte
+	boxW []int
+	boxH []int
+}
+
+func (b *browserDecoder) RasterizeImage(_ context.Context, _ uint32, src []byte, w, h int) ([]byte, error) {
+	b.mu.Lock()
+	b.saw = append(b.saw, src)
+	b.boxW, b.boxH = append(b.boxW, w), append(b.boxH, h)
+	b.mu.Unlock()
+	if b.err != nil {
+		return nil, b.err
+	}
+	return b.png, nil
+}
+
+func (b *browserDecoder) asked() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.saw)
+}
+
+/*
+An image in a format Go cannot read still reaches the page.
+
+This is the whole of the ASUS symptom: a product gallery served entirely as
+AVIF failed at DecodeConfig, so the pipeline dropped every one of those keys
+without ever announcing them. The client had asked, nothing was coming, and
+nothing would ask again — the reader clicked through a carousel whose picture
+could not change, because there had never been a picture in it.
+*/
+func TestAFormatThisProcessCannotReadIsDecodedByTheBrowser(t *testing.T) {
+	d := &recorder{ready: make(chan protocol.ImageMeta, 4), bytes: make(chan protocol.ImageData, 4)}
+	browser := &browserDecoder{png: encodePNG(t, sprite(96, 64))}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher: slowFetcher{body: avifBytes()}, Rasterizer: browser,
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	p.Submit(Request{
+		Tab: 1, Key: "69795b5f", Node: 454, Priority: 0,
+		URL: "https://dlcdnwebimgs.asus.test/features/large/2x/s1/main.avif", W: 96, H: 64,
+	})
+
+	select {
+	case meta := <-d.ready:
+		if meta.W == 0 || meta.H == 0 {
+			t.Errorf("meta = %dx%d: a decoded image has a size", meta.W, meta.H)
+		}
+		if meta.Blur == "" {
+			t.Error("no blurhash: the placeholder is the whole of what the reader sees first")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an AVIF the browser can read was never announced")
+	}
+	select {
+	case data := <-d.bytes:
+		if len(data.Data) == 0 {
+			t.Fatal("the image arrived with no bytes")
+		}
+		if data.Mime != "image/png" {
+			t.Errorf("mime = %q: the transcoder decides the output format, not the source", data.Mime)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an above-the-fold image was announced and never sent")
+	}
+
+	// The browser is asked for the box the page lays the image out in, not for
+	// the source at its natural size: a 4000px hero has no business crossing
+	// the CDP socket as an uncompressed PNG.
+	browser.mu.Lock()
+	defer browser.mu.Unlock()
+	if len(browser.saw) != 1 {
+		t.Fatalf("the browser was asked %d times, want once", len(browser.saw))
+	}
+	if !bytes.Equal(browser.saw[0], avifBytes()) {
+		t.Error("the browser was handed something other than the bytes that failed")
+	}
+	if browser.boxW[0] != 96 || browser.boxH[0] != 64 {
+		t.Errorf("box = %dx%d, want the laid-out 96x64", browser.boxW[0], browser.boxH[0])
+	}
+}
+
+// Only a picture goes back to the browser.
+//
+// Half the failures in a real capture are not images at all: an SVG paint
+// server referenced as url(#gradient) resolves to the page itself, and what
+// comes back is HTML. Those decode nowhere, and a round trip to ask Chromium
+// to try again would turn one cheap failure into a slow one, once per
+// reference, on every page that draws a gradient.
+func TestOnlyARecognisedPictureIsSentBackToTheBrowser(t *testing.T) {
+	d := &recorder{ready: make(chan protocol.ImageMeta, 4), bytes: make(chan protocol.ImageData, 4)}
+	browser := &browserDecoder{png: encodePNG(t, sprite(16, 16))}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher:    slowFetcher{body: []byte("<!doctype html><title>not an image</title>")},
+		Rasterizer: browser,
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	p.Submit(Request{Tab: 1, Key: "5c19183e", Node: 7, Priority: 0,
+		URL: "https://www.asus.test/oxiis/#clip-path", W: 16, H: 16})
+
+	select {
+	case meta := <-d.ready:
+		t.Fatalf("an HTML document was published as an image: %+v", meta)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if n := browser.asked(); n != 0 {
+		t.Errorf("the browser was asked %d times to decode a web page", n)
+	}
+}
+
+// With no browser to ask, the failure still says what the format was.
+//
+// That sentence is the one an operator reads to tell "this site serves a
+// format we cannot read, and every page of it will look like this" apart from
+// "this one asset is damaged".
+func TestWithoutABrowserAnUnreadableFormatSaysSo(t *testing.T) {
+	tc := New(Options{Encoder: EncoderPNG})
+	_, err := tc.Transcode(context.Background(), avifBytes(), 96, 64)
+	if !errors.Is(err, ErrNoDecoder) {
+		t.Fatalf("err = %v, want ErrNoDecoder", err)
+	}
+	if !strings.Contains(err.Error(), "avif") {
+		t.Errorf("err = %v: it does not name the format", err)
+	}
+
+	// And a browser that cannot read it either keeps that sentence.
+	d := &recorder{ready: make(chan protocol.ImageMeta, 1), bytes: make(chan protocol.ImageData, 1)}
+	p, perr := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Rasterizer: &browserDecoder{err: errors.New("the tab has closed")},
+	}, d)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	defer p.Close()
+	p.Submit(Request{Tab: 1, Key: "gone", Priority: 0, Src: avifBytes(), W: 16, H: 16})
+	select {
+	case meta := <-d.ready:
+		t.Fatalf("an undecoded image was published: %+v", meta)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// UndecodableFormat names what a browser can read and this process cannot, and
+// keeps its hands off everything else.
+func TestUndecodableFormatNamesOnlyWhatIsWorthAskingAbout(t *testing.T) {
+	for name, tc := range map[string]struct {
+		src  []byte
+		want string
+	}{
+		"avif":          {avifBytes(), "avif"},
+		"avif sequence": {[]byte("\x00\x00\x00\x20ftypavis...."), "avif"},
+		"heic":          {[]byte("\x00\x00\x00\x18ftypheic...."), "heif"},
+		"jpeg xl":       {[]byte("\xff\x0a\x00\x00"), "jxl"},
+		"jpeg xl box":   {[]byte("\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a"), "jxl"},
+		"bmp":           {[]byte("BM\x36\x00"), "bmp"},
+		"ico":           {[]byte("\x00\x00\x01\x00\x01\x00"), "ico"},
+		"tiff le":       {[]byte("II*\x00"), "tiff"},
+		"tiff be":       {[]byte("MM\x00*"), "tiff"},
+		// These decode here, so asking the browser would only be slower.
+		"png":  {onePixelPNG(t), ""},
+		"webp": {[]byte("RIFF\x00\x00\x00\x00WEBPVP8 "), ""},
+		"gif":  {[]byte("GIF89a\x01\x00"), ""},
+		// An MP4 shares AVIF's container and is not a picture.
+		"mp4":   {[]byte("\x00\x00\x00\x20ftypisom...."), ""},
+		"html":  {[]byte("<!doctype html><title>hi</title>"), ""},
+		"tiny":  {[]byte("BM"), "bmp"},
+		"empty": {nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := UndecodableFormat(tc.src); got != tc.want {
+				t.Errorf("UndecodableFormat = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

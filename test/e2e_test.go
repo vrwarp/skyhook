@@ -9,6 +9,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"html"
@@ -341,6 +342,42 @@ func utilityCSSPage() string {
 // the repository to do it.
 var fakeFont = append([]byte("wOF2"), make([]byte, 256)...)
 
+// heroRGB is the colour of the AVIF hero and of nothing else in the fixtures,
+// so finding it in the delivered pixels proves those pixels came from a format
+// nothing in this process can decode.
+var heroRGB = color.RGBA{R: 0, G: 102, B: 204, A: 255}
+
+/*
+heroAVIF is a real 64x64 AVIF: `ftypavif`, an av01 codec configuration, and a
+mdat holding an actual AV1 keyframe.
+
+It has to be real rather than a plausible header, because what it exists to
+test is a decode. Go has none, which is the whole point — so this fixture is
+generated rather than written, and lives here as bytes for the same reason the
+fake font does: a test that needed libavif installed to run would not run.
+*/
+var heroAVIF = mustBase64(`AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAhaGRs` +
+	`cgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOcGl0bQAAAAAAAQAAAB5pbG9jAAAAAEQAAAEAAQAAAAEAAAET` +
+	`AAAALAAAAChpaW5mAAAAAAABAAAAGmluZmUCAAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlz` +
+	`cGUAAAAAAAAAQAAAAEAAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEADQAGgAAAABdp` +
+	`cG1hAAAAAAAAAAEAAQQBAoMEAAAANG1kYXQSAAoJGBV//aICGg0IMh0SB/f2qQCCCD5AAADPzAvYbDzh2NUXtFMl` +
+	`MPWURQ==`)
+
+func mustBase64(s string) []byte {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// avifPage lays the hero out smaller than it is, so the box the browser is
+// asked to scale into is a box it could get wrong.
+const avifPage = `<!DOCTYPE html><html><head><title>AVIF</title></head>
+	<body style="margin:0"><h1>a page that serves only avif</h1>
+	<img id="hero" src="/hero.avif" width="32" height="32">
+	</body></html>`
+
 // animatedCanvasPage repaints for a while after a click and then stops, which
 // is the shape of everything a reader starts: tiles sliding, a map easing to a
 // halt, a spinner running until the answer lands. One photograph taken shortly
@@ -520,6 +557,15 @@ func (r *router) FetchImage(ctx context.Context, tab uint32, url string, limit i
 	return nil, errors.New("no live tab for image fetch")
 }
 
+func (r *router) RasterizeImage(ctx context.Context, tab uint32, src []byte, w, h int) ([]byte, error) {
+	for _, s := range r.mgr.Sessions() {
+		if t := s.Tab(tab); t != nil {
+			return t.RasterizeImage(ctx, src, w, h)
+		}
+	}
+	return nil, errors.New("no live tab to decode an image with")
+}
+
 // shapedAddr is the address the link emulator shapes. The netem filter targets
 // exactly this port, so the CDP socket and the fixture web server keep running
 // at landside speed — which is what they do in reality.
@@ -666,6 +712,14 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	mux.HandleFunc("/images/", func(w http.ResponseWriter, r *http.Request) {
 		misresolved.Add(1)
 		http.NotFound(w, r)
+	})
+	mux.HandleFunc("/avif", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, avifPage)
+	})
+	mux.HandleFunc("/hero.avif", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/avif")
+		_, _ = w.Write(heroAVIF)
 	})
 	// A path with a bracket in it, which a url() token may carry as long as it
 	// is quoted. See TestABracketInAURLDoesNotTruncateTheSheet.
@@ -970,8 +1024,9 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	r := &router{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{
 		Workers: 2, CacheDir: t.TempDir(), CacheSize: 8 << 20, Logger: log,
-		Fetcher:   r,
-		Transcode: imgproc.Options{Encoder: imgproc.EncoderPNG},
+		Fetcher:    r,
+		Rasterizer: r,
+		Transcode:  imgproc.Options{Encoder: imgproc.EncoderPNG},
 	}, r)
 	if err != nil {
 		t.Fatal(err)
@@ -2038,4 +2093,74 @@ func keysOf(m map[string]protocol.ImageMeta) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+/*
+A page that serves only AVIF still has pictures on it.
+
+Chromium reads AVIF; Go does not, and never will without a cgo dependency that
+would take `go test ./...` with it. So the transcoder used to stop at
+DecodeConfig and drop the key — no metadata, no bytes, nothing to ask again
+with. On a site that serves its whole gallery in one format, that is not a
+missing image, it is every image: the reader clicks through a carousel whose
+picture cannot change, because no picture ever arrived.
+
+The colour is the assertion. It exists nowhere else in the fixtures and it is
+inside the AV1 keyframe, so finding it in the delivered PNG means something
+decoded that keyframe — and the only decoder in the building is the browser's.
+*/
+func TestAPageServedOnlyInAVIFStillHasItsPictures(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/avif"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "a page that serves only avif", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	deadline := time.Now().Add(budget(45 * time.Second))
+	for time.Now().Before(deadline) {
+		img := cl.Model(tab).Find("img", "id", "hero")
+		if img == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		key := strings.TrimPrefix(img.Attrs["src"], "skyhook://img/")
+		data, ok := cl.ImageBytes(key)
+		if key == "" || key == img.Attrs["src"] || !ok {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		decoded, _, derr := image.Decode(bytes.NewReader(data))
+		if derr != nil {
+			t.Fatalf("what arrived is still not something Go can read: %v", derr)
+		}
+		at := decoded.At(decoded.Bounds().Min.X+1, decoded.Bounds().Min.Y+1)
+		r, g, b, _ := at.RGBA()
+		// Wider than the canvas tests allow themselves: this fill has been
+		// through a lossy AV1 encode with subsampled chroma before it ever
+		// reached us, which the shots those tests compare have not.
+		const tol = 24
+		if abs(int(r>>8)-int(heroRGB.R)) > tol ||
+			abs(int(g>>8)-int(heroRGB.G)) > tol ||
+			abs(int(b>>8)-int(heroRGB.B)) > tol {
+			t.Fatalf("the hero arrived the wrong colour: %v, want %v", at, heroRGB)
+		}
+		// The browser is asked for the box the page lays the image out in, so
+		// a 4000px hero never crosses the CDP socket at its natural size.
+		if b := decoded.Bounds(); b.Dx() > 32 || b.Dy() > 32 {
+			t.Errorf("the hero arrived %dx%d, larger than the 32x32 box it is drawn in", b.Dx(), b.Dy())
+		}
+		return
+	}
+	t.Fatal("the AVIF hero never arrived; the page is a row of empty boxes")
 }

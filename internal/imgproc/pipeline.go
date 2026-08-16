@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -43,6 +44,32 @@ type Fetcher interface {
 	FetchImage(ctx context.Context, tab uint32, url string, limit int) ([]byte, error)
 }
 
+/*
+Rasterizer turns bytes this process cannot decode into bytes it can, by asking
+the landside browser — which has already decoded them once to paint the page
+that named them — to hand back the pixels as a PNG.
+
+The alternative was a decoder per format, and it is the wrong trade twice over.
+Every one of them is a C library behind cgo, so the price of reading AVIF would
+be a build that no longer runs `go test ./...` on a machine without libavif —
+the exact cost §7 of the implementation notes went out of its way not to pay for
+*encoding*. And the format list never closes: JPEG XL is already shipping and
+whatever follows it will arrive the same way, as a site that serves one format
+and no fallback.
+
+Chromium is here, it is attached, and it holds a decoder for every format the
+web has ever agreed on. Sending it the bytes costs one round trip on a machine
+that has nothing else to do, and it costs it once, because the result is
+transcoded and cached under the same content hash as everything else.
+
+w and h are the box the page lays the image out in; the browser scales into it
+before handing the pixels back, which is what keeps a 4000px hero from crossing
+the CDP socket as an uncompressed PNG. Zero means "natural size".
+*/
+type Rasterizer interface {
+	RasterizeImage(ctx context.Context, tab uint32, src []byte, w, h int) ([]byte, error)
+}
+
 // Delivery is how the pipeline hands results back to the session.
 type Delivery interface {
 	// ImageReady reports metadata (blurhash, dimensions) for a key.
@@ -59,6 +86,7 @@ type Pipeline struct {
 	tc        *Transcoder
 	deliver   Delivery
 	fetcher   Fetcher
+	raster    Rasterizer
 	userAgent string
 	log       *slog.Logger
 	client    *http.Client
@@ -100,6 +128,10 @@ type PipelineOptions struct {
 	// Fetcher fetches through the landside browser. Nil means every fetch takes
 	// the uncredentialed direct path, which is what the tests want.
 	Fetcher Fetcher
+	// Rasterizer decodes what this process cannot, through the landside
+	// browser. Nil means a format Go has no decoder for stays undecoded, which
+	// is the behaviour every build had before there was one.
+	Rasterizer Rasterizer
 	// UserAgent is sent on the direct path, so the fallback at least agrees
 	// with the browser about who it is.
 	UserAgent string
@@ -133,8 +165,9 @@ func NewPipeline(opts PipelineOptions, d Delivery) (*Pipeline, error) {
 		return nil, err
 	}
 	p := &Pipeline{
-		tc: New(opts.Transcode), deliver: d, fetcher: opts.Fetcher, userAgent: opts.UserAgent,
-		log: opts.Logger, client: cl, cache: cache,
+		tc: New(opts.Transcode), deliver: d, fetcher: opts.Fetcher, raster: opts.Rasterizer,
+		userAgent: opts.UserAgent,
+		log:       opts.Logger, client: cl, cache: cache,
 		hi: make(chan Request, 512), lo: make(chan Request, 4096),
 		stop:     make(chan struct{}),
 		inFlight: map[string]bool{},
@@ -274,6 +307,9 @@ func (p *Pipeline) process(req Request) {
 		return
 	}
 	res, err := p.tc.Transcode(ctx, src, req.W, req.H)
+	if errors.Is(err, ErrNoDecoder) {
+		res, err = p.rasterize(ctx, req, src, err)
+	}
 	if err != nil {
 		// A region shot has no URL to name it; the key is all there is to say
 		// which image failed.
@@ -300,6 +336,31 @@ func (p *Pipeline) process(req Request) {
 	for _, tab := range waiting {
 		p.deliver.ImageBytes(tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
 	}
+}
+
+// rasterize takes the second run at a format this process cannot read, through
+// the browser that can, and then transcodes the pixels it gets back exactly as
+// if they had arrived that way.
+//
+// The failure is carried through rather than replaced: a build with no
+// rasterizer, and a browser that cannot decode it either, should both still say
+// which format was the problem — that is the sentence in the log that tells an
+// operator whether to expect this on every page of that site or only this one.
+func (p *Pipeline) rasterize(ctx context.Context, req Request, src []byte, cause error) (*Result, error) {
+	if p.raster == nil {
+		return nil, cause
+	}
+	pixels, err := p.raster.RasterizeImage(ctx, req.Tab, src, req.W, req.H)
+	if err != nil {
+		return nil, fmt.Errorf("%w (the browser could not read it either: %v)", cause, err)
+	}
+	res, err := p.tc.Transcode(ctx, pixels, req.W, req.H)
+	if err != nil {
+		return nil, err
+	}
+	p.log.Debug("image decoded by the landside browser",
+		"url", req.URL, "key", req.Key, "was", cause, "bytes", len(res.Data))
+	return res, nil
 }
 
 // remember records a key's metadata, dropping the oldest once past metaMax.

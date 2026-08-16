@@ -184,6 +184,34 @@ sprites, chosen by the same palette heuristic the design describes. This keeps
 Resizing to rendered layout size — the part that actually saves the bytes —
 happens either way.
 
+*Decoding* would not degrade the same way, and for a while it did not degrade at
+all. Go reads PNG, JPEG, GIF and WebP; it does not read AVIF, and a site that
+serves AVIF usually serves nothing else — so `image.DecodeConfig` failed, the
+pipeline dropped the key without announcing it, and the client had asked once
+for something that was never coming. A capture of an ASUS product page is what
+this was found in: thirteen images, every one of them `.avif`, every one of them
+an empty box, and a gallery whose picture would not change however many times
+the reader clicked it, because there had never been a picture in it.
+
+The fix takes the same shape the encoders do, but leans on the browser rather
+than on a command-line tool. When the bytes sniff as a picture in a container
+this process has no decoder for, they go back to the tab that asked for them:
+`createImageBitmap` on a Blob made in the agent's isolated world, drawn into an
+`OffscreenCanvas` scaled to the layout box, read back as PNG. Chromium already
+holds a decoder for everything the web has agreed on — it decoded these bytes
+once to paint the page — and the round trip is landside, on the half of the
+connection with bandwidth to spare. The result is transcoded and cached under
+the same content hash as everything else, so the trip is paid once.
+
+Only a *recognised* container makes the trip: AVIF, HEIF, JPEG XL, BMP, ICO,
+TIFF. Half the decode failures in a real capture are not images at all — an SVG
+paint server referenced as `url(#gradient)` resolves to the page itself, and
+what comes back is HTML — and asking Chromium to decode a web page would turn
+one cheap failure into a slow one, once per reference. Without a live tab the
+failure is unchanged, and now says which format it was, which is the sentence
+that distinguishes "this whole site is unreadable" from "this one asset is
+damaged".
+
 ### 8. Integer fields are capped at 32 bits on the client -> server path
 
 `cbor-x`, the client's encoder, emits any integer above 2^32-1 as a float64,
