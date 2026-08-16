@@ -592,7 +592,7 @@ func (c *capture) writeJournal(base string, f *frozenTab, report map[string]any)
 			"finding: the server sent a stream its own replica cannot apply", base, replayErr)
 	default:
 		_ = c.bundle.AddText(base+"/expected.html", model.HTML())
-		_ = c.bundle.AddText(base+"/expected.css", strings.Join(model.CSS, "\n"))
+		_ = c.bundle.AddText(base+"/expected.css", model.Stylesheet())
 		report["expectedHash"] = model.Hash()
 		report["expectedNodes"] = len(model.Nodes)
 	}

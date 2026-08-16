@@ -37,7 +37,7 @@ func TestIconFontsCrossAndProseFontsDoNot(t *testing.T) {
 	var faces []string
 	deadline := time.Now().Add(budget(30 * time.Second))
 	for time.Now().Before(deadline) {
-		faces = fontFaces(cl.Model(tab).CSS)
+		faces = fontFaces(cl.Model(tab).CSSRules())
 		if len(faces) > 0 {
 			break
 		}

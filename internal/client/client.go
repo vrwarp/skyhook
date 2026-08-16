@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -446,11 +445,12 @@ func (c *Client) freezeCapture(req protocol.CaptureRequest) []captureArtifact {
 		if m == nil {
 			continue
 		}
+		meta := m.Meta()
 		base := fmt.Sprintf("tabs/%d", tab)
 		out = append(out, captureArtifact{name: base + "/mirror.html", data: []byte(m.HTML())})
 		add(base+"/state.json", map[string]any{
-			"tab": tab, "url": m.URL, "title": m.Title, "seq": m.Seq,
-			"nodes": len(m.Nodes), "cssRules": len(m.CSS), "docHash": m.Hash(),
+			"tab": tab, "url": meta.URL, "title": meta.Title, "seq": meta.Seq,
+			"nodes": m.NodeCount(), "cssRules": len(m.CSSRules()), "docHash": m.Hash(),
 		})
 		add(base+"/fingerprint.json", modelFingerprint(m))
 	}
@@ -481,14 +481,12 @@ func (c *Client) sendCapture(req protocol.CaptureRequest, artifacts []captureArt
 // modelFingerprint lists what the replica's hash is computed over, in the same
 // shape the agent and the browser patcher produce, so all three are diffable.
 func modelFingerprint(m *mirror.Model) map[string]any {
-	ids := make([]int64, 0, len(m.Nodes))
-	for id := range m.Nodes {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	nodes := make([][]any, 0, len(ids))
-	for _, id := range ids {
-		n := m.Nodes[id]
+	nodes := make([][]any, 0, m.NodeCount())
+	// Under the replica's lock: the frame loop is still feeding it while a
+	// capture is being assembled, and walking `Nodes` from out here is the race
+	// the Model's mutex exists to prevent.
+	m.EachNode(func(n *mirror.ModelNode) bool {
+		id := n.ID
 		v := n.Name
 		switch n.Kind {
 		case protocol.KindText:
@@ -500,8 +498,9 @@ func modelFingerprint(m *mirror.Model) map[string]any {
 			v = string([]rune(v)[:32])
 		}
 		nodes = append(nodes, []any{id, n.Kind, v})
-	}
-	return map[string]any{"total": len(ids), "truncated": false, "nodes": nodes}
+		return true
+	})
+	return map[string]any{"total": len(nodes), "truncated": false, "nodes": nodes}
 }
 
 func (c *Client) ack(tab uint32, seq, hash uint64) {

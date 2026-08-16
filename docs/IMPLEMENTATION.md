@@ -1546,6 +1546,87 @@ had to learn to descend through the root. That is not a cost of the change so
 much as a measure of it: every one of them was written against a tree where the
 boundary did not exist.
 
+
+### 35. The capture drew the collapse the reader did not have
+
+[§30](#30-the-mirrors-own-wrapper-was-breaking-every-full-height-layout) took a
+wrapper `<div>` out from under the mirrored root, because an auto-height box in
+that position collapses every `height: 100%` beneath it. The rasteriser has a
+wrapper of its own, and it was still there.
+
+`screenshot()` serialises the frozen mirror into an SVG `foreignObject`, and
+that needs one element to serialise — so the document's children are moved into
+a `<div>` carrying the page's background and default font. That div is the
+frame's `<body>` as far as everything below it can tell, and it was given a
+width and no height. The same collapse, one layer along, surviving the fix
+because it is separate code that happens to make the same mistake.
+
+What made it expensive is the direction it lies in. §25 recorded the trap where
+every diagnostic path rendered in standards mode, so the bundle's own picture
+showed a working reCAPTCHA to someone looking at a broken one. This is that trap
+inverted: Chat had been fixed, the reader's screen was fine, and the capture
+reported a header and a screenful of white. Two captures and a long
+investigation went into a mirror that was already correct — the DOM agreed, the
+1251-node fingerprints agreed row for row, the 2592 stylesheet rules agreed but
+for three `skyhook://` to `blob:` image rewrites, and laying the client's own
+serialised document out reproduced the page perfectly. Everything the bundle
+contained was healthy; only the bundle's picture was not.
+
+The wrapper is now given the height it stands for — the frame's viewport, which
+is the box the document really resolves against when the reader is looking at
+it. A `DocumentFragment`, which is what fixed the patcher, is no use here
+because the markup has to be serialised.
+
+The page's white moved from the wrapper to a `<rect>` under the
+`foreignObject`. A wrapper sized to the viewport no longer covers a document
+taller than one, and a shot of a long page fading to transparent below the fold
+would have been a new way to lie about the same thing.
+
+`TestPWACapturePicturesAFullHeightPage` asserts it, and the assertion has to be
+about *where* the ink is. `hasInk` cannot see this failure at all: the header
+renders either way, so the picture is never one flat colour. The fixture anchors
+a dark bar to the bottom of a full-height layout — somewhere it can only be if
+the chain survived — and the test looks for it in the bottom eighth of the shot.
+Against the old wrapper it fails with the bar missing from a 90px strip that is
+nothing but white.
+
+
+### 36. A mutex that only guarded half the way in
+
+`Model` has carried a mutex, and a comment saying exactly what it is for: a
+replica is written by whichever goroutine feeds it frames and read by whoever is
+asking what the page says, and walking `Nodes` while a mutation inserts into it
+is a "concurrent map read and map write" — not a test failure but a runtime
+fatal that takes the whole suite down, in whichever test happened to be running.
+
+The lock was real and the methods took it. What leaked was everything around
+them. `Nodes`, `CSS`, `Scoped`, `URL`, `Title` and `Seq` are exported fields, so
+callers indexed and ranged over them directly — fifteen sites across the
+end-to-end suite, plus the capture path in the client library and two in
+`skyhookctl`. Worse, `Find` and `FindByText` took the lock, found a node, and
+returned a `*ModelNode` **pointer into the live replica**; the caller then read
+`Attrs` and `Children` after the lock was released. The race was moved one line
+further out and made invisible.
+
+`go test -race` reported six of them across three tests. None of this was ever
+going to show up in CI, because the end-to-end package is the one package the
+suite does not run under `-race` — it drives real browsers and the detector's
+slowdown does not fit the budget. Confirmed pre-existing rather than introduced:
+a control run on an untouched `e8813d7` produces five races and two failures
+with none of the branch's commits present.
+
+The accessors now hand back copies — `Node`, `ChildText`, `CSSRules`,
+`ScopedRules`, `Meta` — and `Find`/`FindByText` clone before returning.
+`EachNode` exists for the walks that genuinely want every node, and calls back
+under the read lock with a pointer the caller is told not to retain. Copying is
+affordable precisely because these are test and tooling accessors: they answer a
+question about one node, at human speed, beside a link that costs a second.
+
+The same three tests now report zero races.
+
+This is worth keeping in mind next to §30 and §35: a guard that is correct in
+the middle and open at both ends is the shape all three of those bugs share.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
