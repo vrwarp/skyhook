@@ -1748,6 +1748,58 @@ reached by typing their addresses, the app reloaded whole, the address bar
 completing from what survived, a completion opening a page that is *not* the one
 on screen, the ✕ removing a row without opening it, and the undo putting it back.
 
+### 35. The used-CSS filter was asking the document about every rule, forever
+
+The filter decides each style rule by asking the page whether anything matches
+its selector. That is the right question, and it is asked in the wrong place:
+`querySelector` costs nothing when it matches — the search stops at the first
+hit — and costs a full walk of the root when it does not, because proving that
+nothing matches means looking at everything. A used-CSS pass is *mostly*
+failures by construction, so a pass cost rules × elements.
+
+That would be a one-off price if a pass happened once. It does not:
+`handleMutations` schedules one after every batch of DOM records, so the whole
+bundle is re-tested every `CSS_DEBOUNCE_MS` for as long as the page keeps
+changing — and the rules that already shipped are re-tested along with the rest,
+since deduplication happens on the way out, after the question has been asked.
+
+Measured on a synthetic utility bundle (12,000 rules over 9,000 elements), which
+is an ordinary size for a Tailwind-class site:
+
+| | before | after |
+|---|---|---|
+| One used-CSS pass | 1,242 ms | 46 ms |
+| `__skyhook.snapshot()` end to end | 1,636 ms | 172 ms |
+| Renderer main thread, appending one `<div>` per second | **91% busy**, in 1.5 s blocks | 4% busy |
+
+The 91% is the finding. A page that mutates at all — a feed, a clock, a chat, a
+spinner — held the landside renderer down continuously, and everything the
+mirror does happens on that thread: serialising mutations, answering the host's
+evaluates, laying the page out. The reader on the other end of a 1.2 s link was
+waiting behind 1.5 s blocks that had nothing to do with their link.
+
+**What replaced it.** One walk of each root per pass builds the set of tag
+names, class names and ids that actually occur under it; a rule whose rightmost
+compound needs a name that is not in those sets is rejected on a set lookup.
+This is the bucketing a browser's own style engine does, and it is sound in one
+direction only, which is the direction that matters: the index may prove that a
+rule *cannot* match, and everything else — attribute selectors, pseudo-classes,
+namespaces, `*`, anything it cannot parse — falls through to `querySelector`
+exactly as before. The rightmost compound is the one that decides, and a
+compound is a conjunction, so one absent name settles it.
+
+Escaped class names are the trap worth naming: `.md\:flex` is the class called
+`md:flex`, which is what `classList` reports, and an index that compared the
+escaped spelling would silently drop every Tailwind variant on the page.
+
+`TestPresenceIndexAgreesWithTheDocument` asks both the index and the document
+about every rule on a fixture built out of the shapes where they might differ,
+and fails on any disagreement — a rule wrongly dropped is invisible from the
+client and looks like a site that renders badly.
+`TestOneUsedCSSPassStaysCheap` puts a bound on a pass, and
+`TestUtilityBundleDoesNotStallTheRenderer` checks the verdicts end to end
+through the real mirror while the fixture mutates.
+
 ## Measured results
 
 From the end-to-end suite. The design asks for every milestone to be measured
