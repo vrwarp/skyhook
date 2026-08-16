@@ -535,7 +535,8 @@ patcher in your tree.
 | Blank mirror, server logs "isolated world setup failed" | The page navigated during setup; a resync fixes it. Persistent failures mean Chromium is wedged — restart the service. |
 | Images never arrive | Check `avifenc`/`cwebp` are installed, and look for "image transcode failed" in the logs. The transcoder degrades to JPEG/PNG, so persistent silence means the *fetch* failed (authenticated asset, expired cookie). |
 | Mirror looks stale | Look for "mirror divergence" in the logs: the integrity check found a hash mismatch and resynced. To find out *why* next time, set `captureOnDivergence: true` and leave it running — or take one by hand from the client while it still looks wrong. See [diagnosing the mirror](#diagnosing-the-mirror). |
-| High landside CPU | Image transcoding. Lower `imageWorkers`, or raise `imageQuality` (higher quality is *cheaper* for the fallback encoders). |
+| High landside CPU, in the *server* process | Image transcoding. Lower `imageWorkers`, or raise `imageQuality` (higher quality is *cheaper* for the fallback encoders). |
+| High landside CPU, in a *Chromium renderer*, on a page nobody is touching | The used-CSS filter re-tests a stylesheet after every batch of DOM changes, so a page that mutates on a timer pays for its bundle over and over. It is bounded now (IMPLEMENTATION.md §35), but a site with an enormous sheet and a busy feed is still the shape that costs the most; `__skyhook.diag()` in a capture reports `cssSeen` and `cssRejected` for the last pass. |
 | `no space left` in the container | The image cache. Lower `imageCacheBytes`; it evicts LRU but only up to its own limit. |
 
 ## Diagnosing the mirror

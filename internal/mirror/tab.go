@@ -431,19 +431,34 @@ const resnapshotIfSettled = `(function () {
   return __skyhook.snapshot();
 })()`
 
+// onLoad settles a tab that has finished loading.
+//
+// Off the dispatch goroutine, like onFrameNavigated and the agent's "sheets"
+// message, and for the same reason: what follows is a world setup, an evaluate,
+// a round trip per recovered stylesheet and a history query, while the goroutine
+// it would otherwise run on is the one delivering this tab's mutations. The tab
+// that has just loaded is the tab the reader is waiting on, so holding its
+// mutations for the length of its own stylesheet recovery is the worst possible
+// moment to do it.
+//
+// Only the loading flag is set here, before the goroutine starts: it is one
+// small frame, it is the answer the shell is waiting for, and putting it behind
+// the recovery would leave the tab wearing its busy cursor throughout.
 func (t *Tab) onLoad() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	t.setLoading(false)
-	if err := t.ensureWorld(ctx); err != nil {
-		t.log.Warn("world setup after load failed", "tab", t.ID, "err", err)
-		return
-	}
-	// The agent snapshots itself on DOMContentLoaded; ask for a CSS pass now
-	// that late stylesheets have landed.
-	_, _ = t.eval(ctx, "__skyhook && __skyhook.flush()")
-	t.recoverBlockedSheets(ctx)
-	t.RefreshState(ctx)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := t.ensureWorld(ctx); err != nil {
+			t.log.Warn("world setup after load failed", "tab", t.ID, "err", err)
+			return
+		}
+		// The agent snapshots itself on DOMContentLoaded; ask for a CSS pass now
+		// that late stylesheets have landed.
+		_, _ = t.eval(ctx, "__skyhook && __skyhook.flush()")
+		t.recoverBlockedSheets(ctx)
+		t.RefreshState(ctx)
+	}()
 }
 
 /*
@@ -1041,7 +1056,12 @@ func (t *Tab) Close(ctx context.Context) error {
 	}
 	target := t.sess.Target
 	t.mu.Unlock()
-	return t.browser.CloseTarget(ctx, target)
+	err := t.browser.CloseTarget(ctx, target)
+	// After the target is gone, so nothing that was still in flight arrives at
+	// a tab that has stopped listening: this drops the subscriptions installed
+	// by install() and the queue feeding them.
+	t.sess.Forget()
+	return err
 }
 
 func decodeInt(r json.RawMessage) int64 {

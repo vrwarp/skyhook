@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,12 +35,38 @@ type Client struct {
 	done     chan struct{}
 	closeErr error
 
-	// events decouples handler execution from the socket reader. Handlers
-	// routinely make CDP calls (a navigation triggers world setup, which
-	// evaluates the agent); running them on the reader would deadlock, since
-	// the reply they wait for can only arrive through that same reader.
-	events chan event
+	// pumps decouple handler execution from the socket reader, one queue per
+	// target. Handlers routinely make CDP calls (a navigation triggers world
+	// setup, which evaluates the agent); running them on the reader would
+	// deadlock, since the reply they wait for can only arrive through that same
+	// reader.
+	//
+	// Per target rather than one queue for the browser, because handlers here
+	// are not quick and are not meant to be. A tab's load event recovers its
+	// cross-origin stylesheets, which is a round trip per sheet; a binding
+	// carrying a snapshot serialises, filters and compresses a document, and
+	// may then wait on a send queue the link has not drained. On one queue all
+	// of that was time no *other* tab's mutations could be delivered in — a
+	// background tab finishing its page stalled the tab the reader was looking
+	// at, and a queue that overflowed while it happened dropped mutations,
+	// which costs a resync of a document that was never wrong.
+	//
+	// Everything registered here is scoped to one session (see Subscribe), so
+	// per-session ordering is what the callers actually depend on, and that is
+	// exactly what one queue per target preserves.
+	pumps map[string]*pump
 }
+
+// pump is one target's event queue and the goroutine draining it.
+type pump struct {
+	ch   chan event
+	stop chan struct{}
+}
+
+// pumpDepth is how many events one target may have waiting. Deep enough to
+// absorb a page's load burst, bounded because the alternative to dropping an
+// event is stalling the socket reader for every other target.
+const pumpDepth = 1024
 
 type event struct {
 	sessionID string
@@ -103,11 +130,10 @@ func Dial(ctx context.Context, wsURL string, log *slog.Logger) (*Client, error) 
 		log:      log,
 		pending:  map[int64]chan *response{},
 		handlers: map[string][]EventHandler{},
+		pumps:    map[string]*pump{},
 		done:     make(chan struct{}),
-		events:   make(chan event, 4096),
 	}
 	go c.readLoop()
-	go c.dispatchLoop()
 	return c, nil
 }
 
@@ -164,25 +190,51 @@ func (c *Client) readLoop() {
 		if r.Method == "" {
 			continue
 		}
+		p := c.pumpFor(r.SessionID)
+		if p == nil {
+			return // closed
+		}
 		select {
-		case c.events <- event{sessionID: r.SessionID, method: r.Method, params: r.Params}:
+		case p.ch <- event{sessionID: r.SessionID, method: r.Method, params: r.Params}:
 		case <-c.done:
 			return
 		default:
 			// A backed-up handler must never stall the reader: dropping a
 			// mutation event costs a resync, deadlocking costs the session.
-			c.log.Warn("cdp: event queue full, dropping", "method", r.Method)
+			// Only this target's events are at risk, which is the point of
+			// giving each one its own queue.
+			c.log.Warn("cdp: event queue full, dropping",
+				"method", r.Method, "session", r.SessionID)
 		}
 	}
 }
 
-// dispatchLoop runs handlers in arrival order, off the socket reader.
-func (c *Client) dispatchLoop() {
+// pumpFor returns the queue for a target, starting one if this is the first
+// event from it. It reports nil once the client is closed.
+func (c *Client) pumpFor(sessionID string) *pump {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	if p := c.pumps[sessionID]; p != nil {
+		return p
+	}
+	p := &pump{ch: make(chan event, pumpDepth), stop: make(chan struct{})}
+	c.pumps[sessionID] = p
+	go c.runPump(p)
+	return p
+}
+
+// runPump runs one target's handlers in arrival order, off the socket reader.
+func (c *Client) runPump(p *pump) {
 	for {
 		select {
 		case <-c.done:
 			return
-		case ev := <-c.events:
+		case <-p.stop:
+			return
+		case ev := <-p.ch:
 			c.mu.Lock()
 			hs := append([]EventHandler{}, c.handlers[ev.sessionID+"|"+ev.method]...)
 			hs = append(hs, c.handlers["|"+ev.method]...)
@@ -191,6 +243,29 @@ func (c *Client) dispatchLoop() {
 				h(ev.sessionID, ev.params)
 			}
 		}
+	}
+}
+
+// Forget drops a target's handlers and stops its queue. A long session opens
+// and closes many tabs, and without this each one leaves its handlers and its
+// goroutine behind for as long as the browser lives.
+func (c *Client) Forget(sessionID string) {
+	if sessionID == "" {
+		// The browser-level queue, and a prefix that would match every global
+		// handler registered for any method. Nothing owns it to forget.
+		return
+	}
+	c.mu.Lock()
+	p := c.pumps[sessionID]
+	delete(c.pumps, sessionID)
+	for key := range c.handlers {
+		if strings.HasPrefix(key, sessionID+"|") {
+			delete(c.handlers, key)
+		}
+	}
+	c.mu.Unlock()
+	if p != nil {
+		close(p.stop)
 	}
 }
 
@@ -288,6 +363,10 @@ type Session struct {
 func (c *Client) Session(sessionID, targetID string) *Session {
 	return &Session{Client: c, ID: sessionID, Target: targetID}
 }
+
+// Forget releases this session's handlers and its event queue. Call it once the
+// target is gone; the session is unusable afterwards.
+func (s *Session) Forget() { s.Client.Forget(s.ID) }
 
 // Do calls a method on this session.
 func (s *Session) Do(ctx context.Context, method string, params, out any) error {

@@ -259,6 +259,81 @@ const fontPage = `<!DOCTYPE html><html><head><title>Fonts</title>
   <nav><span class="icon">&#xE8B6;</span><span class="icon">&#xE52E;</span></nav>
 </body></html>`
 
+/*
+utilityCSSPage is the shape the used-CSS filter exists for and the shape that
+used to defeat it: a utility bundle where all but a handful of rules match
+nothing.
+
+The rule count is deliberate. The filter decides each rule by asking the
+document whether anything matches, and a selector that matches nothing is the
+expensive question — there is no early exit, so proving a no visits every
+element. At this size that made a pass cost over a second, and a pass is
+scheduled after every batch of DOM records, so a page that mutates at all held
+the renderer's main thread down for as long as it was open.
+
+The selectors below the bundle are the ones a presence index has to get right
+rather than merely get through: escaped class names, attribute selectors it
+cannot answer for, pseudo-classes, lists where only one member matches, and
+compounds where every name but one is on the page.
+*/
+func utilityCSSPage() string {
+	var b strings.Builder
+	b.WriteString("<!DOCTYPE html><html><head><title>Utility CSS</title><style>\n")
+	for i := 0; i < 12000; i++ {
+		fmt.Fprintf(&b, ".u-%d{margin:%dpx}\n", i, i%64)
+	}
+	b.WriteString(`
+    .kept-class { color: rgb(1,1,1) }
+    div.kept-class { color: rgb(2,2,2) }
+    #kept-id { color: rgb(3,3,3) }
+    .kept-wrap .kept-deep { color: rgb(4,4,4) }
+    [data-kept] { color: rgb(5,5,5) }
+    [data-kept="yes"] { color: rgb(6,6,6) }
+    .kept-class:not(.gone) { color: rgb(7,7,7) }
+    :is(.kept-class, .no-such-class) { color: rgb(8,8,8) }
+    .md\:flex { color: rgb(9,9,9) }
+
+    .no-such-class { color: rgb(100,1,1) }
+    div.no-such-class { color: rgb(100,2,2) }
+    #no-such-id { color: rgb(100,3,3) }
+    .kept-wrap .no-such-class { color: rgb(100,4,4) }
+    .kept-class.no-such-class { color: rgb(100,5,5) }
+    [data-kept="no"] { color: rgb(100,6,6) }
+    .md\:hidden { color: rgb(100,7,7) }
+    marquee { color: rgb(100,8,8) }
+  </style></head>
+  <body>
+    <main id="kept-id">
+      <div class="kept-wrap">
+        <div class="kept-class u-7 md:flex" data-kept="yes">
+          <span class="kept-deep">the utility page</span>
+        </div>
+      </div>
+      <button id="add">add</button>
+      <div id="bulk">`)
+	// A document to search. Proving that a selector matches nothing means
+	// visiting every element, so the filter's cost is rules x elements and a
+	// bundle over a stub page would not show it at all.
+	for i := 0; i < 3000; i++ {
+		fmt.Fprintf(&b, `<p class="row"><span>row %d</span></p>`, i)
+	}
+	b.WriteString(`</div>
+    </main>
+    <script>
+      // One node a second, which is all it takes to schedule a CSS pass after
+      // every batch and so to pay the filter's cost over and over.
+      var n = 0;
+      setInterval(function () {
+        var d = document.createElement('div');
+        d.className = 'u-' + (n++);
+        d.textContent = 'tick ' + n;
+        document.getElementById('kept-id').appendChild(d);
+      }, 1000);
+    </script>
+  </body></html>`)
+	return b.String()
+}
+
 // fakeFont is a font only as far as the sniffer is concerned, which is as far
 // as anything in the pipeline looks: nothing decodes it, resizes it or renders
 // it here. A real typeface would test the same code paths and put a binary in
@@ -529,6 +604,10 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	mux.HandleFunc("/fonts", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, fontPage)
+	})
+	mux.HandleFunc("/utility-css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, utilityCSSPage())
 	})
 	for _, name := range []string{"/icons.woff2", "/prose.woff2"} {
 		mux.HandleFunc(name, func(w http.ResponseWriter, _ *http.Request) {

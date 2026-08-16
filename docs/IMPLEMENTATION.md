@@ -1829,6 +1829,107 @@ reached by typing their addresses, the app reloaded whole, the address bar
 completing from what survived, a completion opening a page that is *not* the one
 on screen, the ✕ removing a row without opening it, and the undo putting it back.
 
+### 35. The used-CSS filter was asking the document about every rule, forever
+
+The filter decides each style rule by asking the page whether anything matches
+its selector. That is the right question, and it is asked in the wrong place:
+`querySelector` costs nothing when it matches — the search stops at the first
+hit — and costs a full walk of the root when it does not, because proving that
+nothing matches means looking at everything. A used-CSS pass is *mostly*
+failures by construction, so a pass cost rules × elements.
+
+That would be a one-off price if a pass happened once. It does not:
+`handleMutations` schedules one after every batch of DOM records, so the whole
+bundle is re-tested every `CSS_DEBOUNCE_MS` for as long as the page keeps
+changing — and the rules that already shipped are re-tested along with the rest,
+since deduplication happens on the way out, after the question has been asked.
+
+Measured on a synthetic utility bundle (12,000 rules over 9,000 elements), which
+is an ordinary size for a Tailwind-class site:
+
+| | before | after |
+|---|---|---|
+| One used-CSS pass | 1,242 ms | 46 ms |
+| `__skyhook.snapshot()` end to end | 1,636 ms | 172 ms |
+| Renderer main thread, appending one `<div>` per second | **91% busy**, in 1.5 s blocks | 4% busy |
+
+The 91% is the finding. A page that mutates at all — a feed, a clock, a chat, a
+spinner — held the landside renderer down continuously, and everything the
+mirror does happens on that thread: serialising mutations, answering the host's
+evaluates, laying the page out. The reader on the other end of a 1.2 s link was
+waiting behind 1.5 s blocks that had nothing to do with their link.
+
+**What replaced it.** One walk of each root per pass builds the set of tag
+names, class names and ids that actually occur under it; a rule whose rightmost
+compound needs a name that is not in those sets is rejected on a set lookup.
+This is the bucketing a browser's own style engine does, and it is sound in one
+direction only, which is the direction that matters: the index may prove that a
+rule *cannot* match, and everything else — attribute selectors, pseudo-classes,
+namespaces, `*`, anything it cannot parse — falls through to `querySelector`
+exactly as before. The rightmost compound is the one that decides, and a
+compound is a conjunction, so one absent name settles it.
+
+Escaped class names are the trap worth naming: `.md\:flex` is the class called
+`md:flex`, which is what `classList` reports, and an index that compared the
+escaped spelling would silently drop every Tailwind variant on the page.
+
+`TestPresenceIndexAgreesWithTheDocument` asks both the index and the document
+about every rule on a fixture built out of the shapes where they might differ,
+and fails on any disagreement — a rule wrongly dropped is invisible from the
+client and looks like a site that renders badly.
+`TestOneUsedCSSPassStaysCheap` puts a bound on a pass, and
+`TestUtilityBundleDoesNotStallTheRenderer` checks the verdicts end to end
+through the real mirror while the fixture mutates.
+
+### 36. Every tab's events went through one queue, and slow work ran on it
+
+Found while measuring §35, and the same shape of mistake one level down.
+
+CDP events cannot be handled on the socket reader: a handler that makes a CDP
+call would wait for a reply that only that reader can deliver. So they were
+queued and drained by a goroutine — **one** goroutine, for every target the
+browser has.
+
+That is only sound if handlers are quick, and none of the interesting ones are.
+`Page.loadEventFired` recovered the page's cross-origin stylesheets, which is a
+round trip per sheet and a fetch of up to 4 MB each. `Runtime.bindingCalled`
+carrying a snapshot serialised, filtered, minified, CBOR-encoded and compressed
+a whole document, and could then sit in `enqueue` for up to two seconds waiting
+on a send queue the link had not drained. All of it on the one goroutine that
+every *other* tab's mutations also had to pass through.
+
+Two consequences, and the second is the worse one. A background tab finishing
+its page delayed the tab the reader was actually looking at. And while the
+queue was blocked it kept filling — at which point the reader drops events,
+because the alternative is deadlocking the connection. A dropped
+`Runtime.bindingCalled` is a lost mutation, which the integrity check later
+catches as a divergence and repairs with a resync. So a slow link filled the
+send queue, which blocked dispatch, which dropped mutations, which cost a
+resync, which put a whole document back on the link that was already too slow —
+each step making the next one likelier.
+
+The queue is now per target. Everything registered on it is scoped to one
+session (`Subscribe` binds the session id), so per-session ordering is the only
+guarantee anything depends on, and one queue per target preserves it exactly
+while letting tabs proceed independently. `Session.Forget` drops a target's
+handlers and stops its goroutine when the tab closes, which the single-queue
+version never needed and the old handler map never did either — those leaked
+for the life of the browser.
+
+Separately, `onLoad` now does its stylesheet recovery on its own goroutine,
+which is what `onFrameNavigated` and the agent's `sheets` message already did.
+Per-target queues stop one tab delaying another; they do not stop a tab
+delaying *itself*, and the tab that has just finished loading is precisely the
+one whose mutations someone is waiting for. Only the loading flag is still set
+inline, because it is one small frame and the shell is waiting on it to stop
+drawing a busy cursor.
+
+`internal/cdp/dispatch_test.go` pins all of it: that a blocked target does not
+delay another, that one target's events stay in order, that forgetting a
+session drops its handlers and its queue, and that forgetting cannot be aimed
+at the browser-level queue — whose key is the empty string, and whose prefix
+would otherwise match every global handler there is.
+
 ## Measured results
 
 From the end-to-end suite. The design asks for every milestone to be measured
