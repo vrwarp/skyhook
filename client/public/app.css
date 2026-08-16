@@ -335,6 +335,40 @@ body {
 .suggest-title { overflow: hidden; text-overflow: ellipsis; }
 .suggest-host { color: var(--muted); font-size: 11px; flex: none; }
 
+/* The provenance slot at the end of a row: an X on an address the reader has
+   merely been to, a ★ on one they kept. Same width either way, so the hosts
+   above it line up down the list instead of stepping in and out. */
+.suggest-x,
+.suggest-mark {
+  flex: none;
+  width: 20px;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  border-radius: 4px;
+}
+
+/* Out of the way until the row is under the pointer or under the highlight: six
+   delete buttons standing open in a list somebody is reading is six invitations
+   to destroy something they were only looking at. */
+.suggest-x { visibility: hidden; cursor: pointer; }
+.suggest-item:hover .suggest-x,
+.suggest-item.on .suggest-x { visibility: visible; }
+.suggest-x:hover { color: #fca5a5; background: #374151; }
+
+/* A finger has no hover to reveal it with, so there it is simply always there,
+   and big enough to hit without hitting the row it sits on. */
+.suggest-x.always {
+  visibility: visible;
+  width: 32px;
+  padding: 8px 0;
+  margin: -6px 0;
+}
+
 /* --- PWA shell ------------------------------------------------------------ */
 
 /* The mirror area fills everything below the chrome strip. */

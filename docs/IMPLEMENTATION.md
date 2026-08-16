@@ -13,7 +13,7 @@ this is what survived contact.
 | **M2 — Feel** | Local echo, ghost-send, scroll telemetry, images with blurhash, used-CSS | **Done.** Echo and reconciliation are unit-tested; used-CSS filtering and image transcoding are covered end-to-end. |
 | **M3 — Survive** | Reconnect, resync, offline mode | **Done for reconnect/resync/offline queueing.** 0-RTT resumption is enabled in the QUIC config; it is not separately asserted by a test. FEC is not implemented — see below. |
 | **M4 — Chat adapter** | Warm open ≤ 3 s, offline history, outbox | **Framework and adapter are built** (append-log, outbox, backlog replay, client archive and UI). The Google Chat selectors are a starting point, not a validated set: they need a session against the real app to tune. |
-| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 17. Bookmarks are a start page, a panel and address-bar completion rather than a list that is only written to — see deviation 23. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
+| **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 17. Bookmarks are a start page, a panel and address-bar completion rather than a list that is only written to — see deviation 23, and the address bar completes from where the reader has been as well as from what they saved — see deviation 34. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
 
 The client is a Chrome-targeted PWA served by the server itself; the Electron
 shell the design called for was built first and then pivoted away from
@@ -1466,6 +1466,11 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   no server copy and no sync between two paired browsers; export and import are
   the whole of the story. Reordering is by use rather than by hand — there are
   no folders and no manual sort.
+- **History has no surface of its own.** It completes addresses and it can be
+  forgotten a row or a list at a time (§34), but there is nowhere to browse it:
+  no panel, no search over it, no grouping by day, and no export. It is also
+  per-device, with no sync and no server copy, for the same reasons the saved
+  list is.
 - **Installability is untested against a real install prompt**: the manifest,
   icons and service worker are all in place and the worker registers in a real
   browser under test, but nobody has clicked "Install" on a device yet.
@@ -1549,6 +1554,95 @@ client and asserts it is told; `TestPWAUpdatesItselfOntoTheServersBuild` deploys
 a genuinely different build, presses the button, and asserts the app comes back
 as the one the server serves — with the reload-does-nothing premise asserted in
 between, since the whole mechanism is worthless if a reload had been enough.
+
+### 34. The address bar was completing from the wrong list
+
+[§23](#23-bookmarks-are-a-navigation-surface-not-a-list-that-gets-written-to)
+made the saved list a navigation surface and hung address-bar completion off it.
+`suggest.ts` said in its own header that this was *deliberately* not
+history-backed, on two grounds: that a fuzzy match offering a page the reader did
+not mean costs a round trip to find out, and that the client had no history store
+to complete from anyway.
+
+The first ground was right and still is. The second was a fact about the code,
+not an argument, and it was doing the work of one. Nobody stars the site they
+open every morning — they type four letters of it and press Enter — so the list
+the address bar was completing from was, almost by construction, the one list
+that does not contain the addresses people actually re-type. On this link that
+is the expensive gap: typing a whole address is the costliest way to navigate,
+and a typo in one costs a second page load to discover.
+
+So there is a history store now (`history.ts`), and what the old note was
+protecting survives intact: matching is substring and never fuzzy, and nothing is
+ever written into the field on the reader's behalf. Chrome's inline
+autocompletion — filling in the rest of the address and selecting it — was
+considered and refused for the same reason the file already refuses to touch the
+field as the highlight moves: a fast Enter over a wrong completion is several
+seconds of a bad link spent on the wrong page.
+
+What distinguishes it from a browser's history is three decisions, all of which
+come from the link:
+
+- **Only confirmed arrivals are recorded.** An entry is written when the server
+  says where a tab actually went, never from what was typed at the address bar.
+  The "the reader named this one from memory" flag is carried across the round
+  trip from the gesture that started it, the same way `wantForeground` carries
+  focus intent through an `openTab`. So a mistyped address that resolves to
+  nothing never enters the list and can never be completed back to later, and one
+  page is one row rather than one row for what was typed and another for what it
+  redirected to.
+- **What was typed outranks what was merely reached.** Following a link is cheap
+  evidence — the page was already in front of the reader. Typing an address is
+  somebody naming a destination from memory, which is the thing an address bar
+  exists to finish. Match quality still decides first, so a strong history hit
+  beats a weak bookmark hit; a saved page wins every tie. One `matchScore` serves
+  the panel filter, the start page and the dropdown, so they cannot drift apart
+  about what "matches" means. Its top band is new: the query as a prefix of the
+  address *as a person types one*, scheme and `www.` stripped, which is what
+  re-typing looks like and what fires on the third keystroke instead of the
+  tenth.
+- **It evicts rather than refusing.** The saved list refuses to grow past 500
+  because dropping a bookmark loses something the reader entered (§23). This is a
+  cache of a behaviour, so at 1000 the least useful end goes — never a typed
+  address while a page merely passed through is still there. The map is kept in
+  the order things were last reached rather than sorted on demand, because a
+  redirect chain can put three pages in the same millisecond and an order that is
+  arbitrary between them is an order that answers differently each time it is
+  asked, in a list the reader is watching while they type.
+
+A list built from behaviour rather than from choice will contain things the
+reader does not want offered back, and on a six-row dropdown one such row is a
+sixth of the surface — so each history row carries an **✕**, with Shift+Delete
+doing the same from the keyboard. The widget does not perform the removal: it
+asks the shell, which does it with the same notice-and-undo every other
+destructive gesture here has, and no confirmation dialog. A saved row carries a
+**★** in the same slot instead. That is not decoration — it answers the question
+the missing ✕ would otherwise raise, and it keeps the dropdown from being a place
+where a bookmark can be destroyed without the undo that lives with the star and
+the panel. Removing a row redraws the list in place rather than closing it, since
+triaging three bad rows should not be three trips back into the address bar. On a
+touch screen the ✕ is always drawn, because there is no hover there to reveal it
+with and an affordance a finger cannot discover is not one.
+
+Two smaller consequences. Arrow-down on an empty field used to offer recent
+bookmarks and now offers recent *anything*, ordered by recency alone: that list
+answers "where was I?", and ranking it by provenance would fill all six rows with
+the saved list, which is the one thing already on the page behind the dropdown.
+And history is a record of everywhere the reader went rather than of what they
+chose to keep, so it gets a bulk *Clear history* in the shell menu — with the
+undo in the notice, like everything else — alongside the guarantees it shares
+with the saved list: plane-side only, no server copy, and taken by `Store.wipe()`.
+
+Writes coalesce into a one-second window with a flush on `pagehide`. A page load
+produces a visit and then a title or two as the document settles, and three
+whole-list writes for one navigation is waste with nothing bought by it; the
+exposure is a second of history on a hard kill, against a store that is a
+convenience by construction.
+
+`test/history_test.go` drives it through the real UI in a real browser: two pages
+reached by typing their addresses, the app reloaded whole, the address bar
+completing from what survived, a completion opening a page that is *not* the one
+on screen, the ✕ removing a row without opening it, and the undo putting it back.
 
 ## Measured results
 

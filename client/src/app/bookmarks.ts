@@ -99,6 +99,44 @@ export function displayHost(url: string): string {
 }
 
 /**
+ * An address in the form a person types one: no scheme, no `www.`, everything
+ * after the host kept. Nobody types `https://`, and the completion that matches
+ * what the fingers are actually doing is the one that fires on the third
+ * keystroke instead of the tenth.
+ */
+export function typedForm(url: string): string {
+  return url.trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '');
+}
+
+/**
+ * How well a query matches one entry, as a band rather than a number: -1 for no
+ * match at all, and higher is better.
+ *
+ * Substring rather than fuzzy, everywhere. A fuzzy match that offers the wrong
+ * page is a round trip spent for nothing, and on this link that is several
+ * seconds the reader watches.
+ *
+ * The top band is the address the reader is halfway through re-typing, which
+ * outranks a title match because it is the least ambiguous thing anyone can
+ * type here: `news.ycombinator.com/newest` is a claim about exactly one page,
+ * and a title containing the same letters is not.
+ *
+ * One function so the panel's filter, the start page and the address bar cannot
+ * disagree with each other about what "matches" means.
+ */
+export function matchScore(query: string, title: string, url: string): number {
+  const q = query.trim().toLowerCase();
+  if (!q) return 0;
+  const lowTitle = title.toLowerCase();
+  const lowUrl = url.toLowerCase();
+  if (typedForm(url).startsWith(q) || lowUrl.startsWith(q)) return 4;
+  if (lowTitle.startsWith(q) || displayHost(url).toLowerCase().startsWith(q)) return 3;
+  if (lowTitle.includes(q)) return 2;
+  if (lowUrl.includes(q)) return 1;
+  return -1;
+}
+
+/**
  * A title worth showing. Whitespace in a page title is arbitrary — a `<title>`
  * spanning three indented lines is common — and an anchor's text is worse. When
  * nothing usable survives, the address is a better label than an empty row.
@@ -159,12 +197,8 @@ export function recency(mark: Bookmark): number {
 
 /**
  * Ranks the list against a query, for the panel's filter and the address bar's
- * suggestions alike.
- *
- * Substring rather than fuzzy: a fuzzy match that offers the wrong page is a
- * round trip spent for nothing, and on this link that is several seconds the
- * reader watches. A match at the start of the title or the host outranks one in
- * the middle, and beyond that recency decides.
+ * suggestions alike. A stronger match band (see `matchScore`) wins, and beyond
+ * that recency decides.
  */
 export function search(marks: Bookmark[], query: string, limit = Infinity): Bookmark[] {
   const q = query.trim().toLowerCase();
@@ -172,13 +206,7 @@ export function search(marks: Bookmark[], query: string, limit = Infinity): Book
   if (!q) return limit === Infinity ? ordered : ordered.slice(0, limit);
   const scored: { mark: Bookmark; score: number }[] = [];
   for (const mark of ordered) {
-    const title = mark.title.toLowerCase();
-    const url = mark.url.toLowerCase();
-    const host = displayHost(mark.url).toLowerCase();
-    let score = -1;
-    if (title.startsWith(q) || host.startsWith(q)) score = 3;
-    else if (title.includes(q)) score = 2;
-    else if (url.includes(q)) score = 1;
+    const score = matchScore(q, mark.title, mark.url);
     if (score < 0) continue;
     scored.push({ mark, score });
   }
