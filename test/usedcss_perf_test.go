@@ -192,9 +192,11 @@ One used-CSS pass must not cost a second.
 This is the regression the index exists to prevent, measured where it happens
 rather than through the protocol. Over this fixture — 12,000 rules across 6,000
 elements — a pass took 673 ms before the index and 74 ms after, on the same
-machine and page. The bound below sits between them with roughly four times the
-headroom on the fast side and twice the margin on the slow one, which is as
-tight as a wall-clock assertion can honestly be on hardware it does not choose.
+machine and page. The bound below sits between them, and both sides scale with
+whatever CPU runs them: a runner half this speed still measures around 150 ms
+against a regression that would measure well over a second. That ratio, rather
+than either number, is what makes a wall-clock assertion honest on hardware it
+does not choose.
 */
 func TestOneUsedCSSPassStaysCheap(t *testing.T) {
 	h := newHarness(t)
@@ -239,7 +241,7 @@ func TestOneUsedCSSPassStaysCheap(t *testing.T) {
 	t.Logf("a pass over %d rules across %d elements: %.0f ms",
 		counts.Rules, counts.Elements, best)
 
-	const limit = 300
+	const limit = 400
 	if best > limit {
 		t.Errorf("a used-CSS pass took %.0f ms, over the %d ms bound: the filter is "+
 			"searching the document per rule again, and a page that mutates pays "+
