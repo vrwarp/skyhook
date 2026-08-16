@@ -434,6 +434,10 @@ export class MirrorHost {
    */
   adopt(tab: number): void {
     this.tab = tab;
+    // The frame carries its tab id for anything looking for one specific tab's
+    // document. It was labelled with the provisional id when it was drawn, and
+    // a label that outlives the name it was made from points at nothing.
+    this.frame.dataset.tab = String(tab);
   }
 
   private attach(doc: Document): void {
