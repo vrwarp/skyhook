@@ -265,10 +265,17 @@ type ErrorBody struct {
 
 // Node kinds mirror the DOM node types we care about.
 const (
-	KindElement  uint8 = 1
-	KindText     uint8 = 3
-	KindComment  uint8 = 8
-	KindDoctype  uint8 = 10
+	KindElement uint8 = 1
+	KindText    uint8 = 3
+	KindComment uint8 = 8
+	KindDoctype uint8 = 10
+	// KindFragment is a shadow root. A shadow root *is* a DocumentFragment, and
+	// these kinds are DOM node types, so this needs no number of its own.
+	//
+	// It carries no name and no text: what it is for is to be a boundary. The
+	// client attaches a real root to its parent and builds the children inside
+	// it, which is what keeps a mirrored sub-document's stylesheet from
+	// reaching the rest of the page. See §31.
 	KindFragment uint8 = 11
 )
 
@@ -307,6 +314,17 @@ type Snapshot struct {
 	// 10 was Speculative, which marked a prefetched snapshot.
 	DocHash uint64 `cbor:"11,keyasint,omitempty"`
 	BaseURL string `cbor:"12,keyasint,omitempty"`
+	// Scoped holds the stylesheets that belong to a shadow root rather than to
+	// the document. CSS above is the document's own; these are kept apart
+	// because hoisting them into one sheet is exactly what the boundary exists
+	// to prevent.
+	Scoped []ScopedCSS `cbor:"13,keyasint,omitempty"`
+}
+
+// ScopedCSS is one shadow root's stylesheet.
+type ScopedCSS struct {
+	Root  int64    `cbor:"1,keyasint"`
+	Rules []string `cbor:"2,keyasint,omitempty"`
 }
 
 // Mutation op codes.
@@ -326,7 +344,9 @@ const (
 
 // Op is one mutation operation.
 type Op struct {
-	Op     uint8      `cbor:"1,keyasint"`
+	Op uint8 `cbor:"1,keyasint"`
+	// Node is the node the op acts on. For OpStyle it names the shadow root
+	// whose sheet is being added to, and zero means the document's own.
 	Node   int64      `cbor:"2,keyasint,omitempty"`
 	Parent int64      `cbor:"3,keyasint,omitempty"`
 	Before int64      `cbor:"4,keyasint,omitempty"`

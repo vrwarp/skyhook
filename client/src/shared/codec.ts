@@ -203,6 +203,10 @@ export function decodeSnapshot(body: unknown): Snapshot {
     strings: arr<string>(f, F.snapshot.strings),
     nodes: arr<Fields>(f, F.snapshot.nodes).map(decodeNode),
     css: arr<string>(f, F.snapshot.css),
+    scoped: arr<Fields>(f, F.snapshot.scoped).map((sc) => ({
+      root: num(sc, F.scopedCSS.root),
+      rules: arr<string>(sc, F.scopedCSS.rules),
+    })),
     url: str(f, F.snapshot.url),
     title: str(f, F.snapshot.title),
     images: arr<Fields>(f, F.snapshot.images).map(decodeImage),

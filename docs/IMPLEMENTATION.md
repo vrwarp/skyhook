@@ -679,6 +679,14 @@ draws it nowhere. `knownParentId` answers the same way, or the first mutation
 after a snapshot would put a slotted node back beside the component and undo the
 composition one record at a time.
 
+**Both of those are gone now, and §31 is why.** The selector rewriting and the
+composition walk were reconstructions of a boundary the mirror had thrown away,
+and the boundary is mirrored instead: a shadow root crosses the link as a node
+of its own, the component's sheet is adopted by it, and `:host`, `::part()`,
+`::slotted()` and slot assignment all mean what they meant without anything
+being rewritten. What is recorded above is what it cost to do without one, which
+is the argument for keeping it.
+
 The general rule all four are instances of: what the mirror sends has to be the
 document as it is *rendered*, and every one of these was some part of the
 pipeline answering for the document as it is *written*. `:defined` is the
@@ -1436,6 +1444,108 @@ subtree contains a list at all is the conversation pane. The walk still ends at
 the body, which is what keeps a plain message board — where the body *is* the
 container — working as before.
 
+### 31. Keeping the boundary instead of reconstructing it
+
+Three of the fixes above — the shadow-scoped selector rewrite, the slot
+composition, and the used-CSS filter's per-root testing — are the same work
+done three times: rebuilding, by hand and approximately, a boundary the mirror
+had already thrown away. This records why the boundary should be kept instead,
+and what it costs, because the measurements were worth more than the argument.
+
+**What flattening still gets wrong, and cannot stop getting wrong.** A shadow
+sheet's rules are hoisted into one document-level stylesheet. Rewriting fixes
+the rules that *name* the boundary (`:host`, `::part()`); it can do nothing
+about the rules that merely relied on it. In one capture of Reddit's front page,
+**77 of 881 shipped rule groups select on a bare tag name alone** — `label`,
+`textarea`, `ul`, `svg`, `rpl-popper`, `faceplate-menu`. Landside, `label {
+display: flex; position: relative }` was scoped to one text input's shadow root.
+Plane-side it is in the common sheet and reaches every label on the page. The
+same is true of a same-origin iframe's sheet, which is hoisted the same way and
+whose `body { … }` matches the outer body. `::slotted()` and `exportparts`
+renaming stay unimplemented for the same reason: there is no boundary left for
+them to mean anything against.
+
+**Measured, in the browser the client actually runs in** (Chromium 151,
+`sandbox="allow-same-origin"` with no `allow-scripts`, driven from the parent
+realm the way the patcher drives it):
+
+| Question | Answer |
+| --- | --- |
+| Can the client build a root inside the sandboxed frame? | Yes, and page JavaScript still never runs |
+| Does the boundary actually scope? | A document rule measured 13px outside a root and 0px inside |
+| Cost of 1000 roots — Reddit's order | 9 ms to build vs 7 ms flat; 16 ms layout vs 13 ms |
+| One sheet shared by 1000 roots? | Yes, via `adoptedStyleSheets` |
+| Does a serialised root survive re-parsing? | Yes — `parseHTMLUnsafe`, `setHTMLUnsafe` and `getHTML({serializableShadowRoots:true})` all round-trip |
+| Protocol headroom | Node kinds mirror `nodeType` (1, 3, 8, 10); **11 is DocumentFragment and free** |
+
+Performance is not the objection it looks like, and the capture artifact gets
+better rather than worse: §23's re-parse damage is partly repaired, because a
+declarative root survives the parser even though the nested `<html>`/`<body>`
+wrappers inside it still do not.
+
+**What it costs, including the parts that are not obvious:**
+
+- **Constructed stylesheets are realm-bound.** A `CSSStyleSheet` built in the
+  parent realm is refused by the frame's root — `NotAllowedError: Sharing
+  constructed style...`. It has to be built from the frame's own
+  `contentWindow.CSSStyleSheet`.
+- **Non-composed events do not cross a boundary.** Measured: a `scroll` from
+  inside a root reaches a listener on the root and never reaches one on the
+  document. The client listens for `scroll` on the document, so scroll telemetry
+  — which is most of what keeps a reader's place — goes silent for any scroller
+  inside a component unless a listener is registered per root.
+- **Composed events retarget.** On a real browser-generated `focusin`, `target`
+  reports the host and `composedPath()[0]` the true node. The client reads
+  `ev.target` in about seven places; every one of them has to change.
+- **CSS delivery has to gain a scope.** `Snapshot.CSS` is a flat `[]string` with
+  no owner. Per-root sheets need the rules to say which root they belong to,
+  which is a protocol change and a conformance-fixture change — CBOR's
+  `keyasint,omitempty` keeps it backward compatible, but it is not free.
+- **Scoping is not isolation.** Inherited properties — `color`, `font` — cross
+  the boundary as they do anywhere else.
+
+**Both halves are done.** Frames first, components second, and the second was
+much the smaller change because the first had found everything. What components
+added was the boundary for every shadow host rather than only for a frame; what
+they *removed* was larger — the selector rewriting, the `:host`/`::part()`
+re-pointing, the slot composition walk and the `knownParentId` special case all
+went, because each existed only to stand in for the boundary. `::slotted()` and
+`exportparts`, both listed under known gaps for want of anything to mean, now
+work because there is something for them to mean.
+
+**The order.** Iframes first. An inlined frame is one root per frame rather than
+a thousand per page, it exercises every part of the mechanism — the node kind,
+`attachShadow`, frame-realm sheet construction, `composedPath` input routing,
+serialisation in the capture — and it independently closes the iframe half of
+the leak. Components second, where the seventy-seven rules are.
+
+**What the first increment cost, which is the argument for doing it first.**
+Three of the four things that broke were not on the list above:
+
+- **`instanceof` does not cross a realm.** The patcher builds nodes with the
+  mirror frame's document, so a host element belongs to that frame's realm and
+  `host instanceof Element` — `Element` being the shell's — is false for every
+  host there is. Every frame arrived as an empty box, and jsdom, where the unit
+  tests share one realm, said it was fine. `nodeType` is a number and does not
+  care whose realm it came from.
+- **A shadow root is attached, not inserted.** `appendChild` on one throws, and
+  a throw inside the snapshot loop takes the rest of the document with it.
+- **The client's own compensating CSS stops at the boundary like anyone's.**
+  `[data-skyhook-tag="iframe"] html, body { display: block }` was a document
+  rule about nodes that are now inside a root. It is adopted into each root
+  instead.
+- **Neither `cloneNode` nor `importNode` carries a root, and `XMLSerializer`
+  does not write one.** A capture's clone and the picture rendered from it both
+  lost the frame. The freeze flattens roots into the clone on the way out —
+  rules as a `<style>`, content as ordinary children — because an artifact
+  nobody interacts with loses nothing by being flat, and losing the frame
+  entirely is not a trade.
+
+Six end-to-end tests reached into frame content with document-level queries and
+had to learn to descend through the root. That is not a cost of the change so
+much as a measure of it: every one of them was written against a tree where the
+boundary did not exist.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:
@@ -1478,12 +1588,6 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   be read from an isolated world any more than it can from the page, so such a
   component mirrors as its light DOM and nothing else. Late-attached *open*
   roots are handled (§19); closed ones cannot be.
-- **`::slotted()` rules are dropped, and `exportparts` renaming is ignored.**
-  A `::slotted()` rule cannot be re-pointed the way `:host` and `::part()` are
-  (§19): the composed tree it describes has no marker saying a node arrived by
-  assignment, and nothing in any capture so far wants one. A part re-exported
-  under a new name is matched under the name it carries inside, which is the
-  only one the flattened tree keeps.
 
 ### 33. A client that runs from its own cache cannot see that it is old
 

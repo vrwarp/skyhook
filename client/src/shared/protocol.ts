@@ -103,6 +103,12 @@ export enum NodeKind {
   Text = 3,
   Comment = 8,
   Doctype = 10,
+  /**
+   * A shadow root, which is a DocumentFragment and so needs no number of its
+   * own. It has no name and no text: it is a boundary, and the client builds a
+   * real one so a sub-document's stylesheet cannot reach the rest of the page.
+   */
+  Fragment = 11,
 }
 
 export const NodeFlags = {
@@ -173,6 +179,18 @@ export interface Snapshot {
   images: ImageMeta[];
   scrollX: number;
   scrollY: number;
+  /**
+   * Stylesheets belonging to a shadow root rather than to the document.
+   * Optional: a snapshot from a server that predates scoping has none, and a
+   * page with no mirrored sub-document never grows any.
+   */
+  scoped?: ScopedCSS[];
+}
+
+/** One shadow root's stylesheet. */
+export interface ScopedCSS {
+  root: number;
+  rules: string[];
 }
 
 export interface MutationOp {
@@ -337,8 +355,9 @@ export const F = {
   node: { id: 1, parent: 2, kind: 3, ref: 4, attrs: 5, flags: 6 },
   snapshot: {
     strings: 1, nodes: 2, css: 3, url: 4, title: 5, viewport: 6,
-    images: 7, scrollX: 8, scrollY: 9, docHash: 11, baseUrl: 12,
+    images: 7, scrollX: 8, scrollY: 9, docHash: 11, baseUrl: 12, scoped: 13,
   },
+  scopedCSS: { root: 1, rules: 2 },
   op: {
     op: 1, node: 2, parent: 3, before: 4, ref: 5, ref2: 6, nodes: 7,
     off: 8, del: 9, add: 10, drop: 11, image: 12, x: 13, y: 14, str: 15,

@@ -239,10 +239,28 @@ func waitFor(ctx context.Context, t *testing.T, page *cdp.Session, expr string, 
 		what, expr, dump, mirror)
 }
 
-/** mirrorText reads the text of the mirrored document inside the sandboxed frame. */
+/*
+mirrorText reads the text of the mirrored document inside the sandboxed frame.
+
+It walks shadow roots rather than taking `body.textContent`, because
+`textContent` does not cross a shadow boundary and an inlined sub-document lives
+inside one. Reading only the light DOM would say a mirrored frame was empty.
+*/
 const mirrorText = `(() => {
   const f = document.querySelector('iframe.mirror');
-  return f && f.contentDocument ? (f.contentDocument.body.textContent || '') : '';
+  if (!f || !f.contentDocument) return '';
+  const out = [];
+  const walk = (node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) out.push(child.nodeValue || '');
+      else if (child.nodeType === Node.ELEMENT_NODE) {
+        if (child.shadowRoot) walk(child.shadowRoot);
+        walk(child);
+      }
+    }
+  };
+  walk(f.contentDocument.body);
+  return out.join('');
 })()`
 
 func TestPWALoadsAndRegistersItsServiceWorker(t *testing.T) {
@@ -562,11 +580,27 @@ func TestPWARendersTheImagesAndVectorsInTheDocument(t *testing.T) {
 }
 
 /** mirrorCSS reads the stylesheet the patcher maintains inside the mirror. */
+/*
+mirrorCSS is every rule the mirror is styled by — the page's own sheet and the
+sheet of every shadow root in it.
+
+A mirrored sub-document's rules are adopted by the root its document lives in
+rather than added to the page's stylesheet, so reading only the latter would say
+a frame had arrived unstyled while it was being styled correctly.
+*/
 const mirrorCSS = `(() => {
   const f = document.querySelector('iframe.mirror');
-  const el = f && f.contentDocument
-    && f.contentDocument.querySelector('style[data-skyhook-css]');
-  return el ? el.textContent : '';
+  const doc = f && f.contentDocument;
+  if (!doc) return '';
+  const el = doc.querySelector('style[data-skyhook-css]');
+  const out = [el ? el.textContent : ''];
+  for (const host of doc.querySelectorAll('*')) {
+    if (!host.shadowRoot) continue;
+    for (const sheet of host.shadowRoot.adoptedStyleSheets) {
+      for (const rule of sheet.cssRules) out.push(rule.cssText);
+    }
+  }
+  return out.join('\n');
 })()`
 
 // Both halves say which build they are, and the app says so where a reader can

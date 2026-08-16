@@ -55,7 +55,7 @@
   // or four deep; past this something is looping and a click is not worth it.
   var FRAME_DEPTH_MAX = 16;
 
-  var KIND_ELEMENT = 1, KIND_TEXT = 3, KIND_DOCTYPE = 10;
+  var KIND_ELEMENT = 1, KIND_TEXT = 3, KIND_DOCTYPE = 10, KIND_FRAGMENT = 11;
   var FLAG_EDITABLE = 1, FLAG_IMAGE = 2, FLAG_SCROLL = 4, FLAG_SHADOW = 8, FLAG_CANVAS = 16;
 
   // Tags never mirrored: they either carry code, or carry styling we ship
@@ -80,6 +80,10 @@
   var SENSITIVE_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i;
 
   var nextId = 1;
+  // A mirrored sub-document -> the shadow-root node id it was serialised into.
+  // The CSS pass needs it to say which sheet a rule belongs to; without it the
+  // rules go to the document and the boundary buys nothing.
+  var docRoot = new WeakMap();
   var idOf = new WeakMap();     // node -> id
   var byId = new Map();         // id -> node
   var strings = [];             // intern table
@@ -96,6 +100,7 @@
   var flushTimer = null;
   var cssTimer = null;
   var emittedCSS = new Map();   // rule text -> index
+  var scopedEmitted = new Map(); // shadow-root id -> its own emitted-rule set
   var cssOrder = [];
   var recoveredSheets = new Map(); // href -> constructed sheet the host supplied
   var blockedSheets = {};          // href -> 1, for sheets nothing can read yet
@@ -389,28 +394,21 @@
     if (tag === 'HEAD') return n; // head content is replaced by used-CSS
     if (CANVAS_TAGS[tag]) return n;
 
-    if (tag === 'SLOT') {
-      // A slot renders what was assigned to it, so that is what goes here. The
-      // nodes come from the host's light DOM and are skipped where they sit
-      // (see childrenToSerialize), which is the whole of what "flattened" has
-      // to mean: composed, not merely moved inside the host.
-      //
-      // Left as it was, a component's light DOM rendered next to the slot
-      // instead of in it, and everything the slot was inside stopped applying
-      // to it. Reddit hangs its tooltips off `<span slot="content">`, and the
-      // slot they belong in sits inside a `hidden` box: the mirror drew "Open
-      // navigation", "Go to Reddit Home" and "Log in to Reddit" across the top
-      // of the page, permanently, because the box that hides them was no
-      // longer an ancestor.
-      var assigned = slotContent(node);
-      for (var a = 0; a < assigned.length; a++) n += serializeNode(assigned[a], id2, rows);
-      return n;
-    }
-
     if (node.shadowRoot) {
-      // Flattening the shadow tree in place keeps the client a plain patcher.
+      // The boundary is mirrored, not flattened away. A component's stylesheet
+      // is written against it — `:host`, `::part()`, `::slotted()` all name it,
+      // and the rules that name nothing still lean on it, because `label {}`
+      // inside a text input means that input's label and no other. Rebuilt
+      // plane-side, all of that means what it meant. See §31.
+      //
+      // Slot assignment comes free with it: the light DOM stays where it sits
+      // and the browser composes it, which is what it is for.
+      var rootId = idFor(node.shadowRoot);
+      rows.push([rootId, id2, KIND_FRAGMENT, -1, 0, null]);
+      n += 1;
+      docRoot.set(node.shadowRoot, rootId);
       var sk = node.shadowRoot.childNodes;
-      for (var s = 0; s < sk.length; s++) n += serializeNode(sk[s], id2, rows);
+      for (var s = 0; s < sk.length; s++) n += serializeNode(sk[s], rootId, rows);
       observeDocument(node.shadowRoot);
     } else if (isCustom(node) && !isDefined(node)) {
       watchUpgrade(id2);
@@ -420,51 +418,29 @@
       var idoc = null;
       try { idoc = node.contentDocument; } catch (e) { idoc = null; }
       if (idoc && idoc.documentElement) {
-        n += serializeNode(idoc.documentElement, id2, rows);
+        // The frame's document goes inside a shadow root rather than straight
+        // into the stand-in box. A frame is a document, and a document's
+        // stylesheet is written on the assumption that it governs a document —
+        // `body { margin: 0 }` means this frame's body. Inlined flat, that
+        // sheet joins the page's own and the rule reaches the page's body too.
+        // The root is the boundary that makes it mean what it says. See §31.
+        // Registered like any other node, and against the frame's document:
+        // the hash is taken over what is registered, so a node the client is
+        // sent and the agent does not count is a divergence every thirty
+        // seconds. It also gives the document an id, which is what a later
+        // mutation inside the frame needs to find its parent.
+        var fragId = idFor(idoc);
+        rows.push([fragId, id2, KIND_FRAGMENT, -1, 0, null]);
+        n += 1;
+        docRoot.set(idoc, fragId);
+        n += serializeNode(idoc.documentElement, fragId, rows);
         observeDocument(idoc);
       }
       return n;
     }
-    var kids = childrenToSerialize(node);
+    var kids = node.childNodes;
     for (var i = 0; i < kids.length; i++) n += serializeNode(kids[i], id2, rows);
     return n;
-  }
-
-  /*
-   * slotContent gives what a slot actually renders.
-   *
-   * `{flatten: true}` is what makes this the rendered answer rather than the
-   * assigned one: a slot with nothing assigned draws its own children as
-   * fallback, and a slot assigned another slot resolves through it. Both are
-   * ordinary in a component library, and both are what the reader sees.
-   */
-  function slotContent(slot) {
-    try {
-      return slot.assignedNodes ? slot.assignedNodes({ flatten: true }) : slot.childNodes;
-    } catch (e) {
-      return slot.childNodes;
-    }
-  }
-
-  var NO_CHILDREN = [];
-
-  /*
-   * childrenToSerialize gives the children that render under this node.
-   *
-   * A node assigned to a slot renders there and not here, so it is left for the
-   * slot to emit. A light-DOM child of a shadow host that no slot claimed
-   * renders nowhere at all — the browser drops it — and mirroring it would put
-   * content on the reader's screen that nobody else can see.
-   */
-  function childrenToSerialize(node) {
-    // Nothing here distributes anything — including a host whose root is
-    // closed, which reads as no root at all. Its light DOM goes on being
-    // mirrored where it sits: the same guess as before, and the only one left.
-    if (!node.shadowRoot) return node.childNodes;
-    // An open host draws none of its light DOM where it sits: what a slot
-    // claimed is drawn at that slot, and what no slot claimed is drawn nowhere.
-    // The host's own subtree came from the shadow root above.
-    return NO_CHILDREN;
   }
 
   /**
@@ -593,157 +569,19 @@
     return rows;
   }
 
-  // ------------------------------------------------- shadow-scoped selectors
-
-  /*
-   * The mirror flattens every shadow tree into its host (see serializeNode), so
-   * plane-side there is no boundary left for a shadow-scoped selector to be
-   * scoped by. `:host` matches nothing outside a shadow tree and `::part()`
-   * names a part of a tree that is no longer there, so a component's own
-   * stylesheet crosses the link intact and then does nothing at all.
-   *
-   * That is not a corner case on a site built out of web components. Reddit's
-   * search field is a `faceplate-search-input` whose box padding, its font, and
-   * the `white-space: pre` that keeps its placeholder on one line are all
-   * `:host` rules; with every one of them inert the field spelled "Find
-   * anything" down the screen a letter per line, on top of the header.
-   *
-   * So the selectors are re-pointed at the flattened tree as the sheet is read,
-   * which is the one place that still knows which element hosts it:
-   *
-   *   :host             -> the host's tag name
-   *   :host(S)          -> the host, carrying S's own conditions
-   *   :host-context(S)  -> the host under an ancestor matching S, or matching it
-   *   X::part(p)        -> [part~="p"] under X, which is where it now sits
-   *
-   * Two things are deliberately left undone. `::slotted()` goes on being
-   * dropped: flattening lands slotted content beside the slot rather than in
-   * it, so re-pointing it means rewriting the selector around the host, and no
-   * page in any capture so far has a rule that would gain by it. And a part
-   * renamed on the way out by `exportparts` is matched under the name it was
-   * given inside, because the flattened tree keeps the inner name and nothing
-   * else records the mapping.
-   *
-   * Specificity moves for `:host`, which counts as a pseudo-class (0,1,0) and
-   * lands as a type selector (0,0,1). It moves by that same amount for every
-   * rule in a component's sheet, so the order a component intends among its own
-   * rules survives; only ties against a different sheet can turn over, and in a
-   * document whose shadow styles are all hoisted into one sheet those were
-   * approximate already.
-   */
-
-  // scanSelString returns the index just past the string literal opening at i.
-  function scanSelString(s, i) {
-    var quote = s.charAt(i);
-    for (var j = i + 1; j < s.length; j++) {
-      if (s.charAt(j) === '\\') { j++; continue; }
-      if (s.charAt(j) === quote) return j + 1;
-    }
-    return s.length; // unterminated
-  }
-
-  // scanSelGroup takes the index of a '(' and returns the index of the ')' that
-  // closes it, or -1. Nesting and quoted attribute values both count.
-  function scanSelGroup(s, open) {
-    var depth = 0;
-    for (var i = open; i < s.length; i++) {
-      var c = s.charAt(i);
-      if (c === '\\') { i++; continue; }
-      if (c === '"' || c === "'") { i = scanSelString(s, i) - 1; continue; }
-      if (c === '(') depth++;
-      else if (c === ')' && --depth === 0) return i;
-    }
-    return -1;
-  }
-
-  function isSelIdentChar(c) {
-    return c === '-' || c === '_' || c === '\\' ||
-      (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
-      (c >= 'A' && c <= 'Z') || c >= '\u0080';
-  }
-
-  // startsWith, case-folded: pseudo-class names are ASCII case-insensitive.
-  function selAt(s, i, lit) {
-    return s.substr(i, lit.length).toLowerCase() === lit;
-  }
-
-  /*
-   * rewriteHost re-points a shadow sheet's host selectors at the flattened
-   * tree. `host` is the tag name of the element the sheet's shadow root hangs
-   * off; the empty string means the sheet is a document's, and there is nothing
-   * to re-point.
-   *
-   * The argument of `:host(S)` is wrapped in `:is()` rather than pasted onto
-   * the tag name, because a compound selector must lead with its type: the
-   * paste spells `:host(:not([multiline]))` correctly and `:host-context(body)`
-   * as the tag name "bodyfaceplate-search-input".
-   */
-  function rewriteHost(sel, host) {
-    if (!host || sel.indexOf(':host') < 0) return sel;
-    var out = '', i = 0, changed = false;
-    while (i < sel.length) {
-      var c = sel.charAt(i);
-      if (c === '"' || c === "'") {
-        var end = scanSelString(sel, i);
-        out += sel.slice(i, end);
-        i = end;
-        continue;
-      }
-      // An escaped character stands for itself: `.\:host` is a class name.
-      if (c === '\\') { out += sel.substr(i, 2); i += 2; continue; }
-      if (c === ':' && !(i > 0 && sel.charAt(i - 1) === ':')) {
-        if (selAt(sel, i, ':host-context(')) {
-          var ctx = scanSelGroup(sel, i + ':host-context'.length);
-          if (ctx > 0) {
-            var outer = sel.slice(i + ':host-context('.length, ctx);
-            // Matching the ancestor, or matching it itself — both are what
-            // :host-context() means, and a descendant combinator is only half.
-            out += ':is(' + host + ':is(' + outer + '),' + outer + ' ' + host + ')';
-            i = ctx + 1;
-            changed = true;
-            continue;
-          }
-        } else if (selAt(sel, i, ':host(')) {
-          var arg = scanSelGroup(sel, i + ':host'.length);
-          if (arg > 0) {
-            out += host + ':is(' + sel.slice(i + ':host('.length, arg) + ')';
-            i = arg + 1;
-            changed = true;
-            continue;
-          }
-        } else if (selAt(sel, i, ':host') && !isSelIdentChar(sel.charAt(i + 5))) {
-          out += host;
-          i += ':host'.length;
-          changed = true;
-          continue;
-        }
-      }
-      out += c;
-      i++;
-    }
-    return changed ? out : sel;
-  }
-
-  // rewritePart turns `X::part(p)` into `X [part~="p"]`. The part attribute
-  // survives flattening on the element itself, so the descendant it now is can
-  // be named directly. A name is a plain identifier; anything else is left be.
-  var PART_RE = /::part\(\s*([-\w\u00a0-\uffff]+)\s*\)/g;
-
-  function rewritePart(sel) {
-    if (sel.indexOf('::part(') < 0) return sel;
-    return sel.replace(PART_RE, function (m, name) {
-      return ' [part~="' + name + '"]';
-    });
-  }
-
-  // rewriteScoped is the pair of them, applied to one rule's selector.
-  function rewriteScoped(sel, host) {
-    return rewritePart(rewriteHost(sel, host));
-  }
-
   // ------------------------------------------------------------------ used CSS
 
   var PSEUDO_RE = /::?(?:hover|active|focus(?:-visible|-within)?|visited|link|target|checked|disabled|enabled|placeholder|before|after|first-line|first-letter|selection|marker|backdrop|-webkit-[a-z-]+|-moz-[a-z-]+)(?:\([^)]*\))?/gi;
+
+  // scanSelString returns the index just past the string literal opening at i.
+  function scanSelString(str, i) {
+    var quote = str.charAt(i);
+    for (var j = i + 1; j < str.length; j++) {
+      if (str.charAt(j) === '\\') { j++; continue; }
+      if (str.charAt(j) === quote) return j + 1;
+    }
+    return str.length; // unterminated
+  }
 
   /*
    * splitSelectorList splits on the commas that separate selectors, and not on
@@ -767,42 +605,6 @@
   }
 
   /*
-   * afterHost reduces a selector to the part of it that can still be looked up.
-   *
-   * A shadow sheet's rules are tested against the shadow root, and there the
-   * host is not a descendant: `:host .label-container` finds nothing, and so
-   * would every rule a component writes about its own box. What can be asked is
-   * whether the shadow root holds a `.label-container` — the host is the root's
-   * own, so its half of the question is already answered yes.
-   *
-   * Returns '' when the selector says nothing beyond the host, which is a rule
-   * that has to be kept without a test.
-   */
-  function afterHost(part) {
-    var last = -1, i = 0;
-    while (i < part.length) {
-      var c = part.charAt(i);
-      if (c === '\\') { i += 2; continue; }
-      if (c === '"' || c === "'") { i = scanSelString(part, i); continue; }
-      if (c === ':' && !(i > 0 && part.charAt(i - 1) === ':') && selAt(part, i, ':host')) {
-        i += ':host'.length;
-        if (part.charAt(i) === '-' && selAt(part, i, '-context')) i += '-context'.length;
-        if (part.charAt(i) === '(') {
-          var end = scanSelGroup(part, i);
-          i = end < 0 ? part.length : end + 1;
-        }
-        last = i;
-        continue;
-      }
-      i++;
-    }
-    if (last < 0) return part;
-    // Everything up to the host compound goes, and so does the combinator that
-    // separated it from what follows.
-    return part.slice(last).replace(/^[\s>+~]+/, '');
-  }
-
-  /*
    * testableSelector turns a selector into something querySelector can answer,
    * or null for "no honest test exists — keep the rule".
    *
@@ -816,13 +618,18 @@
     var parts = [];
     var list = splitSelectorList(sel);
     for (var i = 0; i < list.length; i++) {
+      // `:host` and `::part()` cannot be looked up: the first names the
+      // element on the other side of the root, the second a pseudo-element, and
+      // querySelector matches neither. They are kept rather than tested, which
+      // is a handful of rules per component and the only honest answer.
       var p = list[i];
-      if (p.indexOf(':host') >= 0) p = afterHost(p);
-      var part = p.indexOf('::part(') >= 0 ? p.slice(0, p.indexOf('::part(')) : p;
-      part = part.replace(PSEUDO_RE, '').trim();
-      // A selector that was nothing but a pseudo (":root::before"), or nothing
-      // but the host, degrades to an empty part; keep such rules rather than
-      // risk dropping layout.
+      if (p.indexOf(':host') >= 0 || p.indexOf('::part(') >= 0
+          || p.indexOf('::slotted(') >= 0) {
+        return null;
+      }
+      var part = p.replace(PSEUDO_RE, '').trim();
+      // A selector that was nothing but a pseudo (":root::before") degrades to
+      // an empty part; keep such rules rather than risk dropping layout.
       if (!part) return null;
       parts.push(part);
     }
@@ -854,26 +661,7 @@
     }
   }
 
-  /*
-   * ruleText gives a style rule the text it should cross the link as: its own,
-   * unless re-pointing its selector at the flattened tree changed it.
-   *
-   * The declarations are taken from rule.style rather than cut out of cssText,
-   * which keeps a selector containing a brace-like character in a quoted
-   * attribute value from being split in the wrong place.
-   */
-  function ruleText(rule, host) {
-    var sel = rule.selectorText;
-    var next = rewriteScoped(sel, host);
-    if (next === sel) return rule.cssText;
-    var body = '';
-    try { body = rule.style.cssText; } catch (e) { body = ''; }
-    return body ? next + '{' + body + '}' : rule.cssText;
-  }
-
-  // host is the tag name of the element a shadow root hangs off, or '' for a
-  // document's own sheets. See rewriteHost.
-  function collectRules(doc, list, out, depth, host) {
+  function collectRules(doc, list, out, depth) {
     if (!list || depth > 8) return;
     for (var i = 0; i < list.length; i++) {
       var rule = list[i];
@@ -882,7 +670,7 @@
           case 1: // style rule
             cssSeen++;
             if (selectorMatches(doc, rule.selectorText)) {
-              out.push(ruleText(rule, host));
+              out.push(rule.cssText);
             } else {
               noteRejected(rule.selectorText);
             }
@@ -890,7 +678,7 @@
           case 4: // media
           case 12: // supports
             var inner = [];
-            collectRules(doc, rule.cssRules, inner, depth + 1, host);
+            collectRules(doc, rule.cssRules, inner, depth + 1);
             if (inner.length) {
               var cond = rule.type === 4 ? '@media ' + rule.conditionText
                 : '@supports ' + rule.conditionText;
@@ -923,7 +711,7 @@
     }
   }
 
-  function collectSheets(doc, sheets, out, host) {
+  function collectSheets(doc, sheets, out) {
     if (!sheets) return;
     for (var i = 0; i < sheets.length; i++) {
       var sheet = sheets[i];
@@ -948,22 +736,18 @@
         }
       }
       if (!rules) continue;
-      collectRules(doc, rules, out, 0, host);
+      collectRules(doc, rules, out, 0);
     }
   }
 
   function collectUsedCSS(doc) {
     var out = [];
-    // A shadow root's sheets are written against a boundary the mirror does not
-    // keep, and its host is the one thing that can re-point them. See
-    // rewriteHost.
-    var host = doc.host ? localNameOf(doc.host) : '';
-    try { collectSheets(doc, doc.styleSheets, out, host); } catch (e) { /* detached */ }
+    try { collectSheets(doc, doc.styleSheets, out); } catch (e) { /* detached */ }
     // Constructed stylesheets are invisible to document.styleSheets, and they
     // are how every Lit-based web component ships its CSS. Without these a
     // component-heavy page arrives with its structure intact and no styling at
     // all, which looks far more broken than a missing rule.
-    try { collectSheets(doc, doc.adoptedStyleSheets, out, host); } catch (e) { /* unsupported */ }
+    try { collectSheets(doc, doc.adoptedStyleSheets, out); } catch (e) { /* unsupported */ }
     return out;
   }
 
@@ -1055,17 +839,31 @@
     cssRejected = 0;
     cssRejectedList = [];
     var adds = [];
+    var scoped = [];
     for (var d = 0; d < docs.length; d++) {
-      var rules = collectUsedCSS(docs[d]);
+      var doc = docs[d];
+      var root = docRoot.get(doc) || 0;
+      var rules = collectUsedCSS(doc);
+      // A scoped sheet is deduped against itself, not against the document's:
+      // the same rule text may be needed in two places and mean two different
+      // things, which is the point of scoping it.
+      var seen = root ? scopedEmitted.get(root) : emittedCSS;
+      if (root && !seen) { seen = new Map(); scopedEmitted.set(root, seen); }
+      var mine = [];
       for (var i = 0; i < rules.length; i++) {
         var text = rules[i];
-        if (emittedCSS.has(text)) continue;
-        emittedCSS.set(text, cssOrder.length);
-        cssOrder.push(text);
-        adds.push(text);
+        if (seen.has(text)) continue;
+        seen.set(text, 1);
+        if (root) {
+          mine.push(text);
+        } else {
+          cssOrder.push(text);
+          adds.push(text);
+        }
       }
+      if (root && mine.length) scoped.push([root, mine]);
     }
-    return adds;
+    return { adds: adds, scoped: scoped };
   }
 
   /*
@@ -1099,10 +897,15 @@
   // `quiet` is for the host's own walk, which is already holding the answer
   // announceBlocked would be asking it for.
   function emitCSSDelta(quiet) {
-    var adds = cssDelta();
+    var delta = cssDelta();
     if (!quiet) announceBlocked();
-    if (!adds.length) return false;
-    pendingOps.push([7, adds]);
+    if (!delta.adds.length && !delta.scoped.length) return false;
+    // Node 0 is the document's own sheet; anything else names the shadow root
+    // whose sheet this is.
+    if (delta.adds.length) pendingOps.push([7, delta.adds, 0]);
+    for (var s2 = 0; s2 < delta.scoped.length; s2++) {
+      pendingOps.push([7, delta.scoped[s2][1], delta.scoped[s2][0]]);
+    }
     scheduleFlush(false);
     return true;
   }
@@ -1127,16 +930,10 @@
   }
 
   function knownParentId(node) {
-    // Where the node renders, which is where it was serialised. A node the host
-    // handed to a slot belongs under that slot; asking parentNode instead would
-    // put every later mutation back beside the component rather than inside it,
-    // and undo the flattening one record at a time.
-    var slot = null;
-    try { slot = node.assignedSlot; } catch (e) { slot = null; }
-    if (slot) return idOf.get(slot) || 0;
     var p = node.parentNode;
     if (!p) return 0;
-    if (p.nodeType === 11 && p.host) return idOf.get(p.host) || 0; // shadow root
+    // A shadow root is a node here in its own right, so it answers for its
+    // children the way any parent does.
     return idOf.get(p) || 0;
   }
 
@@ -1439,12 +1236,21 @@
     var live = new Map();
     for (var r = 0; r < rows.length; r++) live.set(rows[r][0], byId.get(rows[r][0]));
     byId = live;
-    var css = cssDelta();
+    // Root ids are new after a snapshot, so what each root had already been
+    // sent is not about these roots.
+    scopedEmitted = new Map();
+    var delta = cssDelta();
+    var css = delta.adds;
+    var scopedCSS = [];
+    for (var sc = 0; sc < delta.scoped.length; sc++) {
+      scopedCSS.push({ root: delta.scoped[sc][0], rules: delta.scoped[sc][1] });
+    }
     var imgs = pendingImages; pendingImages = [];
     snapshotDone = true;
     seq = 0;
     send({
       t: 'snap', seq: 0, strings: strings.slice(), nodes: rows, css: css,
+      scoped: scopedCSS,
       url: location.href, title: document.title,
       scrollX: globalThis.scrollX | 0, scrollY: globalThis.scrollY | 0,
       vw: globalThis.innerWidth | 0, vh: globalThis.innerHeight | 0,
