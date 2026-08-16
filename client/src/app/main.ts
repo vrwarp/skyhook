@@ -13,9 +13,10 @@ import { gather } from './capture.js';
 import * as clientlog from './clientlog.js';
 import { Progress, type Ask } from './progress.js';
 import {
-  BOOKMARK_LIMIT, Bookmarks, exportText, parseImport, search, type Bookmark,
+  BOOKMARK_LIMIT, Bookmarks, exportText, normalizeUrl, parseImport, type Bookmark,
 } from './bookmarks.js';
 import { BookmarkPanel, StartPage } from './bookmarkview.js';
+import { completions, History, type Completion, type HistoryEntry } from './history.js';
 import { TabList } from './tabsview.js';
 import { isPhone, isTouch } from './layout.js';
 import { Suggest } from './suggest.js';
@@ -54,6 +55,23 @@ let linkRtt = 0;
 let sweepTimer: ReturnType<typeof setTimeout> | null = null;
 /** How many tabs have been asked for that the reader expects to land in. */
 let wantForeground = 0;
+/**
+ * Addresses typed into the address bar and not yet answered, by the tab they
+ * were typed for — 0 meaning "the tab this is about to open".
+ *
+ * History records where a tab *arrived*, never what was typed at it (see
+ * history.ts), so the one thing the arrival cannot tell us — that the reader
+ * named this page from memory rather than following a link to it — has to be
+ * carried across the round trip from the gesture that started it. Same shape as
+ * `wantForeground` above, and for the same reason.
+ */
+const typedAsks = new Map<number, number>();
+/**
+ * How long such an ask stays believable. Long enough for a page over a bad
+ * link, short enough that an ask whose navigation was dropped during an outage
+ * cannot attach itself to whatever the tab does next.
+ */
+const TYPED_TTL_MS = 120_000;
 
 interface TabView {
   id: number;
@@ -126,6 +144,11 @@ async function main(): Promise<void> {
   // worth clicking before the transport has even been configured.
   await bookmarks.whenReady();
   renderBookmarks();
+  // Alongside it, and for the same reason: both lists are what the address bar
+  // can offer before the link exists, and a completion that only starts working
+  // once the transport is up would be missing at the one moment — a cold start
+  // on a bad link — when typing an address is all there is to do.
+  await visits.whenReady();
 
   // What the server said last time. It is the only answer available until the
   // link comes back, and on this link that can be the whole flight.
@@ -308,6 +331,7 @@ function handle(kind: string, args: Record<string, unknown>): void {
       // Once the server says a tab is loading it is telling this side what it
       // had been guessing, and it is the better source.
       progress.serverLoading(id, st.loading);
+      const before = tab.url;
       tab.url = st.url || tab.url;
       tab.title = st.title || tab.title;
       // Relative links in the mirror resolve against this; a tab that navigates
@@ -316,6 +340,9 @@ function handle(kind: string, args: Record<string, unknown>): void {
       tab.loading = st.loading;
       tab.canBack = st.canBack;
       tab.canForward = st.canForward;
+      // After the tab is complete, so the entry carries the title the strip is
+      // about to show rather than the one it had a moment ago.
+      recordArrival(tab, before);
       upsertTab(tab);
       if (!active) active = id;
       renderProgress();
@@ -761,6 +788,47 @@ function navigateTo(tab: number, url: string): void {
   asking(tab, 'Loading', url);
 }
 
+/** Remembers that the next page this tab lands on was asked for by name. */
+function markTyped(tab: number): void {
+  typedAsks.set(tab, Date.now() + TYPED_TTL_MS);
+}
+
+/**
+ * Whether the page a tab has just arrived at was one the reader typed. Consumes
+ * the ask either way: an address is typed once, and a second page reached from
+ * the first was reached by clicking something on it.
+ */
+function takeTyped(tab: number, first: boolean): boolean {
+  const now = Date.now();
+  // A tab arriving at its first page may be the one an address was typed into
+  // with nothing open, which had no id to be filed under yet.
+  const keys = first ? [tab, 0] : [tab];
+  for (const key of keys) {
+    const until = typedAsks.get(key);
+    if (until === undefined) continue;
+    typedAsks.delete(key);
+    if (until >= now) return true;
+  }
+  return false;
+}
+
+/**
+ * Files where a tab actually ended up, which is the only thing history is
+ * written from.
+ *
+ * A tab reports itself several times per page — the URL first, the title when
+ * the document has one — so a repeat of the address already recorded updates
+ * the title rather than counting as another visit.
+ */
+function recordArrival(tab: TabView, before: string): void {
+  if (isBlank(tab.url)) return;
+  if (normalizeUrl(tab.url) === normalizeUrl(before)) {
+    visits.retitle(tab.url, tab.title);
+    return;
+  }
+  visits.record(tab.url, tab.title, takeTyped(tab.id, isBlank(before)));
+}
+
 /** Reloads a tab, from wherever the gesture came from. */
 function reloadTab(tab: number): void {
   send('navigate', { tab, action: 'reload' });
@@ -807,6 +875,23 @@ const bookmarks = new Bookmarks({
   },
 });
 
+/**
+ * Where the reader has been. Separate from the saved list because it is a
+ * different kind of fact — what they did, rather than what they chose to keep —
+ * and because it is the one that answers "finish this address for me". Only the
+ * address bar reads it.
+ */
+const visits = new History({
+  read: () => store.readHistory(),
+  write: (entries) => store.writeHistory(entries),
+  onError: (message) => log(message),
+});
+
+// Writes are batched, so the last second of them would otherwise go down with
+// the page. Nothing else here needs saving at this point: everything but the
+// two local lists is landside and outlives the tab.
+window.addEventListener('pagehide', () => visits.flush());
+
 const marksPanel = new BookmarkPanel({
   open: (mark, where) => openBookmark(mark, where),
   remove: (mark) => removeBookmark(mark),
@@ -842,11 +927,62 @@ const tabList = new TabList({
 });
 
 const suggest = new Suggest(el.urlbar, {
-  source: (query, limit) => search(bookmarks.all(), query, limit),
-  pick: (mark) => openBookmark(mark, 'here'),
+  source: (query, limit) => completions(bookmarks.all(), visits.all(), query, limit),
+  pick: (row) => openCompletion(row),
+  forget: (row) => forgetVisit(row.entry),
 });
 
 bookmarks.onChange(() => renderBookmarks());
+
+/**
+ * Opens what the dropdown offered. A saved row goes through the bookmark path
+ * so that opening from the address bar counts as a use — the saved list is
+ * ordered by that, and a reader who reaches a bookmark by typing three letters
+ * of it has used it exactly as much as one who clicked it in the panel.
+ */
+function openCompletion(row: Completion): void {
+  if (row.kind === 'saved') {
+    openBookmark(row.mark, 'here');
+    return;
+  }
+  if (!connected) {
+    toast('Offline: opening a page needs the link. The list stays readable.');
+    return;
+  }
+  // Picking a completion is naming a destination at the address bar, which is
+  // the same act as typing the whole thing — so it counts as one, and the row
+  // the reader keeps choosing keeps rising.
+  markTyped(active);
+  navigateTo(active, row.url);
+}
+
+/**
+ * Drops one address out of the completions. No confirmation, a notice with the
+ * way back: the same bargain the star and the saved list make, and the right
+ * one for a gesture whose whole value is being quick enough to use while
+ * typing.
+ */
+function forgetVisit(entry: HistoryEntry): void {
+  const gone = visits.forget(entry.url);
+  if (!gone) return;
+  toast(`Removed “${gone.title}” from history.`, {
+    label: 'Undo',
+    run: () => visits.restore([gone]),
+  });
+}
+
+/** Empties it. The undo is the whole list, held until the notice goes away. */
+function clearHistory(): void {
+  const gone = visits.clear();
+  if (!gone.length) {
+    toast('There is no history to clear.');
+    return;
+  }
+  toast(`Cleared ${gone.length} address(es) from history.`, {
+    label: 'Undo',
+    run: () => visits.restore(gone),
+  });
+}
 
 /** Redraws everything that shows the saved list. Cheap: it is all local. */
 function renderBookmarks(): void {
@@ -1254,6 +1390,15 @@ function shellMenu(): MenuGroups {
     [{ label: 'New tab', disabled: !connected, run: () => openTab('', 'focus') }],
   ];
   if (active) groups.push(...pageGroups(active));
+  // The bulk counterpart to the X on a single completion. It lives here rather
+  // than in the dropdown because a list you are typing at is the wrong place to
+  // put a gesture that empties it, and because the reader who wants it wants it
+  // when they are not mid-address.
+  groups.push([{
+    label: 'Clear history',
+    disabled: !visits.count(),
+    run: () => clearHistory(),
+  }]);
   // Last, and always present: the one entry that works with the link down, and
   // the only way to find out that the app itself is behind the server. It says
   // which of the two it is in the label, because a reader who has an update
@@ -1307,6 +1452,9 @@ el.urlbar.addEventListener('keydown', (ev) => {
   // a URL whose beginning — the host — is the part worth looking at while
   // waiting for it.
   if (isPhone()) el.urlbar.blur();
+  // Before the navigation, because with no tab open that call creates one and
+  // the arrival has to find the ask already filed.
+  markTyped(active);
   navigateTo(active, url);
 });
 

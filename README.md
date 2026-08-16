@@ -55,11 +55,19 @@ queue depth and the bytes actually spent. Middle-click a link for a background
 tab, and right-click anywhere for Skyhook's own menu — the browser's would act
 on the sandboxed frame rather than on the page it is showing.
 
-Press **★** (or Ctrl/⌘+D) to keep a page. Saved pages are the only way of
-getting somewhere here that does not spend the link: the list is on your device,
+Press **★** (or Ctrl/⌘+D) to keep a page. Saved pages are one of the two ways of
+getting somewhere here that do not spend the link: the list is on your device,
 so it opens instantly, searches for free and stays readable through an outage —
 it is what a new tab shows, what Ctrl/⌘+B opens beside the page, and what the
 address bar completes from as you type.
+
+The other is where you have already been. The address bar finishes an address
+out of the pages this device has visited, offering the ones you typed yourself
+ahead of the ones you merely landed on — three keystrokes instead of forty, and
+no round trip until Enter. A row you would rather not be offered again has an
+**✕** on it (Shift+Delete from the keyboard), and *Clear history* in the
+right-click menu empties the lot; both say what they did and both offer the way
+back. That list never leaves the device, and no server is asked about it.
 
 The demo runs in loopback mode — plain HTTP on `127.0.0.1`, no TLS, no QUIC.
 That is deliberate rather than lazy: Chrome will not register a service worker
