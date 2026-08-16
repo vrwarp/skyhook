@@ -282,11 +282,64 @@ event is delivered, the page is fine, and the control simply never responds.
 frame's border-box origin plus its border and padding. Reproduced by
 `TestPWAClicksAControlInsideAnInlinedFrame`.
 
-Two things about frames are still not what a browser does. A cross-origin frame
-cannot be read at all and renders as an empty box of the right size. And a frame
-that navigates is picked up by a `load` hook that re-snapshots the document,
-which is blunt: nothing about a document being replaced reaches the
-MutationObserver watching the old one, so there is no diff to send.
+One thing about frames is still not what a browser does. A frame that navigates
+is picked up by a `load` hook that re-snapshots the document, which is blunt:
+nothing about a document being replaced reaches the MutationObserver watching
+the old one, so there is no diff to send.
+
+### 11b. A frame's box is measured once, and frames change size
+
+`data-sky-box` was written when the frame was serialised and never again, so a
+frame that changed size afterwards kept the box it was born with for the life of
+the document. That is not an edge case: it is how every popover on a Google
+property opens. Gmail's app launcher is a frame inside a wrapper the page
+animates from `height: 0`, and the frame is put in the document as the animation
+starts — so the measurement was 370x0. The wrapper's own height reached the
+client (it is an inline style, and a style is only an attribute), the stand-in
+inside it stayed zero high, and the panel was not on screen at all. Nothing
+downstream says a word about it: the documents agree, the hashes agree — the
+hash covers ids, kinds and names, not attributes — and the only symptom is that
+clicking the grid of dots appears to do nothing, which the reader cannot tell
+apart from an input the link swallowed.
+
+Polling every frame's `getBoundingClientRect` is not affordable, and a
+MutationObserver is no use here: the style that changed is on an ancestor, and
+layout is not a mutation. A `ResizeObserver` reports exactly this and nothing
+else, so every frame gets one — created from its *own* window, because an
+inlined frame's elements belong to that document. What it marks dirty is
+re-measured on the way into the next flush rather than in the callback, so a
+size that moves ten times across a 300ms transition costs one op, and a resize
+that arrives with a mutation rides the same frame as the mutation.
+
+Plane-side, the box is re-applied whenever the page rewrites the element's
+`style`: the width and height are the mirror's, not the page's, and a `style`
+write replaces the whole declaration. `TestPWAResizesAFrameStandInWhenItsFrameGrows`
+is the panel opening; the patcher's own tests pin the style rewrite and the
+box being taken away again.
+
+### 11c. A frame the mirror could not read says so
+
+A cross-origin frame cannot be read at all — no agent runs in it, and its
+`contentDocument` is closed — so its stand-in is empty however right its box is.
+Empty, it is also invisible, and an invisible hole where a panel should be is
+indistinguishable from a bug: the app launcher above was reported as one twice,
+once for the box and once for what was never in it.
+
+So a frame whose document could not be read is named. The agent puts the frame's
+origin in `data-sky-frame`, and the client draws the stand-in as a faint dashed
+panel that says *ogs.google.com — not mirrored*. It is the same bargain the HUD
+makes everywhere else: the reader cannot have the content, and is owed the
+difference between "this did not come" and "your click was lost". Only frames
+big enough to have been worth looking at are named — 64x32 is the floor, which
+keeps the beacons and tracking pixels every page carries out of it — and the
+mark is kept current by the same watch as the box, because a frame is readable
+`about:blank` until the moment it is not. `TestPWASaysWhichFrameItCouldNotRead`
+covers it.
+
+Mirroring what is *inside* such a frame is a different piece of work: it needs
+the host to attach to the frame's own target, an agent per frame, and an id
+space and hash contract that span the two, since the integrity check compares
+one hash for the whole tab.
 
 ### 11a. Stylesheets a page picks up after its load event
 

@@ -77,6 +77,14 @@
   var SENSITIVE_ATTRS = { value: 1, 'data-sky-value': 1 };
   // Marks a custom element that had not upgraded landside. See serializeAttrs.
   var UNDEFINED_ATTR = 'data-sky-undefined';
+  // Names the origin of a frame whose document could not be read. See
+  // watchBox: the client draws the box as an empty panel that says so, because
+  // an unexplained hole is the one thing worse than missing content.
+  var OPAQUE_ATTR = 'data-sky-frame';
+  // How small an unreadable frame can be before saying what it is stops being
+  // worth the ink. A tracking beacon is a frame too, and a page carries a dozen
+  // of them; a widget the reader was looking for is never this small.
+  var FRAME_LABEL_MIN_W = 64, FRAME_LABEL_MIN_H = 32;
   var SENSITIVE_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i;
 
   var nextId = 1;
@@ -94,6 +102,13 @@
   var observers = [];
   var observedDocs = new Set();
   var hookedFrames = new WeakSet();
+  // Frames whose stand-in box the client has been told about: element -> the
+  // "WxH host" it was last sent as. A Map rather than a WeakMap because a
+  // capture has to be able to count it; a frame that leaves the document is
+  // dropped from it when it is forgotten, and the rest go at the next snapshot.
+  var boxWatch = new Map();
+  var boxDirty = new Set();      // frames to re-measure before the next flush
+  var boxObservers = new Map();  // window -> its ResizeObserver
   var reframeTimer = null;
   var pendingOps = [];
   var pendingImages = [];
@@ -152,6 +167,7 @@
       lastText.delete(id);
       lastScroll.delete(id);
     }
+    if (node.tagName === 'IFRAME') unwatchBox(node);
     var kids = node.childNodes;
     if (kids) for (var i = 0; i < kids.length; i++) forget(kids[i]);
     if (node.shadowRoot) forget(node.shadowRoot);
@@ -321,11 +337,11 @@
       // anything — so it renders the inlined document into a plain box. That
       // box has to be told how big it is, because the CSS that sized the real
       // iframe selects on `iframe` and will not match the substitute.
-      var fr = el.getBoundingClientRect();
-      if (fr.width || fr.height) {
-        pairs.push(intern('data-sky-box'),
-          intern(Math.round(fr.width) + 'x' + Math.round(fr.height)));
-      }
+      var box = frameBox(el);
+      var host = opaqueHost(el, box);
+      if (box !== '0x0') pairs.push(intern('data-sky-box'), intern(box));
+      if (host) pairs.push(intern(OPAQUE_ATTR), intern(host));
+      watchBox(el, box, host);
     }
     if (VOID_IMAGE_TAGS[tag]) {
       var img = describeImage(el, base);
@@ -339,6 +355,118 @@
     }
     out.flags = flags;
     return pairs;
+  }
+
+  // --------------------------------------------------------- frame stand-ins
+
+  /*
+   * A frame's stand-in is sized once when it is serialised, and a frame that
+   * changes size after that used to keep the box it was born with for ever.
+   *
+   * That is not an edge case: it is how every popover on a Google property
+   * opens. Gmail's app launcher is a cross-origin iframe inside a wrapper the
+   * page animates from `height: 0` to its full height, and the frame is put in
+   * the document at the moment the animation starts — so the box the agent
+   * measured was 370x0, the wrapper's own height reached the client (it is an
+   * inline style, and a style is just an attribute), and the panel underneath
+   * it stayed exactly as tall as nothing. The reader clicks the grid of dots
+   * and the mirror does not change, which reads as an input that was dropped
+   * on the way and cannot be told apart from one.
+   *
+   * `getBoundingClientRect` cannot be polled cheaply on every frame of a
+   * transition, and a MutationObserver never sees this: the style that changed
+   * is on an ancestor, and layout is not a mutation. A ResizeObserver is the
+   * one thing that reports exactly this, so the frames get one, and the boxes
+   * it marks dirty are re-read on the way into the next flush — where a size
+   * that moved ten times during a 300ms transition costs one op.
+   */
+
+  function frameBox(el) {
+    var r = el.getBoundingClientRect();
+    return Math.round(r.width) + 'x' + Math.round(r.height);
+  }
+
+  /**
+   * opaqueHost is the origin of a frame whose document cannot be read, and ''
+   * for one that can — or one too small for the answer to be worth showing.
+   *
+   * A cross-origin frame is a hole in the mirror that nothing can fill: no
+   * agent runs in it, `contentDocument` throws, and the stand-in stays empty
+   * however right its box is. Empty and unexplained, it is indistinguishable
+   * from a bug — which is exactly how it was reported. Named, it is the same
+   * failure the HUD makes elsewhere: this much did not come, and here is why.
+   */
+  function opaqueHost(el, box) {
+    try {
+      if (el.contentDocument && el.contentDocument.documentElement) return '';
+    } catch (e) { /* cross-origin: nothing to read, which is the point */ }
+    var wh = box.split('x');
+    if (+wh[0] < FRAME_LABEL_MIN_W || +wh[1] < FRAME_LABEL_MIN_H) return '';
+    var src = el.getAttribute('src') || '';
+    if (!src) return ''; // about:blank, and nothing to say about it
+    try {
+      var u = new URL(absolute(docBase(el), src));
+      return u.protocol === 'http:' || u.protocol === 'https:' ? u.host : '';
+    } catch (e) { return ''; }
+  }
+
+  function onBoxResize(entries) {
+    for (var i = 0; i < entries.length; i++) boxDirty.add(entries[i].target);
+    // The size is read at flush time, not here: during a transition this runs
+    // on every animation frame, and the answer is only worth the wire once.
+    scheduleFlush(false);
+  }
+
+  // watchBox records what the client has been told about a frame's stand-in and
+  // arranges to hear about it changing. The observer belongs to the frame's own
+  // window, because an inlined frame's elements are in that document.
+  function watchBox(el, box, host) {
+    boxWatch.set(el, box + ' ' + host);
+    boxDirty.delete(el);
+    var win = null;
+    try { win = el.ownerDocument && el.ownerDocument.defaultView; } catch (e) { win = null; }
+    if (!win || typeof win.ResizeObserver !== 'function') return;
+    var obs = boxObservers.get(win);
+    if (!obs) {
+      try { obs = new win.ResizeObserver(onBoxResize); } catch (e) { return; }
+      boxObservers.set(win, obs);
+    }
+    try { obs.observe(el); } catch (e) { /* gone already */ }
+  }
+
+  function unwatchBox(el) {
+    if (!boxWatch.has(el)) return;
+    boxWatch.delete(el);
+    boxDirty.delete(el);
+    boxObservers.forEach(function (obs) {
+      try { obs.unobserve(el); } catch (e) { /* not this one's */ }
+    });
+  }
+
+  // syncBoxes turns the frames marked dirty into attribute ops. Called on the
+  // way into a flush, so a resize that came with no mutation of its own still
+  // reaches the client, and a resize that came with one rides the same frame.
+  function syncBoxes() {
+    if (!boxDirty.size) return;
+    var els = [];
+    boxDirty.forEach(function (el) { els.push(el); });
+    boxDirty.clear();
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var id = idOf.get(el);
+      if (id === undefined || !el.isConnected) { unwatchBox(el); continue; }
+      var box = frameBox(el);
+      var host = opaqueHost(el, box);
+      var was = (boxWatch.get(el) || ' ').split(' ');
+      if (was[0] === box && was[1] === host) continue;
+      boxWatch.set(el, box + ' ' + host);
+      if (was[0] !== box) {
+        pendingOps.push([3, id, intern('data-sky-box'), intern(box)]);
+      }
+      if (was[1] !== host) {
+        pendingOps.push([3, id, intern(OPAQUE_ATTR), host ? intern(host) : -1]);
+      }
+    }
   }
 
   function describeImage(el, base) {
@@ -456,7 +584,15 @@
     if (hookedFrames.has(el)) return;
     hookedFrames.add(el);
     el.addEventListener('load', function () {
-      try { if (!el.contentDocument) return; } catch (e) { return; }
+      var readable = false;
+      try { readable = !!el.contentDocument; } catch (e) { readable = false; }
+      if (!readable) {
+        // Nothing to re-read, but two things about this frame have just become
+        // knowable: the origin it settled on — a frame starts at about:blank,
+        // which is readable and says nothing — and the size it took there.
+        if (boxWatch.has(el)) { boxDirty.add(el); scheduleFlush(false); }
+        return;
+      }
       if (reframeTimer) return;
       reframeTimer = setTimeout(function () {
         reframeTimer = null;
@@ -1375,6 +1511,7 @@
 
   function flush(isFlush) {
     if (!snapshotDone) return;
+    syncBoxes();
     if (!pendingOps.length && !pendingImages.length) return;
     var ops = pendingOps; pendingOps = [];
     var imgs = pendingImages; pendingImages = [];
@@ -1396,6 +1533,13 @@
     // in the new document.
     awaitingUpgrade = new Set();
     upgradePoll = UPGRADE_POLL_MS;
+    // Same for the frames: the walk re-measures every one of them and says so
+    // in the snapshot, so what the client had been told before is not about
+    // this document.
+    boxWatch = new Map();
+    boxDirty = new Set();
+    boxObservers.forEach(function (obs) { obs.disconnect(); });
+    boxObservers = new Map();
 
     var rows = [];
     serializeNode(document.documentElement, 0, rows);
@@ -1748,6 +1892,11 @@
         // climbs while the mirror looks stale is the whole diagnosis.
         liveElements: document.getElementsByTagName('*').length,
         frames: document.getElementsByTagName('iframe').length,
+        // Frames whose stand-in box is being kept up to date, and how many of
+        // them are waiting to be re-read. A frame missing from the first number
+        // is a stand-in frozen at whatever size it was born with.
+        framesWatched: boxWatch.size,
+        framesDirty: boxDirty.size,
         docHash: api.docHash()
       };
     },

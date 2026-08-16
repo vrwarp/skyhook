@@ -438,6 +438,13 @@ export class Patcher {
     if (lower.startsWith(FORBIDDEN_ATTR_PREFIX) && lower.length > 2) return;
     if (value === null) {
       el.removeAttribute(name);
+      // A box that has been taken away is a frame that no longer has one; the
+      // pixels it was given are not the page's and must go with it.
+      if (lower === 'data-sky-box') {
+        const style = (el as HTMLElement).style;
+        style.removeProperty('width');
+        style.removeProperty('height');
+      }
       return;
     }
     if ((lower === 'href' || lower === 'src' || lower === 'action') &&
@@ -469,10 +476,16 @@ export class Patcher {
     // stated in pixels, because the CSS that sized the original selects on a
     // tag name this element no longer has.
     if (lower === 'data-sky-box') {
-      const [w, h] = value.split('x');
-      const style = (el as HTMLElement).style;
-      if (w) style.width = `${Number(w)}px`;
-      if (h) style.height = `${Number(h)}px`;
+      this.applyBox(el, value);
+      return;
+    }
+    // A `style` write from the page replaces the whole declaration, box and
+    // all: the width and height above are ours, not the page's, and nothing
+    // sends them again just because the page changed a colour. Landside the
+    // frame kept its size through that; here it would collapse.
+    if (lower === 'style') {
+      const box = el.getAttribute('data-sky-box');
+      if (box !== null) this.applyBox(el, box);
       return;
     }
     // Live form state arrives as a data attribute so a resync restores what was
@@ -485,6 +498,14 @@ export class Patcher {
     } else if (lower === 'data-sky-selected') {
       (el as HTMLOptionElement).selected = value === '1';
     }
+  }
+
+  /** Sizes a stand-in from the `WxH` the agent measured landside. */
+  private applyBox(el: Element, box: string): void {
+    const [w, h] = box.split('x');
+    const style = (el as HTMLElement).style;
+    if (w) style.width = `${Number(w)}px`;
+    if (h) style.height = `${Number(h)}px`;
   }
 
   private forget(node: Node): void {
