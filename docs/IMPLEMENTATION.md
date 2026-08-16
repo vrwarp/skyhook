@@ -1800,6 +1800,55 @@ client and looks like a site that renders badly.
 `TestUtilityBundleDoesNotStallTheRenderer` checks the verdicts end to end
 through the real mirror while the fixture mutates.
 
+### 36. Every tab's events went through one queue, and slow work ran on it
+
+Found while measuring §35, and the same shape of mistake one level down.
+
+CDP events cannot be handled on the socket reader: a handler that makes a CDP
+call would wait for a reply that only that reader can deliver. So they were
+queued and drained by a goroutine — **one** goroutine, for every target the
+browser has.
+
+That is only sound if handlers are quick, and none of the interesting ones are.
+`Page.loadEventFired` recovered the page's cross-origin stylesheets, which is a
+round trip per sheet and a fetch of up to 4 MB each. `Runtime.bindingCalled`
+carrying a snapshot serialised, filtered, minified, CBOR-encoded and compressed
+a whole document, and could then sit in `enqueue` for up to two seconds waiting
+on a send queue the link had not drained. All of it on the one goroutine that
+every *other* tab's mutations also had to pass through.
+
+Two consequences, and the second is the worse one. A background tab finishing
+its page delayed the tab the reader was actually looking at. And while the
+queue was blocked it kept filling — at which point the reader drops events,
+because the alternative is deadlocking the connection. A dropped
+`Runtime.bindingCalled` is a lost mutation, which the integrity check later
+catches as a divergence and repairs with a resync. So a slow link filled the
+send queue, which blocked dispatch, which dropped mutations, which cost a
+resync, which put a whole document back on the link that was already too slow —
+each step making the next one likelier.
+
+The queue is now per target. Everything registered on it is scoped to one
+session (`Subscribe` binds the session id), so per-session ordering is the only
+guarantee anything depends on, and one queue per target preserves it exactly
+while letting tabs proceed independently. `Session.Forget` drops a target's
+handlers and stops its goroutine when the tab closes, which the single-queue
+version never needed and the old handler map never did either — those leaked
+for the life of the browser.
+
+Separately, `onLoad` now does its stylesheet recovery on its own goroutine,
+which is what `onFrameNavigated` and the agent's `sheets` message already did.
+Per-target queues stop one tab delaying another; they do not stop a tab
+delaying *itself*, and the tab that has just finished loading is precisely the
+one whose mutations someone is waiting for. Only the loading flag is still set
+inline, because it is one small frame and the shell is waiting on it to stop
+drawing a busy cursor.
+
+`internal/cdp/dispatch_test.go` pins all of it: that a blocked target does not
+delay another, that one target's events stay in order, that forgetting a
+session drops its handlers and its queue, and that forgetting cannot be aimed
+at the browser-level queue — whose key is the empty string, and whose prefix
+would otherwise match every global handler there is.
+
 ## Measured results
 
 From the end-to-end suite. The design asks for every milestone to be measured

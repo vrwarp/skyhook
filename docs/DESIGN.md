@@ -107,7 +107,9 @@ Two processes, one protocol. The client is deliberately dumb: it renders, echoes
 
 ## 2.2 Landside Server — Component Breakdown
 
-**Host process (Go).** Owns the QUIC listener, session lifecycle, stream multiplexing, compression, and the CDP connection pool. Go over Rust for iteration speed; nothing here is CPU-bound except image transcoding, which shells out to `libvips`/`libaom` workers.
+**Host process (Go).** Owns the QUIC listener, session lifecycle, stream multiplexing, compression, and the CDP connection pool. Go over Rust for iteration speed; nothing in the host process is CPU-bound except image transcoding, which shells out to `libvips`/`libaom` workers.
+
+That claim is about the Go process, and it held; what it was read as saying — that landside CPU is only ever transcoding — did not. The expensive landside work turned out to be in the *renderer*, in the injected agent: the used-CSS filter tested every rule against the document on every pass, which is quadratic in rules × elements and repeats after every batch of DOM changes. See [IMPLEMENTATION.md §35](IMPLEMENTATION.md). Landside CPU therefore has two sources, and they are diagnosed differently — the transcoder shows up in the server process, the mirror agent in a Chromium renderer.
 
 **Headless Chromium**, launched with `--headless=new --remote-debugging-port`, one persistent user profile on disk (real login sessions persist across flights). One CDP target per client tab. Key CDP usage:
 
