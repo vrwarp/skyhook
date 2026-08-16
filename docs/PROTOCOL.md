@@ -97,10 +97,31 @@ immediately when the batch was caused by user input:
 order. Frames carry `seq` and `base`; the client acknowledges `seq` on `ctrl`
 and asks for a resync when `base` exceeds what it holds.
 
+The intern table is positional and append-only, which makes **exactly once** the
+requirement rather than a preference. A batch applied twice leaves the client's
+table one entry longer than the server's, and every string reference after it
+resolves to its neighbour: streamed text lands shredded, three characters at a
+time, in the wrong nodes. Nothing catches it — the table is not part of the
+document hash, and a re-inserted node reuses its id — so the tab stays wrong
+until it is reloaded.
+
 ### Sequencing, acks and resync
 
 - The client acknowledges each applied batch with its own document hash.
 - The server trims its replay ring on each ack.
+- The ack is *not* the client's own record of what it has received. A batch
+  travels from the network worker to the shell, into a sandboxed iframe, and
+  back as an ack; several more arrive over the link inside that round trip. The
+  worker decides "duplicate" and "gap" from what it has handed over, and only
+  reports what has been applied. Deciding either from the acknowledged sequence
+  makes every in-flight batch look like a gap and every replay sent in answer to
+  that supposed gap look new — which is how one round trip's worth of frames
+  turns into a permanently shredded page.
+- Duplicates are dropped before gaps are considered: a batch at or below what
+  the client already has is a repeat whatever its `base` says.
+- One resync request per gap per second, per tab. The answer takes a round trip
+  and the frames behind the gap keep arriving throughout; asking for each of
+  them buries `ctrl` under requests for a repair already on its way.
 - On a gap, hash mismatch, or cold resume, the client sends `Resync{tab, haveTo,
   reason}`. The server replays buffered frames when it can and they are smaller
   than 256 KB, and re-snapshots otherwise. A cold client (`haveTo == 0`) always

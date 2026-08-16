@@ -851,6 +851,50 @@ describe('MirrorHost', () => {
     expect(ev.applied).toHaveBeenLastCalledWith(1, 3, expect.any(Number));
   });
 
+  /**
+   * The last line of defence against the failure that shredded a streaming
+   * page: a batch the server replayed after the client had already applied it.
+   *
+   * The damage is not the repeated ops — most are idempotent enough to survive
+   * — but the strings. A batch's strings extend an append-only intern table by
+   * position, so applying one twice leaves the table one entry long and every
+   * reference after it lands on its neighbour. Text streamed in afterwards
+   * arrives shredded three characters at a time, into the wrong nodes, and
+   * nothing notices: the table is not part of the document hash.
+   */
+  it('refuses a batch it has already applied', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    const batch = (): Mutation => ({
+      strings: [' and more'],
+      docHash: 0,
+      flush: false,
+      ops: [{
+        op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 11, ref2: 0,
+        nodes: [], off: 5, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+      }],
+    });
+    host.applyMutation(batch(), 3);
+    const acks = ev.applied.mock.calls.length;
+
+    host.applyMutation(batch(), 3);
+
+    expect(host.frame.contentDocument!.body.textContent).toBe('first and more');
+    // Not applied at all, rather than applied and then acknowledged again.
+    expect(ev.applied.mock.calls.length).toBe(acks);
+
+    // And the table underneath is still the length the server thinks it is, so
+    // the next batch's references resolve to the strings it meant.
+    host.applyMutation({
+      strings: [' still'], docHash: 0, flush: false,
+      ops: [{
+        op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 12, ref2: 0,
+        nodes: [], off: 14, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+      }],
+    }, 4);
+    expect(host.frame.contentDocument!.body.textContent).toBe('first and more still');
+  });
+
   describe('freezing for a capture', () => {
     it('takes the document, the patcher state and the fingerprint', async () => {
       const { host } = await mount();
