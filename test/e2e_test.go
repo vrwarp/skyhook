@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -485,6 +486,11 @@ type harness struct {
 	// not only by the test that opens a bundle.
 	captureDir string
 	logs       *diag.Ring
+	// misresolved counts requests for the address /assets/dist/nested.css's
+	// url() names only when it is resolved against the page rather than
+	// against the sheet. Nothing is served from there; see
+	// TestAStylesheetsImagesResolveAgainstTheSheet.
+	misresolved *atomic.Int32
 }
 
 type router struct{ mgr *session.Manager }
@@ -569,6 +575,7 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	cdn := httptest.NewServer(cdnMux)
 	t.Cleanup(cdn.Close)
 
+	var misresolved atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -636,6 +643,29 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	mux.HandleFunc("/tile.png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(tilePNG)
+	})
+	// A theme laid out the way a CMS lays one out: the stylesheet under
+	// dist/, the pictures it names one directory above that. The only address
+	// the reference resolves to is the sheet's own; resolved against the page
+	// it becomes /images/tile.png, where this site keeps nothing.
+	mux.HandleFunc("/nested-css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Nested</title>
+			<link rel="stylesheet" href="/assets/dist/nested.css"></head>
+			<body><h1>the nested stylesheet</h1><div id="nested-tile"></div></body></html>`)
+	})
+	mux.HandleFunc("/assets/dist/nested.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w,
+			`#nested-tile { width: 48px; height: 48px; background-image: url(../images/tile.png); }`)
+	})
+	mux.HandleFunc("/assets/images/tile.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(tilePNG)
+	})
+	mux.HandleFunc("/images/", func(w http.ResponseWriter, r *http.Request) {
+		misresolved.Add(1)
+		http.NotFound(w, r)
 	})
 	// A path with a bracket in it, which a url() token may carry as long as it
 	// is quoted. See TestABracketInAURLDoesNotTruncateTheSheet.
@@ -935,7 +965,7 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 
 	h := &harness{
 		t: t, site: site, browser: br, token: "test-token",
-		listenAddr: listenAddr, logs: logs,
+		listenAddr: listenAddr, logs: logs, misresolved: &misresolved,
 	}
 	r := &router{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{
@@ -1425,6 +1455,95 @@ func TestABracketInAURLDoesNotTruncateTheSheet(t *testing.T) {
 			t.Errorf("a rule that cannot close itself reached the client: %q", rule)
 		}
 	}
+}
+
+/*
+A stylesheet's pictures live where the stylesheet says, not where the page does.
+
+`cssText` hands a rule back with its url() exactly as authored, and nothing in
+the text says which sheet authored it. Resolved against the document instead of
+against the sheet, `url(../images/logo.svg)` in
+/blog/wp-content/themes/fem-v3/dist/style.css became a request for
+/blog/images/logo.svg — the site's 404 page, which decoded as no image at all,
+so no bytes were ever shipped for it. The styling arrived complete and named a
+picture that did not exist: a capture of that page showed the masthead as an
+empty 320px box, and the sheet gave no hint why.
+
+So the fixture puts the sheet a directory deeper than its images, and serves
+nothing at the address the page-relative reading names.
+*/
+func TestAStylesheetsImagesResolveAgainstTheSheet(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/nested-css"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the nested stylesheet", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var key string
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) && key == "" {
+		for _, rule := range cl.Model(tab).CSSRules() {
+			if strings.Contains(rule, "nested-tile") {
+				key = cssImageKey(rule)
+			}
+		}
+		if key == "" {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+	if key == "" {
+		t.Fatalf("the background-image was never rewritten to a cache key: %q",
+			cl.Model(tab).Stylesheet())
+	}
+
+	// Nothing pushes a background image — the server can see no viewport
+	// position for one — so it has to be asked for, the way the client asks.
+	deadline = time.Now().Add(budget(30 * time.Second))
+	for asked := 0; time.Now().Before(deadline); asked++ {
+		if asked%20 == 0 {
+			if err := cl.WantImages(tab, []string{key}); err != nil {
+				t.Fatalf("ask for the background image: %v", err)
+			}
+		}
+		if data, ok := cl.ImageBytes(key); ok {
+			if len(data) == 0 {
+				t.Fatal("the background image arrived empty")
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if n := h.misresolved.Load(); n > 0 {
+		t.Fatalf("the background image was fetched from %s/images/tile.png (%d times): "+
+			"the url() was resolved against the page, not against its stylesheet",
+			h.site.URL, n)
+	}
+	t.Fatalf("the background image's bytes never arrived (key %q)", key)
+}
+
+// cssImageKey pulls the content hash the server rewrote a url() to out of a
+// rule, or "" if the rule names no image.
+func cssImageKey(rule string) string {
+	i := strings.Index(rule, "skyhook://img/")
+	if i < 0 {
+		return ""
+	}
+	rest := rule[i+len("skyhook://img/"):]
+	if end := strings.IndexAny(rest, `)"' `); end >= 0 {
+		return rest[:end]
+	}
+	return rest
 }
 
 // ruleCloses reports whether a rule's braces and quotes all end, which is what
