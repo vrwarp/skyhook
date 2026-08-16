@@ -560,6 +560,12 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			`width: 220px; height: 60px; border: 1px solid rgb(11, 22, 33); `+
 			`background: rgb(0, 160, 90); }`)
 	})
+	// A document on that other origin, for a frame nothing landside can read.
+	cdnMux.HandleFunc("/widget.html", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Elsewhere</title></head>
+			<body style="margin:0"><p>from another origin entirely</p></body></html>`)
+	})
 	cdn := httptest.NewServer(cdnMux)
 	t.Cleanup(cdn.Close)
 
@@ -832,6 +838,34 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			<body>
 			<div id="app"><div id="header">bar</div>
 			  <div id="main">measure me<div id="foot"></div></div></div>
+			</body></html>`)
+	})
+	// The shape of every popover on a Google property, and of the bug that
+	// found it: a frame inside a wrapper the page opens from nothing. The frame
+	// is in the document from the start, so it is serialised at the size it has
+	// while the panel is shut — which is no size at all.
+	mux.HandleFunc("/growing-frame", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Panel</title></head>
+			<body><h1>the page around the panel</h1>
+			<div id="wrap" style="overflow:hidden;width:300px;height:0">
+			  <iframe id="panel" src="/framed-inner" style="width:100%;height:100%;border:0"></iframe>
+			</div>
+			<script>
+			  addEventListener('load', () => setTimeout(() => {
+			    document.getElementById('wrap').style.height = '240px';
+			  }, 1200));
+			</script>
+			</body></html>`)
+	})
+	// A frame on another origin: no agent runs in it, its document cannot be
+	// read, and the stand-in is empty whatever else happens.
+	mux.HandleFunc("/opaque-frame", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Opaque</title></head>
+			<body><h1>the page around the widget</h1>
+			<iframe id="elsewhere" width="320" height="200" style="border:0"
+			  src="`+cdn.URL+`/widget.html"></iframe>
 			</body></html>`)
 	})
 	// A frame whose document lays out taller than the box the page gave it.

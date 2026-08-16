@@ -193,6 +193,73 @@ describe('Patcher', () => {
     expect(stand!.style.height).toBe('150px');
   });
 
+  /*
+   * A frame that changes size after it was serialised. Every popover on a
+   * Google property is one: the frame sits inside a wrapper the page animates
+   * open, so the box the agent first measured is the closed one — zero high —
+   * and a stand-in left at that size is a panel the reader never sees.
+   */
+  it('resizes a stand-in when the frame it stands for changes size', () => {
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('iframe', 'data-sky-box', '370x0');
+    snap.nodes.push({
+      id: 30, parent: 1, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2], flags: 0,
+    });
+    patcher.applySnapshot(snap);
+    const stand = document.querySelector('[data-skyhook-tag="iframe"]') as HTMLElement;
+    expect(stand.style.height).toBe('0px');
+
+    // A mutation's strings extend the table the snapshot left, so the refs are
+    // where they land in it.
+    const boxRef = base + 1;
+    let next = snap.strings.length;
+    patcher.applyMutation(
+      mutation([{ op: OpCode.Attr, node: 30, ref: boxRef, ref2: next }], ['370x570']), 1);
+    expect(stand.style.width).toBe('370px');
+    expect(stand.style.height).toBe('570px');
+
+    // And back again: a popover that closes has to close here too, or it sits
+    // over the page as a hole nothing can be clicked through.
+    next += 1;
+    patcher.applyMutation(
+      mutation([{ op: OpCode.Attr, node: 30, ref: boxRef, ref2: next }], ['370x0']), 2);
+    expect(stand.style.height).toBe('0px');
+  });
+
+  /*
+   * The page's own `style` writes replace the whole declaration. The box is
+   * ours and is not in them, so re-applying it is the only thing between a
+   * frame and a collapse the agent has no reason to say anything more about.
+   */
+  it('keeps a stand-in its size through the page rewriting its style', () => {
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('iframe', 'data-sky-box', '320x180');
+    snap.nodes.push({
+      id: 30, parent: 1, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2], flags: 0,
+    });
+    patcher.applySnapshot(snap);
+    const stand = document.querySelector('[data-skyhook-tag="iframe"]') as HTMLElement;
+
+    const styleRef = snap.strings.length;
+    patcher.applyMutation(
+      mutation([{ op: OpCode.Attr, node: 30, ref: styleRef, ref2: styleRef + 1 }],
+        ['style', 'border: 0; opacity: 1']), 1);
+    expect(stand.style.opacity).toBe('1');
+    expect(stand.style.width).toBe('320px');
+    expect(stand.style.height).toBe('180px');
+
+    // Taking the box away gives the pixels back rather than leaving the page
+    // wearing a size nothing on the server believes in any more.
+    patcher.applyMutation(
+      mutation([{ op: OpCode.Attr, node: 30, ref: base + 1, ref2: -1 }]), 2);
+    expect(stand.style.width).toBe('');
+    expect(stand.style.height).toBe('');
+  });
+
   it('hashes what the server sent, so a substitution is not a divergence', () => {
     // The server compares this hash against the agent's every thirty seconds
     // and re-snapshots the whole document when they differ. A patcher that

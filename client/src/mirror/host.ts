@@ -35,6 +35,23 @@ img { background-repeat: no-repeat; background-size: cover; }
    to submit it and no indication anything is missing. A scrollbar is the
    honest version of the same failure, and it keeps the control reachable. */
 [data-skyhook-tag="iframe"] { display: block; overflow: auto; scrollbar-width: thin; }
+/* A frame whose document is on another origin. Nothing landside can read it —
+   no agent runs in it and its contentDocument is closed — so the stand-in is
+   empty however right its box is, and an empty box is invisible: Gmail's app
+   launcher is one, and clicking the grid of dots appeared to do nothing at all.
+   A reader who cannot have the content is owed the difference between "this did
+   not come" and "your click was lost", which is the same bargain the HUD makes.
+   Only frames big enough to have been worth looking at are named, and the box
+   is drawn faintly: on a page of ad slots this is furniture, not an alarm. */
+[data-skyhook-tag="iframe"][data-sky-frame] {
+  display: flex; align-items: center; justify-content: center;
+  box-sizing: border-box; overflow: hidden; padding: 4px;
+  border: 1px dashed rgba(0,0,0,.18); border-radius: 3px; background: #fbfbfb;
+}
+[data-skyhook-tag="iframe"][data-sky-frame]::after {
+  content: attr(data-sky-frame) " — not mirrored";
+  font: 12px/1.4 system-ui, sans-serif; color: #767676; text-align: center;
+}
 /* The frame's own html/body are inside the root now, where a document rule
    cannot reach them: this is delivered through Patcher.baseRootCSS instead, and
    kept here only so the two are read together. */

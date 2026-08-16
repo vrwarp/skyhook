@@ -6,6 +6,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -469,5 +470,111 @@ func TestPWAKeepsTheDocumentRootDirectlyInTheBody(t *testing.T) {
 		t.Errorf("#main came out %dpx in a %dpx frame, wanted about %dpx: the "+
 			"page's height:100%% chain is not reaching the frame's viewport",
 			got.Main, got.Frame, want)
+	}
+}
+
+// openPage drives the client to a path on the test site and waits for the
+// mirror to be showing it.
+func openPage(ctx context.Context, t *testing.T, h *pwaHarness, page *cdp.Session, path, marker string) {
+	t.Helper()
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+path), nil)
+	waitFor(ctx, t, page, fmt.Sprintf(`%s.includes(%q)`, mirrorText, marker),
+		budget(60*time.Second), "the mirrored page")
+}
+
+// standInBox reads the box the client gave the page's one frame stand-in.
+const standInBox = `(() => {
+  const doc = document.querySelector('iframe.mirror').contentDocument;
+  const el = doc.querySelector('[data-skyhook-tag="iframe"]');
+  if (!el) return { w: -1, h: -1, host: '', src: '', label: '' };
+  const r = el.getBoundingClientRect();
+  return {
+    w: Math.round(r.width), h: Math.round(r.height),
+    host: el.getAttribute('data-sky-frame') || '',
+    src: el.getAttribute('src') || '',
+    label: getComputedStyle(el, '::after').content || ''
+  };
+})()`
+
+type standIn struct {
+	W     int    `json:"w"`
+	H     int    `json:"h"`
+	Host  string `json:"host"`
+	Src   string `json:"src"`
+	Label string `json:"label"`
+}
+
+// A frame's stand-in is sized from a measurement taken when the frame was
+// serialised, and a frame that changes size afterwards used to keep the box it
+// was born with for ever.
+//
+// That is not an edge case, it is how every popover on a Google property opens:
+// the frame sits inside a wrapper animated from `height: 0`, so the box the
+// agent measured is the shut one. Gmail's app launcher arrived plane-side as a
+// 370x0 panel — nothing on screen, and no way for the reader to tell that from
+// a click that never reached the server at all.
+func TestPWAResizesAFrameStandInWhenItsFrameGrows(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+	openPage(ctx, t, h, page, "/growing-frame", "the page around the panel")
+
+	// The frame's document is inlined either way; it is the box around it that
+	// decides whether any of it can be seen.
+	waitFor(ctx, t, page, mirrorText+`.includes('inside the frame')`,
+		budget(60*time.Second), "the frame's document")
+	waitFor(ctx, t, page, standInBox+`.h === 240`,
+		budget(60*time.Second), "the panel to open in the mirror")
+
+	var box standIn
+	evalJSON(ctx, t, page, standInBox, &box)
+	if box.W != 300 || box.H != 240 {
+		t.Errorf("the panel's stand-in is %dx%d, want the frame's own 300x240", box.W, box.H)
+	}
+}
+
+// A frame on another origin is a hole nothing can fill: no agent runs in it,
+// `contentDocument` is not readable, and the stand-in stays empty however right
+// its box is. Empty and unmarked it is invisible, which is indistinguishable
+// from an input the link swallowed — so the client says whose content is
+// missing instead.
+func TestPWASaysWhichFrameItCouldNotRead(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+	openPage(ctx, t, h, page, "/opaque-frame", "the page around the widget")
+
+	waitFor(ctx, t, page, standInBox+`.host !== ''`,
+		budget(60*time.Second), "the frame to be named")
+
+	var box standIn
+	evalJSON(ctx, t, page, standInBox, &box)
+	// The origin it names is the frame's own, and not the page's.
+	src, err := url.Parse(box.Src)
+	if err != nil {
+		t.Fatalf("the stand-in kept an unparseable src %q: %v", box.Src, err)
+	}
+	if box.Host != src.Host {
+		t.Errorf("the stand-in names %q, want the frame's own %q", box.Host, src.Host)
+	}
+	// Sized like any other stand-in, and actually drawn: the label is what
+	// tells the reader this is content that did not come rather than a bug.
+	if box.W != 320 || box.H != 200 {
+		t.Errorf("the opaque frame's stand-in is %dx%d, want 320x200", box.W, box.H)
+	}
+	if !strings.Contains(box.Label, "not mirrored") {
+		t.Errorf("the stand-in draws %q, want it to say the frame was not mirrored", box.Label)
 	}
 }
