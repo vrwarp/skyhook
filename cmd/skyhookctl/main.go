@@ -15,6 +15,7 @@ import (
 
 	"github.com/vrwarp/skyhook/internal/client"
 	"github.com/vrwarp/skyhook/internal/config"
+	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/protocol"
 )
 
@@ -177,12 +178,13 @@ func probe(args []string) {
 	if *typeText != "" {
 		m := cl.Model(tab)
 		var target int64
-		for id, n := range m.Nodes {
+		m.EachNode(func(n *mirror.ModelNode) bool {
 			if n.Flags&protocol.FlagEditable != 0 {
-				target = id
-				break
+				target = n.ID
+				return false
 			}
-		}
+			return true
+		})
 		if target == 0 {
 			log.Fatal("type: no editable node in the mirror")
 		}
@@ -195,9 +197,9 @@ func probe(args []string) {
 
 	m := cl.Model(tab)
 	if m != nil {
-		report["nodes"] = len(m.Nodes)
-		report["cssRules"] = len(m.CSS)
-		report["title"] = m.Title
+		report["nodes"] = m.NodeCount()
+		report["cssRules"] = len(m.CSSRules())
+		report["title"] = m.Meta().Title
 		report["textBytes"] = len(m.Text())
 		if *dump != "" {
 			if err := os.WriteFile(*dump, []byte(m.HTML()), 0o600); err != nil {

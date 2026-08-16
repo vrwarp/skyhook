@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -937,11 +936,11 @@ func TestMirrorDeliversDocumentAndStyles(t *testing.T) {
 	if !strings.Contains(m.Text(), "the quick brown fox") {
 		t.Errorf("mirror text missing page content: %q", m.Text())
 	}
-	if m.Title != "Skyhook Fixture" {
-		t.Errorf("title = %q", m.Title)
+	if title := m.Meta().Title; title != "Skyhook Fixture" {
+		t.Errorf("title = %q", title)
 	}
 
-	css := strings.Join(m.CSS, "\n")
+	css := m.Stylesheet()
 	if !strings.Contains(css, ".used") {
 		t.Errorf("used-CSS extraction dropped a matching rule: %q", css)
 	}
@@ -990,7 +989,7 @@ func TestReorderArrivesAsMove(t *testing.T) {
 	tab := h.openFixture(ctx, cl)
 
 	before := cl.Model(tab)
-	nodesBefore := len(before.Nodes)
+	nodesBefore := before.NodeCount()
 
 	btn, err := cl.FindNode(tab, "button", "id", "swap")
 	if err != nil {
@@ -1005,7 +1004,7 @@ func TestReorderArrivesAsMove(t *testing.T) {
 		txt := cl.Model(tab).Text()
 		if strings.Index(txt, "second message") < strings.Index(txt, "first message") {
 			// A keyed reorder must be a move: node count is unchanged.
-			if got := len(cl.Model(tab).Nodes); got != nodesBefore {
+			if got := cl.Model(tab).NodeCount(); got != nodesBefore {
 				t.Fatalf("reorder changed node count %d -> %d; it was not a move",
 					nodesBefore, got)
 			}
@@ -1020,17 +1019,15 @@ func TestReorderArrivesAsMove(t *testing.T) {
 // the only handle on node *identity* the client has. A move preserves it; a
 // remove-and-reinsert does not.
 func findText(m *mirror.Model, want string) int64 {
-	ids := make([]int64, 0, len(m.Nodes))
-	for id := range m.Nodes {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	for _, id := range ids {
-		if n := m.Nodes[id]; n.Kind == 3 && strings.Contains(n.Text, want) {
-			return id
+	var found int64
+	m.EachNode(func(n *mirror.ModelNode) bool {
+		if n.Kind == 3 && strings.Contains(n.Text, want) {
+			found = n.ID
+			return false
 		}
-	}
-	return 0
+		return true
+	})
+	return found
 }
 
 // A reorder must move the node, not rebuild it. Node count alone does not show
@@ -1132,7 +1129,7 @@ func TestChurnedNodesNeverCrossTheWire(t *testing.T) {
 	tab := h.openFixture(ctx, cl)
 
 	time.Sleep(budget(2 * time.Second)) // let the page settle
-	nodesBefore := len(cl.Model(tab).Nodes)
+	nodesBefore := cl.Model(tab).NodeCount()
 	_, before := cl.BytesTransferred()
 
 	btn, err := cl.FindNode(tab, "button", "id", "churn")
@@ -1152,7 +1149,7 @@ func TestChurnedNodesNeverCrossTheWire(t *testing.T) {
 	spent := after - before
 	t.Logf("forty added-and-removed nodes cost %d bytes on the wire", spent)
 
-	if got := len(cl.Model(tab).Nodes); got != nodesBefore {
+	if got := cl.Model(tab).NodeCount(); got != nodesBefore {
 		t.Errorf("node count moved %d -> %d: churn leaked into the replica",
 			nodesBefore, got)
 	}
@@ -1184,7 +1181,7 @@ func TestConstructedStylesheetsReachTheClient(t *testing.T) {
 	// component's sheet, and that is where a component's sheet belongs.
 	deadline := time.Now().Add(budget(20 * time.Second))
 	for time.Now().Before(deadline) {
-		for _, rules := range cl.Model(tab).Scoped {
+		for _, rules := range cl.Model(tab).ScopedRules() {
 			for _, rule := range rules {
 				if strings.Contains(rule, "rgb(4,5,6)") {
 					return
@@ -1194,7 +1191,7 @@ func TestConstructedStylesheetsReachTheClient(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 	}
 	t.Fatalf("the component's adopted stylesheet never reached any root; CSS = %q",
-		strings.Join(cl.Model(tab).CSS, " "))
+		cl.Model(tab).Stylesheet())
 }
 
 /*
@@ -1226,10 +1223,10 @@ func TestAComponentsSheetArrivesInItsOwnRoot(t *testing.T) {
 	for time.Now().Before(deadline) {
 		model := cl.Model(tab)
 		scoped = ""
-		for _, rules := range model.Scoped {
+		for _, rules := range model.ScopedRules() {
 			scoped += strings.Join(rules, "\n") + "\n"
 		}
-		page = strings.Join(model.CSS, "\n")
+		page = model.Stylesheet()
 		if strings.Contains(scoped, ":host") {
 			break
 		}
@@ -1296,7 +1293,7 @@ func TestABracketInAURLDoesNotTruncateTheSheet(t *testing.T) {
 	var css string
 	deadline := time.Now().Add(budget(20 * time.Second))
 	for time.Now().Before(deadline) {
-		css = strings.Join(cl.Model(tab).CSS, "\n")
+		css = cl.Model(tab).Stylesheet()
 		if strings.Contains(css, "rgb(22,23,24)") {
 			break
 		}
@@ -1310,7 +1307,7 @@ func TestABracketInAURLDoesNotTruncateTheSheet(t *testing.T) {
 	}
 	// And every rule that did arrive has to be able to close itself, or it takes
 	// its neighbours down on the client.
-	for _, rule := range cl.Model(tab).CSS {
+	for _, rule := range cl.Model(tab).CSSRules() {
 		if !ruleCloses(rule) {
 			t.Errorf("a rule that cannot close itself reached the client: %q", rule)
 		}
@@ -1396,11 +1393,12 @@ func TestSlottedContentIsDrawnWhereTheComponentPutIt(t *testing.T) {
 	// The boundary is there, which is the whole of why none of this needs
 	// composing by hand.
 	roots := 0
-	for _, n := range model.Nodes {
+	model.EachNode(func(n *mirror.ModelNode) bool {
 		if n.Kind == protocol.KindFragment {
 			roots++
 		}
-	}
+		return true
+	})
 	if roots == 0 {
 		t.Error("the component was mirrored with no shadow root, so nothing composes")
 	}
@@ -1428,19 +1426,21 @@ func TestPasswordValuesNeverCrossTheWire(t *testing.T) {
 	time.Sleep(budget(3 * time.Second))
 
 	m := cl.Model(tab)
-	for id, n := range m.Nodes {
+	m.EachNode(func(n *mirror.ModelNode) bool {
 		for name, v := range n.Attrs {
 			if strings.Contains(v, "hunter2") {
-				t.Fatalf("password reached the client on node %d attribute %q", id, name)
+				t.Errorf("password reached the client on node %d attribute %q", n.ID, name)
+				return false
 			}
 		}
-	}
+		return true
+	})
 	if strings.Contains(m.Text(), "hunter2") {
 		t.Fatal("password reached the client as text")
 	}
 	// The field must still exist, and still be a password field: masking is
 	// not the same as dropping the element.
-	if n := m.Nodes[secret.ID]; n == nil || n.Attrs["type"] != "password" {
+	if n := m.Node(secret.ID); n == nil || n.Attrs["type"] != "password" {
 		t.Fatalf("password field itself went missing: %+v", n)
 	}
 }
@@ -1578,13 +1578,7 @@ func TestUserAgentOverrideCarriesMatchingClientHints(t *testing.T) {
 		if n == nil {
 			t.Fatalf("no #%s in the mirrored page", id)
 		}
-		var b strings.Builder
-		for _, c := range n.Children {
-			if child := m.Nodes[c]; child != nil {
-				b.WriteString(child.Text)
-			}
-		}
-		return strings.TrimSpace(b.String())
+		return m.ChildText(n.ID)
 	}
 
 	if got := text("ua"); got != claimed {
@@ -1682,13 +1676,7 @@ func nodeText(m *mirror.Model, n *mirror.ModelNode) string {
 	if n == nil {
 		return ""
 	}
-	var b strings.Builder
-	for _, c := range n.Children {
-		if child := m.Nodes[c]; child != nil {
-			b.WriteString(child.Text)
-		}
-	}
-	return strings.TrimSpace(b.String())
+	return m.ChildText(n.ID)
 }
 
 func TestReconnectResumesSessionAndPage(t *testing.T) {

@@ -1590,6 +1590,43 @@ the chain survived — and the test looks for it in the bottom eighth of the sho
 Against the old wrapper it fails with the bar missing from a 90px strip that is
 nothing but white.
 
+
+### 36. A mutex that only guarded half the way in
+
+`Model` has carried a mutex, and a comment saying exactly what it is for: a
+replica is written by whichever goroutine feeds it frames and read by whoever is
+asking what the page says, and walking `Nodes` while a mutation inserts into it
+is a "concurrent map read and map write" — not a test failure but a runtime
+fatal that takes the whole suite down, in whichever test happened to be running.
+
+The lock was real and the methods took it. What leaked was everything around
+them. `Nodes`, `CSS`, `Scoped`, `URL`, `Title` and `Seq` are exported fields, so
+callers indexed and ranged over them directly — fifteen sites across the
+end-to-end suite, plus the capture path in the client library and two in
+`skyhookctl`. Worse, `Find` and `FindByText` took the lock, found a node, and
+returned a `*ModelNode` **pointer into the live replica**; the caller then read
+`Attrs` and `Children` after the lock was released. The race was moved one line
+further out and made invisible.
+
+`go test -race` reported six of them across three tests. None of this was ever
+going to show up in CI, because the end-to-end package is the one package the
+suite does not run under `-race` — it drives real browsers and the detector's
+slowdown does not fit the budget. Confirmed pre-existing rather than introduced:
+a control run on an untouched `e8813d7` produces five races and two failures
+with none of the branch's commits present.
+
+The accessors now hand back copies — `Node`, `ChildText`, `CSSRules`,
+`ScopedRules`, `Meta` — and `Find`/`FindByText` clone before returning.
+`EachNode` exists for the walks that genuinely want every node, and calls back
+under the read lock with a pointer the caller is told not to retain. Copying is
+affordable precisely because these are test and tooling accessors: they answer a
+question about one node, at human speed, beside a link that costs a second.
+
+The same three tests now report zero races.
+
+This is worth keeping in mind next to §30 and §35: a guard that is correct in
+the middle and open at both ends is the shape all three of those bugs share.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

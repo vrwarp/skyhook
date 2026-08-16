@@ -52,7 +52,7 @@ func TestAgentAndReplicaAgreeOnTheDocumentHash(t *testing.T) {
 			if replica := cl.Model(tab).Hash(); replica != landside {
 				t.Fatalf("replica hash %#x != agent hash %#x over %d nodes: the"+
 					" integrity check will re-snapshot this page every thirty seconds",
-					replica, landside, len(cl.Model(tab).Nodes))
+					replica, landside, cl.Model(tab).NodeCount())
 			}
 		})
 	}

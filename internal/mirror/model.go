@@ -341,6 +341,123 @@ func (m *Model) HTML() string {
 	return b.String()
 }
 
+/*
+clone is why every accessor here hands back a copy.
+
+The lock this type carries only guards the walk. A method that returned a
+*ModelNode out of `Nodes` handed the caller a pointer into the live replica and
+then released the lock, so the caller read `Attrs` and `Children` while the
+frame loop was writing them — the same "concurrent map read and map write" the
+mutex was added to prevent, moved one line further out and no longer visible.
+
+Copying is affordable because these are test and tooling accessors: they answer
+a question about one node, at human speed, next to a link that costs a second.
+*/
+func (n *ModelNode) clone() *ModelNode {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	if n.Attrs != nil {
+		c.Attrs = make(map[string]string, len(n.Attrs))
+		for k, v := range n.Attrs {
+			c.Attrs[k] = v
+		}
+	}
+	c.Children = append([]int64(nil), n.Children...)
+	return &c
+}
+
+// Stylesheet returns the document's rules joined into one sheet.
+func (m *Model) Stylesheet() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return strings.Join(m.CSS, "\n")
+}
+
+// CSSRules returns a copy of the document's rules.
+func (m *Model) CSSRules() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]string(nil), m.CSS...)
+}
+
+// ScopedRules returns a copy of every shadow root's own rules, keyed by the
+// root's node id.
+func (m *Model) ScopedRules() map[int64][]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[int64][]string, len(m.Scoped))
+	for id, rules := range m.Scoped {
+		out[id] = append([]string(nil), rules...)
+	}
+	return out
+}
+
+// Meta is the tab-level state the replica carries beside the tree.
+type Meta struct {
+	URL   string
+	Title string
+	Seq   uint64
+}
+
+// Meta reads the replica's URL, title and sequence together, under the lock.
+func (m *Model) Meta() Meta {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return Meta{URL: m.URL, Title: m.Title, Seq: m.Seq}
+}
+
+// Node returns a copy of one node, or nil if the replica has no such id.
+func (m *Model) Node(id int64) *ModelNode {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.Nodes[id].clone()
+}
+
+// NodeCount is how many nodes the replica holds.
+func (m *Model) NodeCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.Nodes)
+}
+
+// ChildText joins the text of a node's immediate children, which is what a
+// fixture assertion usually means by "what does this element say".
+func (m *Model) ChildText(id int64) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := m.Nodes[id]
+	if n == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range n.Children {
+		if child := m.Nodes[c]; child != nil {
+			b.WriteString(child.Text)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// EachNode calls fn for every node, under the replica's lock, in id order. The
+// node passed in must not be retained: it stops being safe to read the moment
+// fn returns.
+func (m *Model) EachNode(fn func(n *ModelNode) bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ids := make([]int64, 0, len(m.Nodes))
+	for id := range m.Nodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		if n := m.Nodes[id]; n != nil && !fn(n) {
+			return
+		}
+	}
+}
+
 // Find returns the first node matching a tag and attribute value.
 func (m *Model) Find(tag, attr, value string) *ModelNode {
 	m.mu.RLock()
@@ -356,10 +473,10 @@ func (m *Model) Find(tag, attr, value string) *ModelNode {
 			continue
 		}
 		if attr == "" {
-			return n
+			return n.clone()
 		}
 		if v, ok := n.Attrs[attr]; ok && (value == "" || v == value) {
-			return n
+			return n.clone()
 		}
 	}
 	return nil
@@ -395,7 +512,7 @@ func (m *Model) FindByText(substr string) *ModelNode {
 		return text
 	}
 	walk(m.Root)
-	return best
+	return best.clone()
 }
 
 // AncestorWithAttr reports whether a node or any ancestor of it carries an

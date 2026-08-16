@@ -76,7 +76,7 @@ func TestLateCustomElementUpgradeReachesTheMirror(t *testing.T) {
 	if _, ok := never.Attrs["data-sky-undefined"]; !ok {
 		t.Errorf("un-upgraded element is not marked as such: %+v", never.Attrs)
 	}
-	if css := strings.Join(cl.Model(tab).CSS, "\n"); !strings.Contains(css, ".placeholder[data-sky-undefined]") {
+	if css := cl.Model(tab).Stylesheet(); !strings.Contains(css, ".placeholder[data-sky-undefined]") {
 		t.Errorf("the :not(:defined) placeholder rule did not arrive rewritten: %q", css)
 	}
 
@@ -108,7 +108,7 @@ func TestLateCustomElementUpgradeReachesTheMirror(t *testing.T) {
 	// before this could match nothing plane-side at all.
 	deadline := time.Now().Add(budget(20 * time.Second))
 	for {
-		css := strings.Join(cl.Model(tab).CSS, "\n")
+		css := cl.Model(tab).Stylesheet()
 		if strings.Contains(css, "late-card:not([data-sky-undefined])") {
 			break
 		}
