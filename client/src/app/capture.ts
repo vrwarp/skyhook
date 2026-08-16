@@ -234,9 +234,31 @@ async function screenshot(frame: MirrorFreeze): Promise<Shot> {
     notes.push(`the page is ${full}px tall; the screenshot is the top ${height}px`);
   }
 
+  // The wrapper stands in for the mirror frame's <body>, and has to be the size
+  // of one. Everything in the document below it resolves its percentage heights
+  // against this box, exactly as it resolves them against the frame's body when
+  // the reader is looking at it — so a wrapper with a width and no height is an
+  // auto-height box in the one position where the whole web puts a definite
+  // one. `html, body { height: 100% }` then computes to auto, every descendant
+  // that asked for 100% collapses to its content, and the picture is a header
+  // and a screenful of white.
+  //
+  // That is the same bug the patcher had, in the same shape, one layer along:
+  // there a wrapper <div> held the mirrored root, and it was fixed by holding
+  // the tree in a DocumentFragment instead. A fragment is no use here, because
+  // this markup has to be serialised into a foreignObject and that needs a
+  // single element to serialise. So the box stays and is given the height it
+  // stands for.
+  //
+  // Worth stating plainly, because it inverts the trap in §25: the diagnostic
+  // rendered the collapse and the reader's own frame did not, so the bundle
+  // reported a broken page to someone whose screen was fine — and a capture
+  // that disagrees with the reader is read as the reader being wrong.
+  const viewport = Math.max(frame.height, 1);
+
   const wrapper = parsed.createElement('div');
   wrapper.setAttribute('style',
-    `width:${width}px; background:#fff; color:#111; font:14px system-ui, sans-serif;`);
+    `width:${width}px; height:${viewport}px; color:#111; font:14px system-ui, sans-serif;`);
   for (const style of Array.from(parsed.head?.querySelectorAll('style') ?? [])) {
     wrapper.appendChild(style.cloneNode(true));
   }
@@ -244,7 +266,12 @@ async function screenshot(frame: MirrorFreeze): Promise<Shot> {
   makeXMLSafe(wrapper);
 
   const markup = new XMLSerializer().serializeToString(wrapper);
+  // The page's white now comes from the SVG rather than from the wrapper. A
+  // wrapper sized to the viewport no longer covers a document taller than one,
+  // and a shot of a long page that faded to transparent below the fold would be
+  // a new way to lie about the same thing.
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">`
+    + `<rect x="0" y="0" width="${width}" height="${height}" fill="#fff"/>`
     + `<foreignObject x="0" y="0" width="${width}" height="${height}">${markup}</foreignObject>`
     + '</svg>';
 

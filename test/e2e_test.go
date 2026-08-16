@@ -744,10 +744,16 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			  html, body { height: 100%; margin: 0 }
 			  #app { height: 100% }
 			  #header { height: 40px }
-			  #main { height: calc(100% - 40px) }
+			  #main { height: calc(100% - 40px); display: flex; align-items: flex-end }
+			  /* Anchored to the bottom of the viewport, and only reachable there
+			     if the height chain survived. A collapsed #main carries it up
+			     under the header instead, which is the difference a picture of
+			     this page can be asked about. */
+			  #foot { height: 24px; width: 100%; background: rgb(9,9,9) }
 			</style></head>
 			<body>
-			<div id="app"><div id="header">bar</div><div id="main">measure me</div></div>
+			<div id="app"><div id="header">bar</div>
+			  <div id="main">measure me<div id="foot"></div></div></div>
 			</body></html>`)
 	})
 	// A frame whose document lays out taller than the box the page gave it.

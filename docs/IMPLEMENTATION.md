@@ -1546,6 +1546,50 @@ had to learn to descend through the root. That is not a cost of the change so
 much as a measure of it: every one of them was written against a tree where the
 boundary did not exist.
 
+
+### 35. The capture drew the collapse the reader did not have
+
+[§30](#30-the-mirrors-own-wrapper-was-breaking-every-full-height-layout) took a
+wrapper `<div>` out from under the mirrored root, because an auto-height box in
+that position collapses every `height: 100%` beneath it. The rasteriser has a
+wrapper of its own, and it was still there.
+
+`screenshot()` serialises the frozen mirror into an SVG `foreignObject`, and
+that needs one element to serialise — so the document's children are moved into
+a `<div>` carrying the page's background and default font. That div is the
+frame's `<body>` as far as everything below it can tell, and it was given a
+width and no height. The same collapse, one layer along, surviving the fix
+because it is separate code that happens to make the same mistake.
+
+What made it expensive is the direction it lies in. §25 recorded the trap where
+every diagnostic path rendered in standards mode, so the bundle's own picture
+showed a working reCAPTCHA to someone looking at a broken one. This is that trap
+inverted: Chat had been fixed, the reader's screen was fine, and the capture
+reported a header and a screenful of white. Two captures and a long
+investigation went into a mirror that was already correct — the DOM agreed, the
+1251-node fingerprints agreed row for row, the 2592 stylesheet rules agreed but
+for three `skyhook://` to `blob:` image rewrites, and laying the client's own
+serialised document out reproduced the page perfectly. Everything the bundle
+contained was healthy; only the bundle's picture was not.
+
+The wrapper is now given the height it stands for — the frame's viewport, which
+is the box the document really resolves against when the reader is looking at
+it. A `DocumentFragment`, which is what fixed the patcher, is no use here
+because the markup has to be serialised.
+
+The page's white moved from the wrapper to a `<rect>` under the
+`foreignObject`. A wrapper sized to the viewport no longer covers a document
+taller than one, and a shot of a long page fading to transparent below the fold
+would have been a new way to lie about the same thing.
+
+`TestPWACapturePicturesAFullHeightPage` asserts it, and the assertion has to be
+about *where* the ink is. `hasInk` cannot see this failure at all: the header
+renders either way, so the picture is never one flat colour. The fixture anchors
+a dark bar to the bottom of a full-height layout — somewhere it can only be if
+the chain survived — and the test looks for it in the bottom eighth of the shot.
+Against the old wrapper it fails with the bar missing from a 90px strip that is
+nothing but white.
+
 ## Known gaps
 
 These are unbuilt or thin, and are honest to-dos rather than deviations:

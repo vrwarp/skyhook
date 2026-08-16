@@ -573,3 +573,101 @@ func TestPWACapturePicturesTheContentOfAnInlinedFrame(t *testing.T) {
 			"frame's document was flattened out of the picture", widgetRGB, img.Bounds())
 	}
 }
+
+/*
+A picture of a full-height page has to be a picture of the page.
+
+The rasteriser serialises the frozen mirror into an SVG foreignObject, and to do
+that it needs a single element to serialise — so the document's children are
+moved into a wrapper <div>. That wrapper is the frame's <body> as far as the
+document below it can tell, and for a long time it was given a width and no
+height. Every full-height layout on the web resolves its percentages against
+that box: `html, body { height: 100% }` computed to auto, everything asking for
+100% collapsed to its content, and the shot came out as a header and a screenful
+of white.
+
+It is the same defect the patcher had, one layer along, and it outlived the
+patcher's fix because the two are separate code. What made it expensive is the
+direction it lies in. §25 records the trap where every diagnostic rendered in
+standards mode and so showed a working page to someone looking at a broken one;
+this is that trap inverted — the bundle showed a collapsed page to a reader
+whose screen was fine, and a capture that disagrees with the reader is read as
+the reader being wrong. A whole investigation was spent on a mirror that turned
+out to be correct.
+
+hasInk cannot see this: the header renders either way, so the picture is never
+one flat colour. The fixture answers it by anchoring a dark bar to the bottom of
+the viewport, somewhere it can only be if the chain survived. Collapsed, the bar
+rides up under the header and the bottom of the shot is empty white.
+*/
+func TestPWACapturePicturesAFullHeightPage(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(240*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/full-height"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('measure me')`,
+		budget(60*time.Second), "the mirrored page")
+
+	evalJSON(ctx, t, page, `(() => { document.dispatchEvent(new KeyboardEvent('keydown',
+		{ key: 'D', ctrlKey: true, shiftKey: true, bubbles: true })); return true; })()`, nil)
+	waitFor(ctx, t, page, `document.getElementById('capture').open === true`,
+		budget(10*time.Second), "the capture dialog")
+	evalJSON(ctx, t, page, `(() => {
+		document.getElementById('capture-note').value = 'the page below the header is white';
+		document.getElementById('capture-form').dispatchEvent(
+			new Event('submit', { bubbles: true, cancelable: true }));
+		return true; })()`, nil)
+
+	files := openBundle(t, waitForCapture(t, h.captureDir, budget(120*time.Second)))
+	shot := files["planeside/tabs/1/screenshot.webp"]
+	if len(shot) == 0 {
+		t.Fatalf("the plane side sent no screenshot; bundle holds %v\nnotes: %s",
+			names(files), files["NOTES.txt"])
+	}
+	img, err := webp.Decode(bytes.NewReader(shot))
+	if err != nil {
+		t.Fatalf("the plane-side screenshot does not decode: %v", err)
+	}
+
+	// The bar is the bottom 24px of the viewport; allow for the encoder and for
+	// the shot being cropped or scaled by looking at the bottom eighth.
+	b := img.Bounds()
+	foot := image.Rect(b.Min.X, b.Max.Y-b.Dy()/8, b.Max.X, b.Max.Y)
+	if !hasColour(img, color.RGBA{R: 9, G: 9, B: 9, A: 255}) {
+		t.Errorf("the fixture's marker is nowhere in the plane-side screenshot (%v)", b)
+	}
+	if !regionHasColour(img, foot, color.RGBA{R: 9, G: 9, B: 9, A: 255}) {
+		t.Errorf("the bottom of the plane-side screenshot (%v of %v) is empty: the "+
+			"page's height:100%% chain collapsed while it was being rasterised, so "+
+			"the picture shows a header and white where the reader has a full page",
+			foot, b)
+	}
+}
+
+// regionHasColour is hasColour over part of a picture, which is how a shot that
+// rendered the right pixels in the wrong place is told from one that did not
+// render them at all.
+func regionHasColour(img image.Image, r image.Rectangle, want color.RGBA) bool {
+	wr, wg, wb := uint32(want.R)<<8, uint32(want.G)<<8, uint32(want.B)<<8
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		for x := r.Min.X; x < r.Max.X; x++ {
+			cr, cg, cb, _ := img.At(x, y).RGBA()
+			if absDiff(cr, wr)+absDiff(cg, wg)+absDiff(cb, wb) < 12000 {
+				return true
+			}
+		}
+	}
+	return false
+}
