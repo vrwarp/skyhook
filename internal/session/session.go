@@ -86,6 +86,22 @@ type tabState struct {
 	checkSeq   uint64
 	checkGot   bool
 	checkHash  uint64
+	// The last resync served for this tab, and when. A client that is behind
+	// asks again for every frame that arrives while it is behind, which on a
+	// busy page is faster than any answer can reach it. See resyncCooldown.
+	lastResyncFrom uint64
+	lastResyncAt   time.Time
+	// lastResyncSnapshot says the answer already on its way is a whole
+	// document. While one is in flight nothing the client asks for is answered
+	// better by a second one — and a client that is behind keeps asking, with
+	// its haveTo creeping forward as it applies what it already had, so each
+	// request looks new while every one of them is about to be satisfied by the
+	// document already on the link.
+	lastResyncSnapshot bool
+	// resyncDropped counts the repeats that were ignored. It rides into a
+	// capture because a storm that is being absorbed correctly is invisible
+	// otherwise, and "the link went quiet" is the report it would arrive as.
+	resyncDropped int
 }
 
 type outbound struct {
@@ -302,6 +318,32 @@ func (s *Session) EmitFrame(ch protocol.Channel, f *protocol.Frame) {
 		}
 	}
 	s.enqueue(outbound{ch: ch, msg: msg}, ch == protocol.ChMedia)
+}
+
+/*
+replayFrame sends a frame the client was already meant to have.
+
+Deliberately not EmitFrame. That records what the tab has *produced* — into the
+replay ring, the frame journal and the compression trainer — and a replay
+produces nothing: it is the same frame, going out a second time, because the
+first one did not land.
+
+Sending replays through EmitFrame put every replayed frame back into the ring it
+had just been read from, so the ring held each frame twice and the next resync
+from the same point returned twice as many. On one Reddit session that ran
+8 → 16 → 32 → 64 frames and 16 kB → 33 kB → 66 kB → 141 kB against an unmoving
+haveTo, every doubling of it re-sent over a link the client was already behind
+on, and every byte of it discarded plane-side as a duplicate. A repair that
+grows geometrically each time it fails to repair anything is worse than no
+repair at all.
+*/
+func (s *Session) replayFrame(f *protocol.Frame) {
+	msg, err := s.codec.EncodeFrame(protocol.ChDom, f)
+	if err != nil {
+		s.log.Error("replay encode failed", "err", err)
+		return
+	}
+	s.enqueue(outbound{ch: protocol.ChDom, msg: msg}, false)
 }
 
 func (s *Session) enqueue(m outbound, dropIfOffline bool) {
@@ -600,46 +642,112 @@ func (s *Session) Ack(tab uint32, seq uint64, hash uint64) {
 	s.touch()
 }
 
+// maxReplayBytes is the point past which replaying costs more than the document
+// does. The choice is made on bytes, because at 250 kbps that is the only
+// currency that matters.
+const maxReplayBytes = 256 << 10
+
+/*
+resyncCooldown is how long a tab ignores a repeat request for ground it has
+already covered.
+
+A client that has fallen behind asks for a resync on *every* frame that arrives
+while it is behind, and on a page that mutates faster than the link drains —
+which is the case this whole project is about — that is far faster than any
+answer can reach it. One Reddit session asked seventy-eight times in three
+milliseconds, from the same haveTo, and was answered seventy-eight times.
+
+Longer than a round trip on the link this targets, because the request that
+matters is the one sent after the answer arrived. A repeat inside that window is
+not new information; it is the same client asking again before it could possibly
+have heard.
+*/
+const resyncCooldown = 2 * time.Second
+
+// resyncPlan is how one resync request will be answered.
+type resyncPlan struct {
+	snapshot bool
+	frames   []*protocol.Frame
+	bytes    int
+}
+
+/*
+planResync decides between replaying and re-snapshotting.
+
+Separated from doing it because the decision is the part with the history. A
+replay of nothing was previously treated as a successful replay for every reason
+but one, and it repairs nothing by construction: the client said it is missing
+frames, the ring has none to give, and the server logged "resync by replay
+frames=0" and did nothing at all. The client then asked again on the very next
+mutation, forever — the storm above.
+
+Only hash-mismatch was excluded, and the reasoning for leaving the rest alone
+was that "coming back with nothing missed is the good case, and it must stay
+free". That case never reaches here: a client that reconnects with nothing
+missing sends no resync at all, and one resuming a tab it does not hold sends
+`cold`, which asks for a snapshot outright. So a request that arrives here and
+finds an empty ring is always a client that cannot be repaired by replay.
+*/
+func planResync(ring *Ring, haveTo uint64, reason string) resyncPlan {
+	// A client with nothing (a cold resume, or a replica it had to throw away)
+	// cannot apply diffs: only a snapshot puts it back in business.
+	if haveTo == 0 || reason == "cold" || reason == "apply-failed" {
+		return resyncPlan{snapshot: true}
+	}
+	frames, size, ok := ring.Since(haveTo)
+	switch {
+	case !ok:
+		// The frames it needs have already been dropped.
+		return resyncPlan{snapshot: true}
+	case len(frames) == 0:
+		return resyncPlan{snapshot: true}
+	case size >= maxReplayBytes:
+		return resyncPlan{snapshot: true}
+	}
+	return resyncPlan{frames: frames, bytes: size}
+}
+
 // Resync closes a gap: replay if the buffer covers it, otherwise re-snapshot.
-// The choice is made on bytes, because at 250 kbps that is the only currency
-// that matters.
 func (s *Session) Resync(ctx context.Context, tab uint32, haveTo uint64, reason string) {
 	s.mu.Lock()
 	ts := s.tabs[tab]
-	s.mu.Unlock()
 	if ts == nil {
+		s.mu.Unlock()
 		return
 	}
-	// A client with nothing (a cold resume, or a replica it had to throw away)
-	// cannot apply diffs: only a snapshot puts it back in business.
-	cold := haveTo == 0 || reason == "cold" || reason == "apply-failed"
-	frames, size, ok := ts.ring.Since(haveTo)
-	// A replay of nothing cannot repair a proven divergence. The integrity check
-	// only calls here once it has compared two hashes and found them different,
-	// and if the ring has nothing past what the client acknowledged then the two
-	// sides differ over something no diff can express — a document the client
-	// never saw at all. Replaying zero frames leaves it diverged, to be noticed
-	// again in thirty seconds, and again, for as long as the session lives.
-	//
-	// A reconnect is not this: coming back with nothing missed is the good case,
-	// and it must stay free.
-	if len(frames) == 0 && reason == "hash-mismatch" {
-		cold = true
+	// Already answered, and the answer is still in the air: either this exact
+	// request, or any request at all while a whole document is on its way.
+	if !ts.lastResyncAt.IsZero() && time.Since(ts.lastResyncAt) < resyncCooldown &&
+		(haveTo == ts.lastResyncFrom || ts.lastResyncSnapshot) {
+		ts.resyncDropped++
+		dropped, snap := ts.resyncDropped, ts.lastResyncSnapshot
+		s.mu.Unlock()
+		s.log.Debug("ignoring a resync the client cannot have heard the answer to yet",
+			"tab", tab, "haveTo", haveTo, "reason", reason,
+			"snapshotInFlight", snap, "ignored", dropped)
+		return
 	}
-	if !cold && ok && size < 256<<10 {
-		s.log.Info("resync by replay", "tab", tab, "frames", len(frames), "bytes", size, "reason", reason)
+	ts.lastResyncFrom, ts.lastResyncAt = haveTo, time.Now()
+	s.mu.Unlock()
+
+	plan := planResync(ts.ring, haveTo, reason)
+	s.mu.Lock()
+	ts.lastResyncSnapshot = plan.snapshot
+	s.mu.Unlock()
+	if !plan.snapshot {
+		s.log.Info("resync by replay", "tab", tab, "frames", len(plan.frames), "bytes", plan.bytes, "reason", reason)
 		s.events.Add("resync", tab, map[string]any{
 			"how": "replay", "reason": reason, "haveTo": haveTo,
-			"frames": len(frames), "bytes": size,
+			"frames": len(plan.frames), "bytes": plan.bytes,
 		})
-		for _, f := range frames {
-			s.EmitFrame(protocol.ChDom, f)
+		for _, f := range plan.frames {
+			s.replayFrame(f)
 		}
 		return
 	}
 	s.log.Info("resync by snapshot", "tab", tab, "reason", reason)
 	s.events.Add("resync", tab, map[string]any{
-		"how": "snapshot", "reason": reason, "haveTo": haveTo, "cold": cold,
+		"how": "snapshot", "reason": reason, "haveTo": haveTo, "cold": true,
 	})
 	if err := ts.tab.Snapshot(ctx); err != nil {
 		s.log.Warn("resnapshot failed", "tab", tab, "err", err)
