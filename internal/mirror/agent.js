@@ -707,7 +707,44 @@
 
   // ------------------------------------------------------------------ used CSS
 
-  var PSEUDO_RE = /::?(?:hover|active|focus(?:-visible|-within)?|visited|link|target|checked|disabled|enabled|placeholder|before|after|first-line|first-letter|selection|marker|backdrop|-webkit-[a-z-]+|-moz-[a-z-]+)(?:\([^)]*\))?/gi;
+  /*
+   * What has to come out of a selector before the document can be asked about
+   * it, in two kinds.
+   *
+   * A pseudo-*element* is not an element: `querySelector` parses one and then
+   * matches nothing, for every selector that has one, for ever. So the question
+   * that decides the rule is whether the element it hangs off is on the page,
+   * and the pseudo-element itself has to go — whichever one it is. Naming them
+   * instead of recognising the `::` was the older way and it aged badly: the
+   * platform kept adding them, and each new one arrived as a rule that matched
+   * nothing landside and was dropped. `::view-transition-old(root)`,
+   * `input::file-selector-button` and `p::spelling-error` were all being thrown
+   * away for saying no to a question they cannot answer yes to.
+   *
+   * A pseudo-*class* is a live state, and only the ones whose answer differs on
+   * the two sides come out. Plane-side the reader has their own pointer, their
+   * own focus and their own text in the fields, so `:hover`, `:focus` and
+   * `:placeholder-shown` are all questions the landside document answers for
+   * itself and not for the reader. The rest stay in and do their job of
+   * rejecting rules nothing wants.
+   *
+   * Two guards keep the names straight, and both were paid for.
+   *
+   * `(?![-\w])` keeps a name from matching the front of a longer one. Without
+   * it `:placeholder-shown` matched `:placeholder` and left `-shown` behind, so
+   * `input:placeholder-shown` went to the document as `input-shown` — an
+   * element type nothing is — and a float-label form lost every rule that
+   * positions its labels.
+   *
+   * `(?<!\\)` keeps a colon that is part of a name from being read as the colon
+   * that introduces one. A class may be called `field:hover`, and is written
+   * `.field\:hover`; stripping the tail off that leaves `.field\`, which is not
+   * a selector at all and which the presence index reads as a class named
+   * `field` that nothing on the page carries. See readIdent, which resolves the
+   * same escapes for the same reason.
+   */
+  var PSEUDO_ELEMENT_RE = /(?<!\\)::[-\w]+(?:\([^)]*\))?/g;
+  var PSEUDO_CLASS_RE = /(?<!\\):(?:hover|active|focus-visible|focus-within|focus|visited|link|target|checked|disabled|enabled|placeholder-shown|placeholder|autofill|before|after|first-line|first-letter|selection|marker|backdrop|-webkit-[-\w]+|-moz-[-\w]+)(?![-\w])(?:\([^)]*\))?/gi;
 
   // scanSelString returns the index just past the string literal opening at i.
   function scanSelString(str, i) {
@@ -763,9 +800,10 @@
           || p.indexOf('::slotted(') >= 0) {
         return null;
       }
-      var part = p.replace(PSEUDO_RE, '').trim();
-      // A selector that was nothing but a pseudo (":root::before") degrades to
-      // an empty part; keep such rules rather than risk dropping layout.
+      var part = p.replace(PSEUDO_ELEMENT_RE, '').replace(PSEUDO_CLASS_RE, '').trim();
+      // A selector that was nothing but a pseudo (":root::before",
+      // "::view-transition-old(root)") degrades to an empty part; keep such
+      // rules rather than risk dropping layout.
       if (!part) return null;
       parts.push(part);
     }
@@ -1169,14 +1207,85 @@
               noteRejected('@font-face ' + (fam || '?'));
             }
             break;
+          case 3: // import
+            collectImport(doc, rule, out, depth, base);
+            break;
           default:
-            if (rule.cssText && rule.cssText.charAt(0) === '@' &&
-                rule.cssText.indexOf('@import') !== 0) {
+            if (rule.cssText && rule.cssText.charAt(0) === '@') {
               out.push(absolutizeCSSURLs(rule.cssText, base));
             }
         }
       } catch (e) { /* cross-origin sheet, skip */ }
     }
+  }
+
+  /*
+   * collectImport follows an `@import` into the sheet it names.
+   *
+   * An imported sheet is nowhere else. `document.styleSheets` lists the sheets
+   * the document owns — a <link>, a <style> — and an imported one has no owner
+   * node, so it is not in that list and no walk of it will ever reach the
+   * rules. The import rule itself carried nothing but the address, and the
+   * address was skipped as an at-rule the client could not act on, so a site
+   * that imports its design system shipped the import and lost the sheet: all
+   * of it, silently, with the filter reporting nothing rejected because it was
+   * never asked.
+   *
+   * `styleSheet` is the way in, and it is a real sheet with a real href, so the
+   * rules resolve their url() against their own address rather than against the
+   * importer's. A cross-origin import cannot be read, which is the same
+   * position a cross-origin <link> is in and gets the same answer: name it to
+   * the host, which can read it over the protocol and hand the text back.
+   *
+   * The conditions an import may carry — `@import url(x) layer(a) supports(b)
+   * print` — are exactly the group at-rules the sheet would have been wrapped
+   * in had it been written inline, so that is what they become, innermost
+   * first.
+   */
+  function collectImport(doc, rule, out, depth, base) {
+    var href = null;
+    try { href = rule.href; } catch (e) { href = null; }
+    var abs = href;
+    if (href) {
+      try { abs = new URL(href, base).href; } catch (e) { abs = href; }
+    }
+    var sheet = null;
+    try { sheet = rule.styleSheet; } catch (e) { sheet = null; }
+    var rules = null;
+    if (sheet) {
+      try { rules = sheet.cssRules; } catch (e) { rules = null; } // cross-origin
+    }
+    if (!rules && abs) {
+      var sub = recoveredSheets.get(abs);
+      if (sub) {
+        try { rules = sub.cssRules; } catch (e) { rules = null; }
+      } else if (!blockedSheets[abs]) {
+        blockedSheets[abs] = 1;
+        blockedNew = true;
+      }
+    }
+    if (!rules) return;
+    var inner = [];
+    var sheetHref = null;
+    try { sheetHref = sheet && sheet.href; } catch (e) { sheetHref = null; }
+    collectRules(doc, rules, inner, depth + 1, sheetHref || abs || base);
+    if (!inner.length) return;
+    var text = inner.join('');
+    var media = '';
+    try { media = (rule.media && rule.media.mediaText) || ''; } catch (e) { media = ''; }
+    if (media && media !== 'all') text = '@media ' + media + '{' + text + '}';
+    var supports = null;
+    try { supports = rule.supportsText; } catch (e) { supports = null; }
+    if (supports) text = '@supports ' + supports + '{' + text + '}';
+    // A layer name of '' is the anonymous layer, which is not the same as no
+    // layer at all: `@layer{…}` opens one, and where the import asked for one
+    // the rules have to stay in it or they outrank everything in the cascade.
+    var layer = null;
+    try { layer = rule.layerName; } catch (e) { layer = null; }
+    if (typeof layer === 'string') {
+      text = '@layer ' + (layer ? layer + '{' : '{') + text + '}';
+    }
+    out.push(text);
   }
 
   function collectSheets(doc, sheets, out) {

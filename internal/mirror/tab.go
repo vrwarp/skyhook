@@ -188,6 +188,10 @@ type Tab struct {
 	// three times; every pass re-reads the list, so waiting for the one ahead
 	// costs nothing and running alongside it would fetch the same sheet twice.
 	sheetMu sync.Mutex
+	// prunedVars holds the custom-property declarations the snapshot's prune
+	// took out, in the order it took them, against the rule that may yet ask for
+	// one. See restorePrunedVars.
+	prunedVars []prunedVar
 	// lastShot is the content hash of the last region shot sent for a node, so
 	// a canvas the reader did not change costs nothing to leave on screen.
 	lastShot map[int64]string
@@ -741,6 +745,38 @@ type agentScopedCSS struct {
 	Rules []string `json:"rules"`
 }
 
+/*
+scopedCSSText is every shadow root's rules alongside strings, for the pass that
+decides which custom properties are read.
+
+Custom properties are the one thing that crosses a shadow boundary: a component
+declares none of its palette and reads all of it — `color:var(--brand)` — from
+whatever the page around it set. That is not a leak, it is the mechanism, and
+it is the reason a component library can be themed at all.
+
+The document's bundle and a shadow root's are separate sheets, though, and the
+prune ran over the document's alone. A property declared in `:root` and read
+only from inside a component was therefore read nowhere the pass could see, so
+it was dropped — and the component came through with its structure, its layout
+and its own rules intact, drawing every colour it had from a property that no
+longer existed. `var(--brand)` with nothing behind it is not a fallback to the
+old value; it is the property's initial value, which is nothing at all.
+*/
+func scopedCSSText(scoped []agentScopedCSS, attrs []string) []string {
+	n := len(attrs)
+	for _, sc := range scoped {
+		n += len(sc.Rules)
+	}
+	// A fresh slice, not attrs extended: attrs is the snapshot's intern table
+	// and appending to it in place would write into the frame's own strings.
+	out := make([]string, 0, n)
+	out = append(out, attrs...)
+	for _, sc := range scoped {
+		out = append(out, sc.Rules...)
+	}
+	return out
+}
+
 type agentMutation struct {
 	Seq     uint64              `json:"seq"`
 	Strings []string            `json:"strings"`
@@ -823,12 +859,22 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	// value in the document — inline styles included. A custom property read
 	// only from a style attribute is read nowhere in the bundle, and pruning it
 	// would leave that element with no value at all.
-	css, cssImages := rewriteCSSImages(
-		stripUnusedVars(minifyCSS(s.CSS), s.Strings), s.URL, cssImageMaxDim)
+	//
+	// A shadow root's rules read the page's properties the same way and are just
+	// as far outside the document's own bundle: custom properties inherit
+	// through the shadow boundary, which is the whole mechanism a component is
+	// themed by. See scopedCSSText.
+	kept, pruned := stripUnusedVars(minifyCSS(s.CSS), scopedCSSText(s.Scoped, s.Strings))
+	css, cssImages := rewriteCSSImages(kept, s.URL, cssImageMaxDim)
+	t.mu.Lock()
+	// A new snapshot is a new document: whatever the last one pruned describes a
+	// sheet the client has just thrown away.
+	t.prunedVars = pruned
+	t.mu.Unlock()
 
 	// A scoped sheet goes through the same mill as the document's. Custom
-	// properties are not pruned there: a shadow sheet reads plenty it does not
-	// declare, from the page around it, and deciding otherwise needs both
+	// properties are not pruned *from* it: a shadow sheet reads plenty it does
+	// not declare, from the page around it, and deciding otherwise needs both
 	// sheets in view at once.
 	var scoped []protocol.ScopedCSS
 	for _, sc := range s.Scoped {
@@ -888,6 +934,15 @@ func (t *Tab) emitMutation(m *agentMutation) {
 		}
 		ops = append(ops, op)
 	}
+	// Whatever this batch brought may read a property the snapshot's prune took
+	// out. Restored rules lead the batch, and belong to the document's own sheet
+	// whichever sheet asked for them: that is where they were declared, and a
+	// shadow root reads the page's properties without holding any of them.
+	if restored := t.restorePrunedVars(ops, m.Strings); len(restored) > 0 {
+		rules, reqs := rewriteCSSImages(restored, m.URL, cssImageMaxDim)
+		cssImages = append(cssImages, reqs...)
+		ops = append([]protocol.Op{{Op: protocol.OpStyle, Add: rules}}, ops...)
+	}
 	if len(ops) == 0 && len(m.Images) == 0 {
 		return
 	}
@@ -917,6 +972,75 @@ func (t *Tab) emitMutation(m *agentMutation) {
 	if titleChanged {
 		t.emitState(protocol.TabState{URL: m.URL, Title: m.Title})
 	}
+}
+
+/*
+restorePrunedVars returns the pruned declarations this batch has just given a
+reader, and forgets them.
+
+The prune is honest about the page it was shown: a rule that matches nothing is
+not in the bundle, so a property only that rule reads is read by nothing, and a
+themed app defines hundreds of properties for the handful a given screen wants.
+The trouble is only that a page does not stand still. The rule dressing a menu
+starts matching the moment the menu opens, and it arrives complete, naming a
+property that was deleted from the sheet before the reader ever clicked. `var()`
+with nothing behind it is not the old value — it is the property's initial
+value, which is nothing at all — so the menu lands unpainted and the sheet holds
+no trace of what it should have been.
+
+So the prune is deferred rather than final: what came out is held here, and the
+first frame that mentions one puts it back. Both places a reference can arrive
+are read — a rule in this batch, and an inline `style` attribute, which travels
+in the string table and reads properties no rule mentions.
+
+Cascade order survives it. Every declaration of a property is pruned together,
+because the prune is by property, so the ones coming back come back together in
+the order they were written; and being custom properties, where they land in the
+sheet does not decide their value — the selectors they carry do.
+*/
+func (t *Tab) restorePrunedVars(ops []protocol.Op, strs []string) []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.prunedVars) == 0 {
+		return nil
+	}
+	var wanted map[string]bool
+	note := func(s string) {
+		if !strings.Contains(s, "var(") {
+			return
+		}
+		for _, m := range cssVarUse.FindAllStringSubmatch(s, -1) {
+			if wanted == nil {
+				wanted = map[string]bool{}
+			}
+			wanted[m[1]] = true
+		}
+	}
+	for _, op := range ops {
+		if op.Op != protocol.OpStyle {
+			continue
+		}
+		for _, r := range op.Add {
+			note(r)
+		}
+	}
+	for _, s := range strs {
+		note(s)
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	var out []string
+	keep := t.prunedVars[:0]
+	for _, p := range t.prunedVars {
+		if wanted[p.Prop] {
+			out = append(out, p.Rule())
+			continue
+		}
+		keep = append(keep, p)
+	}
+	t.prunedVars = keep
+	return out
 }
 
 // FetchResource loads a URL through this tab's own browser, with the tab's

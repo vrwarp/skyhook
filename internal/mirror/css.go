@@ -514,11 +514,19 @@ func scanCSSString(s string, i int) int {
 //     the top of a bundle costs the page all of its styling.
 //
 // extra holds text outside the bundle that may still read a property: inline
-// style attributes travel with the DOM, not with the stylesheet, and a page
-// that sets `style="color:var(--brand)"` reads a property no rule mentions.
+// style attributes travel with the DOM, not with the stylesheet, and a shadow
+// root's rules are a sheet of their own. A page that sets
+// `style="color:var(--brand)"`, and a component whose sheet does, both read a
+// property no rule in this bundle mentions.
 //
-// It runs over a whole bundle, so it is a snapshot pass, not an incremental one.
-func stripUnusedVars(rules []string, extra []string) []string {
+// It runs over a whole bundle, so it is a snapshot pass, not an incremental
+// one — and "nothing reads it" is a fact about the page as it stands at that
+// moment. A rule that matches nothing yet is not in the bundle to be read from,
+// so the property it wants looks dead; when the page opens the menu that rule
+// dresses, the rule arrives and the property has to be able to come back. What
+// was taken out is returned alongside what was kept, for whoever holds the
+// tab's later frames. See Tab.restorePrunedVars.
+func stripUnusedVars(rules []string, extra []string) ([]string, []prunedVar) {
 	used := map[string]bool{}
 	note := func(s string) {
 		if !strings.Contains(s, "var(") {
@@ -536,6 +544,7 @@ func stripUnusedVars(rules []string, extra []string) []string {
 	}
 
 	out := make([]string, 0, len(rules))
+	var pruned []prunedVar
 	for _, r := range rules {
 		if !strings.Contains(r, "--") {
 			out = append(out, r)
@@ -549,6 +558,7 @@ func stripUnusedVars(rules []string, extra []string) []string {
 		kept := make([]string, 0, 8)
 		for _, decl := range splitDecls(body) {
 			if m := cssVarDecl.FindStringSubmatch(decl); m != nil && !used[m[1]] {
+				pruned = append(pruned, prunedVar{Prop: m[1], Head: head, Decl: decl})
 				continue
 			}
 			if strings.HasSuffix(decl, ":") {
@@ -561,7 +571,36 @@ func stripUnusedVars(rules []string, extra []string) []string {
 		}
 		out = append(out, head+"{"+strings.Join(kept, ";")+"}")
 	}
-	return out
+	return out, pruned
+}
+
+/*
+prunedVar is one custom-property declaration the prune took out, kept in case a
+rule that reads it turns up later.
+
+The declaration is held apart from its neighbours but remembers the selector it
+was written under, because that is what decides who gets the value: `:root` and
+`.theme` declaring the same property are two different answers, and putting a
+pruned one back under the wrong head would repaint half the page.
+
+Source order is the other half of that, and it is the order this is stored in.
+Every declaration of a given property is pruned together — the prune is by
+property, not by rule — so putting them back in the order they were taken keeps
+the cascade among them exactly as the page wrote it.
+*/
+type prunedVar struct {
+	Prop string // `--brand`
+	Head string // the selector the declaration was written under
+	Decl string // `--brand:#f60`
+}
+
+// Rule is the declaration written back out as a rule of its own.
+func (p prunedVar) Rule() string {
+	decl := p.Decl
+	if strings.HasSuffix(decl, ":") {
+		decl += " " // see minifyRule: an empty custom-property value
+	}
+	return p.Head + "{" + decl + "}"
 }
 
 // flatRule splits `sel{decls}` into its selector and body, reporting false for
