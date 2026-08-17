@@ -55,6 +55,16 @@ queue depth and the bytes actually spent. Middle-click a link for a background
 tab, and right-click anywhere for Skyhook's own menu — the browser's would act
 on the sandboxed frame rather than on the page it is showing.
 
+A page here is minutes wide, so the two ways of calling one off are worth
+knowing. The reload button becomes **stop** while a page is on its way (so does
+**Escape**), and stopping keeps the tab and whatever of it had arrived. Closing the tab is the
+harder version: the tab's landside page is torn down, the call it was waiting on
+is cancelled, and every byte it still had queued is dropped rather than spent —
+which on this link is the difference between a link you get back now and one you
+get back in two minutes. A page loading in a background tab cannot starve the
+one you are reading either way; the scheduler rotates between tabs and puts the
+one on screen first.
+
 Press **★** (or Ctrl/⌘+D) to keep a page. Saved pages are one of the two ways of
 getting somewhere here that do not spend the link: the list is on your device,
 so it opens instantly, searches for free and stays readable through an outage —

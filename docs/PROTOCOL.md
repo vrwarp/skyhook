@@ -53,6 +53,18 @@ are already compressed.
 Priority is enforced by the server's outbound scheduler: a burst of image bytes
 can never delay a DOM diff or an acknowledgement.
 
+Within a priority class the scheduler is fair between *tabs*, rotating between
+one queue per tab rather than draining a single line. The tab the reader is
+looking at is served first and yields a turn every fourth frame, so a page
+loading in a background tab arrives slowly instead of arriving instead of the
+page being read. Order within a tab is preserved exactly — the intern table
+makes it load-bearing — and order between tabs guarantees nothing.
+
+Closing a tab discards whatever it still has queued, in every class. A close is
+the reader saying they are no longer willing to spend the link on that page, and
+on a link measured in seconds a queue is minutes; nothing is owed a repair
+afterwards because the document it belonged to is gone on both sides.
+
 ## Frames
 
 Every frame is a CBOR map with integer keys:
@@ -145,6 +157,13 @@ setValue(node, text, start, end)   non-append edits, IME results, masks
 submit(form, fields{})             one frame on submit, not per keystroke
 scroll(tab, x, y, h, docH)         telemetry: image priority and infinite-scroll
 ```
+
+Everything above drives the browser, and so is queued per tab landside and run
+off the connection's read loop: a `Page.navigate` that has not committed must
+not stop the client being heard in its other tabs. `navigate{action: "stop"}`
+and `TabClose` are the two exceptions, and are the reason for the queue as much
+as anything: both are about work already in flight, so both cancel it rather
+than waiting behind it.
 
 Every event carries `(seq, ts, expectDomSeq)`. Resulting mutation frames are
 tagged `causedByInput: seq`, which the client uses for latency measurement and

@@ -522,6 +522,17 @@ func (c *Client) Back(tab uint32) error {
 	return c.send(protocol.ChCtrl, protocol.TypeNavigate, tab, protocol.Navigate{Action: "back"})
 }
 
+// Stop calls off a page that is still coming, keeping the tab and whatever of
+// it has already arrived.
+func (c *Client) Stop(tab uint32) error {
+	return c.send(protocol.ChCtrl, protocol.TypeNavigate, tab, protocol.Navigate{Action: "stop"})
+}
+
+// CloseTab closes a tab.
+func (c *Client) CloseTab(tab uint32) error {
+	return c.send(protocol.ChCtrl, protocol.TypeTabClose, tab, nil)
+}
+
 // Click sends a semantic click.
 func (c *Client) Click(tab uint32, node int64) error {
 	c.inputSeq++

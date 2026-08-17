@@ -37,6 +37,15 @@ export interface TabListActions {
   /** Bring one to the front. The panel closes: the reader asked for a page. */
   select(id: number): void;
   close(id: number): void;
+  /**
+   * Call off a page that is still coming, keeping the tab and whatever of it
+   * has already arrived.
+   *
+   * This list is the only place a *background* tab can be stopped. The toolbar
+   * button acts on the tab in front of the reader, and the tab spending the
+   * link is exactly the one they have given up on and switched away from.
+   */
+  stop(id: number): void;
   /** A long press on a row, answered with the same menu the strip offers. */
   menu(id: number, x: number, y: number): void;
   open(): void;
@@ -92,7 +101,22 @@ export class TabList {
     row.tabIndex = 0;
     row.dataset.tab = String(tab.id);
 
-    if (tab.loading) row.appendChild(spinner());
+    // The spinner is the one thing in the row that is about the waiting, so it
+    // is what the reader reaches for to end it. A row that is not loading has
+    // nothing to stop and shows no target at all.
+    if (tab.loading) {
+      const stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'tabrow-stop';
+      stop.title = 'Stop loading';
+      stop.setAttribute('aria-label', `Stop loading ${tab.title || hostOf(tab.url) || 'this tab'}`);
+      stop.appendChild(spinner());
+      stop.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.actions.stop(tab.id);
+      });
+      row.appendChild(stop);
+    }
 
     const text = document.createElement('span');
     text.className = 'tabrow-text';

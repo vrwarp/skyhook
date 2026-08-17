@@ -1881,6 +1881,15 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   only against a stand-in authority in `internal/transport/acme_test.go`, never
   against Let's Encrypt, because a test that issues real certificates spends a
   real rate limit.
+- **A frame is only preemptible between messages.** The outbound scheduler is
+  fair between tabs and strict between channels, and both only get to choose at
+  message boundaries: a 200 kB snapshot handed to the socket occupies the link
+  for the six seconds it takes at 250 kbps, and a close arriving in second two
+  cannot take those bytes back. Capture artifacts are chunked at 32 kB for
+  exactly this reason ([§16](#16-diagnosing-the-split-renderer-needs-both-halves-at-the-same-instant));
+  dom frames are not, and chunking them means the patcher learning to apply half
+  a document, which the intern table makes more than a transport change. Until
+  then the honest bound on "kill a tab and get the link back" is one message.
 - **The document is delivered whole, not viewport-first.** A snapshot serialises
   the entire DOM, and only images are prioritised by viewport position. Both
   Menlo's Smart DOM and, twenty years earlier, OBML's pagination send what is
@@ -2414,6 +2423,104 @@ existing config is moved aside rather than overwritten. And the file it writes
 is run through `config.Load` — the same loader the server uses — before it is
 installed, because a setup program that produces a configuration the server then
 refuses would be worse than no setup program at all.
+
+### 41. One tab could take the whole browser, and killing it did not help
+
+From a capture taken on a phone: a 6.6 s round trip, 10.6 MB sent against 7.8 kB
+received, and a note that reads *"not a rendering problem but now the app isn't
+responsive when I tried to load reddit."* Nothing in it is a rendering problem.
+Four faults, and the last of them is why the first three could not be worked
+around.
+
+**The reader's own tab starved behind a tab they were not looking at.** The
+outbound scheduler is strict priority by channel, which is the right answer to
+"an image must not delay a diff" and no answer at all to "a tab must not delay a
+tab": inside a class it was one FIFO, so whichever tab filled it first was served
+first and completely. Reddit's snapshot and its mutations went in ahead of
+everything the read tab produced, and for the four minutes that took, that tab's
+`acked` stayed at 0 — through three clicks, until the server declared it stalled
+and resynced it. Each class now keeps a queue per tab and rotates between them.
+Per-tab order is preserved exactly, because a mutation's strings extend an
+append-only intern table by position; order between tabs never guaranteed
+anything. The tab in front of the reader goes first and yields every fourth
+frame, so a background page arrives slowly rather than not at all.
+
+**Closing a tab freed nothing.** `CloseTab` closed the browser target and told
+the client, and left every frame the tab had already encoded sitting in the send
+queues. The capture has the reader closing the offending tab at 02:14:10 and
+still waiting at 02:16:32. A close now discards that tab's queued frames in every
+class and logs what it took back, and the emit path turns away anything the
+mirror was still serialising for a tab that has gone. Nothing is owed a repair
+afterwards, which is exactly what distinguishes this from dropping frames for a
+tab that is still open: the document they belonged to is gone on both sides.
+
+The exception is the news that the tab closed, and it needed one — the emit path
+turns away *ctrl* traffic for a dead tab too, and it has to. A tab emits a last
+state frame as its target goes down, which arrives behind the close and says the
+tab is loading nothing, which is a tab that exists. It cost a test that failed
+one run in three to find, and it is the same shape as the plane-side bug below:
+everything about a closed tab has to stop, including the parts that look
+harmless.
+
+**A closed tab went on costing the client.** Plane-side, a frame for a tab the
+shell no longer held reached `hostFor`, which builds a mirror frame for a tab it
+does not know — so closing a tab put a fresh iframe back in the page and patched
+the dead tab's document into it, invisible, competing for the main thread with
+the tab that was kept. The worker had the worse half of it: a mutation for a tab
+it had no snapshot for is the definition of a cold client, so it asked for a
+resync and the server answered with a whole document for a page that had been
+closed. Both halves now remember what the reader closed. The worker drops those
+frames before decoding them, never acks or asks after them, and re-sends a close
+that could not be sent while the link was down — the tab used to come back from
+an outage the reader had already dismissed it in. The record is cleared when the
+session id changes, because a restarted server numbers its tabs from one again.
+
+**And the kill switch could not be heard.** This is the one that made the app
+unresponsive rather than merely slow. Every client frame was dispatched on the
+connection's read loop, in arrival order, and two of the calls that path makes
+have no deadline worth having: `Page.navigate` returns when the navigation
+commits, and a snapshot's `Runtime.evaluate` returns when the page's own main
+thread is free. The event log — which records a frame when it is dispatched —
+shows what that cost: reddit navigated at 02:12:28, and then **nothing at all
+for a hundred seconds**, from any tab, until it committed at 02:14:08. The
+reader spent that time pressing things. The close they eventually sent was in
+the same queue, behind the navigation it was meant to call off.
+
+Each tab now drains its own queue on its own goroutine and the reader's
+connection goes straight back to reading. Two frames go around that queue rather
+than into it, and they are exactly the two that are about work already in
+flight: `TabClose` cancels the tab's context outright, and `navigate{stop}`
+cancels whatever call is holding the queue before asking for `Page.stopLoading`.
+Cancelling the call is not cancelling the navigation — only `Page.stopLoading`
+does that — but it is what gives the stop a queue to go into.
+
+**Stop is also, finally, a button.** The wire and the landside half had carried
+`navigate{action: "stop"}` from the beginning and no chrome ever sent it, so the
+only way to end a page that was still coming was to close the tab and lose
+whatever had arrived. Reload becomes stop while a page is on its way, the way
+every browser has drawn it since 1994; the phone shell, which hides reload for
+room, draws it *only* while it is a stop; and the tab list — the only place a
+background tab can be reached — makes the spinner on a loading row the target
+that ends it. What has landed stays: the mirror is patched rather than replaced,
+so a page stopped half-drawn leaves a half-drawn page and not a blank one.
+
+`internal/session/sched_test.go` pins the scheduling and the purge — that a tab
+which queued sixteen frames first does not get served completely first, that the
+active tab takes most of the link and still yields, that a tab's own frames keep
+their order, that closing takes back that tab's frames and nobody else's, that
+the only thing left for a closed tab is the close itself, and that ctrl traffic
+queued during an outage is still there when the link returns.
+`internal/session/inbound_test.go` pins the dispatch path: a tab stuck in a call
+that will not return does not stop another tab's work, a stop ends what the tab
+is doing without ending the tab, and a close ends it outright.
+`client/test/killtab.test.ts` pins the plane side, and `test/stop_test.go` runs
+both through a real browser — including the button the reader actually presses.
+
+Each was checked against the code it guards: with one queue per class the
+starvation test reports the read tab waiting behind sixteen frames, with the
+purge removed the close leaves all thirteen frames queued, with dispatch inline
+the blocked-tab test times out, and without the interrupt the stop test waits
+out its thirty seconds on a page that never commits.
 
 ## Measured results
 

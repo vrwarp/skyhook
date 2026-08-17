@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -19,10 +20,18 @@ func armedTab(t *testing.T, s *Session, id uint32) *tabState {
 	// is not a client that disagreed — so there has to be one attached for the
 	// wait to mean anything.
 	s.Attach(newFakeConn())
-	ts := &tabState{ring: NewRing(1 << 20), journal: NewJournal(0)}
+	// The same shape OpenTab builds, minus the browser: a tab is its queue and
+	// the goroutine draining it as much as it is its ring.
+	life, kill := context.WithCancel(context.Background())
+	ts := &tabState{
+		ring: NewRing(1 << 20), journal: NewJournal(0),
+		work: make(chan tabJob, tabDepth), life: life, kill: kill,
+	}
 	s.mu.Lock()
 	s.tabs[id] = ts
 	s.mu.Unlock()
+	go s.tabLoop(id, ts)
+	t.Cleanup(kill)
 	// Closing the session closes each tab's browser side, which this one does
 	// not have. Cleanups run last-registered-first, so this beats the session's
 	// own.

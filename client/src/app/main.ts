@@ -35,6 +35,20 @@ import { PROTOCOL_VERSION } from '../shared/protocol.js';
 const store = new Store();
 const hosts = new Map<number, MirrorHost>();
 const tabs = new Map<number, TabView>();
+/**
+ * Tabs the reader has closed. The shell is told about a tab by frames, and the
+ * frames for a closed one keep arriving for a round trip after the close —
+ * which on this link is seconds, and while a document is streaming is far
+ * longer than that.
+ *
+ * Without this, every one of those frames went to `hostFor`, which builds a
+ * mirror frame for a tab it does not know: closing a tab put a fresh iframe
+ * back into the page and patched the rest of the dead tab's document into it,
+ * off the strip and invisible, competing for the main thread with the tab the
+ * reader kept. The worker drops most of them now, but the shell holds the last
+ * word on what a tab is, so it says no here too.
+ */
+const closedTabs = new Set<number>();
 const archive: AdapterRecord[] = [];
 const spaces = new Map<string, { name: string; unread: number }>();
 /** Navigations asked for and not yet answered. See progress.ts. */
@@ -253,6 +267,10 @@ function handle(kind: string, args: Record<string, unknown>): void {
   switch (kind) {
     case 'welcome': {
       const w = args as unknown as Welcome;
+      // A different session hands out tab ids from one again, so everything
+      // this side had learned to ignore is about tabs that no longer exist
+      // anywhere — and the ids are about to be handed out afresh.
+      if (w.sessionId !== resumeSession) closedTabs.clear();
       resumeSession = w.sessionId;
       void store.writeSessionId(w.sessionId);
       // Before the tabs, because it is the one thing in this frame that is not
@@ -278,7 +296,7 @@ function handle(kind: string, args: Record<string, unknown>): void {
       // tabs, and a strip of tabs that cannot be reached is worse than a short
       // one — every click on them would go to a tab id the server will refuse.
       for (const id of Array.from(tabs.keys())) {
-        if (!held.has(id)) closeTabLocally(id);
+        if (!held.has(id)) closeTabLocally(id, false);
       }
       if (!tabs.has(active)) active = tabs.keys().next().value ?? 0;
       // The tab the session says is the active one is the tab to show. Each
@@ -305,6 +323,10 @@ function handle(kind: string, args: Record<string, unknown>): void {
         closeTabLocally(id);
         break;
       }
+      // A state frame for a closed tab would put the tab back in the strip,
+      // where clicking it reaches a tab the server has already been told to
+      // close.
+      if (closedTabs.has(id)) break;
       const known = tabs.get(id);
       const tab = known ?? {
         id, url: '', title: '', loading: false, canBack: false, canForward: false,
@@ -349,10 +371,10 @@ function handle(kind: string, args: Record<string, unknown>): void {
       break;
     }
     case 'imageMeta':
-      void hostFor(Number(args.tab)).then((h) => h.setImageMeta(args.meta as ImageMeta));
+      void hostFor(Number(args.tab)).then((h) => h?.setImageMeta(args.meta as ImageMeta));
       break;
     case 'imageData':
-      void hostFor(Number(args.tab)).then((h) => h.imageArrived(String(args.hash)));
+      void hostFor(Number(args.tab)).then((h) => h?.imageArrived(String(args.hash)));
       break;
     case 'adapter': {
       const records = (args.records ?? []) as AdapterRecord[];
@@ -408,6 +430,7 @@ function handle(kind: string, args: Record<string, unknown>): void {
 
 async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
   const host = await hostFor(tab);
+  if (!host) return;
   // A whole new document arrived: whatever the open menu was pointing at is
   // gone, and half its entries would act on a node that no longer exists.
   if (tab === active) closeMenu();
@@ -420,10 +443,11 @@ async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
 
 async function applyMutation(tab: number, m: Mutation, seq: number): Promise<void> {
   const host = await hostFor(tab);
-  host.applyMutation(m, seq);
+  host?.applyMutation(m, seq);
 }
 
-async function hostFor(tab: number): Promise<MirrorHost> {
+async function hostFor(tab: number): Promise<MirrorHost | null> {
+  if (closedTabs.has(tab)) return null;
   const existing = hosts.get(tab);
   if (existing) {
     await existing.whenReady();
@@ -586,7 +610,13 @@ function closeTab(id: number): void {
   closeTabLocally(id);
 }
 
-function closeTabLocally(id: number): void {
+function closeTabLocally(id: number, remember = true): void {
+  // Remembered, so the frames still crossing the link for this tab — and on a
+  // slow link there can be a document's worth of them — find a shell that has
+  // stopped believing in it. Not remembered when the caller is reconciling
+  // against a session that never had the tab: nothing is in flight for a tab
+  // the server does not have, and an id it has never used is one it may yet.
+  if (remember) closedTabs.add(id);
   hosts.get(id)?.destroy();
   hosts.delete(id);
   tabs.delete(id);
@@ -608,10 +638,30 @@ function syncToolbar(): void {
   if (document.activeElement !== el.urlbar) el.urlbar.value = addressText(url);
   el.back.disabled = !tab?.canBack;
   el.forward.disabled = !tab?.canForward;
+  syncReloadButton();
   // A back gesture let through earlier spent the trap. Now that there is a page
   // to go back to, it is worth keeping again.
   if (!centred && tab?.canBack) claimHistoryGestures();
   renderBookmarks();
+}
+
+/**
+ * One button, wearing whichever of its two jobs is the useful one.
+ *
+ * Reload and stop are the same button in every browser because they are never
+ * both wanted: a page that is coming can be stopped and not usefully reloaded,
+ * and a page that has arrived is the other way round. Here the swap is worth
+ * more than it is anywhere else — a page is minutes wide on this link, so the
+ * moment the reader most wants a button is the moment reload is the wrong one —
+ * and the toolbar is a phone's, with no room for a second.
+ */
+function syncReloadButton(): void {
+  const busy = isBusy(active);
+  el.reload.textContent = busy ? '✕' : '↻';
+  el.reload.title = busy ? 'Stop' : 'Reload';
+  el.reload.setAttribute('aria-label', busy ? 'Stop loading' : 'Reload');
+  el.reload.classList.toggle('stop', busy);
+  el.reload.disabled = !connected || !active;
 }
 
 /** A tab that has not been anywhere yet. `about:blank` is not a page. */
@@ -836,6 +886,34 @@ function reloadTab(tab: number): void {
 }
 
 /**
+ * Stops a page that is still coming.
+ *
+ * Every other browser has had this button since 1994, and this one has more
+ * need of it than any of them: a page here is minutes wide, and until now the
+ * only way to call one off was to close the tab and lose whatever of it had
+ * already arrived. What has landed stays on screen — the mirror is patched, not
+ * replaced — so stopping a page half-drawn leaves a half-drawn page rather than
+ * nothing.
+ *
+ * The waiting is forgotten straight away. The gesture is the reader saying they
+ * are no longer waiting, and a bar that keeps running until the server answers
+ * would be reporting a wait that has been called off.
+ */
+function stopTab(tab: number): void {
+  if (!tab) return;
+  send('navigate', { tab, action: 'stop' });
+  if (progress.forget(tab)) renderProgress();
+  const view = tabs.get(tab);
+  if (view?.loading) {
+    // The server confirms this a round trip from now. Until then the spinner
+    // would go on turning over a page the reader has just stopped.
+    view.loading = false;
+    upsertTab(view);
+    renderProgress();
+  }
+}
+
+/**
  * Moves a tab through its own history, from wherever the gesture came from: the
  * toolbar, the mouse's side buttons, Alt+←, the browser's back button.
  *
@@ -919,6 +997,7 @@ const tabList = new TabList({
     closePanel();
   },
   close: (id) => closeTab(id),
+  stop: (id) => stopTab(id),
   menu: (id, x, y) => showMenu(x, y, tabMenu(id)),
   open: () => {
     openTab('', 'focus');
@@ -1238,7 +1317,14 @@ function pageGroups(tab: number): MenuGroups {
         disabled: !connected || !view?.canForward,
         run: () => goHistory(tab, 'forward'),
       },
-      {
+      // The same swap the toolbar button makes, for the same reason: a page
+      // that is still coming is one the reader may want called off, and this
+      // menu is the whole of the chrome on a phone in landscape.
+      isBusy(tab) ? {
+        label: 'Stop',
+        disabled: !connected || !tab,
+        run: () => stopTab(tab),
+      } : {
         label: 'Reload',
         disabled: !connected || !tab,
         run: () => reloadTab(tab),
@@ -1363,7 +1449,11 @@ function tabMenu(id: number): MenuGroups {
         disabled: !view?.url || !connected,
         run: () => openInNewTab(view?.url ?? ''),
       },
-      {
+      isBusy(id) ? {
+        label: 'Stop',
+        disabled: !connected,
+        run: () => stopTab(id),
+      } : {
         label: 'Reload',
         disabled: !connected,
         run: () => reloadTab(id),
@@ -1460,7 +1550,10 @@ el.urlbar.addEventListener('keydown', (ev) => {
 
 el.back.addEventListener('click', () => goHistory(active, 'back'));
 el.forward.addEventListener('click', () => goHistory(active, 'forward'));
-el.reload.addEventListener('click', () => reloadTab(active));
+el.reload.addEventListener('click', () => {
+  if (isBusy(active)) stopTab(active);
+  else reloadTab(active);
+});
 el.bookmark.addEventListener('click', () => toggleBookmark());
 el.marks.addEventListener('click', () => showPanel('marks'));
 
@@ -2158,6 +2251,16 @@ document.addEventListener('keydown', (ev) => {
     // phase and marks it handled, and closing the panel out from under a menu
     // dismissal is two things happening for one key.
     closePanel();
+    return;
+  }
+  // Escape is what a browser's stop button has answered to since there were
+  // browsers, and it is worth more here: the reader who wants a page called off
+  // is the reader who has been staring at a spinner for a minute. Only when
+  // there is nothing else for it to mean — a panel or a menu takes it first —
+  // and only over a page that is actually coming, so it never quietly does
+  // something on a page that has arrived.
+  if (ev.key === 'Escape' && !ev.defaultPrevented && isBusy(active)) {
+    stopTab(active);
     return;
   }
   if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
