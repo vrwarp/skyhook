@@ -111,6 +111,15 @@ export class Patcher {
   /** Rules per shadow root, and the constructed sheet each root has adopted. */
   private scopedRules = new Map<number, string[]>();
   private scopedSheets = new Map<number, CSSStyleSheet>();
+  /**
+   * Inline `style` attributes that name an image, in the form they arrived in.
+   *
+   * Kept for the same reason the stylesheet's rules are: the reference resolves
+   * to a transparent pixel until the bytes land and to a blob afterwards, and
+   * only the wire form can be resolved twice. Held by element rather than by id
+   * so a re-rendered attribute reaches the element that actually has it.
+   */
+  private styleAttrs = new Map<Element, string>();
   private roots = new Set<ShadowRoot>();
   private hooks: PatcherHooks;
   /** The mirrored document's root element, which is the page's own <html>. */
@@ -175,6 +184,7 @@ export class Patcher {
     this.cssRules = [];
     this.scopedRules = new Map();
     this.scopedSheets = new Map();
+    this.styleAttrs = new Map();
     this.roots = new Set();
     this.setCSS(snap.css);
 
@@ -460,6 +470,18 @@ export class Patcher {
         return;
       }
     }
+    if (lower === 'style') {
+      // Same reasoning as the src above, for the backgrounds a style attribute
+      // names: `skyhook://img/…` is a scheme no browser knows, so what reaches
+      // the DOM has to be what the hook makes of it. The wire form is kept so
+      // it can be resolved again when the bytes arrive.
+      if (value.includes('skyhook://img/')) {
+        this.styleAttrs.set(el, value);
+        this.writeStyleAttr(el, value);
+        return;
+      }
+      this.styleAttrs.delete(el);
+    }
     try {
       // `xlink:href` is a namespaced attribute, and an SVG <use> resolves
       // nothing from a plain attribute that merely has a colon in its name —
@@ -517,6 +539,7 @@ export class Patcher {
       this.flags.delete(id);
       this.shots.delete(id);
     }
+    this.styleAttrs.delete(node as Element);
     for (let c = node.firstChild; c; c = c.nextSibling) this.forget(c);
   }
 
@@ -622,6 +645,18 @@ export class Patcher {
       const root = this.nodes.get(rootID);
       if (root) this.renderScopedCSS(rootID, root as unknown as ShadowRoot);
     }
+    for (const [el, raw] of this.styleAttrs) {
+      if (el.isConnected) this.writeStyleAttr(el, raw);
+      else this.styleAttrs.delete(el);
+    }
+  }
+
+  /** Puts a style attribute into the DOM with its image references resolved. */
+  private writeStyleAttr(el: Element, raw: string): void {
+    const rewrite = this.hooks.rewriteCSS;
+    try {
+      el.setAttribute('style', rewrite ? rewrite(raw) : raw);
+    } catch { /* an attribute the element will not take is not worth the batch */ }
   }
 
   private renderCSS(): void {

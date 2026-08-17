@@ -308,6 +308,12 @@
       if (URL_ATTRS[name]) {
         value = absolute(base, value);
         if (/^javascript:/i.test(value)) continue;
+      } else if (name === 'style') {
+        var shot = styleAttrImages(value, base, el);
+        if (shot) {
+          value = shot.text;
+          for (var s = 0; s < shot.images.length; s++) pendingImages.push(shot.images[s]);
+        }
       }
       pairs.push(intern(name), intern(value));
     }
@@ -1104,7 +1110,10 @@
   // leave exactly as it stands. A fragment names an SVG filter, clip path or
   // gradient in the document rather than a file, and giving it a path is how it
   // stops resolving; a data: URL is already the bytes.
-  function resolveCSSURL(ref, base) {
+  // `always` asks for the address even when the reference was already absolute.
+  // Rewriting it to itself is pointless when all that is wanted is an absolute
+  // form; it is the whole answer when what is wanted is something to key on.
+  function resolveCSSURL(ref, base, always) {
     // Trimmed first, and empty means leave it: `new URL('  ', base)` is the
     // sheet's own address, so a blank reference would be rewritten into a
     // request for the stylesheet as an image.
@@ -1112,16 +1121,22 @@
     if (!ref || ref.charAt(0) === '#') return '';
     var head = ref.slice(0, 8).toLowerCase();
     if (head.indexOf('data:') === 0 || head.indexOf('skyhook:') === 0) return '';
+    if (head.indexOf('blob:') === 0) return ''; // names an object in a realm we are not
     try {
       var abs = new URL(ref, base).href;
-      return abs === ref ? '' : abs;
+      return abs === ref && !always ? '' : abs;
     } catch (e) {
       return '';
     }
   }
 
-  function absolutizeCSSURLs(text, base) {
-    if (!base || typeof text !== 'string' || !URL_CALL_RE.test(text)) return text;
+  // mapCSSURLs hands every url() token in text to fn and puts back what it
+  // returns — the whole token, `url(` and `)` included — or leaves the token
+  // alone for an empty string. The scanning is the only subtle part, so it
+  // lives here once and the callers differ only in what they do with an
+  // address.
+  function mapCSSURLs(text, fn) {
+    if (typeof text !== 'string' || !URL_CALL_RE.test(text)) return text;
     var out = '';
     for (var i = 0; i < text.length;) {
       var c = text.charAt(i);
@@ -1150,11 +1165,66 @@
         i++;
         continue;
       }
-      var abs = resolveCSSURL(tok.raw, base);
-      out += abs ? cssURLToken(abs) : text.slice(i, tok.end);
+      var rep = fn(tok.raw);
+      out += rep || text.slice(i, tok.end);
       i = tok.end;
     }
     return out;
+  }
+
+  function absolutizeCSSURLs(text, base) {
+    if (!base) return text;
+    return mapCSSURLs(text, function (raw) {
+      var abs = resolveCSSURL(raw, base);
+      return abs ? cssURLToken(abs) : '';
+    });
+  }
+
+  /*
+   * The pictures an inline `style` attribute names.
+   *
+   * Everything a stylesheet names is fetched, transcoded and shipped as a cache
+   * key; a `style="background-image:url(hero.jpg)"` was shipped as written. The
+   * client is a sandboxed frame with no network and a base address that is not
+   * the page's, so the reference resolved to nothing and the element rendered
+   * as an empty box — the same failure as a mis-based stylesheet url(), on the
+   * construct sites reach for most: heroes, avatars, cards, and every
+   * background a script assigns as it lazy-loads.
+   *
+   * Rewritten here rather than landside because this is where the intern table
+   * is built. The value is one string among thousands the table shares, and the
+   * table is addressed by position: editing an entry in place edits it for
+   * every other use, and adding one means renumbering. Interning the rewritten
+   * text costs neither.
+   *
+   * The size asked for is the element's own laid-out box, which is a better
+   * answer than the blanket cap a stylesheet's images get — a background on a
+   * 48px avatar is transcoded to 48px rather than to 512.
+   */
+  function styleAttrImages(text, base, el) {
+    if (!URL_CALL_RE.test(text)) return null;
+    var found = [];
+    var box = null;
+    try { box = el.getBoundingClientRect(); } catch (e) { box = null; }
+    var w = box ? Math.round(box.width) : 0;
+    var h = box ? Math.round(box.height) : 0;
+    if (w > 4096) w = 4096;
+    if (h > 4096) h = 4096;
+    var rewritten = mapCSSURLs(text, function (raw) {
+      var abs = resolveCSSURL(raw, base, true);
+      if (!abs) return '';
+      var key = imageKey(abs, w, h);
+      found.push({
+        n: idFor(el), url: abs, w: w, h: h, key: key, alt: '',
+        // A background is worth the same urgency as the box it fills: the
+        // element is on screen or it is not, and the rectangle says which.
+        pri: box && box.top < (globalThis.innerHeight || 900) * 1.5 &&
+          box.bottom > -200 ? 0 : 1
+      });
+      return 'url(skyhook://img/' + key + ')';
+    });
+    if (!found.length) return null;
+    return { text: rewritten, images: found };
   }
 
   // sheetBase is the address a sheet's references resolve against: its own, or
@@ -1742,6 +1812,14 @@
           if (img) {
             pendingImages.push(img);
             val = 'skyhook://img/' + img.key;
+          }
+        } else if (name === 'style') {
+          // A background a script assigns as it scrolls arrives here rather
+          // than in a snapshot, and needs the same rewrite. See styleAttrImages.
+          var shot = styleAttrImages(val, docBase(el), el);
+          if (shot) {
+            val = shot.text;
+            for (var s = 0; s < shot.images.length; s++) pendingImages.push(shot.images[s]);
           }
         }
         pendingOps.push([3, id, intern(name), intern(val)]);
