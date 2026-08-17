@@ -687,6 +687,11 @@ type harness struct {
 	// not only by the test that opens a bundle.
 	captureDir string
 	logs       *diag.Ring
+	// log is the harness's own logger, exposed so that everything a test starts
+	// — the PWA's app server as much as the landside half — writes to the one
+	// ring and carries the one test name, rather than falling back to
+	// slog.Default() and landing on stderr with nothing to identify it.
+	log *slog.Logger
 	// misresolved counts requests for the address /assets/dist/nested.css's
 	// url() names only when it is resolved against the page rather than
 	// against the sheet. Nothing is served from there; see
@@ -1441,17 +1446,10 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	site := httptest.NewServer(mux)
 	t.Cleanup(site.Close)
 
-	logLevel := slog.LevelWarn
-	if testing.Verbose() {
-		logLevel = slog.LevelDebug
-	}
-	// Teed into a ring the way skyhookd does it, so a capture taken by these
-	// tests carries a server log — and so the tee itself is exercised.
-	logs := diag.NewRing(500)
-	log := slog.New(diag.Tee(
-		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}),
-		slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}),
-	))
+	// Registered here, before the cleanups below it, so that it runs after them
+	// and the dump carries the shutdown records too. See logging_test.go for
+	// why the log does not simply go to stderr any more.
+	log, logs := testLogger(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -1471,7 +1469,7 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 
 	h := &harness{
 		t: t, site: site, browser: br, token: "test-token",
-		listenAddr: listenAddr, logs: logs, misresolved: &misresolved,
+		listenAddr: listenAddr, logs: logs, log: log, misresolved: &misresolved,
 	}
 	r := &router{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{

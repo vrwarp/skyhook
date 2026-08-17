@@ -31,7 +31,7 @@ import (
 
 // userBrowser launches a browser on a known debugging port, opens a page in
 // it, and returns the browser plus the devtools endpoint to attach to.
-func userBrowser(ctx context.Context, t *testing.T) (*cdp.Browser, *cdp.Session, string) {
+func userBrowser(ctx context.Context, t *testing.T) (*cdp.Browser, *cdp.Session, string, *slog.Logger) {
 	t.Helper()
 	if _, err := cdp.FindChromium(""); err != nil {
 		if os.Getenv("SKYHOOK_E2E") != "" {
@@ -43,7 +43,10 @@ func userBrowser(ctx context.Context, t *testing.T) (*cdp.Browser, *cdp.Session,
 	if err != nil {
 		t.Fatal(err)
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	// Same arrangement as the harness even though there is no harness here: the
+	// browser these tests launch is as loud as any other, and its output wants
+	// the same test to belong to.
+	log, _ := testLogger(t)
 	br, err := cdp.Launch(ctx, cdp.BrowserOptions{
 		UserDataDir: t.TempDir(),
 		Headless:    true,
@@ -59,7 +62,7 @@ func userBrowser(ctx context.Context, t *testing.T) (*cdp.Browser, *cdp.Session,
 	if err != nil {
 		t.Fatalf("open the user's tab: %v", err)
 	}
-	return br, page, "http://127.0.0.1:" + strconv.Itoa(port)
+	return br, page, "http://127.0.0.1:" + strconv.Itoa(port), log
 }
 
 func freeTCPPort() (int, error) {
@@ -92,10 +95,10 @@ func TestAttachKeepsTabsInItsOwnWindow(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	user, userTab, devtools := userBrowser(ctx, t)
+	user, userTab, devtools, log := userBrowser(ctx, t)
 	userWindow := windowOf(ctx, t, user, userTab.Target)
 
-	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools})
+	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools, Logger: log})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -138,10 +141,10 @@ func TestAttachOpensConcurrentTabsWithoutCrossingThem(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	user, userTab, devtools := userBrowser(ctx, t)
+	user, userTab, devtools, log := userBrowser(ctx, t)
 	userWindow := windowOf(ctx, t, user, userTab.Target)
 
-	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools})
+	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools, Logger: log})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -198,9 +201,9 @@ func TestAttachClosesATabItJustOpened(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	user, _, devtools := userBrowser(ctx, t)
+	user, _, devtools, log := userBrowser(ctx, t)
 
-	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools})
+	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools, Logger: log})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -255,10 +258,10 @@ func TestAttachNavigatedTabStaysPutAndHasNoOpener(t *testing.T) {
 	}))
 	defer site.Close()
 
-	user, userTab, devtools := userBrowser(ctx, t)
+	user, userTab, devtools, log := userBrowser(ctx, t)
 	userWindow := windowOf(ctx, t, user, userTab.Target)
 
-	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools})
+	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools, Logger: log})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -288,9 +291,9 @@ func TestAttachRefusesTheUsersTabs(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	_, userTab, devtools := userBrowser(ctx, t)
+	_, userTab, devtools, log := userBrowser(ctx, t)
 
-	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools})
+	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools, Logger: log})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -336,9 +339,9 @@ func TestAttachCloseLeavesTheBrowserRunning(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	user, userTab, devtools := userBrowser(ctx, t)
+	user, userTab, devtools, log := userBrowser(ctx, t)
 
-	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools})
+	sky, err := cdp.Launch(ctx, cdp.BrowserOptions{Attach: devtools, Logger: log})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}

@@ -271,6 +271,24 @@ is how the reconnect-and-resync path is exercised. It replaces the whole qdisc,
 lanes included, so it is a thing to do to one session rather than underneath a
 suite.
 
+### Reading the output
+
+A test that fails prints its own server log, in full and down to DEBUG,
+underneath its own name — and a test that passes prints nothing. That is the
+only way the log is readable with eight tests running at once: written straight
+to stderr, eight interleaved streams with nothing to say which test a line came
+from is not a log, it is a haystack.
+
+While the suite runs, stderr carries WARN and worse only, tagged with the test
+it came from. To watch one test in detail, ask for it:
+
+```sh
+SKYHOOK_TEST_LOG=debug go test ./test -run TestPWAReadsAnAggregator -v
+```
+
+`debug`, `info`, `warn` (the default) and `error` all work. It sets what reaches
+stderr live; the failure dump is always the full DEBUG record either way.
+
 ## When the mirror looks wrong
 
 The split renderer's awkward failure mode is that both halves look fine on their
