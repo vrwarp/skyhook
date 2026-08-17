@@ -6,7 +6,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -544,37 +543,45 @@ func TestPWAResizesAFrameStandInWhenItsFrameGrows(t *testing.T) {
 	}
 }
 
-// A frame on another origin is a hole nothing can fill: no agent runs in it,
-// `contentDocument` is not readable, and the stand-in stays empty however right
-// its box is. Empty and unmarked it is invisible, which is indistinguishable
-// from an input the link swallowed — so the client says whose content is
-// missing instead.
-func TestPWASaysWhichFrameItCouldNotRead(t *testing.T) {
+/*
+Frames inside frames, and the floor.
+
+Every level here is cross-origin to the one above it, so each would need an agent
+of its own. The mirror follows one level down — where an app launcher, a captcha
+and an embedded player all live — and leaves what is below it as the labelled box
+that says whose content is missing, which is what that label is for now that a
+frame within reach is mirrored (§11f).
+*/
+func TestPWAMirrorsOneFrameDeepAndSaysSoBelowThat(t *testing.T) {
 	h := newPWAHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
 	defer cancel()
 	page := h.openClient(ctx, t)
-	openPage(ctx, t, h, page, "/opaque-frame", "the page around the widget")
+	// The page is level 3; the frame in it is level 2, and the frame in that is
+	// level 1 — one level past what the mirror follows.
+	openPage(ctx, t, h, page, "/nest?d=3", "level 3")
 
-	waitFor(ctx, t, page, standInBox+`.host !== ''`,
-		budget(60*time.Second), "the frame to be named")
+	waitFor(ctx, t, page, mirrorText+`.includes('level 2')`,
+		budget(60*time.Second), "the frame one level down")
 
-	var box standIn
-	evalJSON(ctx, t, page, standInBox, &box)
-	// The origin it names is the frame's own, and not the page's.
-	src, err := url.Parse(box.Src)
-	if err != nil {
-		t.Fatalf("the stand-in kept an unparseable src %q: %v", box.Src, err)
-	}
-	if box.Host != src.Host {
-		t.Errorf("the stand-in names %q, want the frame's own %q", box.Host, src.Host)
-	}
-	// Sized like any other stand-in, and actually drawn: the label is what
-	// tells the reader this is content that did not come rather than a bug.
-	if box.W != 320 || box.H != 200 {
-		t.Errorf("the opaque frame's stand-in is %dx%d, want 320x200", box.W, box.H)
-	}
-	if !strings.Contains(box.Label, "not mirrored") {
-		t.Errorf("the stand-in draws %q, want it to say the frame was not mirrored", box.Label)
+	// The floor: the level below it is a box that says so, rather than a hole
+	// that says nothing.
+	waitFor(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const seen = [];
+      const walk = (root) => {
+        for (const el of root.querySelectorAll('[data-skyhook-tag="iframe"]')) {
+          if (el.getAttribute('data-sky-frame')) seen.push(el.getAttribute('data-sky-frame'));
+          if (el.shadowRoot) walk(el.shadowRoot);
+        }
+      };
+      walk(doc);
+      return seen.length > 0;
+    })()`, budget(60*time.Second), "the frame past the limit to be named")
+
+	var deeper bool
+	evalJSON(ctx, t, page, mirrorText+`.includes('level 1')`, &deeper)
+	if deeper {
+		t.Error("the mirror followed past its own depth limit")
 	}
 }

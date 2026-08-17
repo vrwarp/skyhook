@@ -72,6 +72,9 @@ type event struct {
 	sessionID string
 	method    string
 	params    json.RawMessage
+	// fence is closed by the pump when it reaches this event, and carries no
+	// handlers of its own. See Fence.
+	fence chan struct{}
 }
 
 type request struct {
@@ -235,6 +238,10 @@ func (c *Client) runPump(p *pump) {
 		case <-p.stop:
 			return
 		case ev := <-p.ch:
+			if ev.fence != nil {
+				close(ev.fence)
+				continue
+			}
 			c.mu.Lock()
 			hs := append([]EventHandler{}, c.handlers[ev.sessionID+"|"+ev.method]...)
 			hs = append(hs, c.handlers["|"+ev.method]...)
@@ -243,6 +250,49 @@ func (c *Client) runPump(p *pump) {
 				h(ev.sessionID, ev.params)
 			}
 		}
+	}
+}
+
+/*
+Fence waits until every event already queued for a target has been handled.
+
+Handlers run off the socket reader, on a queue per target, so an event that has
+been read is not an event that has been acted on. Anything that asks the browser
+a question and then reads state those handlers maintain is racing them: the
+mirror's integrity check flushes each agent — which sends its pending frame as a
+binding event, synchronously, before the call returns — and then reads the tab's
+sequence number to decide which frame the client is being checked against. Read
+before the pump caught up, that number names a frame the client has, while the
+hash describes the document one frame later, and the check reports a divergence
+that is only a race with itself.
+
+The fence rides the same queue as the events, so reaching it means they have all
+been handled. It is not a lock: anything arriving after it is simply after.
+*/
+func (c *Client) Fence(ctx context.Context, sessionID string) error {
+	p := c.pumpFor(sessionID)
+	if p == nil {
+		return errors.New("cdp: client closed")
+	}
+	done := make(chan struct{})
+	select {
+	case p.ch <- event{sessionID: sessionID, fence: done}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return errors.New("cdp: client closed")
+	case <-p.stop:
+		return nil // the target is gone; nothing of its is still pending
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return errors.New("cdp: client closed")
+	case <-p.stop:
+		return nil
 	}
 }
 

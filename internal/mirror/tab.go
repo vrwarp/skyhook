@@ -154,6 +154,14 @@ type Tab struct {
 	log     *slog.Logger
 	opts    Options
 
+	// emitMu orders the tab's stream. Sequence numbers are consecutive and the
+	// client drops a batch that arrives with a gap in front of it, so taking the
+	// next number and putting the frame on the wire has to be one step — and
+	// there is more than one producer now: the page's agent and every frame's,
+	// each on a queue of its own. Held across the encode too, which is what
+	// keeps two frames from swapping places on the way out.
+	emitMu sync.Mutex
+
 	mu      sync.Mutex
 	ctxID   int64
 	frameID string
@@ -175,11 +183,30 @@ type Tab struct {
 	// button for the rest of the session.
 	canBack    bool
 	canForward bool
-	chunks     map[int][]string
-	chunkN     map[int]int
+	// chunks reassembles the split messages of each agent, keyed by session:
+	// two agents number their chunks from one, and mixing them builds a message
+	// out of halves of two documents.
+	chunks map[string]map[int][]string
+	chunkN map[string]map[int]int
 	// pendingInput is the seq of the most recent input event, tagged onto the
 	// next mutation batch so the client can reconcile local echo.
 	pendingInput uint64
+	// frames holds the cross-origin frames this tab is mirroring, keyed by the
+	// world their agent speaks from, and framesByID the same frames keyed by the
+	// frame itself — which is what survives a navigation. ctxFrames says which
+	// frame a world belongs to, and is the only way back from an agent's message
+	// to the document it describes. See frames.go.
+	frames     map[string]*subFrame
+	framesByID map[string]*subFrame
+	ctxFrames  map[string]string
+	// pendingHello holds a frame that announced itself before its world could be
+	// placed in the frame tree. See watchContexts.
+	pendingHello map[string]string
+	// done closes when the tab does, stopping the reconcile loop.
+	done chan struct{}
+	// strs maps each agent's own intern table onto the one table the client
+	// keeps. See strings.go.
+	strs *strTable
 	// sheetIDs maps a stylesheet's URL to the CSS domain's id for it, which is
 	// how a sheet the page's own CSSOM refuses to open is read anyway.
 	sheetIDs map[string]string
@@ -211,7 +238,13 @@ func NewTab(ctx context.Context, id uint32, br *cdp.Browser, sess *cdp.Session, 
 	}
 	t := &Tab{
 		ID: id, sess: sess, browser: br, out: out, log: opts.Logger, opts: opts,
-		chunks: map[int][]string{}, chunkN: map[int]int{},
+		chunks: map[string]map[int][]string{}, chunkN: map[string]map[int]int{},
+		frames:       map[string]*subFrame{},
+		framesByID:   map[string]*subFrame{},
+		ctxFrames:    map[string]string{},
+		pendingHello: map[string]string{},
+		done:         make(chan struct{}),
+		strs:         newStrTable(),
 	}
 	if err := t.install(ctx); err != nil {
 		return nil, err
@@ -278,6 +311,12 @@ func (t *Tab) install(ctx context.Context) error {
 			t.setLoading(false)
 		}
 	})
+	// Cross-origin frames live in targets of their own; each gets the agent and
+	// is spliced into the document above it.
+	if err := t.watchFrames(ctx); err != nil {
+		t.log.Debug("cross-origin frames will not be mirrored", "tab", t.ID, "err", err)
+	}
+	go t.reconcile()
 	s.Subscribe("Page.javascriptDialogOpening", t.onDialog)
 	s.Subscribe("Inspector.targetCrashed", func(string, json.RawMessage) {
 		t.log.Warn("tab crashed", "tab", t.ID)
@@ -674,10 +713,11 @@ func (t *Tab) eval(ctx context.Context, expr string) (json.RawMessage, error) {
 
 // ---------------------------------------------------------------- agent input
 
-func (t *Tab) onBinding(_ string, params json.RawMessage) {
+func (t *Tab) onBinding(sessionID string, params json.RawMessage) {
 	var p struct {
-		Name    string `json:"name"`
-		Payload string `json:"payload"`
+		Name        string `json:"name"`
+		Payload     string `json:"payload"`
+		ExecutionID int64  `json:"executionContextId"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil || p.Name != "__skyhookSend" {
 		return
@@ -695,16 +735,22 @@ func (t *Tab) onBinding(_ string, params json.RawMessage) {
 		if err := json.Unmarshal([]byte(payload), &c); err != nil {
 			return
 		}
+		key := ctxKey(sessionID, p.ExecutionID)
 		t.mu.Lock()
-		if t.chunks[c.ID] == nil {
-			t.chunks[c.ID] = make([]string, c.N)
-			t.chunkN[c.ID] = c.N
+		if t.chunks[key] == nil {
+			t.chunks[key] = map[int][]string{}
+			t.chunkN[key] = map[int]int{}
 		}
-		if c.I < len(t.chunks[c.ID]) {
-			t.chunks[c.ID][c.I] = c.D
+		chunks, sizes := t.chunks[key], t.chunkN[key]
+		if chunks[c.ID] == nil {
+			chunks[c.ID] = make([]string, c.N)
+			sizes[c.ID] = c.N
+		}
+		if c.I < len(chunks[c.ID]) {
+			chunks[c.ID][c.I] = c.D
 		}
 		complete := true
-		for _, s := range t.chunks[c.ID] {
+		for _, s := range chunks[c.ID] {
 			if s == "" {
 				complete = false
 				break
@@ -714,12 +760,12 @@ func (t *Tab) onBinding(_ string, params json.RawMessage) {
 			t.mu.Unlock()
 			return
 		}
-		payload = strings.Join(t.chunks[c.ID], "")
-		delete(t.chunks, c.ID)
-		delete(t.chunkN, c.ID)
+		payload = strings.Join(chunks[c.ID], "")
+		delete(chunks, c.ID)
+		delete(sizes, c.ID)
 		t.mu.Unlock()
 	}
-	t.handleAgentMessage(payload)
+	t.handleAgentMessage(sessionID, p.ExecutionID, payload)
 }
 
 // agentSnapshot mirrors the JSON the agent emits for a full document.
@@ -797,7 +843,7 @@ type agentImage struct {
 	Pri int    `json:"pri"`
 }
 
-func (t *Tab) handleAgentMessage(payload string) {
+func (t *Tab) handleAgentMessage(sessionID string, ctxID int64, payload string) {
 	var head struct {
 		T string `json:"t"`
 	}
@@ -805,11 +851,26 @@ func (t *Tab) handleAgentMessage(payload string) {
 		t.log.Warn("agent message unparsable", "tab", t.ID, "err", err)
 		return
 	}
+	// An agent in a frame of its own describes a document that hangs inside the
+	// page's rather than replacing it, so its snapshots are spliced and its
+	// mutations forwarded — see frames.go.
+	frame := t.frameByCtx(sessionID, ctxID)
 	switch head.T {
+	case "frame":
+		// A frame nothing above it can read, asking to be mirrored itself.
+		var f struct {
+			URL string `json:"url"`
+		}
+		_ = json.Unmarshal([]byte(payload), &f)
+		go t.adoptFrame(sessionID, ctxID, f.URL)
 	case "snap":
 		var s agentSnapshot
 		if err := json.Unmarshal([]byte(payload), &s); err != nil {
 			t.log.Warn("bad snapshot", "err", err)
+			return
+		}
+		if frame != nil {
+			t.spliceFrame(frame, &s)
 			return
 		}
 		t.emitSnapshot(&s)
@@ -817,6 +878,10 @@ func (t *Tab) handleAgentMessage(payload string) {
 		var m agentMutation
 		if err := json.Unmarshal([]byte(payload), &m); err != nil {
 			t.log.Warn("bad mutation", "err", err)
+			return
+		}
+		if frame != nil {
+			t.emitFrameMutation(frame, &m)
 			return
 		}
 		t.emitMutation(&m)
@@ -841,6 +906,14 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 		}
 		nodes = append(nodes, n)
 	}
+	// A snapshot resets the stream to zero, so it takes the same lock every
+	// other frame is put on the wire under: a mutation that slipped between the
+	// reset and the snapshot itself would carry a sequence number from a
+	// document the client is about to throw away.
+	t.emitMu.Lock()
+	defer t.emitMu.Unlock()
+	// The snapshot is the client's whole table, and the top agent's.
+	t.strs.Reset(len(s.Strings))
 	t.mu.Lock()
 	t.seq = 0
 	t.url = s.URL
@@ -916,6 +989,10 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	// A page that draws itself into a canvas has just arrived with that canvas
 	// empty, and nothing it does from here on will be a mutation.
 	t.shotSoon(shotAfterLoad)
+	// The client has just rebuilt its document from nothing, and every frame
+	// spliced into the old one went with it. Their agents heard nothing about
+	// that, so each is asked to say itself again.
+	t.resplice()
 	t.emitState(protocol.TabState{URL: s.URL, Title: s.Title})
 }
 
@@ -946,6 +1023,12 @@ func (t *Tab) emitMutation(m *agentMutation) {
 	if len(ops) == 0 && len(m.Images) == 0 {
 		return
 	}
+	t.emitMu.Lock()
+	// Where this batch's new strings land in the client's table, and where the
+	// ones it refers to landed before. With no mirrored frame in the document
+	// this is the identity it always was.
+	t.strs.Adopt(0, len(m.Strings))
+	t.strs.rebaseOps(0, ops)
 	t.mu.Lock()
 	t.seq++
 	seq := t.seq
@@ -958,6 +1041,7 @@ func (t *Tab) emitMutation(m *agentMutation) {
 	body := protocol.Mutation{Strings: m.Strings, Ops: ops, Flush: m.Flush}
 	f, err := protocol.NewFrame(protocol.TypeMutation, t.ID, body)
 	if err != nil {
+		t.emitMu.Unlock()
 		t.log.Error("mutation encode failed", "err", err)
 		return
 	}
@@ -965,10 +1049,14 @@ func (t *Tab) emitMutation(m *agentMutation) {
 	f.Base = seq - 1
 	f.Cause = cause
 	t.out.EmitFrame(protocol.ChDom, f)
+	t.emitMu.Unlock()
 	t.requestImages(m.Images)
 	for _, req := range cssImages {
 		t.out.WantImage(t.ID, req)
 	}
+	// A frame waiting to be spliced was waiting for its element to reach the
+	// client, and this is the frame that may have carried it.
+	t.retrySplices()
 	if titleChanged {
 		t.emitState(protocol.TabState{URL: m.URL, Title: m.Title})
 	}
@@ -1041,6 +1129,103 @@ func (t *Tab) restorePrunedVars(ops []protocol.Op, strs []string) []string {
 	}
 	t.prunedVars = keep
 	return out
+}
+
+/*
+emitFrameOps sends ops that describe a frame's document rather than the page's.
+
+They ride the tab's own stream and take the tab's sequence numbers, because that
+is the stream the client applies and acks: one document, however many agents
+described it. What does not travel is anything about the tab itself — a frame's
+address and title are its own, and letting them through renamed the tab to
+whatever a widget called itself.
+*/
+func (t *Tab) emitFrameOps(slot int64, ops []protocol.Op, strs []string, images []agentImage, base string) {
+	if len(ops) == 0 {
+		return
+	}
+	var cssImages []ImageRequest
+	for i := range ops {
+		if ops[i].Op == protocol.OpStyle && len(ops[i].Add) > 0 {
+			rewritten, reqs := rewriteCSSImages(minifyCSS(ops[i].Add), base, cssImageMaxDim)
+			ops[i].Add = rewritten
+			cssImages = append(cssImages, reqs...)
+		}
+	}
+	t.emitMu.Lock()
+	t.strs.Adopt(slot, len(strs))
+	t.strs.rebaseOps(slot, ops)
+	t.mu.Lock()
+	t.seq++
+	seq := t.seq
+	cause := t.pendingInput
+	t.pendingInput = 0
+	t.mu.Unlock()
+
+	body := protocol.Mutation{Strings: strs, Ops: ops, Flush: true}
+	f, err := protocol.NewFrame(protocol.TypeMutation, t.ID, body)
+	if err != nil {
+		t.emitMu.Unlock()
+		t.log.Error("frame mutation encode failed", "err", err)
+		return
+	}
+	f.Seq = seq
+	f.Base = seq - 1
+	f.Cause = cause
+	t.out.EmitFrame(protocol.ChDom, f)
+	t.emitMu.Unlock()
+	t.requestImages(images)
+	for _, req := range cssImages {
+		t.out.WantImage(t.ID, req)
+	}
+	// A frame inside this one has been waiting for its element to reach the
+	// client, and this is the frame that carried it. Without this the chain
+	// stops at the first level whose parent is itself a frame: the page's own
+	// agent goes quiet, and nothing else ever tries again.
+	t.retrySplices()
+}
+
+// emitOps sends ops the host made up itself — a frame's subtree being taken
+// away, most of all — with no strings and no images behind them.
+func (t *Tab) emitOps(ops []protocol.Op) {
+	t.emitFrameOps(0, ops, nil, nil, "")
+}
+
+// emitFrameMutation forwards what an attached frame's agent reported.
+func (t *Tab) emitFrameMutation(f *subFrame, m *agentMutation) {
+	f.mu.Lock()
+	root := f.rootID
+	f.mu.Unlock()
+	if root == 0 {
+		// Nothing of this frame is on the client yet: its snapshot is still
+		// waiting for the element to hang from, and a mutation against a subtree
+		// that does not exist would be dropped there in silence. The snapshot
+		// that lands will carry this change with it.
+		return
+	}
+	ops := make([]protocol.Op, 0, len(m.Ops))
+	for _, row := range m.Ops {
+		op, ok := decodeOpRow(row)
+		if !ok {
+			continue
+		}
+		switch op.Op {
+		case protocol.OpDocInfo:
+			// The frame's own title. The tab wears the page's.
+			continue
+		case protocol.OpStyle:
+			// Rules a frame's agent calls the document's belong to the frame's
+			// root, which is what keeps `body { margin: 0 }` off the page's body.
+			if op.Node == 0 {
+				op.Node = root
+			}
+		}
+		ops = append(ops, op)
+	}
+	if len(ops) == 0 && len(m.Images) == 0 {
+		return
+	}
+	t.emitFrameOps(f.slot, ops, m.Strings, m.Images, m.URL)
 }
 
 // FetchResource loads a URL through this tab's own browser, with the tab's
@@ -1254,6 +1439,7 @@ func (t *Tab) Close(ctx context.Context) error {
 		return nil
 	}
 	t.closed = true
+	close(t.done)
 	if t.shotTimer != nil {
 		t.shotTimer.Stop()
 	}

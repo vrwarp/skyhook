@@ -932,6 +932,34 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Elsewhere</title></head>
 			<body style="margin:0"><p>from another origin entirely</p></body></html>`)
 	})
+	// A document on the other origin with something to do in it: a control the
+	// reader can only reach if the frame is mirrored, and if a click aimed at it
+	// lands where the frame actually is rather than where its coordinates say.
+	cdnMux.HandleFunc("/widget-app.html", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>The other origin</title>
+			<style>
+			  body { margin: 0; font: 14px system-ui, sans-serif }
+			  /* A rule that would dress the page around this frame if the
+			     document were flattened into it instead of given a root. */
+			  p { color: rgb(3, 4, 5) }
+			  #shout { display: block; width: 180px; height: 40px;
+			           background: rgb(0, 128, 64) }
+			</style></head>
+			<body>
+			<p id="line">the launcher's own words</p>
+			<span id="shout" role="button">press me</span>
+			<p id="said">nothing yet</p>
+			<script>
+			  document.getElementById('shout').addEventListener('click', () => {
+			    document.getElementById('said').textContent = 'the frame heard it';
+			  });
+			  setTimeout(() => {
+			    document.getElementById('line').textContent = 'the launcher changed its mind';
+			  }, 1200);
+			</script>
+			</body></html>`)
+	})
 	cdn := httptest.NewServer(cdnMux)
 	t.Cleanup(cdn.Close)
 
@@ -1335,16 +1363,29 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			</script>
 			</body></html>`)
 	})
-	// A frame on another origin: no agent runs in it, its document cannot be
-	// read, and the stand-in is empty whatever else happens.
-	mux.HandleFunc("/opaque-frame", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Opaque</title></head>
-			<body><h1>the page around the widget</h1>
-			<iframe id="elsewhere" width="320" height="200" style="border:0"
-			  src="`+cdn.URL+`/widget.html"></iframe>
-			</body></html>`)
-	})
+	// Frames all the way down, alternating origins so that every level is
+	// cross-origin to the one above and needs an agent of its own. The mirror
+	// follows to frameDepthMax and leaves what is below it as a labelled box:
+	// the coordinate walk behind a click has to end somewhere, and a reader owed
+	// nothing else is owed the difference between "this did not come" and "your
+	// click was lost".
+	nest := func(self, other *string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			depth, _ := strconv.Atoi(r.URL.Query().Get("d"))
+			body := fmt.Sprintf("<p>level %d</p>", depth)
+			if depth > 0 {
+				body += fmt.Sprintf(
+					`<iframe width="300" height="150" style="border:0" src="%s/nest?d=%d"></iframe>`,
+					*other, depth-1)
+			}
+			_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Nest</title></head>
+				<body style="margin:0">`+body+`</body></html>`)
+		}
+	}
+	var siteURL, cdnURL string
+	mux.HandleFunc("/nest", nest(&siteURL, &cdnURL))
+	cdnMux.HandleFunc("/nest", nest(&cdnURL, &siteURL))
 	// Live control state the page changes on its own: a tick, a chosen option,
 	// two fields filled from script. None of it is a mutation, none of it fires
 	// an event, and the reader is looking straight at all of it. The paragraph
@@ -1409,6 +1450,21 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			</script>
 			</body></html>`)
 	})
+	// A cross-origin frame with content worth having. Pushed down and across the
+	// page on purpose: a coordinate taken inside the frame and used unmodified
+	// lands on the heading rather than on the control.
+	mux.HandleFunc("/foreign-frame", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Foreign</title>
+			<style>p { color: rgb(200, 201, 202) }</style></head>
+			<body><h1>the page around the launcher</h1>
+			<p id="outsider">the page's own words</p>
+			<div style="margin: 140px 0 0 160px">
+			  <iframe id="launcher" width="320" height="200" style="border:0"
+			    src="`+cdn.URL+`/widget-app.html"></iframe>
+			</div>
+			</body></html>`)
+	})
 	// A frame whose document lays out taller than the box the page gave it.
 	// Landside the frame clips it, as a frame does; plane-side the mirror has
 	// to leave it reachable, because the reader has no way to resize the box
@@ -1445,6 +1501,7 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	})
 	site := httptest.NewServer(mux)
 	t.Cleanup(site.Close)
+	siteURL, cdnURL = site.URL, cdn.URL
 
 	// Registered here, before the cleanups below it, so that it runs after them
 	// and the dump carries the shutdown records too. See logging_test.go for

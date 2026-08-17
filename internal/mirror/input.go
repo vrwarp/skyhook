@@ -77,7 +77,7 @@ func (t *Tab) dispatchInput(ctx context.Context, ev *protocol.InputEvent) error 
 	case protocol.InSetValue:
 		return t.setValue(ctx, ev)
 	case protocol.InFocus:
-		_, err := t.eval(ctx, fmt.Sprintf("__skyhook.focus(%d)", ev.Node))
+		_, err := t.evalInSlot(ctx, frameSlot(ev.Node), fmt.Sprintf("__skyhook.focus(%d)", ev.Node))
 		return err
 	case protocol.InBlur:
 		_, err := t.eval(ctx, "document.activeElement && document.activeElement.blur()")
@@ -98,8 +98,22 @@ func (t *Tab) dispatchInput(ctx context.Context, ev *protocol.InputEvent) error 
 	return fmt.Errorf("mirror: unknown input kind %q", ev.Kind)
 }
 
+/*
+rect asks whichever agent owns a node where it is, in the coordinates the host
+clicks in.
+
+A node inside a cross-origin frame is measured by that frame's own agent against
+that frame's own viewport, and input is replayed at a point in the top-level
+one. The difference is where the frame sits — its element's content origin,
+added up through however many documents are above it — and without it every
+click inside a mirrored frame lands short by exactly that, on whatever is above
+and to the left. This is §11's frame-offset bug again, one process further out,
+and it fails the same silent way: the mirror is right, the event is delivered,
+and the control never responds.
+*/
 func (t *Tab) rect(ctx context.Context, node int64) (*nodeRect, error) {
-	raw, err := t.eval(ctx, fmt.Sprintf("__skyhook.rect(%d)", node))
+	slot := frameSlot(node)
+	raw, err := t.evalInSlot(ctx, slot, fmt.Sprintf("__skyhook.rect(%d)", node))
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +124,21 @@ func (t *Tab) rect(ctx context.Context, node int64) (*nodeRect, error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, err
 	}
+	if slot == 0 {
+		return &r, nil
+	}
+	f := t.frameBySlot(slot)
+	if f == nil {
+		return nil, fmt.Errorf("mirror: node %d belongs to a frame that has gone", node)
+	}
+	dx, dy, err := t.frameOrigin(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	r.X += dx
+	r.Y += dy
+	r.CX += dx
+	r.CY += dy
 	return &r, nil
 }
 
@@ -487,7 +516,7 @@ func (t *Tab) hover(ctx context.Context, ev *protocol.InputEvent) error {
 
 func (t *Tab) insertText(ctx context.Context, ev *protocol.InputEvent) error {
 	if ev.Node != 0 {
-		if _, err := t.eval(ctx, fmt.Sprintf("__skyhook.focus(%d)", ev.Node)); err != nil {
+		if _, err := t.evalInSlot(ctx, frameSlot(ev.Node), fmt.Sprintf("__skyhook.focus(%d)", ev.Node)); err != nil {
 			return err
 		}
 	}
@@ -503,7 +532,7 @@ func (t *Tab) insertText(ctx context.Context, ev *protocol.InputEvent) error {
 
 func (t *Tab) key(ctx context.Context, ev *protocol.InputEvent) error {
 	if ev.Node != 0 {
-		if _, err := t.eval(ctx, fmt.Sprintf("__skyhook.focus(%d)", ev.Node)); err != nil {
+		if _, err := t.evalInSlot(ctx, frameSlot(ev.Node), fmt.Sprintf("__skyhook.focus(%d)", ev.Node)); err != nil {
 			return err
 		}
 	}
@@ -557,7 +586,7 @@ func (t *Tab) submit(ctx context.Context, ev *protocol.InputEvent) error {
 	if err != nil {
 		return err
 	}
-	_, err = t.eval(ctx, fmt.Sprintf("__skyhook.submit(%d,%s)", ev.Node, string(fields)))
+	_, err = t.evalInSlot(ctx, frameSlot(ev.Node), fmt.Sprintf("__skyhook.submit(%d,%s)", ev.Node, string(fields)))
 	return err
 }
 
@@ -602,7 +631,8 @@ func (t *Tab) HandleScroll(ctx context.Context, ev *protocol.ScrollEvent) error 
 	// last shot covered is no longer the rectangle the reader is looking at.
 	defer t.shotSoon(shotAfterInput)
 	if ev.Node != 0 {
-		_, err := t.eval(ctx, fmt.Sprintf("__skyhook.scrollTo(%d,%d,%d)", ev.Node, ev.X, ev.Y))
+		_, err := t.evalInSlot(ctx, frameSlot(ev.Node),
+			fmt.Sprintf("__skyhook.scrollTo(%d,%d,%d)", ev.Node, ev.X, ev.Y))
 		return err
 	}
 	// How far through its scrollable range the client is, not how far down its
@@ -688,6 +718,18 @@ func (t *Tab) DocHash(ctx context.Context) (uint64, error) {
 	if err := json.Unmarshal(raw, &h); err != nil {
 		return 0, err
 	}
+	// Every attached frame's nodes are in the client's document too, in one run
+	// of ids after the page's, so the hash of the whole is each agent's chained
+	// into the next. See Checkpoint.
+	for _, f := range t.framesInOrder() {
+		raw, err := t.evalInSlot(ctx, f.slot, fmt.Sprintf("__skyhook.docHash(%d)", h))
+		if err != nil {
+			return 0, fmt.Errorf("mirror: frame slot %d: %w", f.slot, err)
+		}
+		if err := json.Unmarshal(raw, &h); err != nil {
+			return 0, err
+		}
+	}
 	return h, nil
 }
 
@@ -703,10 +745,23 @@ type Checkpoint struct {
 // found a broken mirror.
 const EmptyDocHash uint64 = 0x811c9dc5
 
-// Checkpoint flushes whatever the agent is holding and reports the hash of the
-// document that frame leaves behind, with its sequence number. Comparing a
-// client's hash at that same sequence number is the only comparison that means
-// anything; see the integrity check.
+/*
+Checkpoint flushes whatever the agents are holding and reports the hash of the
+document those frames leave behind, with the sequence number the client has to
+reach for the comparison to mean anything. See the integrity check.
+
+One tab can be described by several agents — the page, and every cross-origin
+frame the mirror attached to. The client hashes the one document they add up to,
+visiting ids in ascending order; ids are namespaced by slot, so that order walks
+each frame's nodes in one run and the whole hash is each agent's chained into
+the next, in slot order. Each is asked in turn, seeded with the answer before it.
+
+Two things have to happen in this order and not the other. Every agent flushes
+first, so what it is holding is on the wire; then every queue is fenced, so the
+frames it sent have been turned into sequence numbers. Reading the tab's number
+before that names a frame the client already has while the hash describes the
+document a frame later — a divergence report that is only a race with itself.
+*/
 func (t *Tab) Checkpoint(ctx context.Context) (Checkpoint, error) {
 	var cp Checkpoint
 	raw, err := t.eval(ctx, "__skyhook.checkpoint()")
@@ -716,7 +771,42 @@ func (t *Tab) Checkpoint(ctx context.Context) (Checkpoint, error) {
 	if err := json.Unmarshal(raw, &cp); err != nil {
 		return cp, err
 	}
-	return cp, nil
+	hash := cp.Hash
+	for _, f := range t.framesInOrder() {
+		raw, err := t.evalInSlot(ctx, f.slot, fmt.Sprintf("__skyhook.checkpoint(%d)", hash))
+		if err != nil {
+			// A frame that cannot answer is a frame whose nodes are in the
+			// client's document and in nobody's hash. Reporting the rest would
+			// be a divergence against a document nothing described.
+			return Checkpoint{}, fmt.Errorf("mirror: frame slot %d: %w", f.slot, err)
+		}
+		var sub Checkpoint
+		if err := json.Unmarshal(raw, &sub); err != nil {
+			return Checkpoint{}, err
+		}
+		hash = sub.Hash
+	}
+	if err := t.fenceAgents(ctx); err != nil {
+		return Checkpoint{}, err
+	}
+	t.mu.Lock()
+	seq := t.seq
+	t.mu.Unlock()
+	return Checkpoint{Seq: seq, Hash: hash}, nil
+}
+
+// fenceAgents waits until everything the agents have already sent has been
+// turned into frames on the tab's stream.
+func (t *Tab) fenceAgents(ctx context.Context) error {
+	if err := t.sess.Fence(ctx, t.sess.ID); err != nil {
+		return err
+	}
+	for _, f := range t.framesInOrder() {
+		if err := f.sess.Fence(ctx, f.sess.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (t *Tab) flushSoon(d time.Duration) {
