@@ -185,6 +185,14 @@ export interface Snapshot {
    * page with no mirrored sub-document never grows any.
    */
   scoped?: ScopedCSS[];
+  /**
+   * Which document this is: a count of the documents the tab has sent, echoed
+   * back on every acknowledgement about this one. A snapshot restarts the frame
+   * numbering at zero, so a sequence number does not say which document an
+   * acknowledgement is about, and the server's integrity check was answered
+   * about one document for a question it asked about another.
+   */
+  epoch?: number;
 }
 
 /** One shadow root's stylesheet. */
@@ -350,7 +358,7 @@ export const F = {
     adapters: 8, clientVersion: 9, clientBuild: 10,
   },
   tabRef: { tab: 1, url: 2, title: 3, seq: 4, active: 5, loading: 6 },
-  tabAck: { tab: 1, seq: 2, hash: 3 },
+  tabAck: { tab: 1, seq: 2, hash: 3, epoch: 4 },
   viewport: { w: 1, h: 2, dpr: 3, mobile: 4 },
   resync: { tab: 1, haveTo: 2, reason: 3 },
   navigate: { url: 1, action: 2, ref: 3, background: 4 },
@@ -367,6 +375,7 @@ export const F = {
   snapshot: {
     strings: 1, nodes: 2, css: 3, url: 4, title: 5, viewport: 6,
     images: 7, scrollX: 8, scrollY: 9, docHash: 11, baseUrl: 12, scoped: 13,
+    epoch: 14,
   },
   scopedCSS: { root: 1, rules: 2 },
   op: {

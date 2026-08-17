@@ -35,7 +35,7 @@ describe('framing', () => {
 
 describe('frame encoding', () => {
   it('encodes integer keys, not text keys', () => {
-    const bytes = encodeFrame(FrameType.Ack, 3, ackBody(3, 7, 42));
+    const bytes = encodeFrame(FrameType.Ack, 3, ackBody(3, 7, 42, 0));
     const decoded = cborDecode(bytes) as Record<number, unknown>;
     expect(decoded[F.frame.type]).toBe(FrameType.Ack);
     expect(decoded[F.frame.tab]).toBe(3);

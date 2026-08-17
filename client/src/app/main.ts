@@ -439,7 +439,7 @@ async function hostFor(tab: number): Promise<MirrorHost | null> {
   const host = new MirrorHost(tab, {
     input: (t, ev) => tabs.forTab('input', t, { ...ev }),
     scroll: (t, ev) => tabs.forTab('scroll', t, { ...ev }),
-    applied: (t, seq, hash) => tabs.forTab('ack', t, { seq, hash }),
+    applied: (t, seq, hash, epoch) => tabs.forTab('ack', t, { seq, hash, epoch }),
     wantImages: (t, hashes) => tabs.forTab('wantImage', t, { hashes }),
     openLink: (_t, url) => openInNewTab(url),
     navigating: (t, url) => asking(t, 'Loading', url),

@@ -106,6 +106,12 @@ type tabState struct {
 
 	acked    uint64
 	lastHash uint64
+	// lastEpoch is the document lastHash is about, as the client named it. See
+	// protocol.TabAck.Epoch: a sequence number does not identify a document,
+	// because a snapshot restarts the numbering, so the epoch is what says
+	// whether an acknowledgement answers the question that was asked. Zero from
+	// a client too old to send one, which is read as "unknown".
+	lastEpoch uint64
 	// A snapshot restarts this tab's frame numbering at zero, so a sequence
 	// number does not identify a frame on its own: frame 0 means one document
 	// before a re-snapshot and a different one after. awaitingSnap is true from
@@ -118,6 +124,7 @@ type tabState struct {
 	// the client's hash for that seq once the ack carrying it arrives.
 	checkArmed bool
 	checkSeq   uint64
+	checkEpoch uint64
 	checkGot   bool
 	checkHash  uint64
 	// The last resync served for this tab, and when. A client that is behind
@@ -1187,7 +1194,7 @@ func (s *Session) SetViewport(ctx context.Context, vp protocol.Viewport) {
 // ------------------------------------------------------------ resync & acks
 
 // Ack records a client acknowledgement and trims the replay buffer.
-func (s *Session) Ack(tab uint32, seq uint64, hash uint64) {
+func (s *Session) Ack(tab uint32, seq, hash, epoch uint64) {
 	s.mu.Lock()
 	ts := s.tabs[tab]
 	if ts != nil {
@@ -1202,11 +1209,12 @@ func (s *Session) Ack(tab uint32, seq uint64, hash uint64) {
 			ts.awaitingSnap = false
 			ts.acked = seq
 			ts.lastHash = hash
-			// The integrity check is waiting for exactly this frame, and acks
-			// for later ones stream past while it waits: catch the hash on its
-			// way through rather than reading whatever is current when it
-			// looks.
-			if ts.checkArmed && seq == ts.checkSeq {
+			ts.lastEpoch = epoch
+			// The integrity check is waiting for exactly this frame of exactly
+			// this document, and acks for later ones stream past while it
+			// waits: catch the hash on its way through rather than reading
+			// whatever is current when it looks.
+			if ts.checkArmed && seq == ts.checkSeq && epochAnswers(epoch, ts.checkEpoch) {
 				ts.checkGot, ts.checkHash = true, hash
 			}
 		}
@@ -1420,7 +1428,7 @@ func (s *Session) checkTab(id uint32, ts *tabState) {
 		return
 	}
 
-	clientHash, ok := s.awaitCheck(ts, cp.Seq)
+	clientHash, ok := s.awaitCheck(ts, cp.Seq, cp.Epoch)
 	if !ok {
 		// Not a divergence: the client is behind, or offline, or the tab
 		// re-snapshotted and the sequence number it was waiting for will never
@@ -1437,15 +1445,12 @@ func (s *Session) checkTab(id uint32, ts *tabState) {
 		}
 		return
 	}
-	// The answer has to be about the document that was measured. A snapshot
-	// restarts the frame numbering at zero, so the sequence number this check
-	// anchored to names one document before a re-snapshot and a different one
-	// after — and a page that is building itself sends several snapshots a
-	// second, each of them frame 0. Waiting on the number alone let the client's
-	// acknowledgement of a *later* document answer a measurement of an earlier
-	// one, and the two hashes then differ for the honest reason that they are
-	// two documents. That is how a page acquiring frames reported a divergence
-	// with the pristine page's own hash in it.
+	// The document is still the one that was measured. A current client names
+	// the document its answer is about and awaitCheck refuses one about any
+	// other, which settles this outright; a client too old to send an epoch is
+	// heard anyway, and for that client this is the whole of the guard. It
+	// costs a conclusion on a page that is rebuilding itself, and buys never
+	// reporting a divergence between two documents that were each right.
 	if now := ts.tab.DocEpoch(); now != cp.Epoch {
 		s.log.Debug("integrity check inconclusive: the document was replaced while it was being checked",
 			"tab", id, "seq", cp.Seq, "measured", cp.Epoch, "now", now)
@@ -1539,13 +1544,32 @@ func (s *Session) clearStuck(ts *tabState) {
 	s.mu.Unlock()
 }
 
+/*
+epochAnswers says whether an acknowledgement is about the document that was
+measured.
+
+The client names the document its hash is about by echoing the epoch of the
+snapshot it applied, so this is an equality — with one allowance. A client too
+old to send an epoch sends zero, and zero has to keep meaning what it meant
+before the field existed, or every check against such a client would be
+inconclusive and the stall detector would start resyncing a mirror that is
+perfectly well. An old client keeps the old ambiguity; a current one does not.
+*/
+func epochAnswers(acked, measured uint64) bool {
+	return acked == 0 || acked == measured
+}
+
 // awaitCheck arms the tab for one sequence number and waits for the ack that
 // carries it. It reports the client's hash, and whether one arrived at all.
-func (s *Session) awaitCheck(ts *tabState, seq uint64) (uint64, bool) {
+func (s *Session) awaitCheck(ts *tabState, seq, epoch uint64) (uint64, bool) {
 	s.mu.Lock()
-	ts.checkArmed, ts.checkSeq, ts.checkGot, ts.checkHash = true, seq, false, 0
-	// A client already at this frame acked it before the check was armed.
-	if ts.acked == seq && ts.lastHash != 0 {
+	ts.checkArmed, ts.checkSeq, ts.checkEpoch = true, seq, epoch
+	ts.checkGot, ts.checkHash = false, 0
+	// A client already at this frame of this document acked it before the check
+	// was armed. The epoch is the whole of the difference between that and a
+	// client sitting on frame zero of the document before this one, which is
+	// what a page building itself leaves behind it several times a second.
+	if ts.acked == seq && ts.lastHash != 0 && epochAnswers(ts.lastEpoch, epoch) {
 		ts.checkGot, ts.checkHash = true, ts.lastHash
 	}
 	s.mu.Unlock()
@@ -1661,7 +1685,7 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 		if err := f.DecodeBody(&a); err != nil {
 			return err
 		}
-		s.Ack(a.Tab, a.Seq, a.Hash)
+		s.Ack(a.Tab, a.Seq, a.Hash, a.Epoch)
 	case protocol.TypeResync:
 		var r protocol.Resync
 		if err := f.DecodeBody(&r); err != nil {

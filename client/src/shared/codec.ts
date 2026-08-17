@@ -213,6 +213,7 @@ export function decodeSnapshot(body: unknown): Snapshot {
     images: arr<Fields>(f, F.snapshot.images).map(decodeImage),
     scrollX: num(f, F.snapshot.scrollX),
     scrollY: num(f, F.snapshot.scrollY),
+    epoch: num(f, F.snapshot.epoch),
     viewport: {
       w: num(vp, F.viewport.w),
       h: num(vp, F.viewport.h),
@@ -388,11 +389,18 @@ export function viewportBody(v: Viewport): Map<number, unknown> {
   return m;
 }
 
-export function ackBody(tab: number, seq: number, hash: number): Map<number, unknown> {
+export function ackBody(
+  tab: number, seq: number, hash: number, epoch: number,
+): Map<number, unknown> {
   const m = new Map<number, unknown>();
   m.set(F.tabAck.tab, safeInt(tab));
   m.set(F.tabAck.seq, safeInt(seq));
   if (hash) m.set(F.tabAck.hash, safeInt(hash >>> 0));
+  // Which document the hash is about. Without it the server cannot tell an
+  // answer about frame zero of this document from one about frame zero of the
+  // document before it, and a page that is merely building itself is reported
+  // as a diverged mirror.
+  if (epoch) m.set(F.tabAck.epoch, safeInt(epoch));
   return m;
 }
 

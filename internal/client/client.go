@@ -30,8 +30,11 @@ type Client struct {
 	// opened maps a ref sent with TabOpen to the tab the server named in
 	// answer. A tab is announced before it has any content, and the ref is how
 	// the request and the announcement are tied together.
-	opened    map[string]uint32
-	seqs      map[uint32]uint64
+	opened map[string]uint32
+	seqs   map[uint32]uint64
+	// epochs names the document each tab's replica holds — the Epoch of the
+	// snapshot it was built from, echoed on every ack about it.
+	epochs    map[uint32]uint64
 	images    map[string]protocol.ImageMeta
 	imageData map[string][]byte
 	adapter   []protocol.AdapterRecord
@@ -99,7 +102,8 @@ func Attach(ctx context.Context, conn transport.Conn, opts Options) (*Client, er
 		conn: conn, codec: codec, log: opts.Logger,
 		models: map[uint32]*mirror.Model{}, state: map[uint32]protocol.TabState{},
 		opened: map[string]uint32{},
-		seqs:   map[uint32]uint64{}, images: map[string]protocol.ImageMeta{},
+		seqs:   map[uint32]uint64{}, epochs: map[uint32]uint64{},
+		images:    map[string]protocol.ImageMeta{},
 		imageData: map[string][]byte{},
 		events:    make(chan Event, 256), closed: make(chan struct{}),
 	}
@@ -247,6 +251,10 @@ func (c *Client) handle(f *protocol.Frame) {
 		c.mu.Lock()
 		c.models[f.Tab] = m
 		c.seqs[f.Tab] = 0
+		// Which document this replica now holds, echoed back on every
+		// acknowledgement about it. A snapshot restarts the frame numbering, so
+		// the number alone does not say which document an answer is about.
+		c.epochs[f.Tab] = s.Epoch
 		want := make([]string, 0, len(s.Images))
 		for _, im := range s.Images {
 			c.images[im.Hash] = im
@@ -258,7 +266,7 @@ func (c *Client) handle(f *protocol.Frame) {
 		if len(want) > 0 {
 			_ = c.send(protocol.ChCtrl, protocol.TypeImageWant, f.Tab, protocol.ImageWant{Hashes: want})
 		}
-		c.ack(f.Tab, 0, m.Hash())
+		c.ack(f.Tab, 0, m.Hash(), s.Epoch)
 		c.emit(Event{Kind: "snapshot", Tab: f.Tab})
 	case protocol.TypeMutation:
 		var mu protocol.Mutation
@@ -269,6 +277,7 @@ func (c *Client) handle(f *protocol.Frame) {
 		c.mu.Lock()
 		m := c.models[f.Tab]
 		have := c.seqs[f.Tab]
+		epoch := c.epochs[f.Tab]
 		c.mu.Unlock()
 		if m == nil {
 			return
@@ -290,7 +299,7 @@ func (c *Client) handle(f *protocol.Frame) {
 		c.mu.Lock()
 		c.seqs[f.Tab] = f.Seq
 		c.mu.Unlock()
-		c.ack(f.Tab, f.Seq, m.Hash())
+		c.ack(f.Tab, f.Seq, m.Hash(), epoch)
 		c.emit(Event{Kind: "mutation", Tab: f.Tab, Seq: f.Seq})
 	case protocol.TypeTabState:
 		var st protocol.TabState
@@ -511,8 +520,9 @@ func modelFingerprint(m *mirror.Model) map[string]any {
 	return map[string]any{"total": len(nodes), "truncated": false, "nodes": nodes}
 }
 
-func (c *Client) ack(tab uint32, seq, hash uint64) {
-	_ = c.send(protocol.ChCtrl, protocol.TypeAck, tab, protocol.TabAck{Tab: tab, Seq: seq, Hash: hash})
+func (c *Client) ack(tab uint32, seq, hash, epoch uint64) {
+	_ = c.send(protocol.ChCtrl, protocol.TypeAck, tab,
+		protocol.TabAck{Tab: tab, Seq: seq, Hash: hash, Epoch: epoch})
 }
 
 // OpenTab asks for a new tab.

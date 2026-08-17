@@ -490,14 +490,22 @@ func (p *Pipeline) answerIfStranded(tab uint32, key string) {
 	}
 	p.mu.Lock()
 	_, done := p.meta[key]
-	stranded := !done && !p.inFlight[key]
-	if stranded {
-		rest := make([]uint32, 0, len(p.wanted[key]))
-		for _, w := range p.wanted[key] {
-			if w != tab {
-				rest = append(rest, w)
-			}
+	// Still holding a space for it, which is the question. A tab that has been
+	// taken off the list has been answered — by the bytes arriving, or by a
+	// failed fetch telling everyone waiting that they are not coming — and a
+	// second notice for an asset already given up on is noise the client has to
+	// decide about.
+	rest := make([]uint32, 0, len(p.wanted[key]))
+	listed := false
+	for _, w := range p.wanted[key] {
+		if w == tab {
+			listed = true
+			continue
 		}
+		rest = append(rest, w)
+	}
+	stranded := listed && !done && !p.inFlight[key]
+	if stranded {
 		if len(rest) == 0 {
 			delete(p.wanted, key)
 		} else {

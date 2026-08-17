@@ -2923,3 +2923,42 @@ link and able to fail. And the race itself is asked of the ledger directly, two
 submissions in a row answered yes then no, because a race asked of goroutines
 reproduces when it feels like it: the first concurrent test passed against the
 broken code.
+
+### 44. A frame number does not name a document
+
+The integrity check hashes the landside page, waits for the client's
+acknowledgement of the frame it measured, and compares. Over netem it reported
+`mirror divergence` twice on a page nothing was wrong with, and the numbers said
+what it was before any test did: the second report's client hash was the *first
+report's server hash*, and both said `seq=0`.
+
+A snapshot restarts a tab's frame numbering at zero. Frame 0 is therefore not a
+frame — it is the sentence "I have the current document", said identically about
+every document the tab has ever held, and a page that builds itself sends
+several of them a second. The check anchored on that number. A client one round
+trip behind — the ordinary state at 1.2 s RTT — answers about the document
+before the one being measured, the two hashes differ because they describe two
+documents, and the mirror is resynced for being right. The repair costs a whole
+document on the link that made the client late in the first place, which is §37
+again, triggered by the guard that exists to prevent it.
+
+Two halves, because the ambiguity has two sides. The tab counts the documents it
+has sent (`docEpoch`), so the server can tell that the page it measured has been
+replaced since — that half needs nothing on the wire and was the first fix.
+It is not enough: it catches the document moving *after* the measurement and
+says nothing about an answer that predates it. So the epoch goes on the
+snapshot, and every acknowledgement about that document echoes it back
+(`TabAck.Epoch`, `Snapshot.Epoch`). An answer that names another document is not
+an answer, and the check waits for one that does.
+
+An ack with no epoch — a client older than the field — is heard as before, and
+keeps the old ambiguity along with it. The alternative is a check that goes
+inconclusive against every such client, which is not neutral: two of those in a
+row is what §38's stall detector reads as a stopped client, and it would resync
+a mirror with nothing wrong with it once a minute.
+
+What makes this one worth writing down is that the first fix looked complete.
+The e2e test that found it passed afterwards, on the fast link and on the slow
+one, and the fault came back a day later with the same two hashes in the log —
+because the epoch was being compared against the wrong thing at the wrong end.
+A measurement is only as good as the answer's claim to be about it.
