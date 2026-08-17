@@ -192,17 +192,39 @@ func TestPWAAgreesAboutADocumentWithACrossOriginFrameInIt(t *testing.T) {
 	if mt == nil {
 		t.Fatal("the session lost its tab")
 	}
-	landside, err := mt.DocHash(ctx)
-	if err != nil {
-		t.Fatalf("ask the agents for their hash: %v", err)
+	// Two reads of two halves, which have to be of the same document to mean
+	// anything. The client's hash is of the last batch it applied and the
+	// agents' is of the page as it stands, so a page still acquiring frames
+	// makes them differ for the honest reason that they describe two moments —
+	// the same confusion §43 found in the integrity check itself, where the
+	// answer is that the check says nothing rather than reports a divergence.
+	// Here the answer is to ask again until the document holds still: what this
+	// test is about is whether the chain adds up, not how fast the page settles.
+	var got, landside uint64
+	agreed := false
+	deadline := time.Now().Add(budget(60 * time.Second))
+	for !agreed && time.Now().Before(deadline) {
+		before := mt.Seq()
+		hash, err := mt.DocHash(ctx)
+		if err != nil {
+			t.Fatalf("ask the agents for their hash: %v", err)
+		}
+		landside = hash
+		got = sessions[0].ClientHash(refs[0].Tab)
+		// Same sequence number either side of the pair, so nothing was emitted
+		// between the two reads; and the client is at that number, so what it
+		// hashed is what the agents just described.
+		agreed = got != 0 && got == landside && mt.Seq() == before
+		if !agreed {
+			time.Sleep(budget(500 * time.Millisecond))
+		}
 	}
-	got := sessions[0].ClientHash(refs[0].Tab)
 	if got == 0 {
 		t.Fatal("the client never reported a document hash")
 	}
-	if got != landside {
-		t.Fatalf("client hash %#x != the chained agent hash %#x: with a frame in"+
-			" the document the integrity check would resync it every thirty seconds",
-			got, landside)
+	if !agreed {
+		t.Fatalf("client hash %#x != the chained agent hash %#x on a document that has"+
+			" stopped changing: with a frame in it the integrity check would resync"+
+			" every thirty seconds", got, landside)
 	}
 }
