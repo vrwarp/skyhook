@@ -1388,6 +1388,21 @@ func decodeOpRow(row []json.RawMessage) (protocol.Op, bool) {
 		op.Node = decodeInt(row[1])
 		op.X = int(decodeInt(row[2]))
 		op.Y = int(decodeInt(row[3]))
+	case protocol.OpDocInfo: // [11, title]
+		// A literal rather than a ref into the intern table: a title is short,
+		// it changes rarely, and it is the one op whose whole content is a
+		// string nothing else in the document refers to.
+		//
+		// The op exists so that a page whose only change is its own name has
+		// something to put in a frame. The name itself travels on the frame,
+		// where the host already reads it; carrying it here too is what lets
+		// the replica and the mirrored document agree about the title.
+		if len(row) < 2 {
+			return op, false
+		}
+		if err := json.Unmarshal(row[1], &op.Str); err != nil {
+			return op, false
+		}
 	default:
 		return op, false
 	}

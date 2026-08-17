@@ -426,6 +426,77 @@ the host to attach to the frame's own target, an agent per frame, and an id
 space and hash contract that span the two, since the integrity check compares
 one hash for the whole tab.
 
+### 11d. The frame's box was one of five, and they now share a sweep
+
+Fixing the box invited the obvious question — what else is read once and never
+again? — and the answer was five more, all of the same shape. The mirror carries
+two kinds of thing. Structure is reported by a `MutationObserver` and arrives on
+its own. Everything else is a **property or a measurement**, read at the moment
+the element was serialised, with no event to say it has moved. Nothing catches
+that afterwards, either: the integrity check hashes ids, kinds and names, so
+every one of these leaves both sides agreeing about a document they disagree
+about, and no resync is ever triggered. Each was reproduced against a real
+browser before it was fixed.
+
+**What a control holds.** `value`, `checked` and `selected` are properties.
+`value` was refreshed by an `input` event landside — which covers the reader's
+own typing and nothing else — and the other two were refreshed by nothing at
+all. So everything a *page* does to its own form was silent: a React controlled
+input re-rendering, a draft restored, a search box cleared after submit, a
+"select all" ticking every row, a dependent dropdown moving to its new choice.
+A checkbox the page ticked stayed unticked in the mirror for ever. The controls
+the mirror carries state for are now watched, and the sweep reports the
+difference; reading these three forces no layout, so the pass costs a property
+read per control. Removing the mark is how the agent says *unticked*, so the
+patcher unsets the property rather than merely dropping the attribute — an
+attribute going away does not untick a box.
+
+**A shadow root attached by hand.** §19 watches custom elements that were
+mirrored *undefined* and re-reads them when their definition lands. Any element
+can be given a root at any time, though, and two shapes fall outside that watch:
+a plain `<div>` a widget takes over, and a component already defined when it was
+serialised that attaches its root a tick later. Both mirror as light DOM
+rendered flat, which is the Reddit failure of §19 through a door §19 did not
+cover — and the manual claimed otherwise. The sweep now asks an exact question
+rather than a heuristic one: an element wearing a shadow root the agent has no
+id for is a root that was never mirrored, and it is re-read.
+
+**The page's own name.** The title and URL travel as fields on a mutation frame,
+and a frame is only sent when there are ops to put in it. A page whose *only*
+change is its title therefore never sent one — unread counts, "(2) Slack", a
+build finishing in a tab nobody is looking at — and the title's own text node is
+not mirrored either (head content is replaced by used-CSS), so its mutation
+record is dropped and nothing is left to notice. It now travels as a `DocInfo`
+op. It has to be an op and not an empty frame: the host discards a mutation with
+nothing in it, and the agent's sequence numbers are the ones the integrity check
+waits for the client to reach, so a frame the host dropped would leave the two
+counting differently.
+
+**One sweep, not three.** These share a shape — a question only landside can
+answer, no event to answer it, and an answer worth nothing until something asks
+— so they share §19's poll rather than adding two more timers. It backs off to
+eight seconds while it keeps finding nothing and drops back to half a second the
+moment anything moves. `test/livestate_test.go` covers the lot.
+
+### 11e. What the client paints is not the page's to overwrite
+
+The frame box was half of a second pattern, and the other half was live. The
+client paints things into an element's inline style that the page knows nothing
+about: a frame's stand-in size, the photograph of a canvas, an image's blur
+placeholder and reserved box. The landside element none of it came from carries
+none of it — so the page's next `style` write, made for some unrelated reason,
+replaces the whole declaration and takes all of it away.
+
+For an image that is a flicker. For a canvas it is permanent: shots are taken in
+answer to input (§ region shots), so nothing repaints that element until the
+reader touches something, and a mirrored map or game goes blank and stays blank
+with nothing on screen to explain it. The patcher now tells the host when a page
+`style` write landed on an element, and the host puts its own painting back —
+only for writes to a document the client already has, because at creation there
+is nothing painted yet and firing it per element in a snapshot would be a few
+thousand calls that can only answer no.
+`TestPWAKeepsACanvasPhotographThroughARestyle` is the canvas.
+
 ### 11a. Stylesheets a page picks up after its load event
 
 The CSSOM will not show a page a stylesheet served from another origin, so the
@@ -733,7 +804,9 @@ the agent lives in an isolated world and the prototype it can reach is not the
 one the page calls. So the elements that were mirrored undefined are watched and
 re-read when they upgrade — a poll landside, where cycles are free and nothing
 reaches the wire unless something actually changed. It backs off while nothing
-is happening and stops entirely once every watched element has upgraded.
+is happening. It no longer stops when every watched element has upgraded:
+[§11d](#11d-the-frames-box-was-one-of-five-and-they-now-share-a-sweep) gave the
+same pass two more questions to ask, and both outlive the last upgrade.
 
 **The CSS half.** `:defined` is a live question landside and a settled one
 plane-side. The used-CSS filter asks it landside, at a moment of its own
@@ -1811,7 +1884,9 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
 - **A closed shadow root is invisible.** `attachShadow({mode: 'closed'})` cannot
   be read from an isolated world any more than it can from the page, so such a
   component mirrors as its light DOM and nothing else. Late-attached *open*
-  roots are handled (§19); closed ones cannot be.
+  roots are handled — by the upgrade watch when a custom element brings one
+  (§19), and by the sweep when any other element does (§11d); closed ones cannot
+  be.
 
 ### 33. A client that runs from its own cache cannot see that it is old
 

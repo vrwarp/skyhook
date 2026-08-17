@@ -76,6 +76,9 @@ export interface PatcherHooks {
   onShot?(node: HTMLElement, meta: ImageMeta): void;
   /** Rewrites a skyhook image reference inside a CSS rule. */
   rewriteCSS?(rule: string): string;
+  /** Called when the page rewrote an element's `style`, which discards
+   *  everything the host had painted into it. The host puts its own back. */
+  onRestyled?(node: HTMLElement): void;
   /** Called when the server reports the landside focus moved. */
   onFocus?(node: Node | null): void;
   /** Called for document-level or container scroll positions. */
@@ -271,7 +274,8 @@ export class Patcher {
             this.hooks.onDeferred?.(op);
             break;
           }
-          this.setAttr(node as Element, this.str(op.ref), op.ref2 < 0 ? null : this.str(op.ref2));
+          this.setAttr(node as Element, this.str(op.ref),
+            op.ref2 < 0 ? null : this.str(op.ref2), true);
           break;
         }
         case OpCode.Text: {
@@ -442,7 +446,16 @@ export class Patcher {
     return node;
   }
 
-  private setAttr(el: Element, name: string, value: string | null): void {
+  /**
+   * Applies one attribute.
+   *
+   * `live` marks a write the page made to a document the client already has,
+   * as against the ones a node arrives with. Only the first can discard
+   * anything the host painted, because at creation there is nothing painted
+   * yet — and firing the hook for every styled element in a snapshot would
+   * be a few thousand calls that can only answer no.
+   */
+  private setAttr(el: Element, name: string, value: string | null, live = false): void {
     if (!name) return;
     const lower = name.toLowerCase();
     if (lower.startsWith(FORBIDDEN_ATTR_PREFIX) && lower.length > 2) return;
@@ -454,6 +467,14 @@ export class Patcher {
         const style = (el as HTMLElement).style;
         style.removeProperty('width');
         style.removeProperty('height');
+      } else if (lower === 'data-sky-checked') {
+        // These two carry properties, and a property is not unset by dropping
+        // the attribute that described it. The mark going away means the page
+        // unticked the box or moved off the option, and the control has to
+        // follow — otherwise the mirror shows a tick landside stopped drawing.
+        (el as HTMLInputElement).checked = false;
+      } else if (lower === 'data-sky-selected') {
+        (el as HTMLOptionElement).selected = false;
       }
       return;
     }
@@ -478,6 +499,9 @@ export class Patcher {
       if (value.includes('skyhook://img/')) {
         this.styleAttrs.set(el, value);
         this.writeStyleAttr(el, value);
+        // This declaration replaced the old one just as surely as a plain write
+        // would have, so what the mirror had painted into it is gone too.
+        this.restoreOwnStyle(el, live);
         return;
       }
       this.styleAttrs.delete(el);
@@ -501,13 +525,8 @@ export class Patcher {
       this.applyBox(el, value);
       return;
     }
-    // A `style` write from the page replaces the whole declaration, box and
-    // all: the width and height above are ours, not the page's, and nothing
-    // sends them again just because the page changed a colour. Landside the
-    // frame kept its size through that; here it would collapse.
     if (lower === 'style') {
-      const box = el.getAttribute('data-sky-box');
-      if (box !== null) this.applyBox(el, box);
+      this.restoreOwnStyle(el, live);
       return;
     }
     // Live form state arrives as a data attribute so a resync restores what was
@@ -520,6 +539,25 @@ export class Patcher {
     } else if (lower === 'data-sky-selected') {
       (el as HTMLOptionElement).selected = value === '1';
     }
+  }
+
+  /**
+   * Puts back what a page's `style` write discarded.
+   *
+   * A `style` attribute replaces the whole declaration, and everything the
+   * mirror painted into that declaration goes with it: a frame's box, a
+   * canvas's photograph, an image's placeholder. None of it is the page's to
+   * send again, and the page had no idea it was there — the landside element it
+   * copied this style from wears none of it.
+   *
+   * `live` marks a write to a document the client already has. At creation
+   * there is nothing painted yet, so the hook would be a few thousand calls
+   * across a snapshot that can only answer no.
+   */
+  private restoreOwnStyle(el: Element, live: boolean): void {
+    const box = el.getAttribute('data-sky-box');
+    if (box !== null) this.applyBox(el, box);
+    if (live) this.hooks.onRestyled?.(el as HTMLElement);
   }
 
   /** Sizes a stand-in from the `WxH` the agent measured landside. */
@@ -646,8 +684,14 @@ export class Patcher {
       if (root) this.renderScopedCSS(rootID, root as unknown as ShadowRoot);
     }
     for (const [el, raw] of this.styleAttrs) {
-      if (el.isConnected) this.writeStyleAttr(el, raw);
-      else this.styleAttrs.delete(el);
+      if (!el.isConnected) {
+        this.styleAttrs.delete(el);
+        continue;
+      }
+      this.writeStyleAttr(el, raw);
+      // Re-rendering the declaration discards the mirror's own painting just as
+      // the page's own write does, and this one runs every time an image lands.
+      this.restoreOwnStyle(el, true);
     }
   }
 

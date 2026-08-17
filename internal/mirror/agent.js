@@ -41,10 +41,11 @@
   var CSS_DEBOUNCE_MS = 400;
   var SCROLL_THROTTLE_MS = 250;
   var REFRAME_DEBOUNCE_MS = 250;
-  // How often a custom element that has not upgraded yet is looked at again,
-  // and how far that interval backs off while nothing is happening.
-  var UPGRADE_POLL_MS = 500;
-  var UPGRADE_POLL_MAX_MS = 8000;
+  // How often the sweep looks for the things no observer reports — an element
+  // that upgraded, a shadow root attached by hand, a control the page filled in
+  // — and how far that interval backs off while it keeps finding nothing.
+  var SWEEP_MS = 500;
+  var SWEEP_MAX_MS = 8000;
   // How many un-upgraded custom elements are worth watching at once. A page
   // that has more than this has something other than lazy components going on.
   var UPGRADE_WATCH_MAX = 4096;
@@ -127,8 +128,16 @@
   var lastText = new Map();     // id -> last text we reported
   var lastScroll = new Map();
   var awaitingUpgrade = new Set(); // ids of custom elements not yet defined
-  var upgradeTimer = null;
-  var upgradePoll = UPGRADE_POLL_MS;
+  var sweepTimer = null;
+  var sweepEvery = SWEEP_MS;
+  // Controls whose live properties the mirror carries: element -> the value,
+  // ticked and chosen state it was last sent as. See emitLive.
+  var liveWatch = new Map();
+  // Elements the shadow sweep has already re-read once. See sweepShadowRoots.
+  var shadowSwept = new WeakSet();
+  // The page's own name and address as the client last heard them. See
+  // syncDocInfo: neither is a node, so neither has a mutation to ride on.
+  var lastInfo = { url: '', title: '' };
   var scrollTimer = null;
   var focusedId = 0;
   var started = false;
@@ -168,6 +177,7 @@
       lastScroll.delete(id);
     }
     if (node.tagName === 'IFRAME') unwatchBox(node);
+    liveWatch.delete(node);
     var kids = node.childNodes;
     if (kids) for (var i = 0; i < kids.length; i++) forget(kids[i]);
     if (node.shadowRoot) forget(node.shadowRoot);
@@ -318,15 +328,22 @@
       pairs.push(intern(name), intern(value));
     }
     // Live form state is a property, not an attribute; without this a mirrored
-    // form loses everything the user (or the page) already typed.
+    // form loses everything the user (or the page) already typed. What is
+    // recorded here is also what the sweep compares against, so a page that
+    // changes any of it later is a difference rather than a re-send.
     var tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
+      var checked = !!el.checked;
       if (!isSensitive(el)) {
-        pairs.push(intern('data-sky-value'), intern(el.value == null ? '' : el.value));
+        var value = el.value == null ? '' : String(el.value);
+        pairs.push(intern('data-sky-value'), intern(value));
+        watchLive(el, { value: value, checked: checked });
       }
-      if (el.checked) pairs.push(intern('data-sky-checked'), intern('1'));
-    } else if (tag === 'OPTION' && el.selected) {
-      pairs.push(intern('data-sky-selected'), intern('1'));
+      if (checked) pairs.push(intern('data-sky-checked'), intern('1'));
+    } else if (tag === 'OPTION') {
+      var selected = !!el.selected;
+      if (selected) pairs.push(intern('data-sky-selected'), intern('1'));
+      watchLive(el, { selected: selected });
     }
     // Whether a custom element has upgraded is a live question landside and a
     // settled one plane-side, where no definition will ever run: every custom
@@ -473,6 +490,111 @@
         pendingOps.push([3, id, intern(OPAQUE_ATTR), host ? intern(host) : -1]);
       }
     }
+  }
+
+  // ------------------------------------------------------ live control state
+
+  /*
+   * What a control holds is a property, and properties are not in the DOM a
+   * MutationObserver describes.
+   *
+   * `value`, `checked` and `selected` were read once, when the control was
+   * serialised, and refreshed after that only by an `input` event landside —
+   * which covers the reader's own typing and nothing else. Everything a *page*
+   * does to its own form is silent: React re-rendering a controlled input, a
+   * draft being restored, a search box cleared after submit, a "select all"
+   * ticking every row, a dependent dropdown moving to its new choice. The
+   * mirror went on showing the state before it, indefinitely, and the integrity
+   * check cannot see any of it — the hash is over ids, kinds and names, so both
+   * sides agree about a document they disagree about.
+   *
+   * So the controls the mirror carries state for are watched, and the sweep
+   * reports the difference. Reading these three properties forces no layout, so
+   * the pass costs a property read per control and reaches the wire only when
+   * an answer has actually changed.
+   */
+
+  // watchLive records the state a control was serialised with.
+  function watchLive(el, state) {
+    liveWatch.set(el, state);
+  }
+
+  // emitLive sends whatever has changed about one control, and says whether
+  // anything had. Shared by the sweep and by the input listener, so the two can
+  // never disagree about what the client has been told.
+  function emitLive(el) {
+    var id = idOf.get(el);
+    if (id === undefined || !el.isConnected) {
+      liveWatch.delete(el);
+      return false;
+    }
+    var was = liveWatch.get(el) || {};
+    var changed = false;
+    if (el.tagName === 'OPTION') {
+      var selected = !!el.selected;
+      if (was.selected !== selected) {
+        // Removed rather than set to "0": the attribute means chosen, and the
+        // client turns its absence back into a deselected option.
+        pendingOps.push([3, id, intern('data-sky-selected'), selected ? intern('1') : -1]);
+        changed = true;
+      }
+      liveWatch.set(el, { selected: selected });
+      return changed;
+    }
+    // A field holding a secret is not mirrored in either direction, and a field
+    // that has become one since it was serialised stops being watched here.
+    if (isSensitive(el)) {
+      liveWatch.delete(el);
+      return false;
+    }
+    var value = el.value == null ? '' : String(el.value);
+    var checked = !!el.checked;
+    if (was.value !== value) {
+      pendingOps.push([3, id, intern('data-sky-value'), intern(value)]);
+      changed = true;
+    }
+    if (was.checked !== checked) {
+      pendingOps.push([3, id, intern('data-sky-checked'), checked ? intern('1') : -1]);
+      changed = true;
+    }
+    liveWatch.set(el, { value: value, checked: checked });
+    return changed;
+  }
+
+  function syncLive() {
+    if (!liveWatch.size) return false;
+    var els = [];
+    liveWatch.forEach(function (_, el) { els.push(el); });
+    var changed = false;
+    for (var i = 0; i < els.length; i++) {
+      if (emitLive(els[i])) changed = true;
+    }
+    return changed;
+  }
+
+  /*
+   * The page's own name and address, which are not nodes and have no mutation
+   * to ride on.
+   *
+   * Both travel as fields on every mutation frame, and a frame is only sent
+   * when there are ops to put in it — so a page whose *only* change is its
+   * title never sent one. That is unread counts, "(2) Slack", a build finishing
+   * in a CI tab: exactly the pages that change nothing else. The title's own
+   * text node is not mirrored either (head content is replaced by used-CSS), so
+   * its mutation record is dropped and nothing is left to notice.
+   *
+   * One op fixes it, and it has to be an op rather than an empty frame: the
+   * host drops a mutation with nothing in it, and the agent's sequence numbers
+   * are the ones the integrity check waits for the client to reach. A frame the
+   * host discards would leave the two counting differently.
+   */
+  function syncDocInfo() {
+    var url = location.href;
+    var title = document.title || '';
+    if (url === lastInfo.url && title === lastInfo.title) return false;
+    lastInfo = { url: url, title: title };
+    pendingOps.push([11, title]);
+    return true;
   }
 
   function describeImage(el, base) {
@@ -633,27 +755,82 @@
     // Something new to look at, so start the interval over: an element usually
     // upgrades soon after it lands, and a long-backed-off timer would sit on
     // the change for eight seconds.
-    upgradePoll = UPGRADE_POLL_MS;
-    scheduleUpgradeCheck(upgradePoll);
+    sweepEvery = SWEEP_MS;
+    scheduleSweep(sweepEvery);
   }
 
-  function scheduleUpgradeCheck(delay) {
-    if (upgradeTimer || !awaitingUpgrade.size) return;
-    upgradeTimer = setTimeout(function () {
-      upgradeTimer = null;
-      var before = awaitingUpgrade.size;
-      if (checkUpgrades()) {
-        scheduleFlush(false);
-        // The shadow root that just arrived brings its own stylesheet.
-        scheduleCSS();
-      }
-      // Components load in waves: back off while nothing is happening, and
-      // start over the moment something upgrades.
-      upgradePoll = awaitingUpgrade.size < before
-        ? UPGRADE_POLL_MS
-        : Math.min(upgradePoll * 2, UPGRADE_POLL_MAX_MS);
-      scheduleUpgradeCheck(upgradePoll);
+  /*
+   * The sweep: one pass over everything that changes without saying so.
+   *
+   * Three things share it, because they share a shape — a question only
+   * landside can answer, no event to answer it, and an answer worth nothing
+   * until something asks. Upgrades were the first (§19) and had the poll to
+   * themselves; late shadow roots and live control state are the same problem
+   * wearing different clothes, and a second and third timer would have cost
+   * three wake-ups where one does.
+   *
+   * It backs off to eight seconds while it keeps finding nothing, and drops
+   * back to half a second the moment anything moves — components load in
+   * waves, and so do the forms a page fills in.
+   */
+  function scheduleSweep(delay) {
+    if (sweepTimer || !started) return;
+    sweepTimer = setTimeout(function () {
+      sweepTimer = null;
+      var roots = checkUpgrades();
+      if (sweepShadowRoots()) roots = true;
+      var changed = roots;
+      if (syncLive()) changed = true;
+      if (syncDocInfo()) changed = true;
+      if (changed) scheduleFlush(false);
+      // A root that arrived — by upgrade or by hand — brings its own sheet.
+      if (roots) scheduleCSS();
+      sweepEvery = changed ? SWEEP_MS : Math.min(sweepEvery * 2, SWEEP_MAX_MS);
+      scheduleSweep(sweepEvery);
     }, delay);
+  }
+
+  /*
+   * A shadow root attached after its element was serialised.
+   *
+   * The upgrade watch above covers the case a custom element makes: mirrored
+   * undefined, watched from that moment, re-read when its definition lands. But
+   * any element can be given a root at any time, and two common shapes fall
+   * outside that watch — a plain <div> a widget takes over, and a component
+   * already defined when it was serialised that attaches its root a tick later.
+   * `attachShadow` reaches no observer, so what the mirror keeps is the light
+   * DOM rendered flat: the Reddit failure of §19, through a door §19 does not
+   * cover.
+   *
+   * The test is exact rather than a guess: an element wearing a shadow root the
+   * agent has no id for is a root that was never mirrored.
+   */
+  function sweepShadowRoots() {
+    var roots = [];
+    observedDocs.forEach(function (r) { roots.push(r); });
+    var found = false;
+    for (var r = 0; r < roots.length; r++) {
+      var els;
+      try { els = roots[r].querySelectorAll('*'); } catch (e) { continue; }
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var sr = el.shadowRoot;
+        if (!sr || idOf.get(sr) !== undefined) continue;
+        // Not mirrored itself: whatever it is, it is not the client's yet, and
+        // re-reading it here would have nowhere to put the rows.
+        if (idOf.get(el) === undefined) continue;
+        // Once each, whatever comes of it. An element has one shadow root for
+        // life, so a re-read that did not register it — the serialiser stops
+        // at a canvas and at the head, and an element whose parent is not
+        // mirrored has nowhere to go — will not register it next time either,
+        // and a sweep that kept trying would re-send the subtree for ever.
+        if (shadowSwept.has(el)) continue;
+        shadowSwept.add(el);
+        reserialize(el);
+        found = true;
+      }
+    }
+    return found;
   }
 
   // checkUpgrades re-reads every watched element that has since upgraded, and
@@ -1846,6 +2023,11 @@
       }
     });
 
+    // The page's name and address move with a batch as often as not — a
+    // client-side route change is a subtree swap and a pushState — and asking
+    // here costs two string compares against what the client was last told.
+    syncDocInfo();
+
     if (pendingOps.length) {
       scheduleFlush(false);
       scheduleCSS();
@@ -1883,15 +2065,27 @@
     }
   }
 
+  /*
+   * An input event is the one moment a control's state is known to have moved,
+   * and reporting it here rather than waiting for the sweep is what keeps a
+   * reader's own typing off the half-second clock.
+   *
+   * A `select` reports on itself and not on the option that changed, so its
+   * options are read instead — that is where `selected` lives.
+   */
   function onInput(ev) {
     var el = ev.target;
     if (!el || !el.tagName) return;
-    var id = idOf.get(el);
-    if (id === undefined) return;
-    if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !isSensitive(el)) {
-      pendingOps.push([3, id, intern('data-sky-value'), intern(el.value == null ? '' : el.value)]);
-      scheduleFlush(false);
+    var changed = false;
+    if (el.tagName === 'SELECT') {
+      var opts = el.options || [];
+      for (var i = 0; i < opts.length; i++) {
+        if (emitLive(opts[i])) changed = true;
+      }
+    } else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      changed = emitLive(el);
     }
+    if (changed) scheduleFlush(false);
   }
 
   function onFocus() {
@@ -2000,14 +2194,17 @@
     // The watch list is rebuilt by the walk below; its old ids may not even be
     // in the new document.
     awaitingUpgrade = new Set();
-    upgradePoll = UPGRADE_POLL_MS;
-    // Same for the frames: the walk re-measures every one of them and says so
-    // in the snapshot, so what the client had been told before is not about
-    // this document.
+    sweepEvery = SWEEP_MS;
+    // Same for the frames and the controls: the walk re-measures and re-reads
+    // every one of them and says so in the snapshot, so what the client had
+    // been told before is not about this document.
     boxWatch = new Map();
     boxDirty = new Set();
     boxObservers.forEach(function (obs) { obs.disconnect(); });
     boxObservers = new Map();
+    liveWatch = new Map();
+    // The snapshot carries both of these itself.
+    lastInfo = { url: location.href, title: document.title || '' };
 
     var rows = [];
     serializeNode(document.documentElement, 0, rows);
@@ -2055,6 +2252,7 @@
     // within a second or two; a follow-up CSS pass is cheaper than a resnapshot.
     setTimeout(scheduleCSS, 800);
     setTimeout(scheduleCSS, 2500);
+    scheduleSweep(sweepEvery);
   }
 
   // ------------------------------------------------------------- coordinates
@@ -2365,6 +2563,11 @@
         // is a stand-in frozen at whatever size it was born with.
         framesWatched: boxWatch.size,
         framesDirty: boxDirty.size,
+        // Controls whose live state the sweep is keeping current, and how often
+        // it is looking. A page where the sweep has backed off all the way is a
+        // page nothing has changed for eight seconds.
+        liveWatched: liveWatch.size,
+        sweepEvery: sweepEvery,
         docHash: api.docHash()
       };
     },

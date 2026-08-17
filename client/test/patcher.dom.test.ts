@@ -260,6 +260,103 @@ describe('Patcher', () => {
     expect(stand.style.height).toBe('');
   });
 
+  /*
+   * A tick and a chosen option are properties, and the agent reports them by
+   * marking the element. Removing the mark is how it says the page unticked the
+   * box — and removing an attribute does not unset a property, so without this
+   * the mirror keeps showing a tick that landside stopped drawing.
+   */
+  it('unticks a control when its mark is taken away', () => {
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('data-sky-checked', '1', 'option', 'data-sky-selected');
+    snap.nodes.push(
+      {
+        id: 30, parent: 1, kind: NodeKind.Element, ref: snap.strings.indexOf('input'),
+        attrs: [base, base + 1], flags: 0,
+      },
+      {
+        id: 31, parent: 1, kind: NodeKind.Element, ref: base + 2,
+        attrs: [base + 3, base + 1], flags: 0,
+      },
+    );
+    patcher.applySnapshot(snap);
+    const box = document.querySelector('input') as HTMLInputElement;
+    const opt = document.querySelector('option') as HTMLOptionElement;
+    expect(box.checked).toBe(true);
+    expect(opt.selected).toBe(true);
+
+    patcher.applyMutation(mutation([
+      { op: OpCode.Attr, node: 30, ref: base, ref2: -1 },
+      { op: OpCode.Attr, node: 31, ref: base + 3, ref2: -1 },
+    ]), 1);
+    expect(box.checked).toBe(false);
+    expect(opt.selected).toBe(false);
+  });
+
+  /*
+   * Everything the host paints into an element's inline style — a canvas's
+   * photograph, an image's placeholder — is discarded by the page's next
+   * `style` write, which carries none of it and was made for some unrelated
+   * reason. The host is told so it can put its own back.
+   */
+  it('tells the host when a page style write discarded what it painted', () => {
+    const restyled = vi.fn();
+    patcher = new Patcher(document, { onRestyled: restyled });
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('canvas', 'style', 'border: 1px solid #333');
+    snap.nodes.push({
+      id: 30, parent: 1, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2], flags: NodeFlags.Canvas,
+    });
+    patcher.applySnapshot(snap);
+    expect(restyled).not.toHaveBeenCalled();
+
+    patcher.applyMutation(
+      mutation([{ op: OpCode.Attr, node: 30, ref: base + 1, ref2: base + 3 }],
+        ['border: 1px solid #999']), 1);
+    const canvas = document.querySelector('canvas') as HTMLElement;
+    expect(restyled).toHaveBeenCalledWith(canvas);
+  });
+
+  /*
+   * A style attribute that names an image is written twice: once when it
+   * arrives, and again every time bytes land, because only the wire form can be
+   * resolved a second time. Both writes replace the whole declaration, so both
+   * discard what the mirror had painted into it — and the second happens on a
+   * document nobody touched, which is the one nothing else would put right.
+   */
+  it('keeps its own painting through a style attribute that names an image', () => {
+    const restyled = vi.fn();
+    patcher = new Patcher(document, { onRestyled: restyled });
+    const snap = snapshot();
+    const base = snap.strings.length;
+    snap.strings.push('iframe', 'data-sky-box', '320x180', 'style',
+      'background-image: url(skyhook://img/abc123)');
+    snap.nodes.push({
+      id: 30, parent: 1, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2], flags: 0,
+    });
+    patcher.applySnapshot(snap);
+    const stand = document.querySelector('[data-skyhook-tag="iframe"]') as HTMLElement;
+    expect(stand.style.height).toBe('180px');
+
+    patcher.applyMutation(
+      mutation([{ op: OpCode.Attr, node: 30, ref: base + 3, ref2: base + 4 }]), 1);
+    expect(stand.style.backgroundImage).toContain('skyhook://img/abc123');
+    expect(stand.style.width).toBe('320px');
+    expect(stand.style.height).toBe('180px');
+    expect(restyled).toHaveBeenCalledWith(stand);
+
+    // And again when the bytes arrive and the declaration is re-rendered.
+    restyled.mockClear();
+    stand.style.height = '';
+    patcher.refreshCSS();
+    expect(stand.style.height).toBe('180px');
+    expect(restyled).toHaveBeenCalledWith(stand);
+  });
+
   it('hashes what the server sent, so a substitution is not a divergence', () => {
     // The server compares this hash against the agent's every thirty seconds
     // and re-snapshots the whole document when they differ. A patcher that
