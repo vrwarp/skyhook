@@ -15,6 +15,7 @@ function actions() {
   const acts = {
     select: vi.fn<(id: number) => void>(),
     close: vi.fn<(id: number) => void>(),
+    stop: vi.fn<(id: number) => void>(),
     menu: vi.fn<(id: number, x: number, y: number) => void>(),
     open: vi.fn<() => void>(),
   };
@@ -57,6 +58,31 @@ describe('tab list', () => {
     list.render(TABS, [], 1, true);
     expect(rows(list)[0].querySelector('.spin')).toBeNull();
     expect(rows(list)[1].querySelector('.spin')).not.toBeNull();
+  });
+
+  /*
+   * And the spinner is the target that ends the waiting.
+   *
+   * This list is the only place a background tab can be stopped: the toolbar's
+   * button acts on the tab in front of the reader, and the tab spending the
+   * link is exactly the one they gave up on and switched away from. One capture
+   * has a phone with a second tab loading reddit, four minutes of a 6.6 s link
+   * spent on it, and nothing anywhere in the chrome that meant "stop that".
+   */
+  it('stops a tab from its spinner, keeping the tab and what has arrived', () => {
+    const acts = actions();
+    const list = new TabList(acts);
+    list.render(TABS, [], 1, true);
+    const stop = rows(list)[1].querySelector('.tabrow-stop') as HTMLElement;
+    expect(stop).not.toBeNull();
+    stop.click();
+    expect(acts.stop).toHaveBeenCalledWith(2);
+    // Stopping is not closing, and the two targets sit at opposite ends of the
+    // row for that reason.
+    expect(acts.close).not.toHaveBeenCalled();
+    expect(acts.select).not.toHaveBeenCalled();
+    // A tab that has arrived has nothing to stop, and offers no target.
+    expect(rows(list)[0].querySelector('.tabrow-stop')).toBeNull();
   });
 
   it('switches on a tap and closes on the close button, never both', () => {

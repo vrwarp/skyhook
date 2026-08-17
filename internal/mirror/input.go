@@ -658,7 +658,15 @@ func (t *Tab) Navigate(ctx context.Context, n protocol.Navigate) error {
 	case "reload":
 		return t.sess.Do(ctx, "Page.reload", map[string]any{"ignoreCache": false}, nil)
 	case "stop":
-		return t.sess.Do(ctx, "Page.stopLoading", nil, nil)
+		err := t.sess.Do(ctx, "Page.stopLoading", nil, nil)
+		// Said here rather than waited for. Page.stopLoading halts the main
+		// frame's load, but a page whose subframes are still going may not
+		// produce a lifecycle event for the main frame at all — and the reader
+		// pressed stop precisely because this tab has been spinning for
+		// minutes. The one thing they must get for the round trip they spent is
+		// the spinner going out.
+		t.setLoading(false)
+		return err
 	}
 	if n.URL == "" {
 		return nil

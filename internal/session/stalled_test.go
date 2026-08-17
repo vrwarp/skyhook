@@ -134,3 +134,54 @@ func TestAStallWithAnEmptyRingCostsASnapshot(t *testing.T) {
 		t.Fatal("a stalled client with an empty ring was answered with a replay of nothing")
 	}
 }
+
+/*
+A client that never heard the document at all.
+
+A snapshot is frame 0, so `acked == 0` describes both a client that has applied
+the document and one that has never seen it — and the check used to read the
+first and let the second go. That is the worst case to miss: with no later frame
+to find a gap in, the plane side cannot notice a missing snapshot, so this check
+is the only thing that will ever ask.
+
+Found the hard way. A dropped snapshot left a tab acknowledging nothing for four
+minutes of a netem run while this check logged "inconclusive" eight times and
+did nothing about it.
+*/
+func TestAClientThatNeverAcknowledgedTheDocumentIsRepaired(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	ts := armedTab(t, s, 1)
+
+	// Nothing acknowledged, and no hash — which is what "never arrived" looks
+	// like from here.
+	s.mu.Lock()
+	ts.acked, ts.lastHash = 0, 0
+	s.mu.Unlock()
+
+	got := stuckOver(s, ts, 0, 3)
+	if got[0] {
+		t.Error("one check asked for a repair; a client mid-flight when it was " +
+			"sampled is not a stalled one")
+	}
+	if !got[1] {
+		t.Error("a tab whose snapshot the client never acknowledged was left " +
+			"unrepaired: nothing else will ever ask for it")
+	}
+}
+
+// And the ordinary case it must not disturb: a client that has applied the
+// snapshot and said so is not stuck, however long it sits on frame 0.
+func TestAClientHoldingTheSnapshotIsNotStuck(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	ts := armedTab(t, s, 1)
+
+	s.mu.Lock()
+	ts.acked, ts.lastHash = 0, 0x9e3779b9
+	s.mu.Unlock()
+
+	for i, stuck := range stuckOver(s, ts, 0, 3) {
+		if stuck {
+			t.Fatalf("check %d asked to resync a tab the client is holding", i+1)
+		}
+	}
+}

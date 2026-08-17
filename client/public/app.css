@@ -721,6 +721,14 @@ body {
      one tap the reader is not making on every page. */
   #back, #forward, #reload, #marks, #chat { display: none; }
 
+  /* Except while it is a stop button. The argument for hiding reload is that it
+     is one tap the reader is not making on every page and the ⋯ menu is one tap
+     away — and neither half holds for stop. A page here is minutes wide, the
+     reader who wants it called off wants it called off now, and a button that
+     is only there while something is coming costs the address bar nothing the
+     rest of the time. */
+  #reload.stop { display: block; color: var(--warn); }
+
   #tabs, #more { display: block; }
 
   /* Everything the buttons leave, which is why there are four of them and not
@@ -921,6 +929,26 @@ body {
 }
 
 .tabrow-close:hover { background: #4b5563; color: var(--fg); }
+
+/* The spinner in a loading row, made a target: it is the one thing in the row
+   that is about the waiting, so it is what the reader reaches for to end it.
+   Sized like the close button beside it, and on the other end of the row from
+   it — the two are a hand's width apart, because one of them keeps the page
+   and the other does not. */
+.tabrow-stop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+}
+
+.tabrow-stop:hover { background: #4b5563; }
 
 /* The one row in the list that is not a tab. It is last rather than first
    because the list is read from the top and this is not what the reader came

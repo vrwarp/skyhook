@@ -29,8 +29,15 @@ type Session struct {
 	log     *slog.Logger
 	mgr     *Manager
 
-	mu       sync.Mutex
-	tabs     map[uint32]*tabState
+	mu   sync.Mutex
+	tabs map[uint32]*tabState
+	// opening holds ids that have been handed out and whose tabState is not in
+	// place yet. A tab starts mirroring the moment its agent is installed —
+	// before OpenTab has anything to register — and the frames it produces in
+	// that window are the tab's whole first document. Without this they are
+	// frames for a tab the session does not know, which is indistinguishable
+	// from frames for a tab that has closed.
+	opening  map[uint32]bool
 	nextTab  uint32
 	viewport protocol.Viewport
 	caps     map[string]bool
@@ -42,8 +49,11 @@ type Session struct {
 	// it cached before the last three deploys.
 	client clientID
 
-	conn   atomic.Pointer[connHolder]
-	sendQ  [4]chan outbound
+	conn  atomic.Pointer[connHolder]
+	sendQ [4]*fairQueue
+	// wake nudges the writer when something is queued, so a frame does not wait
+	// out a polling interval on a link where every millisecond is already spent.
+	wake   chan struct{}
 	codec  *protocol.Codec
 	closed chan struct{}
 	once   sync.Once
@@ -67,9 +77,21 @@ type connHolder struct {
 }
 
 type tabState struct {
-	tab      *mirror.Tab
-	ring     *Ring
-	journal  *Journal
+	tab     *mirror.Tab
+	ring    *Ring
+	journal *Journal
+	// work is this tab's inbound queue and life is how long it has to drain it.
+	// Everything a client frame asks of the browser goes through them; see
+	// tabLoop.
+	work chan tabJob
+	life context.Context
+	kill context.CancelFunc
+	// jobCancel ends the one thing the tab is doing this instant, and is nil
+	// while it is idle. It is what stop pulls: a navigation that has not
+	// committed is holding the queue, and the reader asking for it to end must
+	// not have to wait for it to end. Guarded by Session.mu.
+	jobCancel context.CancelFunc
+
 	acked    uint64
 	lastHash uint64
 	// A snapshot restarts this tab's frame numbering at zero, so a sequence
@@ -109,12 +131,120 @@ type tabState struct {
 	stuckTimes int
 }
 
-type outbound struct {
-	ch     protocol.Channel
-	msg    []byte
-	object bool
-	// dropIfOffline marks traffic not worth queueing across an outage.
-	dropIfOffline bool
+// tabJob is one piece of work a client frame asked of a tab.
+type tabJob struct {
+	what string
+	// expendable marks work that is only worth doing while it is fresh: a
+	// scroll position superseded by the next one is not worth a queue slot.
+	expendable bool
+	run        func(context.Context) error
+}
+
+/*
+tabLoop runs one tab's inbound work, off the connection's read loop.
+
+The read loop used to do this itself, and one call was enough to stop the whole
+client being heard. `Page.navigate` does not return until the navigation commits
+— on a page whose server has accepted the connection and not answered, that is
+however long the browser is willing to wait — and `Runtime.evaluate` for a
+snapshot does not return while the page's own main thread is busy. Neither has a
+deadline here, because both are legitimately slow on the link this exists for.
+
+The capture that prompted all of this shows exactly what that costs: reddit
+navigated at 02:12:28, and then not one frame from the client dispatched for a
+hundred seconds — no input, no ack, no resync, nothing in the session's event
+log at all — until it committed at 02:14:08. The reader spent that time pressing
+things, and then closed the tab. The close was in the same queue, behind the
+navigation it was meant to call off, which is the precise reason a kill switch
+did not work: it could not be heard.
+
+So each tab drains its own queue, and the connection's reader goes straight back
+to reading. Per-tab order is preserved, which is all anything depends on: two
+clicks in one tab keep their order, and a click in another tab is not behind
+them. Closing a tab cancels this context, so a navigation that will never commit
+ends the moment the reader says so rather than whenever the browser gives up.
+*/
+func (s *Session) tabLoop(id uint32, ts *tabState) {
+	for {
+		select {
+		case <-ts.life.Done():
+			return
+		case <-s.closed:
+			return
+		case job := <-ts.work:
+			ctx, cancel := context.WithCancel(ts.life)
+			s.mu.Lock()
+			ts.jobCancel = cancel
+			s.mu.Unlock()
+			err := job.run(ctx)
+			s.mu.Lock()
+			ts.jobCancel = nil
+			s.mu.Unlock()
+			cancel()
+			if err != nil {
+				// Not an error frame back to the client: by the time this is
+				// known the frame that asked for it is long answered, and a tab
+				// that has just been stopped or closed fails whatever it was
+				// doing by design.
+				s.log.Debug("tab work failed", "session", s.ID, "tab", id,
+					"what", job.what, "err", err)
+			}
+		}
+	}
+}
+
+/*
+interrupt ends what a tab is doing without closing it.
+
+This is the whole of stop, and the reason stop cannot be ordinary work: the
+thing being stopped is what is holding the queue. A `Page.navigate` that has not
+committed sits in the tab's loop with no deadline, so a stop submitted behind it
+would be answered whenever the page it is meant to call off gave up on its own —
+which is precisely never, for the pages worth stopping.
+
+Cancelling the call is not cancelling the navigation; only Page.stopLoading does
+that, and it goes in behind this. What this does is give it a queue to go in to.
+*/
+func (s *Session) interrupt(tab uint32) {
+	s.mu.Lock()
+	var cancel context.CancelFunc
+	if ts := s.tabs[tab]; ts != nil {
+		cancel = ts.jobCancel
+	}
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// tabDepth is how much inbound work one tab may have waiting.
+//
+// Generous, because the queue is per tab and the work in it is what the reader
+// did: sixty-odd clicks and keystrokes behind a page that has not answered yet
+// is a reader typing into a form, and dropping any of it would lose their
+// typing. A queue that is actually full means the tab's browser is wedged, and
+// the answer to that is stop or close — neither of which queues.
+const tabDepth = 64
+
+// submit hands a job to a tab, reporting whether it was taken.
+func (s *Session) submit(tab uint32, job tabJob) error {
+	s.mu.Lock()
+	ts := s.tabs[tab]
+	s.mu.Unlock()
+	if ts == nil || ts.work == nil {
+		return errNoTab
+	}
+	select {
+	case ts.work <- job:
+		return nil
+	default:
+	}
+	if job.expendable {
+		return nil
+	}
+	s.log.Warn("a tab is not keeping up with what the reader is doing",
+		"session", s.ID, "tab", tab, "what", job.what, "queued", tabDepth)
+	return fmt.Errorf("session: tab %d is not answering", tab)
 }
 
 // Options configures a session.
@@ -132,16 +262,20 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 	}
 	s := &Session{
 		ID: id, created: time.Now(), log: opts.Logger, mgr: mgr,
-		tabs: map[uint32]*tabState{}, nextTab: 1,
+		tabs: map[uint32]*tabState{}, opening: map[uint32]bool{}, nextTab: 1,
 		viewport: opts.Viewport, caps: map[string]bool{},
 		codec: codec, closed: make(chan struct{}),
 		lastSeen: time.Now(),
 		adapters: map[string]adapter.Adapter{},
 		events:   NewEventLog(1024),
 	}
+	s.wake = make(chan struct{}, 1)
 	for i := range s.sendQ {
-		s.sendQ[i] = make(chan outbound, 1024)
+		s.sendQ[i] = newFairQueue(1024)
 	}
+	// Ctrl is the exception: small frames whose order across tabs is the plane
+	// side's only way of knowing which tab it asked for first. See fairQueue.
+	s.sendQ[protocol.ChCtrl.Priority()] = newOrderedQueue(1024)
 	go s.writer()
 	go s.integrityLoop()
 	return s, nil
@@ -202,29 +336,14 @@ func (s *Session) touch() {
 // has usually moved on — while ctrl and dom traffic is small and still wanted.
 func (s *Session) drainOffline() {
 	for _, q := range s.sendQ {
-		keep := make([]outbound, 0, len(q))
-	drain:
-		for {
-			select {
-			case m := <-q:
-				if !m.dropIfOffline {
-					keep = append(keep, m)
-				}
-			default:
-				break drain
-			}
-		}
-		for _, m := range keep {
-			select {
-			case q <- m:
-			default:
-			}
-		}
+		q.dropIf(func(m outbound) bool { return m.dropIfOffline })
 	}
 }
 
-// writer is the outbound scheduler: strict priority, so a burst of image bytes
-// can never delay a DOM diff or an acknowledgement.
+// writer is the outbound scheduler: strict priority between channels, so a
+// burst of image bytes can never delay a DOM diff or an acknowledgement, and a
+// rotation between tabs inside each channel, so a tab loading in the background
+// can never delay the one being read. See fairQueue.
 func (s *Session) writer() {
 	for {
 		select {
@@ -232,26 +351,27 @@ func (s *Session) writer() {
 			return
 		default:
 		}
+		holder := s.conn.Load()
+		if holder == nil || holder.conn == nil {
+			// Nothing is taken off a queue while there is nowhere to put it.
+			// Popping first and then discovering the link is down loses the
+			// frame — which for ctrl traffic is the whole message, since only
+			// dom frames have a ring behind them. A reconnect is usually
+			// seconds away; the queue is where this waits.
+			select {
+			case <-s.closed:
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
 		m, ok := s.nextOutbound()
 		if !ok {
 			select {
 			case <-s.closed:
 				return
-			case <-time.After(5 * time.Millisecond):
-			}
-			continue
-		}
-		holder := s.conn.Load()
-		if holder == nil || holder.conn == nil {
-			if m.dropIfOffline {
-				continue
-			}
-			// Hold ctrl/dom traffic briefly; a reconnect is usually seconds away
-			// and the ring buffer is the real safety net.
-			select {
-			case <-s.closed:
-				return
-			case <-time.After(200 * time.Millisecond):
+			case <-s.wake:
+			case <-time.After(20 * time.Millisecond):
 			}
 			continue
 		}
@@ -269,30 +389,20 @@ func (s *Session) writer() {
 }
 
 func (s *Session) nextOutbound() (outbound, bool) {
-	for i := range s.sendQ {
-		select {
-		case m := <-s.sendQ[i]:
+	active := s.activeTab.Load()
+	for _, q := range s.sendQ {
+		if m, ok := q.pop(active); ok {
 			return m, true
-		default:
 		}
 	}
-	// Nothing pending: block briefly on the highest-priority queues.
-	select {
-	case m := <-s.sendQ[0]:
-		return m, true
-	case m := <-s.sendQ[1]:
-		return m, true
-	case m := <-s.sendQ[2]:
-		return m, true
-	case m := <-s.sendQ[3]:
-		return m, true
-	case <-time.After(20 * time.Millisecond):
-		return outbound{}, false
-	}
+	return outbound{}, false
 }
 
 // EmitFrame implements mirror.Emitter.
 func (s *Session) EmitFrame(ch protocol.Channel, f *protocol.Frame) {
+	if !s.worthSending(ch, f.Type, f.Tab) {
+		return
+	}
 	msg, err := s.codec.EncodeFrame(ch, f)
 	if err != nil {
 		s.log.Error("frame encode failed", "err", err)
@@ -322,7 +432,7 @@ func (s *Session) EmitFrame(ch protocol.Channel, f *protocol.Frame) {
 			s.mgr.trainer.Observe(originOf(s.tabURL(f.Tab)), f.Body)
 		}
 	}
-	s.enqueue(outbound{ch: ch, msg: msg}, ch == protocol.ChMedia)
+	s.enqueue(outbound{ch: ch, tab: f.Tab, msg: msg}, ch == protocol.ChMedia)
 }
 
 /*
@@ -343,31 +453,90 @@ grows geometrically each time it fails to repair anything is worse than no
 repair at all.
 */
 func (s *Session) replayFrame(f *protocol.Frame) {
+	if !s.worthSending(protocol.ChDom, f.Type, f.Tab) {
+		return
+	}
 	msg, err := s.codec.EncodeFrame(protocol.ChDom, f)
 	if err != nil {
 		s.log.Error("replay encode failed", "err", err)
 		return
 	}
-	s.enqueue(outbound{ch: protocol.ChDom, msg: msg}, false)
+	s.enqueue(outbound{ch: protocol.ChDom, tab: f.Tab, msg: msg}, false)
 }
 
 func (s *Session) enqueue(m outbound, dropIfOffline bool) {
 	m.dropIfOffline = dropIfOffline
+	if dropIfOffline && !s.Online() {
+		return
+	}
 	q := s.sendQ[m.ch.Priority()]
-	select {
-	case q <- m:
-	default:
-		// A full queue means the link cannot keep up. Media is expendable;
-		// anything else is worth blocking the producer for a moment.
-		if dropIfOffline {
-			return
-		}
+	if q.push(m) {
+		s.nudge()
+		return
+	}
+	// A full queue means the link cannot keep up. Media is expendable;
+	// anything else is worth blocking the producer for a moment.
+	if dropIfOffline {
+		return
+	}
+	deadline := time.After(2 * time.Second)
+	for {
 		select {
-		case q <- m:
-		case <-time.After(2 * time.Second):
-			s.log.Warn("outbound queue stalled", "channel", m.ch.String())
+		case <-s.closed:
+			return
+		case <-deadline:
+			s.log.Warn("outbound queue stalled", "channel", m.ch.String(), "tab", m.tab)
+			return
+		case <-time.After(10 * time.Millisecond):
+			if q.push(m) {
+				s.nudge()
+				return
+			}
 		}
 	}
+}
+
+// nudge tells the writer there is something to send. Never blocks: a signal
+// already pending says the same thing.
+func (s *Session) nudge() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// liveTab reports whether a tab is open, or on its way to being open.
+func (s *Session) liveTab(id uint32) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tabs[id]; ok {
+		return true
+	}
+	return s.opening[id]
+}
+
+/*
+worthSending reports whether a frame is still worth the link.
+
+A tab that is gone is owed nothing. Its frames come from goroutines that were
+already at work when it closed — a snapshot mid-encode, a batch of mutations, an
+image the transcoder had in hand — and each is a document neither half has any
+more.
+
+The state frames are the subtle case and have to go too: a tab emits one as its
+browser target goes down, it arrives behind the close, and a client reading it
+puts the tab back in the strip. Everything else on ctrl still travels, because
+an error about a tab that has just gone is the sort of thing somebody is reading
+a log for.
+*/
+func (s *Session) worthSending(ch protocol.Channel, typ protocol.Type, tab uint32) bool {
+	if tab == 0 || s.liveTab(tab) {
+		return true
+	}
+	if ch == protocol.ChDom || ch == protocol.ChMedia {
+		return false
+	}
+	return typ != protocol.TypeTabState
 }
 
 // Send encodes and queues a frame on a channel.
@@ -408,7 +577,7 @@ const backloggedFrames = 8
 func (s *Session) Backlogged() bool {
 	depth := 0
 	for _, q := range s.sendQ {
-		depth += len(q)
+		depth += q.depth()
 	}
 	return depth >= backloggedFrames
 }
@@ -420,6 +589,9 @@ func (s *Session) ImageReady(tab uint32, meta protocol.ImageMeta) {
 
 // ImageBytes implements imgproc.Delivery.
 func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
+	if !s.worthSending(protocol.ChMedia, protocol.TypeImageData, tab) {
+		return
+	}
 	f, err := protocol.NewFrame(protocol.TypeImageData, tab, data)
 	if err != nil {
 		return
@@ -430,7 +602,7 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 	}
 	// Each image is its own stream: independently cancellable, and incapable of
 	// head-of-line-blocking a DOM diff.
-	s.enqueue(outbound{ch: protocol.ChMedia, msg: msg, object: true}, true)
+	s.enqueue(outbound{ch: protocol.ChMedia, tab: tab, msg: msg, object: true}, true)
 }
 
 // ------------------------------------------------------------------- tabs
@@ -441,7 +613,16 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 	id := s.nextTab
 	s.nextTab++
 	vp := s.viewport
+	// Held from here to the moment the tabState is in the map, so that what the
+	// tab emits while it is being built is treated as a live tab's output and
+	// not as a dead one's. See the opening field.
+	s.opening[id] = true
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.opening, id)
+		s.mu.Unlock()
+	}()
 
 	sess, err := s.mgr.browser.NewPage(ctx, "about:blank")
 	if err != nil {
@@ -456,13 +637,22 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	s.mu.Lock()
-	s.tabs[id] = &tabState{
+	// Not the caller's context: a session outlives the connection that opened
+	// its tabs, and a tab whose work was cancelled when a client disconnected
+	// would stop mirroring the moment the aircraft lost coverage.
+	life, kill := context.WithCancel(context.Background())
+	ts := &tabState{
 		tab:     t,
 		ring:    NewRing(s.mgr.opts.RingBytes),
 		journal: NewJournal(s.mgr.opts.Capture.JournalBytes),
+		work:    make(chan tabJob, tabDepth),
+		life:    life,
+		kill:    kill,
 	}
+	s.mu.Lock()
+	s.tabs[id] = ts
 	s.mu.Unlock()
+	go s.tabLoop(id, ts)
 	s.activeTab.Store(id)
 	s.events.Add("tab-open", id, map[string]any{"url": url})
 
@@ -484,7 +674,23 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 	return id, nil
 }
 
-// CloseTab closes a mirrored tab.
+/*
+CloseTab closes a mirrored tab and takes back what it had already spent.
+
+Closing used to mean closing the browser target and saying so, which leaves the
+one thing the reader was actually asking for undone: the frames this tab had
+already queued go out anyway. On a link where a document takes minutes that is
+the whole of the problem — a capture of a phone on a 6.6 s link has the reader
+closing the tab that was drowning them and then waiting another two minutes
+while it drained, during which nothing they clicked in the tab they kept was
+answered.
+
+Killing a tab has to be worth something immediately, so the queued bytes go
+with it. Nothing is owed a repair afterwards: the frames belonged to a document
+that no longer exists on either side, which is exactly what makes this safe to
+drop and a mid-page stop not. The tab's ring and journal go with the tabState,
+and enqueue turns away anything the mirror was still serialising when it went.
+*/
 func (s *Session) CloseTab(ctx context.Context, id uint32) error {
 	s.mu.Lock()
 	ts := s.tabs[id]
@@ -493,9 +699,76 @@ func (s *Session) CloseTab(ctx context.Context, id uint32) error {
 	if ts == nil {
 		return nil
 	}
-	s.events.Add("tab-close", id, nil)
-	s.Send(protocol.ChCtrl, protocol.TypeTabState, id, protocol.TabState{Closed: true})
-	return ts.tab.Close(ctx)
+	// First, and before anything that can block: whatever this tab was doing
+	// for the reader, they have just said they no longer want it. A navigation
+	// that has not committed, a snapshot of a document too big to serialise —
+	// both end here rather than when the browser finishes with them.
+	if ts.kill != nil {
+		ts.kill()
+	}
+	frames, bytes := s.dropQueued(id)
+	if frames > 0 {
+		s.log.Info("closing a tab took back what it had queued",
+			"session", s.ID, "tab", id, "frames", frames, "bytes", bytes)
+	}
+	s.events.Add("tab-close", id, map[string]any{
+		"droppedFrames": frames, "droppedBytes": bytes,
+	})
+	s.sendClosed(id)
+	if ts.tab == nil {
+		return nil
+	}
+	// The browser side goes down off this goroutine, and not under the caller's
+	// context. Two reasons, and they pull the same way: this is the reader's
+	// kill switch, so it must not be the one thing in the dispatch path that
+	// can block on the browser — and a reader who closes a tab and then loses
+	// the link would otherwise have the teardown cancelled with their
+	// connection, leaving the page running landside with nothing to show it in.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), tabCloseWait)
+		defer cancel()
+		if err := ts.tab.Close(ctx); err != nil {
+			s.log.Debug("closing the browser side of a tab failed",
+				"session", s.ID, "tab", id, "err", err)
+		}
+	}()
+	return nil
+}
+
+// tabCloseWait bounds the browser-side teardown of a closed tab. Long enough
+// for a busy browser, short enough that a wedged one does not hold the
+// goroutine for the life of the session.
+const tabCloseWait = 30 * time.Second
+
+// sendClosed tells the client a tab is gone.
+//
+// Not through Send, which would be turned away by the emit path along with
+// every other state frame about a tab that is no longer in the table — see
+// worthSending. This is the one message that has to get past that, and the one
+// message the client cannot do without.
+func (s *Session) sendClosed(id uint32) {
+	f, err := protocol.NewFrame(protocol.TypeTabState, id, protocol.TabState{Closed: true})
+	if err != nil {
+		s.log.Error("frame build failed", "type", protocol.TypeTabState, "err", err)
+		return
+	}
+	msg, err := s.codec.EncodeFrame(protocol.ChCtrl, f)
+	if err != nil {
+		s.log.Error("frame encode failed", "err", err)
+		return
+	}
+	s.enqueue(outbound{ch: protocol.ChCtrl, tab: id, msg: msg}, false)
+}
+
+// dropQueued discards everything waiting on the link for one tab, reporting how
+// many frames and bytes the close took back.
+func (s *Session) dropQueued(id uint32) (frames, bytes int) {
+	for _, q := range s.sendQ {
+		f, b := q.dropTab(id)
+		frames += f
+		bytes += b
+	}
+	return frames, bytes
 }
 
 // Tab returns a tab by id.
@@ -902,7 +1175,16 @@ func (s *Session) noteStuck(ts *tabState, seq uint64) (acked uint64, stuck bool)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	acked = ts.acked
-	if acked >= seq {
+	// A client that has answered for this frame, or a later one, is fine — with
+	// one exception that is not a corner case at all. A snapshot is frame 0, so
+	// "acked 0" is what a client that has applied the document and a client
+	// that has never heard of it both look like. The hash tells them apart: it
+	// is set by every ack and zero until the first one, and a tab whose first
+	// document went missing is exactly the tab that most needs repairing —
+	// there is no later frame for the plane side to notice a gap in, so nobody
+	// but this check is ever going to ask.
+	unheard := seq == 0 && ts.lastHash == 0
+	if acked >= seq && !unheard {
 		ts.stuckTimes = 0
 		return acked, false
 	}
@@ -989,7 +1271,12 @@ func (s *Session) Close(ctx context.Context) {
 		adapters := s.adapters
 		s.mu.Unlock()
 		for _, ts := range tabs {
-			_ = ts.tab.Close(ctx)
+			if ts.kill != nil {
+				ts.kill()
+			}
+			if ts.tab != nil {
+				_ = ts.tab.Close(ctx)
+			}
 		}
 		for _, a := range adapters {
 			_ = a.Stop(ctx)
@@ -1020,7 +1307,7 @@ func (s *Session) Stats() protocol.Stats {
 	}
 	depth := 0
 	for _, q := range s.sendQ {
-		depth += len(q)
+		depth += q.depth()
 	}
 	st.QueueDepth = depth
 	s.mu.Lock()
@@ -1053,7 +1340,13 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 		if err := f.DecodeBody(&r); err != nil {
 			return err
 		}
-		s.Resync(ctx, r.Tab, r.HaveTo, r.Reason)
+		// On the tab's own queue: the answer may be a fresh snapshot, which is
+		// a Runtime.evaluate over the whole document and takes as long as the
+		// page's main thread makes it take.
+		return s.submit(r.Tab, tabJob{what: "resync", run: func(ctx context.Context) error {
+			s.Resync(ctx, r.Tab, r.HaveTo, r.Reason)
+			return nil
+		}})
 	case protocol.TypeTabOpen:
 		var n protocol.Navigate
 		_ = f.DecodeBody(&n)
@@ -1071,8 +1364,20 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return errNoTab
 		}
 		s.activeTab.Store(f.Tab)
+		// Recorded here rather than where it runs, so the session's event log
+		// says when the reader asked for this and a capture can put a gap
+		// between the asking and the doing where it belongs.
 		s.events.Add("navigate", f.Tab, map[string]any{"url": n.URL, "action": n.Action})
-		return t.Navigate(ctx, n)
+		// Stop is about what the tab is doing, not another thing for it to do.
+		// Queued behind the navigation it exists to call off, it would be
+		// answered when that navigation finished — and a navigation that
+		// finishes is not one anybody presses stop on.
+		if n.Action == "stop" {
+			s.interrupt(f.Tab)
+		}
+		return s.submit(f.Tab, tabJob{what: "navigate", run: func(ctx context.Context) error {
+			return t.Navigate(ctx, n)
+		}})
 	case protocol.TypeInput:
 		var ev protocol.InputEvent
 		if err := f.DecodeBody(&ev); err != nil {
@@ -1084,7 +1389,9 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 		}
 		s.activeTab.Store(f.Tab)
 		s.recordInput(f.Tab, &ev)
-		return t.HandleInput(ctx, &ev)
+		return s.submit(f.Tab, tabJob{what: "input", run: func(ctx context.Context) error {
+			return t.HandleInput(ctx, &ev)
+		}})
 	case protocol.TypeScroll:
 		var ev protocol.ScrollEvent
 		if err := f.DecodeBody(&ev); err != nil {
@@ -1094,7 +1401,13 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 		if t == nil {
 			return nil
 		}
-		return t.HandleScroll(ctx, &ev)
+		// Expendable: a scroll position is only interesting until the next one,
+		// and it is what image priority is read from rather than anything the
+		// reader sees.
+		return s.submit(ev.Tab, tabJob{
+			what: "scroll", expendable: true,
+			run: func(ctx context.Context) error { return t.HandleScroll(ctx, &ev) },
+		})
 	case protocol.TypeViewport:
 		var vp protocol.Viewport
 		if err := f.DecodeBody(&vp); err != nil {

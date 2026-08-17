@@ -1206,6 +1206,13 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			</script>
 			</body></html>`)
 	})
+	// A navigation that is accepted and never answered: nothing is written and
+	// the response is never closed, so the tab spins for as long as the request
+	// is open. This is the page a reader presses stop on — the one that has been
+	// coming for minutes with nothing to show for it.
+	mux.HandleFunc("/hangs", func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
 	mux.HandleFunc("/never-finishes", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><body>a frame still on its way`)

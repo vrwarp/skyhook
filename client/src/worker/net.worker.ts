@@ -74,6 +74,25 @@ const delivered = new Map<number, number>();
  * two thousand resync requests in one session.
  */
 const resyncAsked = new Map<number, number>();
+/**
+ * Tabs the reader has closed, which this side goes on hearing about.
+ *
+ * A close is a request, and the answer to it is a round trip away — on this
+ * link, seconds. Everything the tab had already sent is still arriving
+ * throughout, and everything the server had already queued for it keeps coming
+ * until the close lands. Without a record of the closing, each of those frames
+ * is a frame for a tab this side does not hold, which is the definition of a
+ * cold client: the worker asks for a resync, and the server answers with a
+ * whole document for a page nobody can see. The tab the reader kept waits
+ * behind all of it.
+ *
+ * So a closed tab is remembered, and nothing about it is decoded, forwarded,
+ * acknowledged or asked after again. Ids are handed out by the session and
+ * never reused, so this only grows with the tabs a reader actually closes — and
+ * a new session (a restarted server) starts its numbering again, which is why
+ * it is cleared when the session id changes rather than never.
+ */
+const closedTabs = new Set<number>();
 
 /** The shortest gap between two resync requests for the same tab. */
 const RESYNC_MIN_GAP_MS = 1000;
@@ -279,17 +298,35 @@ function handleMessage(msg: Uint8Array): void {
     return;
   }
   const frame = decodeFrame(payload);
+  // A tab the reader has closed costs nothing more: not the decode, not the
+  // postMessage, and above all not the resync that a frame for a tab this side
+  // no longer holds would otherwise ask for. See closedTabs.
+  if (frame.tab && closedTabs.has(frame.tab)) return;
   switch (frame.type) {
     case FrameType.Welcome: {
       const w = decodeWelcome(frame.body);
+      // A different session numbers its tabs from one again, so what this side
+      // knows about tab 3 is about a tab that no longer exists anywhere.
+      if (w.sessionId !== sessionId) closedTabs.clear();
       sessionId = w.sessionId;
       // A session that reached Welcome is the only evidence that connecting
       // works, so this is where the backoff earns its reset.
       reconnectDelay = 500;
-      post('welcome', w as unknown as Record<string, unknown>);
+      // A tab the reader closed while the link was down is still in the
+      // session: the close was never sent, because the worker drops frames it
+      // cannot send. Say the thing that was never said, and keep it out of the
+      // strip the shell is about to draw — a tab that comes back from an outage
+      // after the reader closed it is the app arguing with them.
+      const kept = w.tabs.filter((t) => !closedTabs.has(t.tab));
+      for (const t of w.tabs) {
+        if (closedTabs.has(t.tab)) {
+          void send(Channel.Ctrl, encodeFrame(FrameType.TabClose, t.tab));
+        }
+      }
+      post('welcome', { ...w, tabs: kept } as unknown as Record<string, unknown>);
       // A resumed session hands back tabs that kept running while we were
       // gone; ask for whatever we do not already hold.
-      for (const t of w.tabs) {
+      for (const t of kept) {
         if (!progress.has(t.tab)) {
           void send(Channel.Ctrl,
             encodeFrame(FrameType.Resync, t.tab, resyncBody(t.tab, 0, 'cold')));
@@ -458,6 +495,11 @@ function workerReport(): Record<string, unknown> {
     refused,
     reconnectDelayMs: reconnectDelay,
     queuedInputFrames: outbox.length,
+    // Tabs this side is deliberately ignoring. A capture taken while a close is
+    // still crossing the link would otherwise show a tab the server is talking
+    // about and the client is silent on, with nothing to say which of them is
+    // wrong.
+    closedTabs: Array.from(closedTabs),
     transport: transport?.kind ?? 'none',
     transportStats: transport?.stats() ?? null,
     serverStats,
@@ -510,6 +552,11 @@ async function cachedHashes(hashes: string[]): Promise<string[]> {
 
 self.addEventListener('message', (event: MessageEvent) => {
   const cmd = event.data as { name: string; args: Record<string, unknown> };
+  // Nothing is said about a tab the reader has closed. An ack or a want for a
+  // batch the shell applied a moment before the close is the shell answering
+  // for a page that is gone, and it would put the tab back in this worker's
+  // books — which is what the next Hello resumes from.
+  if (cmd.name !== 'closeTab' && cmd.args && closedTabs.has(Number(cmd.args.tab))) return;
   switch (cmd.name) {
     case 'configure':
       pairing = cmd.args.pairing as Pairing;
@@ -530,12 +577,17 @@ self.addEventListener('message', (event: MessageEvent) => {
       void send(Channel.Ctrl,
         encodeFrame(FrameType.TabOpen, 0, navigateBody(String(cmd.args.url ?? ''))));
       break;
-    case 'closeTab':
-      progress.delete(Number(cmd.args.tab));
-      delivered.delete(Number(cmd.args.tab));
-      resyncAsked.delete(Number(cmd.args.tab));
-      void send(Channel.Ctrl, encodeFrame(FrameType.TabClose, Number(cmd.args.tab)));
+    case 'closeTab': {
+      const tab = Number(cmd.args.tab);
+      progress.delete(tab);
+      delivered.delete(tab);
+      resyncAsked.delete(tab);
+      // Before the frame goes out, because the answer to it is a round trip
+      // away and everything the tab had already sent is still arriving.
+      closedTabs.add(tab);
+      void send(Channel.Ctrl, encodeFrame(FrameType.TabClose, tab));
       break;
+    }
     case 'navigate':
       void send(Channel.Ctrl, encodeFrame(FrameType.Navigate, Number(cmd.args.tab),
         navigateBody(String(cmd.args.url ?? ''), String(cmd.args.action ?? ''))));
