@@ -1,9 +1,11 @@
 package imgproc
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +71,19 @@ the CDP socket as an uncompressed PNG. Zero means "natural size".
 type Rasterizer interface {
 	RasterizeImage(ctx context.Context, tab uint32, src []byte, w, h int) ([]byte, error)
 }
+
+/*
+ErrEmptyResource means a fetch reported success and returned nothing.
+
+It is a fetch failure and used to be reported as a decode one. `loadNetworkResource`
+answers a request it could not read a body for with success and no stream, and
+`FetchResource` passes that on as the empty resource it honestly is — but the
+zero bytes then reached the codecs, where "no bytes" and "bytes in a format I
+do not know" are the same answer, and the log said `image: unknown format`.
+That sentence sends an operator looking for a missing codec for an asset that
+never arrived at all.
+*/
+var ErrEmptyResource = errors.New("imgproc: the fetch succeeded and returned no bytes")
 
 // Delivery is how the pipeline hands results back to the session.
 type Delivery interface {
@@ -193,18 +208,33 @@ func (p *Pipeline) Submit(req Request) {
 	if req.Key == "" || (req.URL == "" && len(req.Src) == 0) {
 		return
 	}
+	p.warm(req.Key)
+	p.forgetEvicted(req.Key)
 	p.mu.Lock()
 	if meta, ok := p.meta[req.Key]; ok {
 		p.mu.Unlock()
 		// Already transcoded: the new node just needs to know the key exists.
 		meta.Node = req.Node
 		meta.Box = req.Box
-		p.deliver.ImageReady(req.Tab, meta)
-		if req.Priority == 0 {
-			p.sendCached(req.Tab, req.Key)
+		// Above the fold the bytes go now, and they have to actually go: an
+		// announcement the cache cannot answer is the silence this whole change
+		// is about, and here — unlike in Want — there is a request in hand to
+		// do the work again with.
+		if req.Priority == 0 && !p.sendCached(req.Tab, req.Key) {
+			p.forget(req.Key)
+			p.queue(req)
+			return
 		}
+		p.deliver.ImageReady(req.Tab, meta)
 		return
 	}
+	p.mu.Unlock()
+	p.queue(req)
+}
+
+// queue puts one request in front of the workers, unless it is already there.
+func (p *Pipeline) queue(req Request) {
+	p.mu.Lock()
 	if p.inFlight[req.Key] {
 		p.mu.Unlock()
 		return
@@ -220,11 +250,46 @@ func (p *Pipeline) Submit(req Request) {
 	case q <- req:
 	default:
 		// Queue full: drop the lowest-value work rather than block the mirror.
+		// The client is told, because it is already holding a placeholder for
+		// this key and will not ask a second time.
 		p.mu.Lock()
 		delete(p.inFlight, req.Key)
 		p.mu.Unlock()
-		p.log.Debug("image queue full, dropping", "key", req.Key)
+		p.abandon(req, errors.New("imgproc: the queue was full"))
 	}
+}
+
+/*
+warm publishes what the disk cache already knows about a key.
+
+The cache holds bytes across restarts and the metadata table does not, so
+without this the two disagree from the moment the process starts: every reader
+of the cache asks the table first, the table is empty, and a directory full of
+already-transcoded assets is re-fetched from the origin and re-encoded one by
+one. Reading the header is one small file read, and only ever for a key the
+index already names.
+*/
+func (p *Pipeline) warm(key string) {
+	p.mu.Lock()
+	_, known := p.meta[key]
+	p.mu.Unlock()
+	if known {
+		return
+	}
+	head, n, ok := p.cache.header(key)
+	if !ok {
+		return
+	}
+	p.mu.Lock()
+	// Checked again under the lock: a worker may have published the real thing
+	// while the header was being read, and that one knows the request it came
+	// from.
+	if _, raced := p.meta[key]; !raced {
+		p.remember(key, protocol.ImageMeta{
+			Hash: key, W: head.W, H: head.H, Blur: head.Blur, Mime: head.Mime, Bytes: n,
+		})
+	}
+	p.mu.Unlock()
 }
 
 // Want handles a client cache miss: ship bytes for keys it does not have.
@@ -247,14 +312,61 @@ func (p *Pipeline) Submit(req Request) {
 // whose bytes are there to send.
 func (p *Pipeline) Want(tab uint32, keys []string) {
 	for _, k := range keys {
+		// Both of these settle before the lock is taken, so the decision made
+		// under it is still the single atomic one this comment is about.
+		p.warm(k)
+		if p.forgetEvicted(k) {
+			// The table called this finished and the bytes have since been
+			// evicted. Unlike Submit there is no request here to do the work
+			// again with, so the honest answer is that it is not coming; the
+			// next snapshot submits the key afresh, and the client takes the
+			// good metadata when it arrives.
+			p.deliver.ImageReady(tab, protocol.ImageMeta{Hash: k, Missing: true})
+			continue
+		}
 		p.mu.Lock()
 		_, done := p.meta[k]
 		if !done {
 			p.wanted[k] = append(p.wanted[k], tab)
 		}
 		p.mu.Unlock()
-		if done {
-			p.sendCached(tab, k)
+		if !done {
+			continue
+		}
+		if !p.sendCached(tab, k) {
+			// The bytes went out from under the table between the two. Nothing
+			// will submit this key again on its own, and the client has spent
+			// its one question on it.
+			p.forget(k)
+			p.deliver.ImageReady(tab, protocol.ImageMeta{Hash: k, Missing: true})
+		}
+	}
+}
+
+// forgetEvicted drops metadata for a key whose bytes the cache has evicted, so
+// it is re-transcoded rather than announced as an asset nothing can send, and
+// reports whether it dropped one. The two are bounded differently — the table
+// by a count, the cache by a size — so they part company on any page busy
+// enough to fill either.
+func (p *Pipeline) forgetEvicted(key string) bool {
+	p.mu.Lock()
+	_, known := p.meta[key]
+	p.mu.Unlock()
+	if !known || p.cache.has(key) {
+		return false
+	}
+	p.forget(key)
+	return true
+}
+
+func (p *Pipeline) forget(key string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.meta, key)
+	for el := p.metaAge.Front(); el != nil; el = el.Next() {
+		if el.Value.(string) == key {
+			p.metaAge.Remove(el)
+			break
 		}
 	}
 }
@@ -304,6 +416,7 @@ func (p *Pipeline) process(req Request) {
 	src, err := p.fetch(ctx, req)
 	if err != nil {
 		p.log.Debug("image fetch failed", "url", req.URL, "err", err)
+		p.abandon(req, err)
 		return
 	}
 	res, err := p.tc.Transcode(ctx, src, req.W, req.H)
@@ -314,6 +427,7 @@ func (p *Pipeline) process(req Request) {
 		// A region shot has no URL to name it; the key is all there is to say
 		// which image failed.
 		p.log.Debug("image transcode failed", "url", req.URL, "key", req.Key, "err", err)
+		p.abandon(req, err)
 		return
 	}
 	meta := res.Meta(req.Key, req.Node, req.Priority)
@@ -322,7 +436,9 @@ func (p *Pipeline) process(req Request) {
 	// The cache first, then the metadata, and both before the waiting list is
 	// taken: a client asking for this key sees it as finished only once the
 	// bytes it would be answered with are actually there. See Want.
-	p.cache.put(req.Key, res.Data, res.Mime)
+	p.cache.put(req.Key, res.Data, cacheHeader{
+		W: res.W, H: res.H, Blur: res.Blurhash, Mime: res.Mime,
+	})
 	p.mu.Lock()
 	p.remember(req.Key, meta)
 	waiting := p.wanted[req.Key]
@@ -336,6 +452,44 @@ func (p *Pipeline) process(req Request) {
 	for _, tab := range waiting {
 		p.deliver.ImageBytes(tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
 	}
+}
+
+/*
+abandon says an asset is not coming, to everyone still holding a space for it.
+
+Every failure here used to end at a log line. The key was never announced, the
+waiting list was never emptied, and the client — which asks for a hash exactly
+once — went on holding a transparent pixel where the picture was, for as long
+as the session lasted. One missing codec on a site that serves one format made
+that the whole page, which is how it was finally noticed; but a 403, a redirect
+to a login, an oversized font and a full queue had all been doing it quietly
+for as long as there had been an image pipeline.
+
+The metadata table is deliberately not written. A key with no entry is a key a
+later snapshot will submit again, and re-fetching a failure on the next resync
+is the only second chance anything here has; recording the failure would take
+that away in exchange for nothing.
+*/
+func (p *Pipeline) abandon(req Request, cause error) {
+	p.mu.Lock()
+	waiting := p.wanted[req.Key]
+	delete(p.wanted, req.Key)
+	p.mu.Unlock()
+
+	// Alt is the whole of what is left to show, so it travels even though
+	// nothing else about the asset was ever learned.
+	meta := protocol.ImageMeta{Node: req.Node, Hash: req.Key, Alt: req.Alt, Missing: true}
+	told := map[uint32]bool{req.Tab: true}
+	p.deliver.ImageReady(req.Tab, meta)
+	for _, tab := range waiting {
+		if told[tab] {
+			continue
+		}
+		told[tab] = true
+		p.deliver.ImageReady(tab, protocol.ImageMeta{Hash: req.Key, Missing: true})
+	}
+	p.log.Debug("image abandoned", "url", req.URL, "key", req.Key,
+		"tabs", len(told), "err", cause)
 }
 
 // rasterize takes the second run at a format this process cannot read, through
@@ -443,12 +597,22 @@ func (p *Pipeline) fetch(ctx context.Context, req Request) ([]byte, error) {
 	limit := p.tc.opts.MaxBytes + 1
 	if p.fetcher != nil {
 		data, err := p.fetcher.FetchImage(ctx, req.Tab, req.URL, limit)
-		if err == nil {
+		if err == nil && len(data) > 0 {
 			return data, nil
+		}
+		if err == nil {
+			err = ErrEmptyResource
 		}
 		p.log.Debug("browser image fetch failed, trying direct", "url", req.URL, "err", err)
 	}
-	return p.fetchDirect(ctx, req, limit)
+	data, err := p.fetchDirect(ctx, req, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, ErrEmptyResource
+	}
+	return data, nil
 }
 
 func (p *Pipeline) fetchDirect(ctx context.Context, req Request, limit int) ([]byte, error) {
@@ -474,7 +638,22 @@ func (p *Pipeline) fetchDirect(ctx context.Context, req Request, limit int) ([]b
 	return io.ReadAll(io.LimitReader(resp.Body, int64(limit)))
 }
 
-// diskCache is a bounded content-addressed store shared by all sessions.
+/*
+diskCache is a bounded content-addressed store shared by all sessions.
+
+Each entry carries its own description. That is the difference between a cache
+that survives a restart and one that only looks like it does: bytes alone are
+not enough to answer a request, because announcing an asset means naming its
+size, its type and its blurhash, and those existed only in a map in memory. A
+restarted server therefore indexed five hundred megabytes it could never quote
+from, and re-fetched and re-transcoded every asset on every page — the whole
+cache reduced to a ledger for its own eviction.
+
+The description is a JSON header behind a magic prefix, ahead of the bytes in
+the same file. One file per entry keeps eviction exactly as it was, and the
+prefix means an entry written by an older build is recognisably not one of
+these and is dropped rather than misread.
+*/
 type diskCache struct {
 	dir   string
 	limit int64
@@ -485,10 +664,36 @@ type diskCache struct {
 	index map[string]*list.Element
 }
 
+// cacheMagic marks a file written with a header. Anything else in the
+// directory is from a build that stored bare bytes and cannot be quoted.
+const cacheMagic = "SKYC1"
+
+// cacheTempPrefix names an entry that is still being written. A key is a hex
+// hash, so nothing real can collide with it, and anything wearing it after a
+// restart is the remains of a write that did not finish.
+const cacheTempPrefix = "writing-"
+
+// cacheHeader is what an entry knows about itself.
+//
+// Only what belongs to the asset. A node id, a placement box and a priority
+// describe the request that happened to want it, not the bytes, and the same
+// bytes serve a different element on the next page.
+type cacheHeader struct {
+	W    int    `json:"w,omitempty"`
+	H    int    `json:"h,omitempty"`
+	Blur string `json:"blur,omitempty"`
+	Mime string `json:"mime,omitempty"`
+}
+
 type cacheEntry struct {
 	key  string
-	mime string
 	size int64
+	// head is the parsed header, read on first use rather than at startup:
+	// indexing ten thousand entries should cost a directory listing, not ten
+	// thousand file reads.
+	head   cacheHeader
+	bytes  int
+	loaded bool
 }
 
 func newDiskCache(dir string, limit int64) (*diskCache, error) {
@@ -504,12 +709,20 @@ func newDiskCache(dir string, limit int64) (*diskCache, error) {
 		return nil, err
 	}
 	for _, e := range entries {
+		key := e.Name()
+		// A half-written entry from a process that died between creating the
+		// temporary file and renaming it over the real one. It is named after
+		// nothing, so no request will ever match it, and left alone it would
+		// hold its space until the whole cache turned over.
+		if strings.HasPrefix(key, cacheTempPrefix) {
+			_ = os.Remove(filepath.Join(dir, key))
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		key := e.Name()
-		el := c.order.PushBack(&cacheEntry{key: key, size: info.Size(), mime: mimeFor(key)})
+		el := c.order.PushBack(&cacheEntry{key: key, size: info.Size()})
 		c.index[key] = el
 		c.size += info.Size()
 	}
@@ -519,9 +732,23 @@ func newDiskCache(dir string, limit int64) (*diskCache, error) {
 
 func (c *diskCache) path(key string) string { return filepath.Join(c.dir, key) }
 
-func (c *diskCache) get(key string) ([]byte, string, bool) {
+// has reports whether the key is in the index, without touching the disk. It
+// is what stops a key whose bytes have been evicted from being announced as
+// though they were still there.
+func (c *diskCache) has(key string) bool {
 	if c.dir == "" {
-		return nil, "", false
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.index[key]
+	return ok
+}
+
+// read returns an entry's header and bytes, parsing the header once.
+func (c *diskCache) read(key string) (cacheHeader, []byte, bool) {
+	if c.dir == "" {
+		return cacheHeader{}, nil, false
 	}
 	c.mu.Lock()
 	el, ok := c.index[key]
@@ -530,25 +757,145 @@ func (c *diskCache) get(key string) ([]byte, string, bool) {
 	}
 	c.mu.Unlock()
 	if !ok {
-		return nil, "", false
+		return cacheHeader{}, nil, false
 	}
-	data, err := os.ReadFile(c.path(key)) //nolint:gosec // key is a hex hash
+	raw, err := os.ReadFile(c.path(key)) //nolint:gosec // key is a hex hash
 	if err != nil {
+		c.drop(key)
+		return cacheHeader{}, nil, false
+	}
+	head, data, ok := splitCacheFile(raw)
+	if !ok {
+		// Written by a build that stored bare bytes, or truncated by a full
+		// disk. Either way it cannot be quoted, and leaving it costs the space
+		// it occupies for as long as the directory lives.
+		c.drop(key)
+		return cacheHeader{}, nil, false
+	}
+	c.mu.Lock()
+	if ent, still := c.index[key]; still {
+		e := ent.Value.(*cacheEntry)
+		e.head, e.bytes, e.loaded = head, len(data), true
+	}
+	c.mu.Unlock()
+	return head, data, true
+}
+
+// header returns what an entry says about itself, reading the file only the
+// first time and only for a key the index already holds.
+func (c *diskCache) header(key string) (cacheHeader, int, bool) {
+	if c.dir == "" {
+		return cacheHeader{}, 0, false
+	}
+	c.mu.Lock()
+	el, ok := c.index[key]
+	if ok {
+		if e := el.Value.(*cacheEntry); e.loaded {
+			head, n := e.head, e.bytes
+			c.mu.Unlock()
+			return head, n, true
+		}
+	}
+	c.mu.Unlock()
+	if !ok {
+		return cacheHeader{}, 0, false
+	}
+	head, data, ok := c.read(key)
+	if !ok {
+		return cacheHeader{}, 0, false
+	}
+	return head, len(data), true
+}
+
+func (c *diskCache) get(key string) ([]byte, string, bool) {
+	head, data, ok := c.read(key)
+	if !ok {
 		return nil, "", false
 	}
-	mime := el.Value.(*cacheEntry).mime
+	mime := head.Mime
 	if mime == "" {
-		// Recovered from disk at startup: the type lives in the bytes.
 		mime = Sniff(data)
 	}
 	return data, mime, true
 }
 
-func (c *diskCache) put(key string, data []byte, mime string) {
+// splitCacheFile separates the header from the bytes.
+func splitCacheFile(raw []byte) (cacheHeader, []byte, bool) {
+	if !bytes.HasPrefix(raw, []byte(cacheMagic)) {
+		return cacheHeader{}, nil, false
+	}
+	rest := raw[len(cacheMagic):]
+	nl := bytes.IndexByte(rest, '\n')
+	if nl < 0 {
+		return cacheHeader{}, nil, false
+	}
+	var head cacheHeader
+	if err := json.Unmarshal(rest[:nl], &head); err != nil {
+		return cacheHeader{}, nil, false
+	}
+	return head, rest[nl+1:], true
+}
+
+// drop forgets an entry and removes its file.
+func (c *diskCache) drop(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.index[key]
+	if !ok {
+		return
+	}
+	c.size -= el.Value.(*cacheEntry).size
+	c.order.Remove(el)
+	delete(c.index, key)
+	_ = os.Remove(c.path(key))
+}
+
+func (c *diskCache) put(key string, data []byte, head cacheHeader) {
 	if c.dir == "" {
 		return
 	}
-	if err := os.WriteFile(c.path(key), data, 0o600); err != nil { //nolint:gosec // key is a hex hash
+	desc, err := json.Marshal(head)
+	if err != nil {
+		return
+	}
+	// Written in pieces into a temporary file, then renamed into place.
+	//
+	// In pieces because a transcoded asset runs to megabytes and is already in
+	// memory once: copying the whole of it into a second slice to hand the
+	// filesystem is a copy nobody reads, and sizing that slice means adding
+	// lengths together, which is an overflow to reason about in exchange for
+	// nothing.
+	//
+	// Renamed because a write that stops halfway — a full disk is the way that
+	// happens — leaves an entry with a good header and only some of its bytes,
+	// and that is the one shape the magic prefix cannot catch on the way back
+	// in. It would be read back as a truncated image, which is a broken picture
+	// rather than a missing one. A rename within a directory is atomic, so an
+	// entry is either wholly there or not there at all.
+	tmp, err := os.CreateTemp(c.dir, cacheTempPrefix)
+	if err != nil {
+		return
+	}
+	var size int64
+	for _, part := range [][]byte{[]byte(cacheMagic), desc, {'\n'}, data} {
+		n, werr := tmp.Write(part)
+		size += int64(n)
+		if werr != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		_ = os.Remove(tmp.Name())
+		return
+	}
+	if err := os.Rename(tmp.Name(), c.path(key)); err != nil {
+		_ = os.Remove(tmp.Name())
 		return
 	}
 	c.mu.Lock()
@@ -557,9 +904,11 @@ func (c *diskCache) put(key string, data []byte, mime string) {
 		c.size -= el.Value.(*cacheEntry).size
 		c.order.Remove(el)
 	}
-	el := c.order.PushBack(&cacheEntry{key: key, size: int64(len(data)), mime: mime})
+	el := c.order.PushBack(&cacheEntry{
+		key: key, size: size, head: head, bytes: len(data), loaded: true,
+	})
 	c.index[key] = el
-	c.size += int64(len(data))
+	c.size += size
 	c.evictLocked()
 }
 
@@ -580,14 +929,27 @@ func (c *diskCache) evictLocked() {
 	}
 }
 
-// mimeFor guesses a cached entry's type from its stored bytes' magic on read;
-// the key itself carries no extension, so entries recovered at startup are
-// re-sniffed lazily.
-func mimeFor(string) string { return "" }
+/*
+Sniff reports the type of a byte slice the transcoder produced.
 
-// Sniff reports the image type of a byte slice, used when a cache entry was
-// recovered from disk without its metadata.
+It has to know every type Transcode can emit, and it did not: an SVG passes
+through as markup and a webfont passes through as itself, and both came back
+from here as `application/octet-stream`. That answer rides all the way to the
+`content-type` the client stores the bytes under, and from there to the type of
+the Blob it mints a URL from — where, for an SVG handed to an `<img>`, it is
+load-bearing. A browser will not sniff its way past the wrong type on a blob
+URL, so the picture is simply not drawn.
+
+Nothing reached this until the disk cache became readable again, which is what
+makes it worth stating plainly: the fallback that had never run was wrong, and
+would have blanked every logo on the page the moment it did.
+*/
 func Sniff(data []byte) string {
+	// A font is named by four exact bytes, which is cheaper and surer than
+	// anything below, and it is not a picture at all.
+	if mime := SniffFont(data); mime != "" {
+		return mime
+	}
 	switch {
 	case len(data) > 12 && string(data[4:12]) == "ftypavif":
 		return "image/avif"
@@ -599,6 +961,12 @@ func Sniff(data []byte) string {
 		return "image/png"
 	case len(data) > 3 && string(data[0:3]) == "GIF":
 		return "image/gif"
+	}
+	// Last, because it is the only one that reads rather than matches: a
+	// vector image has no magic number, only a root element somewhere near the
+	// front.
+	if looksLikeSVG(data) {
+		return "image/svg+xml"
 	}
 	return "application/octet-stream"
 }

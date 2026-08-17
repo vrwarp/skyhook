@@ -193,6 +193,7 @@ function decodeImage(i: Fields): ImageMeta {
     priority: num(i, F.imageMeta.priority),
     alt: str(i, F.imageMeta.alt),
     box: arr<number>(i, F.imageMeta.box).map(Number),
+    missing: bool(i, F.imageMeta.missing),
   };
 }
 

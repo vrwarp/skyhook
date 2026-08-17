@@ -212,6 +212,63 @@ failure is unchanged, and now says which format it was, which is the sentence
 that distinguishes "this whole site is unreadable" from "this one asset is
 damaged".
 
+### 7a. A failed asset is announced, because the client only ever asks once
+
+The missing decoder turned out to be one way into a wider hole. Nothing in the
+image pipeline ever announced a *failure*: every exit — a 403, a redirect to a
+login, a source over the size cap, a full queue, a codec nobody has — logged a
+line and returned. The key was never mentioned, the waiting list kept its tabs
+on it forever, and the client had already spent its one question.
+
+That "once" is deliberate and stays: a second ask costs a round trip on a link
+where round trips are the whole problem. What was missing was the other half of
+the bargain. `ImageMeta.Missing` says the bytes are not coming, the waiting list
+is emptied, and the element drops the transparent placeholder so it falls back
+to the alt text the page's author wrote for exactly this case — unless it is
+already wearing a blurhash, which is a better picture than a broken-image
+marker. A background image stays the transparent pixel it already was; there is
+no alt text for one, and a broken-image marker tiled across a panel is worse
+than nothing.
+
+The failure is deliberately *not* recorded in the metadata table. A key with no
+entry is one the next snapshot submits again, and re-trying on the next resync
+is the only second chance anything here has.
+
+Two more entrances to the same hole are closed with it. A fetch that succeeds
+and returns no bytes — which is how `loadNetworkResource` reports a body it
+could not read — used to reach the codecs, where "no bytes" and "a format I do
+not know" are the same answer, so an empty response was logged as a missing
+codec. And metadata that outlives the bytes it describes is the same silence
+again: the table is bounded by a count and the cache by a size, so they part
+company on any busy page, and a key announced out of the table whose bytes have
+been evicted is answered by nothing at all. Both now say what happened.
+
+### 7b. The landside cache had never once been read after a restart
+
+It survived on disk and was consulted by nobody. Both readers ask the in-memory
+metadata table first, that table starts empty, and so a directory holding half a
+gigabyte of already-transcoded assets was re-fetched from the origin and
+re-encoded — every page, every restart. The cache was a ledger for its own
+eviction and nothing else. The lazily-re-sniffed mime, with its comment about
+entries recovered at startup, was written for a path that could not be reached.
+
+What was missing was not the bytes but everything needed to *announce* them.
+Publishing an asset means naming its size, its type and its blurhash, and those
+lived only in the map that had just been thrown away. So each entry now carries
+its own description: a JSON header behind a magic prefix, ahead of the bytes in
+the same file. One file per entry keeps eviction exactly as it was, and the
+prefix means an entry written by an older build is recognisably not one of these
+and is dropped rather than misread.
+
+That fallback being unreachable had also hidden a bug in it. `Sniff` knew the
+raster magic numbers and nothing else, so an SVG and a webfont — the two things
+here that pass through untranscoded — both came back as
+`application/octet-stream`. That answer rides to the `content-type` the client
+stores the bytes under and from there to the type of the Blob it mints a URL
+from, where, for an SVG handed to an `<img>`, it is load-bearing: a browser will
+not sniff past the wrong type on a blob URL. Making the cache readable without
+fixing that would have blanked every logo on the page.
+
 ### 8. Integer fields are capped at 32 bits on the client -> server path
 
 `cbor-x`, the client's encoder, emits any integer above 2^32-1 as a float64,

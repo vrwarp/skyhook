@@ -932,6 +932,18 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		misresolved.Add(1)
 		http.NotFound(w, r)
 	})
+	// An image the origin does not have. The fetch fails landside, which is
+	// the cheapest way to reach every other failure's exit.
+	mux.HandleFunc("/broken-image", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Gone</title></head>
+			<body><h1>a page whose picture is gone</h1>
+			<img id="gone" src="/no-such-image.png" alt="the missing diagram" width="32" height="32">
+			</body></html>`)
+	})
+	mux.HandleFunc("/no-such-image.png", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
 	mux.HandleFunc("/avif", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, avifPage)
@@ -2837,4 +2849,68 @@ func TestAPageServedOnlyInAVIFStillHasItsPictures(t *testing.T) {
 		return
 	}
 	t.Fatal("the AVIF hero never arrived; the page is a row of empty boxes")
+}
+
+/*
+An image that cannot be fetched is reported, not left pending.
+
+The reader's half of this is what makes it matter: the client asks for a hash
+exactly once, because a second ask costs a round trip on a link where round
+trips are the whole problem. So an asset the server quietly gave up on used to
+be one the element waited on until the tab was closed — a transparent pixel
+where the picture is, and a capture that shows it as still on its way. There is
+no amount of patience that fixes it, and no way for the reader to ask again.
+
+A 404 is the cheapest way to produce that landside; a missing codec, an
+oversized font, a redirect to a login and a full queue all arrive here the same
+way.
+*/
+func TestAnImageThatCannotBeFetchedIsReportedRatherThanLeftPending(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/broken-image"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "a page whose picture is gone", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	deadline := time.Now().Add(budget(45 * time.Second))
+	for time.Now().Before(deadline) {
+		img := cl.Model(tab).Find("img", "id", "gone")
+		if img == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		key := strings.TrimPrefix(img.Attrs["src"], "skyhook://img/")
+		if key == "" || key == img.Attrs["src"] {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		// The agent announces a placeholder for the element in the snapshot
+		// itself, before anything has tried to fetch it; the verdict is the
+		// one that arrives after the pipeline has given up.
+		meta, ok := cl.Images()[key]
+		if !ok || !meta.Missing {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		// The alt text travels, because it is the whole of what is left to show.
+		if meta.Alt != "the missing diagram" {
+			t.Errorf("meta.Alt = %q, want the element's alt text", meta.Alt)
+		}
+		if _, gotBytes := cl.ImageBytes(key); gotBytes {
+			t.Error("bytes arrived for an image the server said was not coming")
+		}
+		return
+	}
+	t.Fatal("nothing was ever said about an image that 404s; the element waits forever")
 }

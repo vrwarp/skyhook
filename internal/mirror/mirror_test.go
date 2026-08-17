@@ -789,3 +789,52 @@ func TestAReplicaCanBeReadWhileFramesArrive(t *testing.T) {
 		_ = m.FindByText("one")
 	}
 }
+
+/*
+A reference to something in the document is left exactly as it stands.
+
+`fill: url(#grad)`, `clip-path: url(#clip)`, `filter:` and `mask:` all name an
+SVG element on the page, not a file. Resolved against the page they become its
+own address — which fetches the document's HTML, and then reports that the
+bytes are an image in no format anyone knows. That is the wasted half. The
+damaging half is the rewrite: the rule comes out as
+`clip-path: url(skyhook://img/eda649fa)`, which names nothing at all, and the
+element quietly stops being clipped.
+
+absolutizeCSSURLs and the agent's own resolveCSSURL have both always said this.
+This one had not.
+*/
+func TestLocalFragmentReferencesAreNotAssets(t *testing.T) {
+	rules := []string{
+		`.a { clip-path: url(#clip-path); }`,
+		`.b { fill: url(#btnGradColor); }`,
+		`.c { filter: url("#blur"); }`,
+		`.d { mask: url( #m ); }`,
+		`.e { background-image: url(/real.png); }`,
+	}
+	out, reqs := rewriteCSSImages(rules, "https://www.asus.test/oxiis/page/", 512)
+
+	for i, r := range out[:4] {
+		if strings.Contains(r, "skyhook://img/") {
+			t.Errorf("rule %d had its reference rewritten to a cache key: %s", i, r)
+		}
+		if !strings.Contains(r, "#") {
+			t.Errorf("rule %d lost the fragment it names: %s", i, r)
+		}
+	}
+	// The one real image still goes through, or this would be a fix that
+	// stopped every background image instead.
+	if !strings.Contains(out[4], "skyhook://img/") {
+		t.Errorf("a real background image was left unrewritten: %s", out[4])
+	}
+	if len(reqs) != 1 {
+		var urls []string
+		for _, r := range reqs {
+			urls = append(urls, r.URL)
+		}
+		t.Errorf("%d fetches queued, want the 1 real image: %v", len(reqs), urls)
+	}
+	if len(reqs) == 1 && reqs[0].URL != "https://www.asus.test/real.png" {
+		t.Errorf("the queued fetch was %q", reqs[0].URL)
+	}
+}

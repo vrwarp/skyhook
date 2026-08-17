@@ -393,6 +393,18 @@ type ImageMeta struct {
 	// box. Empty means the image covers the element, which is what an ordinary
 	// <img> means and what a fully visible canvas reduces to.
 	Box []int `cbor:"10,keyasint,omitempty"`
+	// Missing says the bytes are not coming: the fetch or the decode failed
+	// landside, and the key carries no size, no type and no blurhash because
+	// nothing ever got far enough to measure one.
+	//
+	// Without it a failure is indistinguishable from slowness. The client asks
+	// for a hash exactly once — a second request costs a round trip on a link
+	// where round trips are the whole problem — so an asset the server quietly
+	// gave up on is one the reader waits on for the rest of the session,
+	// holding a placeholder that will never be replaced. Saying so costs a few
+	// bytes and lets the element fall back to its alt text, which is the thing
+	// the page's author wrote for exactly this.
+	Missing bool `cbor:"11,keyasint,omitempty"`
 }
 
 // ImageData carries the encoded bytes for a hash.

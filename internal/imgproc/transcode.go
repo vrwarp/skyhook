@@ -201,15 +201,33 @@ func passThroughSVG(src []byte, w, h int) (*Result, bool) {
 	return res, true
 }
 
+// svgSniffWindow is how far in to look for the root element.
+//
+// It was a kilobyte, which is enough for an XML declaration and a doctype and
+// not enough for what an export tool actually puts in front of them: a licence
+// header, an editor's metadata comment, or a doctype carrying an internal
+// subset of entity declarations. Any of those pushes `<svg` past the first
+// kilobyte, and the file is then treated as a bitmap that no codec can read —
+// a logo that fails for the length of its own copyright notice.
+const svgSniffWindow = 8 << 10
+
 // looksLikeSVG sniffs the markup, skipping an XML declaration, a doctype, a
 // byte-order mark or comments — none of which an `image/svg+xml` content type
 // would be needed to see past.
 func looksLikeSVG(src []byte) bool {
 	head := src
-	if len(head) > 1024 {
-		head = head[:1024]
+	if len(head) > svgSniffWindow {
+		head = head[:svgSniffWindow]
 	}
 	head = bytes.TrimPrefix(head, []byte("\xef\xbb\xbf"))
+	// Looking further costs a wider chance of finding those four bytes inside
+	// something that is not markup at all. A picture is not text, and XML may
+	// not carry a zero byte anywhere: one in the window says this is a
+	// container whose payload happens to read as ASCII, and it belongs in the
+	// codecs.
+	if bytes.IndexByte(head, 0) >= 0 {
+		return false
+	}
 	return bytes.Contains(bytes.ToLower(head), []byte("<svg"))
 }
 
