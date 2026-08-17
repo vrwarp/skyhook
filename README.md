@@ -112,6 +112,22 @@ self-signed ECDSA certificate, and writes `pairing.json` into its data
 directory. That file is what the client needs: host, port, token, and the
 certificate fingerprint it will pin.
 
+If the box has a name, give it a real certificate instead — the server gets one
+from Let's Encrypt and keeps it renewed:
+
+```sh
+SKYHOOK_ACME_DOMAINS=skyhook.example.com SKYHOOK_ACME_EMAIL=you@example.com \
+  docker compose -f deploy/docker-compose.acme.yml up -d
+```
+
+That is the deployment to want, because it is the only one that keeps both
+halves of what makes the client work. TLS terminates here, so WebTransport
+survives; the certificate is one Chrome already trusts, so the app installs and
+starts with no network — which a self-signed certificate never allows, however
+firmly the client pins it. Renewal needs no restart and no re-pairing.
+[docs/OPERATIONS.md](docs/OPERATIONS.md#a-certificate-of-its-own) has the DNS
+record, the challenge port and how to rehearse it against staging.
+
 Behind a reverse proxy, tell the server the address the proxy answers on —
 everything it hands the client is built from it, and it cannot infer it:
 

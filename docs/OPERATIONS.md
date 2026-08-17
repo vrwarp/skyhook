@@ -60,6 +60,7 @@ default; this is the whole surface:
   "dataDir": "/var/lib/skyhook",
   "hosts": ["vps.example.com"],
   "token": "",
+  "acme": { "enabled": false, "agreeTos": false, "email": "", "domains": [] },
   "headless": false,
   "lang": "en-US",
   "sessionTtl": "12h",
@@ -91,7 +92,13 @@ Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_WEB_ROOT`,
 `SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`,
 `SKYHOOK_PUBLIC_URL`, `SKYHOOK_BEHIND_PROXY`, `SKYHOOK_CAPTURE_KEEP`,
-`SKYHOOK_CAPTURE_TEXT`, `SKYHOOK_CAPTURE_ON_DIVERGENCE`.
+`SKYHOOK_CAPTURE_TEXT`, `SKYHOOK_CAPTURE_ON_DIVERGENCE`, `SKYHOOK_ACME`,
+`SKYHOOK_ACME_DOMAINS`, `SKYHOOK_ACME_EMAIL`, `SKYHOOK_ACME_AGREE_TOS`,
+`SKYHOOK_ACME_DIRECTORY`, `SKYHOOK_ACME_CHALLENGE`,
+`SKYHOOK_ACME_HTTP_LISTEN`.
+
+`acme` has the server get its own certificate and keep it renewed — see
+[a certificate of its own](#a-certificate-of-its-own).
 
 The `capture*` and `journal*` settings are the diagnostic bundles — see
 [diagnosing the mirror](#diagnosing-the-mirror).
@@ -200,6 +207,101 @@ which is stronger than trusting the public CA set and is what lets a personal
 server run without a public certificate. **Treat this file as a credential**: it
 carries the token.
 
+### A certificate of its own
+
+If the box has a name, the server can get a real certificate for it from Let's
+Encrypt and keep it renewed. Two settings and a DNS record:
+
+```json
+{
+  "hosts": ["skyhook.example.com"],
+  "acme": { "enabled": true, "agreeTos": true, "email": "you@example.com" }
+}
+```
+
+or `SKYHOOK_ACME=1`, `SKYHOOK_ACME_DOMAINS=skyhook.example.com`,
+`SKYHOOK_ACME_AGREE_TOS=1`, which is what `deploy/docker-compose.acme.yml` sets:
+
+```sh
+SKYHOOK_ACME_DOMAINS=skyhook.example.com SKYHOOK_ACME_EMAIL=you@example.com \
+  docker compose -f deploy/docker-compose.acme.yml up -d
+```
+
+**This is the arrangement to want.** It is the only one that keeps both halves
+of what makes the client work:
+
+* **WebTransport**, because TLS terminates in this process rather than at a
+  proxy, and no HTTP proxy forwards HTTP/3 upstream.
+* **An installable app**, because the certificate is one Chrome already trusts.
+  Chrome will not register a service worker behind a self-signed certificate, so
+  the pinned deployment can pair and mirror pages but can never start with no
+  network — which is the situation the whole client was written for.
+
+The self-signed path keeps the first and loses the second; a reverse proxy keeps
+the second and loses the first. This keeps both, and it also ends the
+fortnightly rotation dance below: the certificate is answered per handshake out
+of `<dataDir>/acme`, so a renewal is simply what the next handshake gets. No
+restart, no re-pairing, no new fingerprint for anybody to copy.
+
+What it costs:
+
+* **A DNS record.** An A or AAAA for each name in `domains`, pointing here. The
+  authority checks by connecting to it from the outside; there is no way to
+  certify an address, and no way to certify `localhost`. `domains` defaults to
+  `hosts`, and the certified names then *become* `hosts`, so the pairing link,
+  `pairing.json` and the app's `connect-src` all name the certificate's names.
+* **A reachable challenge port.** Port 80 by default (`http-01`). If the
+  fallback listener is already on 443, `tls-alpn-01` is chosen instead and
+  answers on that listener, with nothing extra bound.
+* **Accepting the subscriber agreement.** `agreeTos` has to be set, because
+  agreeing to <https://letsencrypt.org/repository/> on somebody's behalf is not
+  this program's decision to make. Nothing is requested without it.
+
+The challenge port is the part worth checking twice, because it is the one that
+fails for reasons outside this process. Port 80 and port 443 are what the
+authority *dials*; they need not be what this process *binds*. The container
+publishes `80:8080` and binds 8080, because an unprivileged uid cannot have port
+80; a systemd unit can bind it directly with the `AmbientCapabilities` line in
+`deploy/skyhook.service`. When the two differ the server says so at startup, and
+then it is on you to make the forwarding real.
+
+One thing in the log is expected and not a fault: with `http-01`, the client
+library tries `tls-alpn-01` first and falls back when it fails, so a refused
+challenge appears once per issuance before the certificate arrives. It costs a
+few seconds and is well inside any authority's failure allowance. Putting the
+fallback listener on 443 — which selects `tls-alpn-01` by default — avoids it.
+
+Work it out against staging first if there is any doubt. Its certificates are
+refused by every browser, and its rate limits are generous enough to fail
+against all afternoon:
+
+```sh
+SKYHOOK_ACME_DIRECTORY=staging skyhookd -init
+```
+
+`-init` is the short way to find out: it creates the data directory, gets the
+certificate and exits, with no browser and no listeners in the way. A challenge
+that fails is an error there rather than a warning, so it either works or it
+tells you what did not.
+
+Once it is working, the certificate lives in `<dataDir>/acme` along with the
+ACME account key, and **that directory has to persist**. Losing it means
+registering again and re-issuing from scratch on every start, which is the
+shortest route to a rate limit. It is inside the data directory for exactly that
+reason: the data directory is the one thing every deployment already keeps.
+
+The client is not given a pin here. `pairing.json` carries no `certSha256`, and
+that is deliberate rather than an omission: WebTransport refuses a pin whose
+certificate is valid for longer than 14 days, which is every certificate a
+public authority issues, so pinning one would fail every QUIC dial and quietly
+demote the connection to the socket. Ordinary TLS trust is what a real
+certificate is for. The same now applies to `tlsCert`/`tlsKey`, which used to
+hand out a pin the browser could not use.
+
+`acme` is refused alongside `behindProxy` (the certificate that matters there is
+the proxy's), alongside `tlsCert`/`tlsKey` (two answers to one question), and
+alongside `insecureLoopback` (no TLS, and no authority certifies `127.0.0.1`).
+
 ### Behind a reverse proxy
 
 Terminating TLS somewhere else — nginx, Caddy, Traefik, a Cloudflare tunnel —
@@ -301,9 +403,12 @@ loudly — but the listener keeps serving the old certificate until it restarts.
 Restart the service (a nightly `systemctl restart skyhook` is fine; sessions
 rebuild from the profile) and re-pair the client with the new fingerprint.
 
-If you have a real certificate for the host, set `tlsCert` and `tlsKey` and none
-of this applies: no pinning, no rotation dance. The same is true behind a
-reverse proxy, where the certificate that matters is the proxy's.
+None of this applies once the certificate is a real one. Turn on
+[`acme`](#a-certificate-of-its-own) and the server gets and renews one itself,
+with no restart and no re-pairing; set `tlsCert` and `tlsKey` if you already
+have one from elsewhere; or stand behind a reverse proxy, where the certificate
+that matters is the proxy's. In all three the client uses ordinary TLS trust and
+there is nothing to pin.
 
 ## Security posture
 
@@ -521,7 +626,10 @@ patcher in your tree.
 |---|---|
 | Client cannot connect over QUIC | UDP blocked. The client falls back to WebSocket automatically; check the HUD, which shows which transport is live. |
 | The app shows "The client has not been built" | `webRoot` is unset or wrong. Build `client/` and point at `client/dist`. |
-| The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. |
+| The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. Turn on [`acme`](#a-certificate-of-its-own). |
+| ACME: the log says `could not get a certificate` | The authority could not reach the challenge port. Check DNS resolves each name here, that port 80 (or 443 for `tls-alpn-01`) reaches this process from the outside, and that a published container port is mapped to what the server bound — the startup log says when those two numbers differ. Reproduce against `SKYHOOK_ACME_DIRECTORY=staging` rather than burning production quota. |
+| ACME: worked once, now the authority refuses | Almost always a lost `<dataDir>/acme`: without the account key the server registers and re-issues on every start, until a rate limit stops it. Persist the data directory. Rate limits are per week; staging has its own. |
+| ACME: browsers say the certificate is not trusted | `directory` is still `staging`. Clear it, delete `<dataDir>/acme` so the staging certificate is not reused, and restart. |
 | Stale UI after a deploy | Expected: the app runs from the service worker's cache and a reload is answered from it. The client compares builds with the server on every connection and offers *Update Skyhook…* in the shell menu; see [versions and updates](#versions-and-updates). |
 | `unauthorized` on connect | Token mismatch: re-read `pairing.json`. The client says `unpaired` in the HUD and opens its pairing dialog rather than retrying. |
 | HUD alternates between offline and connected every second or two | The server is refusing the token on every attempt. Older builds retried it forever; check the server log for `unauthorized client`, and for a restart just before it — a server that generated a fresh token has un-paired every client. Pair again from the link in the log. |

@@ -1,0 +1,77 @@
+# Skyhook with a certificate of its own, from Let's Encrypt.
+#
+#   SKYHOOK_ACME_DOMAINS=skyhook.example.com \
+#   SKYHOOK_ACME_EMAIL=you@example.com \
+#     docker compose -f deploy/docker-compose.acme.yml up -d
+#   docker compose -f deploy/docker-compose.acme.yml exec skyhook \
+#     skyhookctl pairing -file /data/pairing.json -link
+#
+# This is the deployment to want if the box has a name. It is the only one that
+# keeps both halves of what makes the client work:
+#
+#   * WebTransport, because TLS terminates here rather than at a proxy, and no
+#     HTTP proxy forwards HTTP/3 upstream.
+#   * An installable app, because the certificate is one Chrome already trusts,
+#     and Chrome will not register a service worker behind a self-signed one —
+#     which is what stops the plane-side app starting with no network.
+#
+# The cost is a DNS A/AAAA record pointing at this host, and port 80 reachable
+# from the internet so the authority can check it.
+#
+# The data volume holds the browser profile — real cookies, real logins — so put
+# it on an encrypted disk (see docs/OPERATIONS.md). It also holds the ACME
+# account key and the issued certificate, which is why it has to persist: losing
+# it means registering again and re-issuing on every start, which is the fastest
+# route to a rate limit.
+services:
+  skyhook:
+    image: ghcr.io/vrwarp/skyhook:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "4433:4433/udp"
+      - "4434:4434/tcp"
+      # The authority connects to port 80. The container answers it on 8080
+      # because the server runs as an unprivileged uid and cannot bind 80
+      # itself; Docker does the privileged half.
+      - "80:8080/tcp"
+    volumes:
+      - skyhook-data:/data
+    environment:
+      SKYHOOK_CONFIG: /data/config.json
+      SKYHOOK_ACME: "1"
+      # The names to certify. Each must resolve to this host: the authority
+      # checks by connecting to it.
+      SKYHOOK_ACME_DOMAINS: ${SKYHOOK_ACME_DOMAINS:?set it to the name that resolves here, e.g. skyhook.example.com}
+      # Where expiry warnings go. Optional, and the only notice anybody gets if
+      # renewal has been quietly failing for two months.
+      SKYHOOK_ACME_EMAIL: ${SKYHOOK_ACME_EMAIL:-}
+      # Accepting the authority's subscriber agreement is the operator's to do,
+      # so nothing is requested until this says so:
+      # https://letsencrypt.org/repository/
+      SKYHOOK_ACME_AGREE_TOS: "1"
+      # Matches the published port above.
+      SKYHOOK_ACME_HTTP_LISTEN: ":8080"
+      # Set to "staging" while working out whether port 80 really is reachable.
+      # Staging certificates are refused by every browser, and its rate limits
+      # are generous enough to fail against all afternoon.
+      SKYHOOK_ACME_DIRECTORY: ${SKYHOOK_ACME_DIRECTORY:-}
+      SKYHOOK_LOG_LEVEL: ${SKYHOOK_LOG_LEVEL:-info}
+      # Headful under Xvfb is the default; set 0 for headless, which is
+      # lighter and more conspicuous.
+      SKYHOOK_HEADFUL: ${SKYHOOK_HEADFUL:-1}
+    # Chromium wants more shared memory than the container default.
+    shm_size: 1gb
+    security_opt:
+      - seccomp:unconfined
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/skyhookctl", "pairing", "-file", "/data/pairing.json"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  skyhook-data:

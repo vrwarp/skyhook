@@ -1875,7 +1875,12 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   list is.
 - **Installability is untested against a real install prompt**: the manifest,
   icons and service worker are all in place and the worker registers in a real
-  browser under test, but nobody has clicked "Install" on a device yet.
+  browser under test, but nobody has clicked "Install" on a device yet. It also
+  needs a certificate the browser trusts, which [§39](#39-the-certificate-was-a-choice-between-the-app-and-the-transport)
+  now makes reachable without a proxy — and the ACME path itself is exercised
+  only against a stand-in authority in `internal/transport/acme_test.go`, never
+  against Let's Encrypt, because a test that issues real certificates spends a
+  real rate limit.
 - **The document is delivered whole, not viewport-first.** A snapshot serialises
   the entire DOM, and only images are prioritised by viewport position. Both
   Menlo's Smart DOM and, twenty years earlier, OBML's pagination send what is
@@ -2249,6 +2254,74 @@ stalled client is repaired on the second check and not the first or third, a
 client working through a backlog is left alone however far behind it is, a
 client behind a page that is still emitting is left alone, and a caught-up
 client is never considered at all.
+
+### 39. The certificate was a choice between the app and the transport
+
+Every deployment had to give up one of the two things the client is built on,
+and nothing in the tree said so.
+
+The self-signed certificate is not a compromise on the wire: the client pins its
+exact SHA-256, which is stronger than trusting the public CA set, and it is what
+lets a personal server run with no public name at all. What it costs is
+elsewhere. Chrome will not register a service worker behind a certificate it
+does not trust, and the service worker is the entire offline story — the app
+that starts from its own cache at 35,000 feet, the shell that survives an
+outage, the install. A pinned deployment can mirror pages perfectly and can
+never be the thing the README describes.
+
+The reverse proxy fixes precisely that and takes WebTransport away, because no
+HTTP proxy forwards HTTP/3 to an upstream. That trade is documented and real —
+stream independence and 0-RTT resume are what make a bad link bearable — but it
+is a trade, and it was the only escape from the first one.
+
+There was a third arrangement all along, `tlsCert`/`tlsKey`, and it was broken
+in a way nobody would find. The pairing file was built from
+`cert.FingerprintB64()` unconditionally, so a server with a real certificate
+handed the client a pin for it. WebTransport refuses `serverCertificateHashes`
+whose certificate is valid for more than 14 days, which is every certificate a
+public authority issues. So the one deployment that should have had both got
+neither: every QUIC dial failed on a rule about validity windows, the client
+fell back to the socket exactly as it does behind a proxy, and the HUD said
+`websocket` with no error anywhere to explain it.
+
+`CertBundle.Pin` is the fix and the statement of the rule: only a certificate
+this process minted is pinnable, because only that one is short-lived by
+construction. Everything else goes out with no `certSha256` and the client uses
+ordinary TLS trust — which is what a real certificate is *for*.
+
+That left getting one easy enough to be the default answer, which is
+`internal/transport/acme.go`. `hosts` are the names, the challenge follows from
+where the listeners already are, and two settings turn it on. Three details are
+not obvious:
+
+- **The certificate is answered per handshake**, never held. `GetCertificate`
+  rather than `Certificates` is what makes renewal invisible: the replacement is
+  simply what the next handshake gets. Contrast the self-signed path, where
+  rotation invalidates the pin every client holds and needs a restart *and* a
+  re-pairing — a fortnightly ritual that this arrangement deletes.
+- **Renewal cannot be left to the handshake.** The manager renews while
+  answering, which covers a server in daily use and covers nothing else. A
+  Skyhook that is opened when somebody flies is exactly the server that goes two
+  months without a handshake and then presents an expired certificate to the one
+  connection that mattered. `acmeRenewalLoop` asks every twelve hours whether
+  anybody is connecting or not.
+- **The warm-up has to look like a browser.** Priming with a synthetic
+  `ClientHelloInfo` orders under a cache key derived from the hello, and a hello
+  with no cipher suites orders an *RSA* certificate. Every real handshake would
+  then miss that entry and order a second one — a warm-up that doubles issuance
+  is the shortest path to a rate limit. The suites are set for that reason and
+  nothing else.
+
+The challenge port is where deployments actually fail, and it is deliberately
+not validated to death. Ports 80 and 443 are what the authority *dials*, not
+what this process *binds*: a container publishes `80:8080` because an
+unprivileged uid cannot have port 80, and refusing that would refuse the
+deployment this feature is most useful in. So the server compares the two
+numbers and says once, loudly, when they differ, and leaves the forwarding to
+the operator. Everything that genuinely cannot work — `behindProxy`, an address
+instead of a name, a wildcard, no agreement to the subscriber terms — is refused
+at startup with a sentence naming the fix, because the alternative is an
+authority error some minutes later written for people implementing ACME.
 
 ## Measured results
 

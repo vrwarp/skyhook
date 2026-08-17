@@ -71,7 +71,7 @@ func main() {
 		log.Info("initialised",
 			"dataDir", cfg.DataDir,
 			"pairing", cfg.PairingPath(),
-			"fingerprint", cert.FingerprintHex())
+			"certificate", cert.Describe())
 		return
 	}
 

@@ -29,6 +29,16 @@ type CertBundle struct {
 	NotAfter    time.Time
 	SelfSigned  bool
 	CertPEMPath string
+	// Managed marks a certificate an authority issues and this process renews
+	// (see acme.go). There is no leaf to fingerprint here: the one being served
+	// is whatever the manager answered the last handshake with, and it changes
+	// under the listener without a restart. That is the feature, and it is also
+	// why nothing downstream may treat this bundle as a fixed certificate.
+	Managed bool
+	// WSNextProtos overrides the ALPN list the fallback listener offers. It
+	// exists for the TLS-ALPN-01 challenge, which arrives on that listener and
+	// only on a connection asking for a protocol no browser ever asks for.
+	WSNextProtos []string
 }
 
 // FingerprintHex renders the pin as colon-separated hex.
@@ -207,7 +217,44 @@ func (b *CertBundle) TLSForWS() *tls.Config {
 	}
 	c := b.TLS.Clone()
 	c.NextProtos = []string{"http/1.1"}
+	if len(b.WSNextProtos) > 0 {
+		c.NextProtos = append([]string(nil), b.WSNextProtos...)
+	}
 	return c
+}
+
+// Pin reports what the client should pin, and whether it should pin at all.
+//
+// Only the self-signed certificate is pinnable, and that is a browser rule
+// rather than a preference: WebTransport's serverCertificateHashes refuses any
+// certificate whose validity window exceeds 14 days, which every certificate a
+// public authority issues does. Handing a client the fingerprint of a real
+// certificate would not strengthen anything — it would make every WebTransport
+// dial fail and quietly demote the connection to the socket.
+//
+// The expiry goes out with it, because the two are one fact: the date is how
+// the client knows when the thing it pinned stops being served.
+func (b *CertBundle) Pin() (sha256B64, expires string, ok bool) {
+	if b == nil || b.Managed || !b.SelfSigned || len(b.SHA256) == 0 {
+		return "", "", false
+	}
+	return b.FingerprintB64(), b.NotAfter.UTC().Format(time.RFC3339), true
+}
+
+// Describe renders the certificate for a log line: what it is, and what an
+// operator would want to know next about it.
+func (b *CertBundle) Describe() string {
+	switch {
+	case b == nil || b.TLS == nil:
+		return "no certificate"
+	case b.Managed:
+		return "issued by a certificate authority, renewed automatically"
+	case b.SelfSigned:
+		return fmt.Sprintf("self-signed, pinned sha256=%s expires=%s",
+			b.FingerprintHex(), b.NotAfter.Format(time.RFC3339))
+	default:
+		return fmt.Sprintf("configured, expires=%s", b.NotAfter.Format(time.RFC3339))
+	}
 }
 
 // String renders the bundle for the pairing file.

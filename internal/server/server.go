@@ -38,6 +38,7 @@ type Server struct {
 	images  *imgproc.Pipeline
 	mgr     *session.Manager
 	cert    *transport.CertBundle
+	acme    *transport.ACME
 	logs    *diag.Ring
 
 	wt *transport.WTServer
@@ -52,13 +53,28 @@ type Server struct {
 // exactly what it used to do inside a container.
 //
 // It returns the certificate so a caller can report the fingerprint.
+//
+// With ACME configured this is where the certificate is actually fetched, which
+// makes `skyhookd -init` the way to find out whether the deployment can get one
+// before there is a browser and a session manager in the way. A challenge that
+// fails is an error here, not a warning: the one thing this call exists to do
+// is leave a working data directory behind.
 func Prepare(cfg config.Config, log *slog.Logger) (*transport.CertBundle, error) {
 	if err := makeDirs(cfg); err != nil {
 		return nil, err
 	}
-	cert, err := loadOrCreateCert(cfg, log)
+	cert, acmeMgr, err := setupCert(cfg, log)
 	if err != nil {
 		return nil, err
+	}
+	if acmeMgr != nil {
+		defer func() { _ = acmeMgr.Close() }()
+		notAfter, err := acmeMgr.Ensure(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		log.Info("certificate obtained", "domains", acmeMgr.Domains(),
+			"expires", notAfter.UTC().Format(time.RFC3339))
 	}
 	s := &Server{cfg: cfg, log: log, cert: cert}
 	if err := s.WritePairingFile(); err != nil {
@@ -71,6 +87,9 @@ func makeDirs(cfg config.Config) error {
 	dirs := []string{cfg.DataDir, cfg.ProfileDir(), cfg.CertDir(), cfg.ImageCacheDir()}
 	if cfg.CapturesEnabled() {
 		dirs = append(dirs, cfg.CaptureDir())
+	}
+	if cfg.ACME.Enabled {
+		dirs = append(dirs, cfg.ACMEDir())
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -91,11 +110,26 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 	}
 	s := &Server{cfg: cfg, log: log, logs: logs, errs: make(chan error, 4)}
 
-	cert, err := loadOrCreateCert(cfg, log)
+	cert, acmeMgr, err := setupCert(cfg, log)
 	if err != nil {
 		return nil, err
 	}
 	s.cert = cert
+	s.acme = acmeMgr
+	if acmeMgr != nil {
+		// Fetched here rather than lazily on the first handshake, so a
+		// deployment that cannot be certified says so at startup instead of
+		// looking like a client that will not connect. It is not fatal: the
+		// authority may be having a bad afternoon, or DNS may not have
+		// propagated yet, and the renewal loop will keep trying.
+		if notAfter, err := acmeMgr.Ensure(ctx); err != nil {
+			log.Error("could not get a certificate; TLS will fail until this succeeds",
+				"domains", acmeMgr.Domains(), "err", err)
+		} else {
+			log.Info("certificate ready", "domains", acmeMgr.Domains(),
+				"expires", notAfter.UTC().Format(time.RFC3339))
+		}
+	}
 
 	br, err := cdp.Launch(ctx, cdp.BrowserOptions{
 		ExecPath:    cfg.Chrome,
@@ -387,16 +421,19 @@ func (s *Server) Start(ctx context.Context) error {
 			s.log.Info("http listener up (TLS terminates at the proxy)",
 				"addr", s.cfg.FallbackListen, "path", s.cfg.Path)
 		} else {
-			s.log.Info("https listener up", "addr", s.cfg.FallbackListen)
+			s.log.Info("https listener up", "addr", s.cfg.FallbackListen,
+				"certificate", s.cert.Describe())
 		}
+		pin, _, _ := s.cert.Pin()
 		s.log.Info("pair the client by opening this link once",
-			"url", PairingLink(s.cfg, s.cert.FingerprintB64()))
+			"url", PairingLink(s.cfg, pin))
 	}
 
 	if err := s.writePairing(); err != nil {
 		s.log.Warn("pairing file not written", "err", err)
 	}
 	go s.certRotationLoop(ctx)
+	go s.acmeRenewalLoop(ctx)
 	go s.dictTrainerLoop(ctx)
 
 	select {
@@ -496,6 +533,9 @@ func (s *Server) Shutdown() error {
 	if s.ws != nil {
 		_ = s.ws.Close()
 	}
+	if s.acme != nil {
+		_ = s.acme.Close()
+	}
 	s.mgr.Close(ctx)
 	s.images.Close()
 	return s.browser.Close()
@@ -513,8 +553,41 @@ func (s *Server) Manager() *session.Manager { return s.mgr }
 func (s *Server) Cert() *transport.CertBundle { return s.cert }
 
 func (s *Server) writePairing() error {
-	p := s.cfg.PairingFor(s.cert.FingerprintB64(), s.cert.NotAfter.UTC().Format(time.RFC3339))
+	sha, expires, _ := s.cert.Pin()
+	p := s.cfg.PairingFor(sha, expires)
 	return config.WritePairing(s.cfg.PairingPath(), p)
+}
+
+// acmeRenewalLoop keeps the certificate current on a server nobody is
+// connecting to.
+//
+// Renewal happens inside the handshake — the manager notices the certificate is
+// close to expiry and replaces it while answering — which covers a server in
+// daily use and covers nothing else. A Skyhook that is opened when somebody
+// flies is exactly the server that might go two months without a handshake, and
+// would then present an expired certificate to the one connection that mattered.
+func (s *Server) acmeRenewalLoop(ctx context.Context) {
+	if s.acme == nil {
+		return
+	}
+	t := time.NewTicker(12 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			notAfter, err := s.acme.Ensure(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				s.log.Error("certificate renewal failed", "err", err)
+				continue
+			}
+			s.log.Debug("certificate checked", "expires", notAfter.UTC().Format(time.RFC3339))
+		}
+	}
 }
 
 // certRotationLoop mints a new self-signed certificate before the old one ages
@@ -612,6 +685,94 @@ func firstHost(hosts []string) string {
 		return hosts[0]
 	}
 	return "localhost"
+}
+
+// setupCert settles what this server will serve for TLS, and returns the ACME
+// manager alongside it when there is one — because that manager owns a listener
+// and a renewal loop, and both have to be stopped with the server.
+//
+// The manager is started but not used here: getting the first certificate is
+// the caller's to time, since `-init` wants it to be fatal and a running server
+// does not.
+func setupCert(cfg config.Config, log *slog.Logger) (
+	*transport.CertBundle, *transport.ACME, error,
+) {
+	if !cfg.ACME.Enabled {
+		b, err := loadOrCreateCert(cfg, log)
+		return b, nil, err
+	}
+	a, err := transport.NewACME(transport.ACMEOptions{
+		Domains:   cfg.ACME.Domains,
+		Email:     cfg.ACME.Email,
+		Directory: cfg.ACME.Directory,
+		CacheDir:  cfg.ACMEDir(),
+		Challenge: transport.ACMEChallenge(cfg.ACME.Challenge),
+		HTTPAddr:  cfg.ACME.HTTPListen,
+		// Port 80 is open for the authority either way, so anyone who types the
+		// bare name into a browser may as well land on the app rather than on a
+		// redirect to a port that is not serving it.
+		RedirectTo: appOrigin(cfg),
+		Logger:     log,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := a.Start(); err != nil {
+		_ = a.Close()
+		return nil, nil, err
+	}
+	log.Info("getting a certificate from a certificate authority",
+		"domains", a.Domains(), "challenge", cfg.ACME.Challenge,
+		"directory", directoryName(cfg.ACME.Directory))
+	if bound, wants := challengePorts(cfg); bound != wants {
+		// Not an error: a container publishes 80:8080, and an unprivileged
+		// process on a bare-metal box often cannot have port 80 at all. Both are
+		// fine as long as something forwards. Said once, loudly, because a
+		// challenge that is never reached fails with an authority error that
+		// names neither port.
+		log.Warn("the authority dials one port and this server bound another; "+
+			"publish or forward it, or the challenge cannot be answered",
+			"challenge", cfg.ACME.Challenge, "bound", bound, "dialled", wants)
+	}
+	return a.Bundle(), a, nil
+}
+
+// challengePorts reports the port the challenge listener bound and the port the
+// authority will connect to, which are the same number in a deployment that
+// owns its own ports and different in one behind a published container port.
+func challengePorts(cfg config.Config) (bound, dialled int) {
+	if cfg.ACME.Challenge == config.ChallengeTLSALPN01 {
+		return portOf(cfg.FallbackListen), 443
+	}
+	return portOf(cfg.ACME.HTTPListen), 80
+}
+
+// directoryName renders the authority for a log line, so "staging" is never
+// mistaken for the real thing when a browser later refuses the certificate.
+func directoryName(dir string) string {
+	switch dir {
+	case "":
+		return "letsencrypt"
+	case config.ACMEStagingURL:
+		return "letsencrypt-staging"
+	}
+	return dir
+}
+
+// appOrigin is where the plane-side app is served, as a browser would type it.
+func appOrigin(cfg config.Config) string {
+	if ep, ok := cfg.Public(); ok {
+		return ep.String()
+	}
+	if !cfg.WebSocketFallback {
+		return ""
+	}
+	host := firstHost(cfg.Hosts)
+	port := portOf(cfg.FallbackListen)
+	if port == 443 {
+		return fmt.Sprintf("https://%s", host)
+	}
+	return fmt.Sprintf("https://%s:%d", host, port)
 }
 
 func loadOrCreateCert(cfg config.Config, log *slog.Logger) (*transport.CertBundle, error) {
