@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -897,4 +898,75 @@ func slotsOf(fs []*subFrame) []int64 {
 		out = append(out, f.slot)
 	}
 	return out
+}
+
+// stateSink records the tab-state frames a tab emits.
+type stateSink struct {
+	mu     sync.Mutex
+	states []protocol.TabState
+}
+
+func (s *stateSink) EmitFrame(_ protocol.Channel, f *protocol.Frame) {
+	if f.Type != protocol.TypeTabState {
+		return
+	}
+	var st protocol.TabState
+	if err := f.DecodeBody(&st); err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.states = append(s.states, st)
+}
+
+func (s *stateSink) WantImage(uint32, ImageRequest) {}
+func (s *stateSink) Backlogged() bool               { return false }
+
+func (s *stateSink) last() (protocol.TabState, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.states) == 0 {
+		return protocol.TabState{}, false
+	}
+	return s.states[len(s.states)-1], true
+}
+
+/*
+A stop is not undone by the load it stopped.
+
+Page.stopLoading and Page.frameStartedLoading describe the same load and cross
+on the wire: the event says the page began, the stop says the reader has given
+up on it, and the event can be delivered second. Acting on it turns the spinner
+back on — and the stopped load then produces no lifecycle event of its own,
+which is the whole reason stop says "not loading" itself instead of waiting to
+be told. So nothing takes it off again, and the tab spins until it is navigated
+or closed: exactly what the reader pressed stop to escape.
+
+On a loaded machine this is not rare. It is what left
+TestStopEndsAPageWithoutLosingTheTab timing out in CI.
+*/
+func TestALateStartedLoadingDoesNotUndoAStop(t *testing.T) {
+	sink := &stateSink{}
+	tab := &Tab{out: sink}
+
+	// A page the reader is waiting for, and gives up on.
+	tab.wantsLoading()
+	tab.setLoading(true)
+	tab.callOff()
+	if st, ok := sink.last(); !ok || st.Loading {
+		t.Fatalf("stop left the tab saying loading=%v", st.Loading)
+	}
+
+	// The stopped load's own "started" event, arriving after the stop.
+	tab.startedLoading()
+	if st, _ := sink.last(); st.Loading {
+		t.Error("a lifecycle event from the stopped load put the spinner back on")
+	}
+
+	// A page the reader does want is not held back by it.
+	tab.wantsLoading()
+	tab.startedLoading()
+	if st, ok := sink.last(); !ok || !st.Loading {
+		t.Error("the next page the reader asked for is not shown as loading")
+	}
 }
