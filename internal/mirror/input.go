@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"strings"
@@ -770,7 +771,40 @@ frames it sent have been turned into sequence numbers. Reading the tab's number
 before that names a frame the client already has while the hash describes the
 document a frame later — a divergence report that is only a race with itself.
 */
+// checkpointTries bounds how often one check re-measures a page that moved
+// under it. A frame arriving invalidates the walk it spans and no more than
+// that, so a second look usually lands in the gap between two of them; a page
+// acquiring frames faster than it can be measured is not going to be measured
+// today, and saying so beats walking it all afternoon.
+const checkpointTries = 3
+
+// Checkpoint measures the page, re-measuring when a frame arrives mid-walk.
+//
+// Abandoning was the whole answer once, and it is the wrong length of answer: a
+// measurement is taken every thirty seconds, so one thrown away is half a
+// minute in which nothing is watching the mirror at all. The page that most
+// needs the check — one busy enough to be acquiring frames — was the page least
+// likely to get one.
 func (t *Tab) Checkpoint(ctx context.Context) (Checkpoint, error) {
+	var last error
+	for try := 0; try < checkpointTries; try++ {
+		cp, err := t.checkpointOnce(ctx)
+		if !errors.Is(err, errPageMoved) {
+			return cp, err
+		}
+		last = err
+		if ctx.Err() != nil {
+			return Checkpoint{}, ctx.Err()
+		}
+	}
+	return Checkpoint{}, last
+}
+
+// errPageMoved marks a measurement invalidated by the page changing under it,
+// which is a reason to look again rather than a fault.
+var errPageMoved = errors.New("mirror: a frame arrived while the page was being measured")
+
+func (t *Tab) checkpointOnce(ctx context.Context) (Checkpoint, error) {
 	var cp Checkpoint
 	raw, err := t.eval(ctx, "__skyhook.checkpoint()")
 	if err != nil {
@@ -808,8 +842,7 @@ func (t *Tab) Checkpoint(ctx context.Context) (Checkpoint, error) {
 	// which is what it looked like, at the cost of a whole document, whenever a
 	// frame arrived while the check happened to be running.
 	if now := t.spliceGen.Load(); now != gen {
-		return Checkpoint{}, fmt.Errorf(
-			"mirror: a frame arrived while the page was being measured (%d -> %d)", gen, now)
+		return Checkpoint{}, fmt.Errorf("%w (%d -> %d)", errPageMoved, gen, now)
 	}
 	return Checkpoint{Seq: seq, Hash: hash}, nil
 }
