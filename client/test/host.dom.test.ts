@@ -107,6 +107,30 @@ describe('MirrorHost', () => {
     host.destroy();
   });
 
+  // A load event that lands before the frame has a document is not the load
+  // that matters, and spending the subscription on it strands the tab.
+  //
+  // `ready` is what every snapshot and every batch for a tab awaits, so a
+  // promise that never settles is a tab that is never drawn and — worse, because
+  // it is what the server goes on — never acknowledges anything. The server
+  // reads that as a client that has stopped short of a page it has already
+  // sent, and only its thirty-second stalled-resync gets the page there at all.
+  // Nothing anywhere reports the frame as the reason.
+  it('keeps waiting for a document when a load arrives before there is one', async () => {
+    const host = new MirrorHost(1, events());
+    expect(host.frame.contentDocument).toBeNull();
+    host.frame.dispatchEvent(new Event('load'));
+
+    document.body.appendChild(host.frame);
+    const stranded = Symbol('stranded');
+    const settled = await Promise.race([
+      host.whenReady().then(() => 'ready'),
+      new Promise((r) => { setTimeout(() => r(stranded), 1000); }),
+    ]);
+    expect(settled).toBe('ready');
+    host.destroy();
+  });
+
   beforeEach(() => {
     document.body.innerHTML = '';
   });
