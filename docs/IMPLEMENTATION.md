@@ -2504,6 +2504,28 @@ background tab can be reached — makes the spinner on a loading row the target
 that ends it. What has landed stays: the mirror is patched rather than replaced,
 so a page stopped half-drawn leaves a half-drawn page and not a blank one.
 
+Two things the netem run found that a loopback run could not, both of them
+consequences of the drop above rather than of the capture. **A tab being opened
+looks exactly like a tab that has closed** from the emit path: neither has a
+tabState, because a tab starts mirroring inside `mirror.NewTab` — the moment its
+agent is installed — and `OpenTab` has nothing to register until that returns.
+The frames in that window are the tab's whole first document, and dropping them
+left a tab acknowledging nothing for four minutes with an empty frame in front
+of the reader. `opening` holds the id across the gap, so the two cases are
+distinguishable; and the emit path now asks `worthSending`, which keeps ctrl
+traffic that is not a state frame, because an error about a tab that has just
+gone is what somebody is reading the log for.
+
+**And nothing came to its rescue**, which is the more interesting half. §38's
+stalled-client repair exists for exactly this — a frame the plane side cannot
+notice is missing — and it sat out all eight checks. A snapshot is frame 0, so
+`acked == 0` is what a client that has applied the document and a client that
+has never heard of it both look like, and `noteStuck` read the first. The
+document hash tells them apart: every ack carries one and it is zero until the
+first arrives. A missing snapshot is the case that most needs this check, since
+there is no later frame for a gap to show up in — so it was missing precisely
+where it mattered most.
+
 `internal/session/sched_test.go` pins the scheduling and the purge — that a tab
 which queued sixteen frames first does not get served completely first, that the
 active tab takes most of the link and still yields, that a tab's own frames keep
@@ -2519,8 +2541,10 @@ both through a real browser — including the button the reader actually presses
 Each was checked against the code it guards: with one queue per class the
 starvation test reports the read tab waiting behind sixteen frames, with the
 purge removed the close leaves all thirteen frames queued, with dispatch inline
-the blocked-tab test times out, and without the interrupt the stop test waits
-out its thirty seconds on a page that never commits.
+the blocked-tab test times out, without the interrupt the stop test waits out
+its thirty seconds on a page that never commits, without `opening` a tab being
+built loses both its snapshot and its state frame, and with `acked >= seq` alone
+a client that never heard the document is never repaired.
 
 ## Measured results
 

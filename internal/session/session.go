@@ -29,8 +29,15 @@ type Session struct {
 	log     *slog.Logger
 	mgr     *Manager
 
-	mu       sync.Mutex
-	tabs     map[uint32]*tabState
+	mu   sync.Mutex
+	tabs map[uint32]*tabState
+	// opening holds ids that have been handed out and whose tabState is not in
+	// place yet. A tab starts mirroring the moment its agent is installed —
+	// before OpenTab has anything to register — and the frames it produces in
+	// that window are the tab's whole first document. Without this they are
+	// frames for a tab the session does not know, which is indistinguishable
+	// from frames for a tab that has closed.
+	opening  map[uint32]bool
 	nextTab  uint32
 	viewport protocol.Viewport
 	caps     map[string]bool
@@ -255,7 +262,7 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 	}
 	s := &Session{
 		ID: id, created: time.Now(), log: opts.Logger, mgr: mgr,
-		tabs: map[uint32]*tabState{}, nextTab: 1,
+		tabs: map[uint32]*tabState{}, opening: map[uint32]bool{}, nextTab: 1,
 		viewport: opts.Viewport, caps: map[string]bool{},
 		codec: codec, closed: make(chan struct{}),
 		lastSeen: time.Now(),
@@ -390,6 +397,9 @@ func (s *Session) nextOutbound() (outbound, bool) {
 
 // EmitFrame implements mirror.Emitter.
 func (s *Session) EmitFrame(ch protocol.Channel, f *protocol.Frame) {
+	if !s.worthSending(ch, f.Type, f.Tab) {
+		return
+	}
 	msg, err := s.codec.EncodeFrame(ch, f)
 	if err != nil {
 		s.log.Error("frame encode failed", "err", err)
@@ -440,6 +450,9 @@ grows geometrically each time it fails to repair anything is worse than no
 repair at all.
 */
 func (s *Session) replayFrame(f *protocol.Frame) {
+	if !s.worthSending(protocol.ChDom, f.Type, f.Tab) {
+		return
+	}
 	msg, err := s.codec.EncodeFrame(protocol.ChDom, f)
 	if err != nil {
 		s.log.Error("replay encode failed", "err", err)
@@ -450,19 +463,6 @@ func (s *Session) replayFrame(f *protocol.Frame) {
 
 func (s *Session) enqueue(m outbound, dropIfOffline bool) {
 	m.dropIfOffline = dropIfOffline
-	// A tab that is gone is not owed anything. Its frames are produced by
-	// goroutines that were already serialising a document when it closed — a
-	// snapshot, a batch of mutations, an image the transcoder had in hand, a
-	// state frame emitted as its browser target went down — and every one of
-	// them is about a page neither half has any more. The last of those is not
-	// merely wasted: a TabState arriving behind the close tells the client the
-	// tab is open again, which is how a closed tab came back in the strip.
-	//
-	// The close itself is the exception, and says so. Session traffic (tab 0)
-	// belongs to no tab and is never in question.
-	if !m.final && m.tab != 0 && !s.liveTab(m.tab) {
-		return
-	}
 	if dropIfOffline && !s.Online() {
 		return
 	}
@@ -502,12 +502,38 @@ func (s *Session) nudge() {
 	}
 }
 
-// liveTab reports whether a tab is still open.
+// liveTab reports whether a tab is open, or on its way to being open.
 func (s *Session) liveTab(id uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.tabs[id]
-	return ok
+	if _, ok := s.tabs[id]; ok {
+		return true
+	}
+	return s.opening[id]
+}
+
+/*
+worthSending reports whether a frame is still worth the link.
+
+A tab that is gone is owed nothing. Its frames come from goroutines that were
+already at work when it closed — a snapshot mid-encode, a batch of mutations, an
+image the transcoder had in hand — and each is a document neither half has any
+more.
+
+The state frames are the subtle case and have to go too: a tab emits one as its
+browser target goes down, it arrives behind the close, and a client reading it
+puts the tab back in the strip. Everything else on ctrl still travels, because
+an error about a tab that has just gone is the sort of thing somebody is reading
+a log for.
+*/
+func (s *Session) worthSending(ch protocol.Channel, typ protocol.Type, tab uint32) bool {
+	if tab == 0 || s.liveTab(tab) {
+		return true
+	}
+	if ch == protocol.ChDom || ch == protocol.ChMedia {
+		return false
+	}
+	return typ != protocol.TypeTabState
 }
 
 // Send encodes and queues a frame on a channel.
@@ -560,6 +586,9 @@ func (s *Session) ImageReady(tab uint32, meta protocol.ImageMeta) {
 
 // ImageBytes implements imgproc.Delivery.
 func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
+	if !s.worthSending(protocol.ChMedia, protocol.TypeImageData, tab) {
+		return
+	}
 	f, err := protocol.NewFrame(protocol.TypeImageData, tab, data)
 	if err != nil {
 		return
@@ -581,7 +610,16 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 	id := s.nextTab
 	s.nextTab++
 	vp := s.viewport
+	// Held from here to the moment the tabState is in the map, so that what the
+	// tab emits while it is being built is treated as a live tab's output and
+	// not as a dead one's. See the opening field.
+	s.opening[id] = true
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.opening, id)
+		s.mu.Unlock()
+	}()
 
 	sess, err := s.mgr.browser.NewPage(ctx, "about:blank")
 	if err != nil {
@@ -702,9 +740,9 @@ const tabCloseWait = 30 * time.Second
 // sendClosed tells the client a tab is gone.
 //
 // Not through Send, which would be turned away by the emit path along with
-// everything else about a tab that is no longer in the table — this is the one
-// message that has to get past that, and the one message the client cannot do
-// without.
+// every other state frame about a tab that is no longer in the table — see
+// worthSending. This is the one message that has to get past that, and the one
+// message the client cannot do without.
 func (s *Session) sendClosed(id uint32) {
 	f, err := protocol.NewFrame(protocol.TypeTabState, id, protocol.TabState{Closed: true})
 	if err != nil {
@@ -716,7 +754,7 @@ func (s *Session) sendClosed(id uint32) {
 		s.log.Error("frame encode failed", "err", err)
 		return
 	}
-	s.enqueue(outbound{ch: protocol.ChCtrl, tab: id, msg: msg, final: true}, false)
+	s.enqueue(outbound{ch: protocol.ChCtrl, tab: id, msg: msg}, false)
 }
 
 // dropQueued discards everything waiting on the link for one tab, reporting how
@@ -1134,7 +1172,16 @@ func (s *Session) noteStuck(ts *tabState, seq uint64) (acked uint64, stuck bool)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	acked = ts.acked
-	if acked >= seq {
+	// A client that has answered for this frame, or a later one, is fine — with
+	// one exception that is not a corner case at all. A snapshot is frame 0, so
+	// "acked 0" is what a client that has applied the document and a client
+	// that has never heard of it both look like. The hash tells them apart: it
+	// is set by every ack and zero until the first one, and a tab whose first
+	// document went missing is exactly the tab that most needs repairing —
+	// there is no later frame for the plane side to notice a gap in, so nobody
+	// but this check is ever going to ask.
+	unheard := seq == 0 && ts.lastHash == 0
+	if acked >= seq && !unheard {
 		ts.stuckTimes = 0
 		return acked, false
 	}

@@ -17,12 +17,6 @@ type outbound struct {
 	object bool
 	// dropIfOffline marks traffic not worth queueing across an outage.
 	dropIfOffline bool
-	// final marks the one message that may still be sent about a tab that is
-	// gone: the news that it closed. Everything else the tab produces on its
-	// way out — a last state frame as its target goes down, a mutation a
-	// goroutine was already encoding — is about a page neither half has any
-	// more, and a state frame arriving behind the close undoes it.
-	final bool
 }
 
 /*

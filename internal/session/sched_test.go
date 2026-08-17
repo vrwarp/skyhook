@@ -247,6 +247,42 @@ func TestClosingATabTakesBackItsQueuedFrames(t *testing.T) {
 }
 
 /*
+A tab that is being opened is not a tab that has closed.
+
+The two look identical from the emit path — neither has a tabState — and they
+could hardly be more different. A tab starts mirroring the moment its agent is
+installed, which is inside `mirror.NewTab`, before `OpenTab` has anything to
+register; the frames it produces in that window are its whole first document.
+
+Dropping them cost a netem run: a tab whose snapshot went missing acknowledged
+nothing for four minutes, the reader was left looking at an empty frame, and
+because a snapshot is frame 0 there was no later frame for the plane side to
+find a gap in — so nothing ever asked for it again.
+*/
+func TestAFrameFromATabStillOpeningIsSent(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	// No connection, so the writer leaves the queues alone; and no trainer,
+	// which is the one thing on the emit path that reads a tab's URL from a
+	// browser this tab has not got.
+	s.mgr.trainer = nil
+	// What OpenTab holds from the moment it takes an id to the moment the
+	// tabState is in the map.
+	s.mu.Lock()
+	s.opening[7] = true
+	s.mu.Unlock()
+
+	s.EmitFrame(protocol.ChDom, snapshotFrame(7))
+	s.Send(protocol.ChCtrl, protocol.TypeTabState, 7, protocol.TabState{URL: "about:blank"})
+
+	if got := s.sendQ[protocol.ChDom.Priority()].depth(); got != 1 {
+		t.Errorf("%d dom frames for a tab that is opening, want its snapshot", got)
+	}
+	if got := s.sendQ[protocol.ChCtrl.Priority()].depth(); got != 1 {
+		t.Errorf("%d ctrl frames for a tab that is opening, want its state", got)
+	}
+}
+
+/*
 A frame produced for a tab that has just gone is not queued at all.
 
 Closing a tab does not stop the goroutines that were already serialising for it
@@ -294,6 +330,28 @@ func TestFramesForAClosedTabAreNotQueued(t *testing.T) {
 	}
 	if !st.Closed {
 		t.Errorf("the frame the client is left with says %+v, want the tab closed", st)
+	}
+}
+
+// Silence is for the traffic that costs the link, not for the traffic that
+// explains it. An error about a tab that has just gone is exactly what somebody
+// is reading a log — or a capture — to find.
+func TestAnErrorAboutAClosedTabStillTravels(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	armedTab(t, s, 1)
+	s.Detach(s.conn.Load().conn)
+	if err := s.CloseTab(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := s.sendQ[protocol.ChCtrl.Priority()]
+	before := ctrl.depth()
+
+	s.Send(protocol.ChCtrl, protocol.TypeError, 1, protocol.ErrorBody{
+		Code: "dispatch", Message: "session: no such tab",
+	})
+
+	if got := ctrl.depth(); got != before+1 {
+		t.Error("an error frame about a closed tab was dropped with the rest of it")
 	}
 }
 
