@@ -326,11 +326,23 @@ func (p *Pipeline) Want(tab uint32, keys []string) {
 		}
 		p.mu.Lock()
 		_, done := p.meta[k]
+		inFlight := p.inFlight[k]
 		if !done {
 			p.wanted[k] = append(p.wanted[k], tab)
 		}
 		p.mu.Unlock()
 		if !done {
+			// The waiting list is only an answer while something is being made
+			// to serve it. Nothing in flight means the request that would have
+			// produced these bytes is gone — dropped by a full queue, abandoned
+			// after a failed fetch, or never made — and joining the list is then
+			// a silent wait that outlives the document: the client asks for a
+			// hash exactly once, so nothing will ask again, and a background
+			// image stays the transparent pixel it started as. The failure
+			// leaves no trace anywhere, which is how it lasted.
+			if !inFlight {
+				go p.answerIfStranded(tab, k)
+			}
 			continue
 		}
 		if !p.sendCached(tab, k) {
@@ -452,6 +464,60 @@ func (p *Pipeline) process(req Request) {
 	for _, tab := range waiting {
 		p.deliver.ImageBytes(tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
 	}
+}
+
+// wantGrace is how long a key is given to turn out to be in flight after all.
+// A request and the question about it can cross — the client asks as the server
+// submits — and answering "not coming" into that window would be a wrong answer
+// where waiting a moment gives the right one.
+const wantGrace = 500 * time.Millisecond
+
+/*
+answerIfStranded tells a client asking for a key that nothing is making it.
+
+Only when nothing still is, a moment later. What this is for is the key whose
+work never happened or is already over: the client has asked its one question,
+the waiting list it joined belongs to no worker, and without this nobody ever
+speaks again. Saying "not coming" is not the best answer available — the best
+would be to make the bytes — but `Want` has a hash and no request, and a
+transparent pixel the reader can see through beats one they cannot.
+*/
+func (p *Pipeline) answerIfStranded(tab uint32, key string) {
+	select {
+	case <-p.stop:
+		return
+	case <-time.After(wantGrace):
+	}
+	p.mu.Lock()
+	_, done := p.meta[key]
+	// Still holding a space for it, which is the question. A tab that has been
+	// taken off the list has been answered — by the bytes arriving, or by a
+	// failed fetch telling everyone waiting that they are not coming — and a
+	// second notice for an asset already given up on is noise the client has to
+	// decide about.
+	rest := make([]uint32, 0, len(p.wanted[key]))
+	listed := false
+	for _, w := range p.wanted[key] {
+		if w == tab {
+			listed = true
+			continue
+		}
+		rest = append(rest, w)
+	}
+	stranded := listed && !done && !p.inFlight[key]
+	if stranded {
+		if len(rest) == 0 {
+			delete(p.wanted, key)
+		} else {
+			p.wanted[key] = rest
+		}
+	}
+	p.mu.Unlock()
+	if !stranded {
+		return
+	}
+	p.log.Debug("nothing is making a key the client asked for", "key", key, "tab", tab)
+	p.deliver.ImageReady(tab, protocol.ImageMeta{Hash: key, Missing: true})
 }
 
 /*

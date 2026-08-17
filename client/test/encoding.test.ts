@@ -139,7 +139,7 @@ describe('client frames encode integers as CBOR integers', () => {
     text: encodeFrame(FrameType.Input, 1, inputBody({
       kind: 'text', node: 42, seq: 8, text: 'hello', ts: 1234,
     })),
-    ack: encodeFrame(FrameType.Ack, 2, ackBody(2, 99, 0xdeadbeef)),
+    ack: encodeFrame(FrameType.Ack, 2, ackBody(2, 99, 0xdeadbeef, 3)),
     scroll: encodeFrame(FrameType.Scroll, 1, scrollBody({
       tab: 1, x: 0, y: 4096, h: 900, docH: 120000,
     })),

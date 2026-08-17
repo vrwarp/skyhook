@@ -172,9 +172,35 @@ describe('MirrorHost', () => {
   it('acknowledges each applied batch with a document hash', async () => {
     const { host, ev } = await mount();
     host.applySnapshot(snapshot());
-    expect(ev.applied).toHaveBeenCalledWith(1, 0, expect.any(Number));
-    const [, , hash] = ev.applied.mock.calls[0] as [number, number, number];
+    expect(ev.applied).toHaveBeenCalledWith(1, 0, expect.any(Number), expect.any(Number));
+    const [, , hash] = ev.applied.mock.calls[0] as [number, number, number, number];
     expect(hash).toBeGreaterThan(0);
+  });
+
+  /*
+   * And says which document the hash is about.
+   *
+   * A snapshot restarts the numbering at zero, so "frame 0" is the same
+   * sentence about every document this tab has ever held, and the server's
+   * integrity check compares the client's hash for a frame against its own.
+   * Answering about the previous document — which is what a client one round
+   * trip behind does — reads landside as a diverged mirror, and costs the whole
+   * document to repair something that was never broken.
+   */
+  it('says which document each acknowledgement is about', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot({ ...snapshot(), epoch: 4 });
+    expect(ev.applied).toHaveBeenLastCalledWith(1, 0, expect.any(Number), 4);
+
+    // And keeps saying it for the batches that follow, which carry no epoch of
+    // their own: a mutation belongs to the document it was applied to.
+    host.applyMutation(scrollOp(3, 0, 0), 1);
+    const last = ev.applied.mock.calls.at(-1) as [number, number, number, number];
+    expect(last[3]).toBe(4);
+
+    // The next document is a different document, and is named as one.
+    host.applySnapshot({ ...snapshot(), epoch: 5 });
+    expect(ev.applied).toHaveBeenLastCalledWith(1, 0, expect.any(Number), 5);
   });
 
   it('turns a click inside the frame into a semantic input event', async () => {
@@ -1007,7 +1033,7 @@ describe('MirrorHost', () => {
     };
     host.applyMutation(mutation, 3);
     expect(host.frame.contentDocument!.body.textContent).toBe('first and more');
-    expect(ev.applied).toHaveBeenLastCalledWith(1, 3, expect.any(Number));
+    expect(ev.applied).toHaveBeenLastCalledWith(1, 3, expect.any(Number), expect.any(Number));
   });
 
   /**

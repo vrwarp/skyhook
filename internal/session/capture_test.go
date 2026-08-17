@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -48,7 +49,10 @@ func newTestSession(t *testing.T, opts CaptureOptions) *Session {
 // exists so a session can be Online without a link: whether the server asks the
 // plane side for its half, and whether it then waits for it, both turn on that.
 type fakeConn struct {
-	mu          sync.Mutex
+	mu sync.Mutex
+	// failSends makes every write fail, which is a link that has gone without
+	// the queue knowing it yet.
+	failSends   bool
 	sent        [][]byte
 	done        chan struct{}
 	closeCode   uint32
@@ -60,6 +64,9 @@ func newFakeConn() *fakeConn { return &fakeConn{done: make(chan struct{})} }
 func (c *fakeConn) Send(_ protocol.Channel, msg []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failSends {
+		return errors.New("session: the link is gone")
+	}
 	c.sent = append(c.sent, append([]byte(nil), msg...))
 	return nil
 }

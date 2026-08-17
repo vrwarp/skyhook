@@ -201,6 +201,14 @@ type Tab struct {
 	// frame itself — which is what survives a navigation. ctxFrames says which
 	// frame a world belongs to, and is the only way back from an agent's message
 	// to the document it describes. See frames.go.
+	// docEpoch counts the documents this tab has sent. A snapshot restarts the
+	// frame numbering at zero, so a sequence number does not name a document on
+	// its own — frame 0 means one document before a re-snapshot and another
+	// after, and a page building itself sends several snapshots a second. The
+	// integrity check anchors on a number the client acknowledges, so it needs
+	// this to know the answer it got is about the document it measured.
+	docEpoch atomic.Uint64
+
 	// spliceGen counts changes to what the client holds of this tab's frames.
 	// The integrity check reads it either side of its walk: a walk that spans a
 	// splice describes a document that never existed. See splicedFrames.
@@ -965,6 +973,7 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	defer t.emitMu.Unlock()
 	// The snapshot is the client's whole table, and the top agent's.
 	t.strs.Reset(len(s.Strings))
+	epoch := t.docEpoch.Add(1)
 	t.mu.Lock()
 	t.seq = 0
 	t.url = s.URL
@@ -1020,6 +1029,9 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 		Viewport: protocol.Viewport{W: s.VW, H: s.VH, DPR: s.DPR, Mobile: vp.Mobile},
 		ScrollX:  s.ScrollX,
 		ScrollY:  s.ScrollY,
+		// Which document this is, so that the client's acknowledgements can say
+		// which document they are about. Frame numbering restarts here.
+		Epoch: epoch,
 	}
 	for _, im := range s.Images {
 		snap.Images = append(snap.Images, protocol.ImageMeta{
@@ -1435,6 +1447,11 @@ func (t *Tab) RefreshState(ctx context.Context) {
 	url, title := t.syncHistory(ctx)
 	t.emitState(protocol.TabState{URL: url, Title: title})
 }
+
+// DocEpoch says which document this tab is on. It changes when a snapshot
+// replaces what the client holds, which is the one event that makes a sequence
+// number mean a different frame than it meant a moment ago.
+func (t *Tab) DocEpoch() uint64 { return t.docEpoch.Load() }
 
 // Seq reports the last emitted mutation sequence.
 func (t *Tab) Seq() uint64 {

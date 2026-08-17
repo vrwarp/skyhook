@@ -235,10 +235,11 @@ func (t *Tab) click(ctx context.Context, ev *protocol.InputEvent) error {
 	}
 	down := cloneMap(base)
 	down["type"] = "mousePressed"
+	sent := time.Now()
 	if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", down, nil); err != nil {
 		return err
 	}
-	sleepCtx(ctx, holdFor(ev))
+	sleepCtx(ctx, pressHold(holdFor(ev), time.Since(sent)))
 	up := cloneMap(base)
 	up["type"] = "mouseReleased"
 	up["buttons"] = 0
@@ -400,6 +401,33 @@ func holdFor(ev *protocol.InputEvent) time.Duration {
 		return d
 	}
 	return pressHoldMin + time.Duration(rand.Int64N(int64(pressHoldSpan)))
+}
+
+/*
+pressHold is how long to sleep between the two dispatches so that the page sees
+the press the reader actually made.
+
+A press is bracketed by two trips into the browser rather than one. The page's
+clock starts when the browser handles `mousePressed`, which is before our call
+returns, and stops when it handles `mouseReleased`, which is after we send it —
+so sleeping the reader's whole hold hands the page the hold *plus one round
+trip*. On an idle box that is a millisecond and nobody could care. On a busy one
+it is not: a 210 ms tap was measured by the page at 342 ms with eight browsers
+on the machine, and a page whose long-press threshold is 300 ms would have
+opened a context menu for a reader who tapped.
+
+The press's own round trip is a fresh measurement of how far away this browser
+is at this instant, under whatever load it is under, so that is what comes off.
+Nothing is added back when the trip is longer than the hold: the shortest press
+this can make is the one the two dispatches make between them, and stretching a
+tap to keep up with a slow browser would be inventing a gesture rather than
+replaying one.
+*/
+func pressHold(want, rtt time.Duration) time.Duration {
+	if rtt >= want {
+		return 0
+	}
+	return want - rtt
 }
 
 // replayApproach walks the landside pointer along the path the reader's pointer
@@ -746,6 +774,10 @@ func (t *Tab) DocHash(ctx context.Context) (uint64, error) {
 type Checkpoint struct {
 	Seq  uint64 `json:"seq"`
 	Hash uint64 `json:"hash"`
+	// Epoch is which document this measurement is of. A snapshot restarts the
+	// numbering at zero, so Seq alone does not say: a page building itself
+	// sends several snapshots a second, and every one of them is frame 0.
+	Epoch uint64 `json:"-"`
 }
 
 // EmptyDocHash is the FNV-1a offset basis, and so the hash of a document with
@@ -776,7 +808,13 @@ document a frame later — a divergence report that is only a race with itself.
 // that, so a second look usually lands in the gap between two of them; a page
 // acquiring frames faster than it can be measured is not going to be measured
 // today, and saying so beats walking it all afternoon.
-const checkpointTries = 3
+//
+// Six rather than three because the walk now notices the page moving as well as
+// its frames — a page mutating on a timer moves under it far more often than
+// frames arrive — and because the tries are cheap next to what they prevent:
+// one wasted eval each, against a whole document re-sent for a divergence that
+// was only the page carrying on while it was being measured.
+const checkpointTries = 6
 
 // Checkpoint measures the page, re-measuring when a frame arrives mid-walk.
 //
@@ -832,9 +870,27 @@ func (t *Tab) checkpointOnce(ctx context.Context) (Checkpoint, error) {
 	if err := t.fenceAgents(ctx); err != nil {
 		return Checkpoint{}, err
 	}
+	// And the page itself, which the frames are not the only thing moving. Its
+	// hash was taken before the walk and the sequence number is read after, so
+	// anything the page emitted in between is in the number and in none of the
+	// hash — the frame case one level up, for a page that is merely busy. The
+	// agent's checkpoint returns docHash, so asking again says whether the
+	// document that was measured is still the document being counted.
+	raw, err = t.eval(ctx, "__skyhook.docHash()")
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	var pageNow uint64
+	if err := json.Unmarshal(raw, &pageNow); err != nil {
+		return Checkpoint{}, err
+	}
+	if pageNow != cp.Hash {
+		return Checkpoint{}, fmt.Errorf("%w (the page moved under the walk)", errPageMoved)
+	}
 	t.mu.Lock()
 	seq := t.seq
 	t.mu.Unlock()
+	epoch := t.docEpoch.Load()
 	// A frame that was spliced while this walk was in progress put its document
 	// on the wire behind the walk: it is in the sequence number just read and in
 	// none of the hashes above, so the answer describes a document that never
@@ -844,7 +900,7 @@ func (t *Tab) checkpointOnce(ctx context.Context) (Checkpoint, error) {
 	if now := t.spliceGen.Load(); now != gen {
 		return Checkpoint{}, fmt.Errorf("%w (%d -> %d)", errPageMoved, gen, now)
 	}
-	return Checkpoint{Seq: seq, Hash: hash}, nil
+	return Checkpoint{Seq: seq, Hash: hash, Epoch: epoch}, nil
 }
 
 // fenceAgents waits until everything the agents have already sent has been

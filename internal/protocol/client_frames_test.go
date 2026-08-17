@@ -99,7 +99,10 @@ func TestClientControlFramesDecode(t *testing.T) {
 	if err := decodeClientFrame(t, frames, "ack").DecodeBody(&ack); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
-	if ack.Tab != 2 || ack.Seq != 99 || ack.Hash != 0xdeadbeef {
+	// Epoch names the document the hash is about; the client sends it on every
+	// ack, and a server that cannot read it would mistake an answer about one
+	// document for an answer about another.
+	if ack.Tab != 2 || ack.Seq != 99 || ack.Hash != 0xdeadbeef || ack.Epoch != 3 {
 		t.Fatalf("ack = %+v", ack)
 	}
 

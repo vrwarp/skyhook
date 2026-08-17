@@ -622,7 +622,8 @@ self.addEventListener('message', (event: MessageEvent) => {
       // side never saw, and an ack is the more recent of the two answers.
       if (seq > (delivered.get(tab) ?? 0)) delivered.set(tab, seq);
       void send(Channel.Ctrl, encodeFrame(FrameType.Ack, tab,
-        ackBody(tab, Number(cmd.args.seq), Number(cmd.args.hash))));
+        ackBody(tab, Number(cmd.args.seq), Number(cmd.args.hash),
+          Number(cmd.args.epoch ?? 0))));
       break;
     }
     case 'wantImage': {

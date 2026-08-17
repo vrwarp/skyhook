@@ -173,7 +173,7 @@ export interface MirrorFreeze {
 export interface HostEvents {
   input(tab: number, ev: Record<string, unknown>): void;
   scroll(tab: number, ev: Record<string, unknown>): void;
-  applied(tab: number, seq: number, hash: number): void;
+  applied(tab: number, seq: number, hash: number, epoch: number): void;
   wantImages(tab: number, hashes: string[]): void;
   /** A link the user asked to open in a new tab (middle or ctrl/⌘ click). */
   openLink(tab: number, url: string): void;
@@ -477,7 +477,8 @@ export class MirrorHost {
         // A snapshot is where shadow roots appear, and a root the client has
         // not bound is a sub-document whose scrolling nobody hears.
         this.bindRootScroll();
-        this.events.applied(this.tab, seq, this.patcher?.docHash() ?? 0);
+        this.events.applied(
+          this.tab, seq, this.patcher?.docHash() ?? 0, this.patcher?.epoch ?? 0);
       },
     });
 

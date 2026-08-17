@@ -223,8 +223,44 @@ func TestTheBrowsersOwnBackAndForwardDriveTheTab(t *testing.T) {
 	// reader can see has moved.
 	trap := `((history.state || {}).skyhook || '')`
 	evalJSON(ctx, t, page, `history.back(), true`, nil)
-	waitFor(ctx, t, page, trap+` === 'skyhook:back'`, budget(30*time.Second),
-		"the back gesture to be let through")
+	// Reported rather than merely waited for: what decides this is whether the
+	// shell believes the tab can still go back, and that belief is a whole
+	// round trip old. A timeout that says only "it did not happen" cannot tell
+	// a shell that answered the gesture from one that let it through and was
+	// moved afterwards, and the two have different faults behind them. The
+	// toolbar's back button is that belief, drawn from the same tab state.
+	letThrough := func() bool {
+		var st struct {
+			Trap    string `json:"trap"`
+			CanBack bool   `json:"canBack"`
+			URL     string `json:"url"`
+			Depth   int    `json:"depth"`
+		}
+		evalJSON(ctx, t, page, `({
+          trap: `+trap+`,
+          canBack: !document.getElementById('back').disabled,
+          url: document.getElementById('urlbar').value,
+          depth: history.length
+        })`, &st)
+		if st.Trap == "skyhook:back" {
+			return true
+		}
+		t.Logf("the trap says %q; the shell thinks the tab can go back: %v; the bar shows %q; %d entries",
+			st.Trap, st.CanBack, st.URL, st.Depth)
+		return false
+	}
+	deadline := time.Now().Add(budget(30 * time.Second))
+	let := false
+	for !let && time.Now().Before(deadline) {
+		let = letThrough()
+		if !let {
+			time.Sleep(budget(2 * time.Second))
+		}
+	}
+	if !let {
+		t.Fatal("the back gesture at the start of the tab's history was not let through:" +
+			" the shell answered it instead, or re-armed the trap under it")
+	}
 	alive("a back at the start of the tab's history")
 
 	// And it has to be armed again once there is something to protect, or it

@@ -129,6 +129,13 @@ export class Patcher {
   private root: HTMLElement | null = null;
   /** Sequence of the last applied batch. */
   seq = 0;
+  /**
+   * Which document the sequence above counts within: the epoch of the snapshot
+   * this content was built from. A snapshot restarts `seq` at zero, so the
+   * number on its own does not name a document, and the server's integrity
+   * check needs to know which one an acknowledgement is about.
+   */
+  epoch = 0;
   /** Images referenced by the current document, keyed by content hash. */
   images = new Map<string, ImageMeta>();
   /**
@@ -182,6 +189,7 @@ export class Patcher {
     this.shots = new Map();
     this.orphans = new Map();
     this.seq = 0;
+    this.epoch = snap.epoch ?? 0;
     for (const im of snap.images) this.images.set(im.hash, im);
 
     const body = this.doc.body;

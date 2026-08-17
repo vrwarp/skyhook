@@ -207,6 +207,35 @@ func solidPNG(w, h int, c color.RGBA) []byte {
 // pixelPNG is a real PNG built at init: the image pipeline decodes what it is
 // given, so a hand-written byte blob with a stale CRC would only test the
 // error path.
+/*
+heroPNG is a picture big enough to see crossing the link.
+
+A test that asks whether an image was sent twice has to be able to tell its
+bytes apart from a document's; eight pixels of gradient compress to less than a
+snapshot does. This is noise, because noise does not compress, so the number on
+the wire is the number here.
+*/
+var heroPNG = func() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 160, 160))
+	// A fixed sequence rather than math/rand: the same bytes every run, so a
+	// byte-count assertion means the same thing every run.
+	seed := uint32(12345)
+	next := func() uint8 {
+		seed = seed*1664525 + 1013904223
+		return uint8(seed >> 24)
+	}
+	for y := 0; y < 160; y++ {
+		for x := 0; x < 160; x++ {
+			img.Set(x, y, color.RGBA{R: next(), G: next(), B: next(), A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}()
+
 var pixelPNG = func() []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
 	for y := 0; y < 8; y++ {
@@ -1145,9 +1174,13 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Hero</title></head>
 			<body style="margin:0">
-			<img id="hero" src="/pixel.png" width="320" height="200" alt="the picture at the top">
+			<img id="hero" src="/hero.png" width="320" height="320" alt="the picture at the top">
 			<h1>the page with a picture at the top</h1>
 			</body></html>`)
+	})
+	mux.HandleFunc("/hero.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(heroPNG)
 	})
 	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")

@@ -207,7 +207,7 @@ func (m *Manager) Serve(conn transport.Conn) {
 		}
 	}
 	for _, ta := range hello.Resume {
-		sess.Ack(ta.Tab, ta.Seq, ta.Hash)
+		sess.Ack(ta.Tab, ta.Seq, ta.Hash, ta.Epoch)
 		sess.Resync(ctx, ta.Tab, ta.Seq, "reconnect")
 	}
 	if resumed {

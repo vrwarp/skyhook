@@ -1155,3 +1155,41 @@ func TestAnUnfinishedWriteLeavesNothingBehind(t *testing.T) {
 		t.Errorf("cache directory holds %v, want just the key", got)
 	}
 }
+
+/*
+A question about a key nobody is making has to be answered.
+
+The client asks for a hash exactly once — §24 — so one request gets one answer
+or the asset is missing for the life of the document, and a stylesheet's image
+is asked for rather than pushed. `Want` joined the key's waiting list and
+returned, which is right while something is in flight to serve it and a silent
+permanent wait when nothing is: the request that would have produced those bytes
+was dropped by a full queue, or abandoned, or never made. Nothing then arrives,
+nothing says why, and a background image stays the transparent pixel it started
+as. The failure leaves no trace at all, which is how it survived: the server log
+for a tab this has happened to is empty.
+*/
+func TestAskingForAKeyNobodyIsMakingIsAnswered(t *testing.T) {
+	d := &recorder{ready: make(chan protocol.ImageMeta, 4), bytes: make(chan protocol.ImageData, 4)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher: slowFetcher{body: encodePNG(t, sprite(8, 8))},
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// Nothing has ever submitted this key: no metadata, nothing in flight.
+	p.Want(1, []string{"nevermade"})
+
+	select {
+	case meta := <-d.ready:
+		if !meta.Missing {
+			t.Errorf("the answer was %+v; a key nobody is making is not coming", meta)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client asked for a key nobody is making and was told nothing:" +
+			" it holds a transparent pixel for the life of the document")
+	}
+}

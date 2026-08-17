@@ -148,6 +148,44 @@ describe('TabModel', () => {
     expect(sent.length).toBe(1);
   });
 
+  /*
+   * Tab order is the session's, not the order this client happened to hear
+   * about them. A Map keeps a key where it was first put, so re-setting one
+   * that is already there leaves it in place — which means a client that
+   * learned about tab 2 before tab 1 kept them that way however many times the
+   * session said otherwise. A reader who reloads comes back to their tabs
+   * rearranged, and only when the machine was busy enough to deliver the
+   * frames out of order, which is the worst way for a bug to behave.
+   */
+  it('puts the strip in the order the session gives, not the order it heard', () => {
+    model.connectionUp();
+    // Heard about out of order, which a reload under load is enough to do.
+    model.reset([
+      { tab: 2, url: 'https://b.test/', title: 'B', seq: 1, active: false, loading: false },
+      { tab: 1, url: 'https://a.test/', title: 'A', seq: 1, active: true, loading: false },
+    ]);
+    expect(model.ids()).toEqual([2, 1]);
+
+    // And then told the truth.
+    model.reset([
+      { tab: 1, url: 'https://a.test/', title: 'A', seq: 2, active: true, loading: false },
+      { tab: 2, url: 'https://b.test/', title: 'B', seq: 2, active: false, loading: false },
+    ]);
+    expect(model.ids()).toEqual([1, 2]);
+  });
+
+  // A tab asked for on this connection has no id from the session yet, so it
+  // cannot be in the list the session sends — and it is the newest thing the
+  // reader did, so it belongs at the end rather than nowhere.
+  it('keeps a tab it has just asked for at the end of the strip', () => {
+    model.connectionUp();
+    const mine = model.open();
+    model.reset([
+      { tab: 1, url: 'https://a.test/', title: 'A', seq: 1, active: true, loading: false },
+    ]);
+    expect(model.ids()).toEqual([1, mine]);
+  });
+
   it('keeps a tab opened in the gap between the link coming up and the welcome', () => {
     // The transport reports itself online a round trip before the welcome
     // arrives, and on this link that round trip is long enough to press "+"
