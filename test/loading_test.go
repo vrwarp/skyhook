@@ -136,12 +136,23 @@ func TestAskingForATabPutsItInTheStripBeforeItExists(t *testing.T) {
 		t.Fatal("no link to /slow in the mirrored waiting room")
 	}
 
-	// Deliberately not scaled to the link: the tab is drawn plane-side, so it
-	// owes nothing to the round trip. /slow takes three seconds to answer, so a
-	// strip that waited for the page — or for the server to name the tab —
-	// would still be showing one tab when this expires.
 	waitFor(ctx, t, page, `document.querySelectorAll('#tabstrip .tab').length === 2`,
-		2*time.Second, "a placeholder for the tab being opened")
+		budget(20*time.Second), "a placeholder for the tab being opened")
+
+	// The tab appeared with the gesture rather than with the page: /slow has
+	// not answered yet, so the tab opened for it is still empty. A wall clock
+	// would say the same thing and say it wrongly on a loaded machine — eight
+	// browsers share this one — so ask the question that is actually being
+	// asked.
+	var early bool
+	evalJSON(ctx, t, page, `(() => {
+      const f = document.querySelector('#frames iframe.mirror[data-tab="2"]');
+      const text = f && f.contentDocument ? (f.contentDocument.body.textContent || '') : '';
+      return !text.includes('the slow page');
+    })()`, &early)
+	if !early {
+		t.Error("the tab was only drawn once its page had arrived")
+	}
 
 	// It is a placeholder while it lasts: a tab this side is holding open until
 	// the server names it.
