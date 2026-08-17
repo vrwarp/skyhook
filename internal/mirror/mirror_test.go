@@ -970,3 +970,31 @@ func TestALateStartedLoadingDoesNotUndoAStop(t *testing.T) {
 		t.Error("the next page the reader asked for is not shown as loading")
 	}
 }
+
+/*
+A press is not stretched by the distance to the browser.
+
+The reader's hold is a measurement of what their finger did, and the mirror's
+job is to reproduce it landside. Between the two dispatches that make the press
+sits one round trip into the browser, which the page counts as part of the hold
+because the page has no way to know it was ours. Under load that trip is over a
+hundred milliseconds — enough to carry a tap past a long-press threshold and
+open a menu nobody asked for.
+*/
+func TestAPressIsNotLengthenedByTheTripToTheBrowser(t *testing.T) {
+	// A busy browser: the press took 132 ms to acknowledge, which the page will
+	// count, so only the rest is slept.
+	if got := pressHold(210*time.Millisecond, 132*time.Millisecond); got != 78*time.Millisecond {
+		t.Errorf("held for %v on a browser 132ms away, want 78ms so the page sees the reader's 210ms", got)
+	}
+	// An idle one: nothing measurable to take off.
+	if got := pressHold(210*time.Millisecond, 0); got != 210*time.Millisecond {
+		t.Errorf("held for %v with no delay to correct for, want the reader's own 210ms", got)
+	}
+	// Further away than the press was long. The two dispatches already make a
+	// press longer than the reader's, and there is nothing to be done about it
+	// but not make it longer still.
+	if got := pressHold(50*time.Millisecond, 200*time.Millisecond); got != 0 {
+		t.Errorf("slept %v on top of a trip already longer than the press, want none", got)
+	}
+}

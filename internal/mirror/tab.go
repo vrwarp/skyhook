@@ -973,7 +973,7 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	defer t.emitMu.Unlock()
 	// The snapshot is the client's whole table, and the top agent's.
 	t.strs.Reset(len(s.Strings))
-	t.docEpoch.Add(1)
+	epoch := t.docEpoch.Add(1)
 	t.mu.Lock()
 	t.seq = 0
 	t.url = s.URL
@@ -1029,6 +1029,9 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 		Viewport: protocol.Viewport{W: s.VW, H: s.VH, DPR: s.DPR, Mobile: vp.Mobile},
 		ScrollX:  s.ScrollX,
 		ScrollY:  s.ScrollY,
+		// Which document this is, so that the client's acknowledgements can say
+		// which document they are about. Frame numbering restarts here.
+		Epoch: epoch,
 	}
 	for _, im := range s.Images {
 		snap.Images = append(snap.Images, protocol.ImageMeta{

@@ -235,10 +235,11 @@ func (t *Tab) click(ctx context.Context, ev *protocol.InputEvent) error {
 	}
 	down := cloneMap(base)
 	down["type"] = "mousePressed"
+	sent := time.Now()
 	if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", down, nil); err != nil {
 		return err
 	}
-	sleepCtx(ctx, holdFor(ev))
+	sleepCtx(ctx, pressHold(holdFor(ev), time.Since(sent)))
 	up := cloneMap(base)
 	up["type"] = "mouseReleased"
 	up["buttons"] = 0
@@ -400,6 +401,33 @@ func holdFor(ev *protocol.InputEvent) time.Duration {
 		return d
 	}
 	return pressHoldMin + time.Duration(rand.Int64N(int64(pressHoldSpan)))
+}
+
+/*
+pressHold is how long to sleep between the two dispatches so that the page sees
+the press the reader actually made.
+
+A press is bracketed by two trips into the browser rather than one. The page's
+clock starts when the browser handles `mousePressed`, which is before our call
+returns, and stops when it handles `mouseReleased`, which is after we send it —
+so sleeping the reader's whole hold hands the page the hold *plus one round
+trip*. On an idle box that is a millisecond and nobody could care. On a busy one
+it is not: a 210 ms tap was measured by the page at 342 ms with eight browsers
+on the machine, and a page whose long-press threshold is 300 ms would have
+opened a context menu for a reader who tapped.
+
+The press's own round trip is a fresh measurement of how far away this browser
+is at this instant, under whatever load it is under, so that is what comes off.
+Nothing is added back when the trip is longer than the hold: the shortest press
+this can make is the one the two dispatches make between them, and stretching a
+tap to keep up with a slow browser would be inventing a gesture rather than
+replaying one.
+*/
+func pressHold(want, rtt time.Duration) time.Duration {
+	if rtt >= want {
+		return 0
+	}
+	return want - rtt
 }
 
 // replayApproach walks the landside pointer along the path the reader's pointer

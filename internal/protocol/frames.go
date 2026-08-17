@@ -204,6 +204,15 @@ type TabAck struct {
 	Seq uint64 `cbor:"2,keyasint"`
 	// Hash is the client's whole-document hash, used for divergence detection.
 	Hash uint64 `cbor:"3,keyasint,omitempty"`
+	// Epoch names the document Hash is about: the Epoch of the snapshot the
+	// client had applied when it hashed. A snapshot restarts Seq at zero, so
+	// the pair (Tab, Seq) does not name a document, and a client acknowledging
+	// frame zero of one document answered the server's question about frame
+	// zero of another — which is a divergence report against a mirror that was
+	// merely one document behind, and a whole document re-sent to repair it.
+	// Zero from a client that predates this field, which is read as "unknown"
+	// rather than as epoch zero.
+	Epoch uint64 `cbor:"4,keyasint,omitempty"`
 }
 
 // Viewport mirrors the client window so landside layout and media queries match.
@@ -333,6 +342,9 @@ type Snapshot struct {
 	// because hoisting them into one sheet is exactly what the boundary exists
 	// to prevent.
 	Scoped []ScopedCSS `cbor:"13,keyasint,omitempty"`
+	// Epoch counts the documents this tab has sent, and is echoed back in every
+	// TabAck the client makes about this one. See TabAck.Epoch.
+	Epoch uint64 `cbor:"14,keyasint,omitempty"`
 }
 
 // ScopedCSS is one shadow root's stylesheet.
