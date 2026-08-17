@@ -22,7 +22,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -728,24 +730,126 @@ func (r *router) RasterizeImage(ctx context.Context, tab uint32, src []byte, w, 
 	return nil, errors.New("no live tab to decode an image with")
 }
 
-// shapedAddr is the address the link emulator shapes. The netem filter targets
-// exactly this port, so the CDP socket and the fixture web server keep running
-// at landside speed — which is what they do in reality.
-func shapedAddr() string {
-	if p := os.Getenv("SKYHOOK_TEST_PORT"); p != "" {
-		return "127.0.0.1:" + p
+// shaped asks for a listener on a port the link emulator shapes, rather than
+// naming one. Which port that is depends on who else is running, so it is
+// resolved inside the harness — see leaseShapedAddr.
+const shaped = "shaped"
+
+/*
+Shaped ports are leased, not shared.
+
+The netem filter targets exact port numbers, so the CDP socket and the fixture
+web servers keep running at landside speed — which is what they do in reality.
+That much was always true. What changed is that there is now more than one such
+port: `scripts/netem.sh lanes` builds a netem qdisc per port, and a test leases
+one for its lifetime.
+
+The lease is what bounds concurrency, and it has to, because the lanes are the
+scarce thing rather than the CPU. A test blocks here until a lane frees instead
+of doubling up on one, since two tests on one shaped port would be sharing that
+port's 250 kbit rather than each getting a link — which is the whole reason the
+suite is slow, and would make running them together pointless.
+
+SKYHOOK_TEST_PORTS takes "45123-45126" or "45123,45124", and SKYHOOK_TEST_PORT
+still takes the single port it always did. Neither set means nothing is shaped:
+every harness binds :0 and the pool never comes into it.
+*/
+var shapedLanes = sync.OnceValues(func() (chan int, error) {
+	spec := os.Getenv("SKYHOOK_TEST_PORTS")
+	if spec == "" {
+		spec = os.Getenv("SKYHOOK_TEST_PORT")
 	}
-	return "127.0.0.1:0"
+	ports, err := parseLanes(spec)
+	if err != nil {
+		return nil, err
+	}
+	if len(ports) == 0 {
+		return nil, nil
+	}
+	lanes := make(chan int, len(ports))
+	for _, p := range ports {
+		lanes <- p
+	}
+	return lanes, nil
+})
+
+// parseLanes reads a port spec: comma-separated ports and "first-last" ranges,
+// in any mixture.
+func parseLanes(spec string) ([]int, error) {
+	var ports []int
+	seen := map[int]bool{}
+	port := func(s string) (int, error) {
+		n, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil || n < 1 || n > 65535 {
+			return 0, fmt.Errorf("%q is not a port number", strings.TrimSpace(s))
+		}
+		return n, nil
+	}
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		first, last := part, part
+		if from, to, ok := strings.Cut(part, "-"); ok {
+			first, last = from, to
+		}
+		lo, err := port(first)
+		if err != nil {
+			return nil, err
+		}
+		hi, err := port(last)
+		if err != nil {
+			return nil, err
+		}
+		if hi < lo {
+			return nil, fmt.Errorf("port range %q runs backwards", part)
+		}
+		for p := lo; p <= hi; p++ {
+			if !seen[p] {
+				seen[p] = true
+				ports = append(ports, p)
+			}
+		}
+	}
+	return ports, nil
+}
+
+// leaseShapedAddr takes a shaped port for the rest of the test and gives it
+// back afterwards. Call it after t.Parallel: a test that leases before it
+// parks holds a lane while it waits to be resumed, and with as many such tests
+// as there are lanes, nothing is left to hand one back.
+func leaseShapedAddr(t *testing.T) string {
+	t.Helper()
+	lanes, err := shapedLanes()
+	if err != nil {
+		t.Fatalf("shaped port pool: %v", err)
+	}
+	return leaseFrom(t, lanes)
+}
+
+// leaseFrom is the lease itself, separated from where the pool comes from so a
+// test can hand it a pool of its own.
+func leaseFrom(t *testing.T, lanes chan int) string {
+	t.Helper()
+	if lanes == nil {
+		return "127.0.0.1:0"
+	}
+	port := <-lanes
+	// Registered before the listener's own cleanup and so run after it: the
+	// port is closed by the time the next test can lease it.
+	t.Cleanup(func() { lanes <- port })
+	return "127.0.0.1:" + strconv.Itoa(port)
 }
 
 func newHarness(t *testing.T) *harness {
-	return newHarnessOn(t, shapedAddr())
+	return newHarnessOn(t, shaped)
 }
 
 // newHarnessWith builds the standard harness with the manager options adjusted,
 // for tests about what the landside browser claims to be.
 func newHarnessWith(t *testing.T, tweak func(*session.ManagerOptions)) *harness {
-	return newHarnessTweaked(t, shapedAddr(), tweak)
+	return newHarnessTweaked(t, shaped, tweak)
 }
 
 // newHarnessOn builds the landside half with its client listener on a given
@@ -755,13 +859,48 @@ func newHarnessOn(t *testing.T, listenAddr string) *harness {
 	return newHarnessTweaked(t, listenAddr, nil)
 }
 
+/*
+newHarnessTweaked builds a harness and runs its test in parallel with the rest.
+
+The marking belongs here rather than in ninety-odd test bodies, because a test
+that forgets it does not fail — it quietly serialises itself and costs the
+suite a lane, which nothing would report. Everything a harness owns is already
+private to the test: its own Chromium under t.TempDir, its own fixture and CDN
+servers on ephemeral ports, its own manager, image pipeline, profile, capture
+and cache directories. Only the shaped port was ever shared, and now it is
+leased.
+
+What this buys is wall clock on the netem job, where a test spends nearly all
+of its life waiting on a 1.2 s round trip and almost none of it running. Use
+newSerialHarness for a test that measures the machine instead of the link.
+*/
 func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.ManagerOptions)) *harness {
+	t.Helper()
+	t.Parallel()
+	return buildHarness(t, listenAddr, tweak)
+}
+
+// newSerialHarness keeps its test out of the parallel set, for the ones whose
+// assertion is a wall-clock measurement of this machine: a contended box reads
+// as a regression, and the point of those tests is that a regression is the
+// only thing that should.
+func newSerialHarness(t *testing.T) *harness {
+	t.Helper()
+	return buildHarness(t, shaped, nil)
+}
+
+func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOptions)) *harness {
 	t.Helper()
 	if _, err := cdp.FindChromium(""); err != nil {
 		if os.Getenv("SKYHOOK_E2E") == "1" {
 			t.Fatalf("SKYHOOK_E2E=1 but no browser: %v", err)
 		}
 		t.Skipf("no chromium available: %v", err)
+	}
+	// After the skip, so a test that is not going to run does not take a lane
+	// off a test that is.
+	if listenAddr == shaped {
+		listenAddr = leaseShapedAddr(t)
 	}
 
 	// A second origin, for the assets a real site keeps on a CDN. Same host,

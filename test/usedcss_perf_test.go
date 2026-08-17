@@ -235,7 +235,11 @@ than either number, is what makes a wall-clock assertion honest on hardware it
 does not choose.
 */
 func TestOneUsedCSSPassStaysCheap(t *testing.T) {
-	h := newHarness(t)
+	// Serial: the bound below is a wall-clock read of this machine, and the
+	// best-of-three above only absorbs a stolen slice, not a box running as
+	// many browsers as it has lanes. Sharing CPU here would report the runner
+	// as a used-CSS regression.
+	h := newSerialHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
 	defer cancel()
 

@@ -2424,7 +2424,6 @@ plain loopback run, and a CI run with `tc netem` shaping the Skyhook port to
 
 | | Loopback | Emulated 1.2 s / 250 kbps / 2% |
 |---|---|---|
-| Whole suite (8 tests, each with its own Chromium) | 10 s | 158 s |
 | Mirror delivers document and styles | 0.6 s | 23.3 s |
 | Click → resulting mutation applied | 0.6 s | 20.6 s |
 | Reconnect → resumed page state | 2.7 s | 27.5 s |
@@ -2437,6 +2436,20 @@ The last two rows are the mutation-batch work described in
 [PRIOR-ART.md](PRIOR-ART.md). The reorder cost 365 bytes and destroyed node
 identity before it; the churn figure is unchanged, and is there to keep it that
 way.
+
+There used to be a whole-suite row here — 8 tests, 10 s on loopback and 158 s
+over the emulated link. It has been dropped rather than updated. The suite is
+about ninety-five tests now, so the old figure was long stale, but the deeper
+problem is that a single number stopped describing anything: the suite runs
+several tests at once, each leasing one of `scripts/netem.sh lanes`' shaped
+lanes, so its wall clock is a function of how many lanes CI was given and not a
+property of the code under test. The per-test rows above are the honest
+measurements, and they are the ones a change to the protocol would move.
+
+The per-test figures are unaffected by running tests together, which is the
+point of a lane per test: each concurrent test gets a netem qdisc of its own,
+so it sees the whole 250 kbit rather than a share of it. Sharing one shaped
+port would have divided the link and bought nothing.
 
 Per-test figures include launching a browser and loading the fixture page, so
 they are an upper bound on the interaction cost rather than a measure of it.
