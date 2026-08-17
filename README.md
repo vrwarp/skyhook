@@ -223,13 +223,35 @@ Every milestone is measured against an emulated 1.2 s RTT / 250 kbps / 2% loss
 link, not against a LAN:
 
 ```sh
-sudo scripts/netem.sh port 45123 1200 250 2   # shape only the Skyhook port
-SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 SKYHOOK_TEST_PORT=45123 go test ./test -v
+make test-slow            # shape four lanes, run the suite four-wide, unshape
+```
+
+which is this, and `LANES=8 make test-slow` to widen it:
+
+```sh
+sudo scripts/netem.sh lanes 45123 4 1200 250 2   # shape only the Skyhook ports
+SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 SKYHOOK_TEST_PORTS=45123-45126 \
+  go test ./test -parallel 4 -v
 sudo scripts/netem.sh down
 ```
 
+Four *lanes*, not one shaped port shared four ways. A netem qdisc's rate is a
+budget for everything queued into it, so tests sharing a port would divide the
+250 kbit between them and finish no sooner than they would have one at a time.
+Each lane is a netem qdisc of its own, and a test leases one for its lifetime —
+which is also what bounds how many run at once, so `-parallel` and the lane
+count want to match.
+
+Running them together is worth it because of what the suite spends its time on.
+A test here is almost entirely waiting on a 1.2 s round trip, using neither the
+link nor the CPU while it does, and tests that are waiting can wait together.
+Every test already builds its own Chromium, fixture servers, manager and
+temporary directories, so the shaped port was the only thing they ever shared.
+
 `sudo scripts/netem.sh outage 60` drops the link entirely for a minute, which
-is how the reconnect-and-resync path is exercised.
+is how the reconnect-and-resync path is exercised. It replaces the whole qdisc,
+lanes included, so it is a thing to do to one session rather than underneath a
+suite.
 
 ## When the mirror looks wrong
 

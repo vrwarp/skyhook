@@ -78,7 +78,9 @@ func newPWAHarnessAt(t *testing.T, dist string) *pwaHarness {
 		o.WebRoot = dist
 	})
 
-	ln, err := net.Listen("tcp", shapedAddr())
+	// After newHarnessTweaked, which is where the test is marked parallel and
+	// parked: leasing a lane before that would hold it while waiting to resume.
+	ln, err := net.Listen("tcp", leaseShapedAddr(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,12 @@ import (
 // noticed. The "user" here is a browser we launch and then treat as a
 // stranger's — we only ever touch it through its own CDP client, never through
 // the attached one under test.
+//
+// These are the tests that mark themselves parallel rather than letting a
+// harness do it: they build no harness, and they take no shaped port either,
+// because attaching happens over CDP and CDP is landside. Each one says so
+// before opening its context, so the deadline starts when the test resumes
+// rather than when it parked.
 
 // userBrowser launches a browser on a known debugging port, opens a page in
 // it, and returns the browser plus the devtools endpoint to attach to.
@@ -83,6 +89,7 @@ func windowOf(ctx context.Context, t *testing.T, br *cdp.Browser, targetID strin
 // actually holds — including when the user is working in their own window,
 // which is exactly when an unadorned createTarget would go astray.
 func TestAttachKeepsTabsInItsOwnWindow(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	user, userTab, devtools := userBrowser(ctx, t)
@@ -128,6 +135,7 @@ func TestAttachKeepsTabsInItsOwnWindow(t *testing.T) {
 // asks for another. Each caller must get the tab its own call created, so the
 // tab a session drives is never a tab some other session is also driving.
 func TestAttachOpensConcurrentTabsWithoutCrossingThem(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	user, userTab, devtools := userBrowser(ctx, t)
@@ -187,6 +195,7 @@ func TestAttachOpensConcurrentTabsWithoutCrossingThem(t *testing.T) {
 // closed immediately after a navigation it has not committed, which is why a
 // blank tab is left blank rather than navigated to about:blank.
 func TestAttachClosesATabItJustOpened(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	user, _, devtools := userBrowser(ctx, t)
@@ -237,6 +246,7 @@ func TestAttachClosesATabItJustOpened(t *testing.T) {
 // handed a window handle on the anchor: with an opener it could navigate
 // Skyhook's own tab out from under it.
 func TestAttachNavigatedTabStaysPutAndHasNoOpener(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -275,6 +285,7 @@ func TestAttachNavigatedTabStaysPutAndHasNoOpener(t *testing.T) {
 
 // Attaching must not give Skyhook a licence to drive the tabs it found there.
 func TestAttachRefusesTheUsersTabs(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	_, userTab, devtools := userBrowser(ctx, t)
@@ -322,6 +333,7 @@ func TestAttachRefusesTheUsersTabs(t *testing.T) {
 // Shutting down closes Skyhook's window and nothing else. Browser.close here
 // would quit the whole browser out from under whoever is using it.
 func TestAttachCloseLeavesTheBrowserRunning(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	user, userTab, devtools := userBrowser(ctx, t)

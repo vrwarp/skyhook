@@ -148,7 +148,11 @@ jobs:
           # Skipping for want of a browser is a failure in CI, not a pass.
           SKYHOOK_E2E: '1'
           SKYHOOK_CHROME: ${{ steps.browser.outputs.path }}
-        run: go test -count=1 -timeout 20m -v ./test
+        # Unshaped, so every harness takes an ephemeral port and nothing is
+        # leased; the only limit on concurrency here is the runner. Each test
+        # owns a Chromium and the PWA ones own two, so four at a time is about
+        # what the box will carry.
+        run: go test -count=1 -timeout 20m -parallel 4 -v ./test
 
   netem:
     name: End-to-end over an emulated 1.2s / 250kbps link
@@ -192,14 +196,17 @@ jobs:
 
       - name: Apply the link profile from the design document
         # 1.2s RTT, 250 kbps, 2% loss on loopback: the link every milestone is
-        # measured against.
-        run: sudo scripts/netem.sh port 45123 1200 250 2
+        # measured against. Four lanes of it, on ports 45123-45126, each with a
+        # netem qdisc of its own — a rate is a per-qdisc budget, so four tests
+        # on one shaped port would divide the link between them and save
+        # nothing. One lane per concurrent test is what makes this parallel.
+        run: sudo scripts/netem.sh lanes 45123 4 1200 250 2
 
       - name: End-to-end tests over the bad link
         env:
           SKYHOOK_E2E: '1'
           SKYHOOK_SLOW_LINK: '1'
-          SKYHOOK_TEST_PORT: '45123'
+          SKYHOOK_TEST_PORTS: '45123-45126'
           SKYHOOK_CHROME: ${{ steps.browser.outputs.path }}
         # Every test here pays 1.2s of latency per round trip, so this suite
         # grows with the test count far faster than the one above it, and the
@@ -211,11 +218,17 @@ jobs:
         # test three seconds in when the alarm went off; nothing was hung and
         # nothing was slow, there was simply no room left.
         #
-        # 45m is roughly twice what the suite costs today. When that stops
-        # being generous the answer is to make the suite cheaper, not to move
-        # this number again: a timeout that tracks the measurement never
-        # reports anything.
-        run: go test -count=1 -timeout 45m -v ./test
+        # 45m was roughly twice what the suite cost then, with a note saying
+        # the answer next time was to make the suite cheaper rather than move
+        # the number again. This is that: four tests at a time, each leasing
+        # one of the four shaped lanes above. What the suite spends is latency,
+        # and latency is the one cost that overlaps — a test waiting on a round
+        # trip is not using the link or the CPU, so four of them wait together.
+        #
+        # 45m stays, and it is now a much wider margin over a much shorter run
+        # rather than a number that tracks the measurement. The next time it is
+        # close, the lane count is the dial to turn, not this.
+        run: go test -count=1 -timeout 45m -parallel 4 -v ./test
 
       - name: Remove the link profile
         if: always()
