@@ -1430,6 +1430,20 @@ func (s *Session) checkTab(id uint32, ts *tabState) {
 		}
 		return
 	}
+	// The answer has to be about the document that was measured. A snapshot
+	// restarts the frame numbering at zero, so the sequence number this check
+	// anchored to names one document before a re-snapshot and a different one
+	// after — and a page that is building itself sends several snapshots a
+	// second, each of them frame 0. Waiting on the number alone let the client's
+	// acknowledgement of a *later* document answer a measurement of an earlier
+	// one, and the two hashes then differ for the honest reason that they are
+	// two documents. That is how a page acquiring frames reported a divergence
+	// with the pristine page's own hash in it.
+	if now := ts.tab.DocEpoch(); now != cp.Epoch {
+		s.log.Debug("integrity check inconclusive: the document was replaced while it was being checked",
+			"tab", id, "seq", cp.Seq, "measured", cp.Epoch, "now", now)
+		return
+	}
 	s.clearStuck(ts)
 	if clientHash == cp.Hash {
 		s.log.Debug("integrity check passed", "tab", id, "seq", cp.Seq)

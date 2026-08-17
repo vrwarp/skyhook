@@ -746,6 +746,10 @@ func (t *Tab) DocHash(ctx context.Context) (uint64, error) {
 type Checkpoint struct {
 	Seq  uint64 `json:"seq"`
 	Hash uint64 `json:"hash"`
+	// Epoch is which document this measurement is of. A snapshot restarts the
+	// numbering at zero, so Seq alone does not say: a page building itself
+	// sends several snapshots a second, and every one of them is frame 0.
+	Epoch uint64 `json:"-"`
 }
 
 // EmptyDocHash is the FNV-1a offset basis, and so the hash of a document with
@@ -858,6 +862,7 @@ func (t *Tab) checkpointOnce(ctx context.Context) (Checkpoint, error) {
 	t.mu.Lock()
 	seq := t.seq
 	t.mu.Unlock()
+	epoch := t.docEpoch.Load()
 	// A frame that was spliced while this walk was in progress put its document
 	// on the wire behind the walk: it is in the sequence number just read and in
 	// none of the hashes above, so the answer describes a document that never
@@ -867,7 +872,7 @@ func (t *Tab) checkpointOnce(ctx context.Context) (Checkpoint, error) {
 	if now := t.spliceGen.Load(); now != gen {
 		return Checkpoint{}, fmt.Errorf("%w (%d -> %d)", errPageMoved, gen, now)
 	}
-	return Checkpoint{Seq: seq, Hash: hash}, nil
+	return Checkpoint{Seq: seq, Hash: hash, Epoch: epoch}, nil
 }
 
 // fenceAgents waits until everything the agents have already sent has been
