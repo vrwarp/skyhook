@@ -677,16 +677,7 @@ func (t *Tab) invalidateInside(frameID string) {
 		f.retryIn = 0
 		f.mu.Unlock()
 	}
-	for _, f := range inside {
-		go func(f *subFrame) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			if _, err := t.evalInSlot(ctx, f.slot, "__skyhook.snapshot()"); err != nil {
-				t.log.Debug("a frame inside a re-spliced one would not say itself again",
-					"tab", t.ID, "slot", f.slot, "err", err)
-			}
-		}(f)
-	}
+	t.resnapshotFrames()
 }
 
 // framesInside lists the frames whose chain of parents reaches this one.
@@ -960,22 +951,7 @@ func (t *Tab) reconcile() {
 			// asked all over again anyway.
 			continue
 		}
-		for _, f := range t.framesInOrder() {
-			f.mu.Lock()
-			settled := f.spliced || f.pending != nil || f.gone
-			f.mu.Unlock()
-			if settled {
-				continue
-			}
-			go func(f *subFrame) {
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				defer cancel()
-				if _, err := t.evalInSlot(ctx, f.slot, "__skyhook.snapshot()"); err != nil {
-					t.log.Debug("a frame out of place would not say itself again",
-						"tab", t.ID, "slot", f.slot, "err", err)
-				}
-			}(f)
-		}
+		t.resnapshotFrames()
 	}
 }
 
@@ -1012,6 +988,40 @@ func (t *Tab) resplice() {
 		f.pending = nil
 		f.retryIn = 0
 		f.mu.Unlock()
+	}
+	t.resnapshotFrames()
+}
+
+/*
+resnapshotFrames asks the frames the client no longer has to say themselves
+again — unless the link is already behind, in which case it waits.
+
+This is where a slow link nearly lost the whole feature. A frame's document is
+re-sent whole every time the page above it is, because the client dropped it
+with the rest of the old document; and a page is re-snapshotted on every resync.
+On a fast link that is a few kilobytes nobody notices. On 250 kbps with 2% loss
+it is the difference between the client catching up and not: the resync sends
+the page, every frame piles its document on behind it, the client falls further
+behind, the integrity check calls that a stall, and the stall resyncs. The tests
+that failed had been waiting three minutes for a frame that was re-sent, in
+full, over and over.
+
+The reconciler is already asking the same question every two seconds, so there
+is no need to force it now. This is exactly the trade shotSoon makes with the
+same signal: work that will still be right in two seconds does not go onto a
+queue the reader is already waiting on.
+*/
+func (t *Tab) resnapshotFrames() {
+	if t.out.Backlogged() {
+		return
+	}
+	for _, f := range t.framesInOrder() {
+		f.mu.Lock()
+		skip := f.spliced || f.gone || f.pending != nil
+		f.mu.Unlock()
+		if skip {
+			continue
+		}
 		go func(f *subFrame) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()

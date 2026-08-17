@@ -168,7 +168,8 @@ jobs:
         run: |
           echo '### Failed tests' >> "$GITHUB_STEP_SUMMARY"
           grep -E '^(\s+)?--- FAIL' /tmp/e2e.log | tee -a "$GITHUB_STEP_SUMMARY" || true
-          grep -B 20 -E '^(\s+)?--- FAIL' /tmp/e2e.log | grep -E '_test\.go:[0-9]+:' || true
+          echo '### What they said' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '_test\.go:[0-9]+:' /tmp/e2e.log | tail -40 | tee -a "$GITHUB_STEP_SUMMARY" || true
 
   netem:
     name: End-to-end over an emulated 1.2s / 250kbps link
@@ -272,7 +273,15 @@ jobs:
         run: |
           echo '### Failed tests over the bad link' >> "$GITHUB_STEP_SUMMARY"
           grep -E '^(\s+)?--- FAIL' /tmp/netem.log | tee -a "$GITHUB_STEP_SUMMARY" || true
-          grep -B 20 -E '^(\s+)?--- FAIL' /tmp/netem.log | grep -E '_test\.go:[0-9]+:' || true
+          # What each of them said. Test log lines are few and the browser's
+          # noise is not, so this is the whole of the evidence in ten lines.
+          echo '### What they said' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '_test\.go:[0-9]+:' /tmp/netem.log | tail -40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # And whether the mirror was repairing itself in a loop, which is what
+          # a link this slow turns any re-send into.
+          echo '### Resyncs' >> "$GITHUB_STEP_SUMMARY"
+          grep -cE 'resync by snapshot' /tmp/netem.log | tee -a "$GITHUB_STEP_SUMMARY" || true
+          grep -E 'stalled|mirror divergence' /tmp/netem.log | tail -20 || true
 
       - name: Remove the link profile
         if: always()
