@@ -905,6 +905,17 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
 	})
+	// An inline background, which is how a page states the one picture that
+	// belongs to one element: a hero, an avatar, a card. Relative, because that
+	// is how it is written, and because the mirror frame resolves a relative
+	// reference against an address that is not this page's.
+	mux.HandleFunc("/inline-bg", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Inline</title></head>
+			<body><h1>the inline background page</h1>
+			<div id="ibg" style="width:48px;height:48px;background-image:url(tile.png)"></div>
+			</body></html>`)
+	})
 	mux.HandleFunc("/tile.png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(tilePNG)
@@ -2271,6 +2282,73 @@ func TestAStylesheetsImagesResolveAgainstTheSheet(t *testing.T) {
 			h.site.URL, n)
 	}
 	t.Fatalf("the background image's bytes never arrived (key %q)", key)
+}
+
+/*
+An inline style names its picture as surely as a stylesheet does.
+
+Everything a stylesheet names is fetched, transcoded and shipped as a cache
+key. A `style="background-image:url(hero.jpg)"` was shipped exactly as written,
+into a sandboxed frame with no network and a base address that is not the
+page's, so it resolved to nothing and the element rendered as an empty box —
+the same failure as a mis-based stylesheet url(), on the construct sites reach
+for most. A script assigning a background as it lazy-loads takes the same path,
+through an attribute mutation rather than a snapshot.
+*/
+func TestAnInlineStyleGetsItsPictureToo(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/inline-bg"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the inline background page", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var key string
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) && key == "" {
+		if n := cl.Model(tab).Find("div", "id", "ibg"); n != nil {
+			style := n.Attrs["style"]
+			if strings.Contains(style, "url(") && !strings.Contains(style, "skyhook://img/") {
+				t.Fatalf("the inline background was shipped as written, so it names "+
+					"an address the mirror cannot reach: %q", style)
+			}
+			key = cssImageKey(style)
+		}
+		if key == "" {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+	if key == "" {
+		t.Fatal("the inline background never arrived as a cache key")
+	}
+
+	// And the bytes have to follow, or the key is a prettier kind of nothing.
+	deadline = time.Now().Add(budget(30 * time.Second))
+	for asked := 0; time.Now().Before(deadline); asked++ {
+		if asked%20 == 0 {
+			if err := cl.WantImages(tab, []string{key}); err != nil {
+				t.Fatalf("ask for the inline background: %v", err)
+			}
+		}
+		if data, ok := cl.ImageBytes(key); ok {
+			if len(data) == 0 {
+				t.Fatal("the inline background arrived empty")
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("the inline background's bytes never arrived (key %q)", key)
 }
 
 // cssImageKey pulls the content hash the server rewrote a url() to out of a
