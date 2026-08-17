@@ -104,15 +104,21 @@ case "${1:-status}" in
     while [ "$i" -lt "$COUNT" ]; do
       band=$(( i + 4 ))
       lane_port=$(( BASE_PORT + i ))
+      # tc parses the minor half of a class ID as hex, while `bands` above is
+      # decimal, so band 10 has to be written 1:a. Spelling it 1:10 asks for
+      # minor 0x10 and fails with "Specified class not found" — but only from
+      # the seventh lane on, because below ten the two spellings agree.
+      hband=$(printf '%x' "$band")
       # netem's delay is applied per direction; half the RTT each way.
-      tc qdisc add dev "$IFACE" parent "1:${band}" handle "${band}0:" netem \
+      tc qdisc add dev "$IFACE" parent "1:${hband}" handle "${hband}0:" netem \
         delay "${HALF_MS}ms" 40ms distribution normal \
         loss "${LOSS_PCT}%" \
         rate "${RATE_KBIT}kbit" \
         limit 10000
+      # Filter priority is its own decimal thing, unrelated to the class ID.
       for match in dport sport; do
         tc filter add dev "$IFACE" protocol ip parent 1:0 prio "$band" u32 \
-          match ip "$match" "$lane_port" 0xffff flowid "1:${band}"
+          match ip "$match" "$lane_port" 0xffff flowid "1:${hband}"
       done
       i=$(( i + 1 ))
     done
