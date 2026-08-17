@@ -82,20 +82,22 @@ const (
 )
 
 /*
-frameDepthMax is the deepest frame this mirrors: one level down, which is where
-every frame anyone opens this for lives — an app launcher, a captcha, an
-embedded player, an ad slot.
+frameDepthMax is how far down the frame tree this follows.
 
-It is not a guess about what is worth having. A chain of frames inside frames
-was measured, and the levels below the first arrive and then go: a top-level
-snapshot drops every spliced subtree, and re-establishing a chain requires each
-level to be spliced before the one below it can find its element, which the
-retry does not converge on today. One level is what is verified to stay. Below
-it a frame is left as the labelled box it was before any of this, which is a
-worse answer than mirroring and a better one than a frame that appears for ten
-seconds and then does not.
+It was one for a while, honestly: the levels below the first arrived and then
+went, and one level is where an app launcher, a captcha and an embedded player
+all live anyway. What was actually wrong is in invalidateInside — splicing a
+frame replaces its subtree, the client drops what was inside it, and the frames
+mirrored in there went on believing they were on screen. rrweb has the same bug
+open against its own cross-origin recording, where the fix is harder: a recorder
+inside a page cannot ask a child frame to say itself again, and this can.
+
+Eight is now measured rather than hoped for: nine documents deep, every level
+arriving and staying. The limit is what the coordinate walk behind a click costs
+— one round trip per level to translate a rectangle into the top-level viewport
+— and past this an ad stack is doing something other than showing an ad.
 */
-const frameDepthMax = 1
+const frameDepthMax = 8
 
 // subFrame is one cross-origin frame the mirror is keeping.
 type subFrame struct {
@@ -104,7 +106,14 @@ type subFrame struct {
 	// is a target of its own, and the tab's when it shares the page's process.
 	sess    *cdp.Session
 	frameID string
-	depth   int
+	// parentFrame is the frame this one hangs in, empty for a frame in the page
+	// itself. What it is for: when a frame is spliced again, everything mirrored
+	// *inside* it went with the subtree the client dropped, and has to be sent
+	// again. Nothing else tells those frames that — their own agents saw
+	// nothing happen — so they sit there believing the client has a document it
+	// threw away.
+	parentFrame string
+	depth       int
 
 	// spliceMu admits one splice at a time. Two of them for the same document
 	// would build it twice: the second re-creates every node under ids the
@@ -345,6 +354,10 @@ func (t *Tab) adoptFrame(sessionID string, ctxID int64, url string) {
 		return
 	}
 
+	// Asked before the lock is taken, not under it: this is a round trip to the
+	// browser, and everything that puts a frame on the wire wants that lock.
+	parentFrame, _ := t.parentFrameOf(ctx, sess, frameID)
+
 	t.mu.Lock()
 	f := t.framesByID[frameID]
 	if f == nil {
@@ -354,7 +367,10 @@ func (t *Tab) adoptFrame(sessionID string, ctxID int64, url string) {
 			t.log.Warn("no id space left for another frame; it stays a labelled box", "tab", t.ID)
 			return
 		}
-		f = &subFrame{slot: slot, sess: sess, frameID: frameID, depth: depth}
+		f = &subFrame{
+			slot: slot, sess: sess, frameID: frameID, depth: depth,
+			parentFrame: parentFrame,
+		}
 		t.framesByID[frameID] = f
 	}
 	t.frames[ctxKey(sessionID, ctxID)] = f
@@ -624,6 +640,75 @@ func (t *Tab) ownerNodeOf(ctx context.Context, f *subFrame) (int64, error) {
 	return res.Result.Value, nil
 }
 
+// parentFrameOf names the frame a frame hangs in, empty for one in the page.
+func (t *Tab) parentFrameOf(ctx context.Context, sess *cdp.Session, frameID string) (string, error) {
+	var tree struct {
+		FrameTree json.RawMessage `json:"frameTree"`
+	}
+	if err := sess.Do(ctx, "Page.getFrameTree", nil, &tree); err != nil {
+		return "", err
+	}
+	parent, _ := findFrameParent(tree.FrameTree, frameID, "")
+	return parent, nil
+}
+
+/*
+invalidateInside marks every frame mirrored inside this one as no longer on the
+client, and asks each to say itself again.
+
+Splicing a frame replaces its whole subtree, and the client drops what was there
+— including any frame that had been spliced *into* it. Those frames' agents know
+nothing about that: they go on sending mutations for nodes the client has
+forgotten, and the reconciler sees a frame that believes it is spliced and
+leaves it alone. That is the whole of why a chain of frames arrived and then
+went: the first level was re-spliced, the second went with it, and nothing ever
+said so.
+*/
+func (t *Tab) invalidateInside(frameID string) {
+	inside := t.framesInside(frameID)
+	for _, f := range inside {
+		f.mu.Lock()
+		f.spliced = false
+		f.pending = nil
+		f.retryIn = 0
+		f.mu.Unlock()
+	}
+	for _, f := range inside {
+		go func(f *subFrame) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if _, err := t.evalInSlot(ctx, f.slot, "__skyhook.snapshot()"); err != nil {
+				t.log.Debug("a frame inside a re-spliced one would not say itself again",
+					"tab", t.ID, "slot", f.slot, "err", err)
+			}
+		}(f)
+	}
+}
+
+// framesInside lists the frames whose chain of parents reaches this one.
+func (t *Tab) framesInside(frameID string) []*subFrame {
+	t.mu.Lock()
+	parents := make(map[string]string, len(t.framesByID))
+	all := make([]*subFrame, 0, len(t.framesByID))
+	for id, f := range t.framesByID {
+		parents[id] = f.parentFrame
+		all = append(all, f)
+	}
+	t.mu.Unlock()
+
+	var out []*subFrame
+	for _, f := range all {
+		for up, hops := f.parentFrame, 0; up != "" && hops <= frameDepthMax+1; hops++ {
+			if up == frameID {
+				out = append(out, f)
+				break
+			}
+			up = parents[up]
+		}
+	}
+	return out
+}
+
 // parentOf finds which agent owns the document a frame hangs in.
 func (t *Tab) parentOf(ctx context.Context, sess *cdp.Session, frameID string) (int64, *cdp.Session, error) {
 	var tree struct {
@@ -777,6 +862,10 @@ func (t *Tab) spliceFrame(f *subFrame, s *agentSnapshot) {
 		}
 	}
 	t.emitFrameOps(f.slot, ops, s.Strings, s.Images, s.URL)
+
+	// Whatever was mirrored inside this document went with the subtree the
+	// client just replaced.
+	t.invalidateInside(f.frameID)
 
 	// The box that said this content was missing is now the box it is in.
 	if _, err := t.evalInSlot(ctx, frameSlot(owner),

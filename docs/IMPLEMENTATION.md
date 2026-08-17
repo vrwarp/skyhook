@@ -489,6 +489,17 @@ reading it before the queues had drained named a frame the client already had
 while the hash described the document one frame later, which is a divergence
 report that is only a race with itself.
 
+**An insert waits for its parent instead of being dropped.** The client used to
+throw away an insert addressed at a node it did not have, silently, which is
+exactly what a frame's document is when it overtakes the element it hangs from —
+and the host had no way to know, so it believed the frame was mirrored while the
+reader looked at an empty box. Ordering is the client's to know, because the
+client is the only one that knows what it has; it holds such an insert and
+applies it when the parent arrives. (One more of these was self-inflicted: the
+frame's parent was looked up over CDP while the tab's lock was held, which
+stalled every frame waiting to go out behind a browser round trip. Batches that
+took ninety seconds take twenty-three.)
+
 **It converges on a clock, not on a chain of events.** Splicing a frame depends
 on a run of things going right in an order nobody controls: the frame announces,
 the page serialises the element it hangs from, the snapshot arrives, the insert
@@ -503,15 +514,25 @@ it is mirroring against what the client has, and asks any frame that is out of
 place to say itself again. One CDP call per frame that is wrong, none for a frame
 that is right, and every race above collapses into the same convergent loop.
 
-**One level down, and no further.** That is where every frame this was opened
-for lives — an app launcher, a captcha, an embedded player, an ad slot — and it
-is also the honest end of what was measured. A chain of frames inside frames was
-built and watched: the levels below the first arrive and then go. A top-level
-snapshot drops every spliced subtree, and putting a chain back needs each level
-spliced before the one below it can find its element, which the retry does not
-converge on. Below the first level a frame is left as the labelled box it was
-before any of this — a worse answer than mirroring, and a better one than content
-that appears for ten seconds and then does not.
+**Eight levels down, once the levels stopped taking each other away.** This was
+capped at one for a while and the cap was honest: the levels below the first
+arrived and then went. The cause is worth keeping. Splicing a frame replaces its
+subtree, so the client drops what was inside it — including any frame spliced in
+there — while those frames' agents saw nothing happen at all and went on
+describing a document nobody had. The reconciler could not help: it looks for
+frames that believe they are absent, and these believed they were fine. So a
+splice now invalidates everything mirrored inside it and asks each of those
+frames to say itself afresh, which is the whole of what deep nesting needed.
+
+rrweb has this bug open against its own cross-origin recording — "when the
+parent is reset during its FullSnapshot, the iframe context is wiped, and
+subsequent child events can't be played in the DOM correctly" — and it is harder
+there: a recorder living inside a page cannot ask a child frame to re-snapshot.
+Driving the browser from outside is what makes the fix available here.
+
+Eight is measured — nine documents deep, every level arriving and staying — and
+bounded by what a click costs: one round trip per level to walk a rectangle up
+into the top-level viewport.
 
 Also not covered: a frame the page hides and shows repeatedly pays a re-snapshot
 each time, for the same reason; and a closed shadow root inside such a frame is

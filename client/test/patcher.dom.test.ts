@@ -357,6 +357,36 @@ describe('Patcher', () => {
     expect(restyled).toHaveBeenCalledWith(stand);
   });
 
+  /*
+   * An insert whose parent has not arrived yet. A tab is described by several
+   * agents once it holds a cross-origin frame, each on a queue of its own, so a
+   * frame's document can overtake the element it hangs from. Dropped, that is a
+   * frame missing for the life of the page with nothing anywhere to say so.
+   */
+  it('keeps an insert whose parent has not arrived, and applies it when it does', () => {
+    patcher.applySnapshot(snapshot());
+    const base = 100;
+    // A subtree hung from a node the client does not have.
+    patcher.applyMutation(mutation([{
+      op: OpCode.Insert, parent: 500, before: 0,
+      nodes: [
+        { id: 501, parent: 500, kind: NodeKind.Element, ref: 0, attrs: [], flags: 0 },
+        { id: 502, parent: 501, kind: NodeKind.Text, ref: 3, attrs: [], flags: 0 },
+      ],
+    }]), 1);
+    expect(patcher.nodeFor(501)).toBeUndefined();
+
+    // The parent arrives; what was waiting goes in behind it.
+    patcher.applyMutation(mutation([{
+      op: OpCode.Insert, parent: 1, before: 0,
+      nodes: [{ id: 500, parent: 1, kind: NodeKind.Element, ref: 0, attrs: [], flags: 0 }],
+    }]), 2);
+    expect(patcher.nodeFor(500)).toBeDefined();
+    expect(patcher.nodeFor(501)).toBeDefined();
+    expect((patcher.nodeFor(500) as Element).textContent).toBe('first');
+    expect(base).toBe(100);
+  });
+
   it('hashes what the server sent, so a substitution is not a divergence', () => {
     // The server compares this hash against the agent's every thirty seconds
     // and re-snapshots the whole document when they differ. A patcher that

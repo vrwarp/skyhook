@@ -546,26 +546,49 @@ func TestPWAResizesAFrameStandInWhenItsFrameGrows(t *testing.T) {
 /*
 Frames inside frames, and the floor.
 
-Every level here is cross-origin to the one above it, so each would need an agent
-of its own. The mirror follows one level down — where an app launcher, a captcha
-and an embedded player all live — and leaves what is below it as the labelled box
-that says whose content is missing, which is what that label is for now that a
-frame within reach is mirrored (§11f).
+Every level here is cross-origin to the one above it, so each needs an agent of
+its own and a place in the document above it. This is the case that was broken
+for a while and is worth a test of its own: the levels below the first arrived
+and then went, because splicing a frame replaces its subtree and the client
+drops what was inside it — including any frame spliced in there — while those
+frames' agents saw nothing happen and went on describing a document nobody had.
+rrweb has the same bug open against its own cross-origin recording. The fix is
+to tell them: a frame that is spliced again invalidates everything mirrored
+inside it, and each is asked to say itself afresh.
+
+Below frameDepthMax a frame is left as the labelled box that says whose content
+is missing, which is what that label is for now that a frame within reach is
+mirrored (§11f).
 */
-func TestPWAMirrorsOneFrameDeepAndSaysSoBelowThat(t *testing.T) {
+func TestPWAMirrorsFramesInsideFramesAndSaysWhereItStops(t *testing.T) {
 	h := newPWAHarness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), budget(240*time.Second))
 	defer cancel()
 	page := h.openClient(ctx, t)
-	// The page is level 3; the frame in it is level 2, and the frame in that is
-	// level 1 — one level past what the mirror follows.
-	openPage(ctx, t, h, page, "/nest?d=3", "level 3")
+	// The page is level 9; the frame in it is level 8, and so on down. Level 0
+	// is one past what the mirror follows.
+	openPage(ctx, t, h, page, "/nest?d=9", "level 9")
 
-	waitFor(ctx, t, page, mirrorText+`.includes('level 2')`,
+	// Every level the mirror follows, from the first to the last.
+	waitFor(ctx, t, page, mirrorText+`.includes('level 8')`,
 		budget(60*time.Second), "the frame one level down")
+	waitFor(ctx, t, page, mirrorText+`.includes('level 5')`,
+		budget(90*time.Second), "a frame four levels down")
+	waitFor(ctx, t, page, mirrorText+`.includes('level 1')`,
+		budget(90*time.Second), "the deepest frame within the limit")
 
-	// The floor: the level below it is a box that says so, rather than a hole
-	// that says nothing.
+	// And they stay. A parent re-splicing used to take the levels below it away
+	// with no way back, which is the whole reason this test waits and looks
+	// again rather than asking once.
+	time.Sleep(budget(12 * time.Second))
+	var still bool
+	evalJSON(ctx, t, page, mirrorText+`.includes('level 1')`, &still)
+	if !still {
+		t.Error("the deepest frame arrived and then went again")
+	}
+
+	// The floor: the level past the limit is a box that says so, rather than a
+	// hole that says nothing.
 	waitFor(ctx, t, page, `(() => {
       const doc = document.querySelector('iframe.mirror').contentDocument;
       const seen = [];
@@ -580,7 +603,7 @@ func TestPWAMirrorsOneFrameDeepAndSaysSoBelowThat(t *testing.T) {
     })()`, budget(60*time.Second), "the frame past the limit to be named")
 
 	var deeper bool
-	evalJSON(ctx, t, page, mirrorText+`.includes('level 1')`, &deeper)
+	evalJSON(ctx, t, page, mirrorText+`.includes('level 0')`, &deeper)
 	if deeper {
 		t.Error("the mirror followed past its own depth limit")
 	}
