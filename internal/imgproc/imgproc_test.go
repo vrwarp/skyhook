@@ -1116,3 +1116,42 @@ func TestAnEvictedKeyIsNotAnnouncedAsThoughItsBytesWereThere(t *testing.T) {
 		t.Error("the bytes came from somewhere without a fetch, which the cache no longer has")
 	}
 }
+
+// An entry is either wholly there or not there at all.
+//
+// A write that stops halfway leaves a good header and only some of the bytes,
+// which is the one shape the magic prefix cannot catch on the way back in: it
+// reads as a truncated image, which is a broken picture rather than a missing
+// one. The temporary file a rename never happened for is the remains of that,
+// and it holds its space under a name no request can ever match.
+func TestAnUnfinishedWriteLeavesNothingBehind(t *testing.T) {
+	dir := t.TempDir()
+	leftover := filepath.Join(dir, cacheTempPrefix+"123456")
+	if err := os.WriteFile(leftover, []byte(cacheMagic+`{"mime":"image/png"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := newDiskCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Error("a half-written entry survived a restart, holding space nothing can read")
+	}
+	if c.size != 0 || len(c.index) != 0 {
+		t.Errorf("it was counted as a cache entry: size=%d entries=%d", c.size, len(c.index))
+	}
+
+	// And a finished write leaves exactly one file, under the key itself.
+	c.put("cafed00d", encodePNG(t, sprite(8, 8)), cacheHeader{W: 8, H: 8, Mime: "image/png"})
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0].Name() != "cafed00d" {
+		var got []string
+		for _, n := range names {
+			got = append(got, n.Name())
+		}
+		t.Errorf("cache directory holds %v, want just the key", got)
+	}
+}

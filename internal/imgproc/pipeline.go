@@ -668,6 +668,11 @@ type diskCache struct {
 // directory is from a build that stored bare bytes and cannot be quoted.
 const cacheMagic = "SKYC1"
 
+// cacheTempPrefix names an entry that is still being written. A key is a hex
+// hash, so nothing real can collide with it, and anything wearing it after a
+// restart is the remains of a write that did not finish.
+const cacheTempPrefix = "writing-"
+
 // cacheHeader is what an entry knows about itself.
 //
 // Only what belongs to the asset. A node id, a placement box and a priority
@@ -704,11 +709,19 @@ func newDiskCache(dir string, limit int64) (*diskCache, error) {
 		return nil, err
 	}
 	for _, e := range entries {
+		key := e.Name()
+		// A half-written entry from a process that died between creating the
+		// temporary file and renaming it over the real one. It is named after
+		// nothing, so no request will ever match it, and left alone it would
+		// hold its space until the whole cache turned over.
+		if strings.HasPrefix(key, cacheTempPrefix) {
+			_ = os.Remove(filepath.Join(dir, key))
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		key := e.Name()
 		el := c.order.PushBack(&cacheEntry{key: key, size: info.Size()})
 		c.index[key] = el
 		c.size += info.Size()
@@ -845,12 +858,44 @@ func (c *diskCache) put(key string, data []byte, head cacheHeader) {
 	if err != nil {
 		return
 	}
-	raw := make([]byte, 0, len(cacheMagic)+len(desc)+1+len(data))
-	raw = append(raw, cacheMagic...)
-	raw = append(raw, desc...)
-	raw = append(raw, '\n')
-	raw = append(raw, data...)
-	if err := os.WriteFile(c.path(key), raw, 0o600); err != nil { //nolint:gosec // key is a hex hash
+	// Written in pieces into a temporary file, then renamed into place.
+	//
+	// In pieces because a transcoded asset runs to megabytes and is already in
+	// memory once: copying the whole of it into a second slice to hand the
+	// filesystem is a copy nobody reads, and sizing that slice means adding
+	// lengths together, which is an overflow to reason about in exchange for
+	// nothing.
+	//
+	// Renamed because a write that stops halfway — a full disk is the way that
+	// happens — leaves an entry with a good header and only some of its bytes,
+	// and that is the one shape the magic prefix cannot catch on the way back
+	// in. It would be read back as a truncated image, which is a broken picture
+	// rather than a missing one. A rename within a directory is atomic, so an
+	// entry is either wholly there or not there at all.
+	tmp, err := os.CreateTemp(c.dir, cacheTempPrefix)
+	if err != nil {
+		return
+	}
+	var size int64
+	for _, part := range [][]byte{[]byte(cacheMagic), desc, {'\n'}, data} {
+		n, werr := tmp.Write(part)
+		size += int64(n)
+		if werr != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		_ = os.Remove(tmp.Name())
+		return
+	}
+	if err := os.Rename(tmp.Name(), c.path(key)); err != nil {
+		_ = os.Remove(tmp.Name())
 		return
 	}
 	c.mu.Lock()
@@ -860,10 +905,10 @@ func (c *diskCache) put(key string, data []byte, head cacheHeader) {
 		c.order.Remove(el)
 	}
 	el := c.order.PushBack(&cacheEntry{
-		key: key, size: int64(len(raw)), head: head, bytes: len(data), loaded: true,
+		key: key, size: size, head: head, bytes: len(data), loaded: true,
 	})
 	c.index[key] = el
-	c.size += int64(len(raw))
+	c.size += size
 	c.evictLocked()
 }
 
