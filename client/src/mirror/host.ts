@@ -1188,6 +1188,15 @@ export class MirrorHost {
 
     if (resync) {
       this.scrollDocTo(keep.x, keep.y);
+      // Anything still waiting for bytes has been waiting since before the
+      // resync, and nothing else will offer them: an asset is asked for once
+      // per hash, and the server does not re-send what it has already sent, so
+      // a push the link dropped would leave that picture missing for the life
+      // of the document. This is the one moment that knows a request went
+      // unanswered — the document has just been rebuilt and these are still
+      // empty — and it costs one round trip per picture that is genuinely
+      // absent, and nothing at all for a page whose images all arrived.
+      this.askAgainForWhatNeverCame();
     } else {
       this.readerMovedDoc = false;
       this.readerMoved = new WeakSet();
@@ -1541,6 +1550,17 @@ export class MirrorHost {
     if (!want.length) return;
     for (const hash of want) this.requested.add(hash);
     this.events.wantImages(this.tab, want);
+  }
+
+  /**
+   * Forgets having asked for the assets that never arrived, so the next round
+   * of requests includes them.
+   */
+  private askAgainForWhatNeverCame(): void {
+    // Not the region shots: those were dropped a moment ago with the elements
+    // they belonged to, and the server photographs the new document itself.
+    for (const hash of this.pendingImages.keys()) this.requested.delete(hash);
+    for (const hash of this.pendingCSS) this.requested.delete(hash);
   }
 
   /** Batches the requests a burst of patches would otherwise make one at a time. */

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vrwarp/skyhook/internal/cdp"
@@ -134,9 +135,6 @@ type Options struct {
 	// replaced but whose language header was not is a browser with a story that
 	// does not add up.
 	AcceptLanguage string
-	// IdleSnapshotAfter re-snapshots if the page has been silent this long and
-	// the client asked for a resync. Zero disables.
-	IdleSnapshotAfter time.Duration
 	// StreamEvery keeps photographing a canvas that animates with nobody
 	// touching it — a clock, an idle game loop — at this interval. Zero, the
 	// default, means a canvas is only ever photographed because of something
@@ -196,6 +194,11 @@ type Tab struct {
 	// frame itself — which is what survives a navigation. ctxFrames says which
 	// frame a world belongs to, and is the only way back from an agent's message
 	// to the document it describes. See frames.go.
+	// spliceGen counts changes to what the client holds of this tab's frames.
+	// The integrity check reads it either side of its walk: a walk that spans a
+	// splice describes a document that never existed. See splicedFrames.
+	spliceGen atomic.Uint64
+
 	frames     map[string]*subFrame
 	framesByID map[string]*subFrame
 	ctxFrames  map[string]string

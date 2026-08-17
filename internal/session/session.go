@@ -57,6 +57,12 @@ type Session struct {
 	// spends the link on what is visible.
 	activeTab atomic.Uint32
 
+	// imgMu guards what this client has been given of the image cache. See
+	// mayShipImage.
+	imgMu    sync.Mutex
+	imgSent  map[string]bool
+	imgAsked map[string]bool
+
 	// events is the session's own story — resyncs, divergences, navigations,
 	// what the reader did — kept so a capture can say how the mirror got into
 	// the state it is in, which no snapshot of that state can.
@@ -466,33 +472,36 @@ func (s *Session) replayFrame(f *protocol.Frame) {
 	s.enqueue(outbound{ch: protocol.ChDom, tab: f.Tab, msg: msg}, false)
 }
 
-func (s *Session) enqueue(m outbound, dropIfOffline bool) {
+// enqueue queues a frame, and reports whether it took it. Expendable work is
+// dropped rather than waited for, and a caller that is keeping track of what
+// the client has been given needs to know the difference.
+func (s *Session) enqueue(m outbound, dropIfOffline bool) bool {
 	m.dropIfOffline = dropIfOffline
 	if dropIfOffline && !s.Online() {
-		return
+		return false
 	}
 	q := s.sendQ[m.ch.Priority()]
 	if q.push(m) {
 		s.nudge()
-		return
+		return true
 	}
 	// A full queue means the link cannot keep up. Media is expendable;
 	// anything else is worth blocking the producer for a moment.
 	if dropIfOffline {
-		return
+		return false
 	}
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case <-s.closed:
-			return
+			return false
 		case <-deadline:
 			s.log.Warn("outbound queue stalled", "channel", m.ch.String(), "tab", m.tab)
-			return
+			return false
 		case <-time.After(10 * time.Millisecond):
 			if q.push(m) {
 				s.nudge()
-				return
+				return true
 			}
 		}
 	}
@@ -567,6 +576,86 @@ func (s *Session) WantImage(tab uint32, req mirror.ImageRequest) {
 	})
 }
 
+/*
+mayShipImage says whether this client still needs the bytes behind a key.
+
+An image is announced by key and shipped once, and the client keeps it in a
+cache of its own that a new document does not empty — the key is a hash of the
+content, so a picture that survives a navigation survives it under the same
+name. The pipeline does not know any of that: it ships the bytes of any
+above-the-fold key it already holds every time a snapshot submits it, and a
+snapshot is submitted on every resync.
+
+Which makes it §37's shape exactly. A client that is behind is
+resynced; the resync re-announces the document; the document re-submits its
+images; and every picture above the fold is sent again, in full, to a client
+that has had them all along — down the link that made it late in the first
+place. The bigger the page, the more the repair costs, and the cost lands
+exactly where there is least room for it.
+
+So the session keeps the ledger the pipeline cannot: keys this client has
+already been given. A key on it is not sent again — unless the client asks,
+which is the one thing that means its own cache no longer has it. That path is
+`Want`, it was already the client's way of saying so, and nothing here changes
+it.
+*/
+func (s *Session) mayShipImage(hash string) bool {
+	if hash == "" {
+		return true
+	}
+	s.imgMu.Lock()
+	defer s.imgMu.Unlock()
+	// Asked for: the client's cache has lost it, whatever the ledger says.
+	return s.imgAsked[hash] || !s.imgSent[hash]
+}
+
+// noteImageShipped records a key the link actually took. Deliberately not
+// recorded when the queue drops it: media is expendable, and a ledger that
+// counts a dropped push as delivered turns "the reader waits a moment longer"
+// into "the picture never comes".
+func (s *Session) noteImageShipped(hash string) {
+	if hash == "" {
+		return
+	}
+	s.imgMu.Lock()
+	defer s.imgMu.Unlock()
+	delete(s.imgAsked, hash)
+	s.noteImageSent(hash)
+}
+
+// imageWanted records that the client has asked for these keys, so the answer
+// reaches it even though it has had them before.
+func (s *Session) imageWanted(hashes []string) {
+	s.imgMu.Lock()
+	defer s.imgMu.Unlock()
+	if s.imgAsked == nil {
+		s.imgAsked = make(map[string]bool, len(hashes))
+	}
+	for _, h := range hashes {
+		if h == "" {
+			continue
+		}
+		s.imgAsked[h] = true
+		delete(s.imgSent, h)
+	}
+}
+
+// imagesRemembered bounds the ledger. A session that has seen this many
+// distinct images has browsed for a long time, and forgetting the lot costs one
+// round of re-sends rather than unbounded memory.
+const imagesRemembered = 8192
+
+// noteImageSent records a key as delivered. Called with imgMu held.
+func (s *Session) noteImageSent(hash string) {
+	if s.imgSent == nil {
+		s.imgSent = make(map[string]bool, 64)
+	}
+	if len(s.imgSent) >= imagesRemembered {
+		s.imgSent = make(map[string]bool, 64)
+	}
+	s.imgSent[hash] = true
+}
+
 // backloggedFrames is how many queued frames mean the link is behind.
 //
 // Not zero: a queue with a frame or two in it is a queue doing its job. This
@@ -594,6 +683,9 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 	if !s.worthSending(protocol.ChMedia, protocol.TypeImageData, tab) {
 		return
 	}
+	if !s.mayShipImage(data.Hash) {
+		return
+	}
 	f, err := protocol.NewFrame(protocol.TypeImageData, tab, data)
 	if err != nil {
 		return
@@ -604,7 +696,9 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 	}
 	// Each image is its own stream: independently cancellable, and incapable of
 	// head-of-line-blocking a DOM diff.
-	s.enqueue(outbound{ch: protocol.ChMedia, tab: tab, msg: msg, object: true}, true)
+	if s.enqueue(outbound{ch: protocol.ChMedia, tab: tab, msg: msg, object: true}, true) {
+		s.noteImageShipped(data.Hash)
+	}
 }
 
 // ------------------------------------------------------------------- tabs
@@ -1214,6 +1308,11 @@ func (s *Session) checkTab(id uint32, ts *tabState) {
 	cp, err := ts.tab.Checkpoint(ctx)
 	cancel()
 	if err != nil {
+		// Said out loud. A check that cannot take its own measurement does
+		// nothing, and doing nothing quietly is indistinguishable from finding
+		// nothing wrong — which is the difference between a mirror that is
+		// watched and one that only looks like it is.
+		s.log.Debug("integrity check could not measure the page", "tab", id, "err", err)
 		return
 	}
 	if cp.Hash == mirror.EmptyDocHash {
@@ -1536,6 +1635,7 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return err
 		}
 		if s.mgr.images != nil {
+			s.imageWanted(w.Hashes)
 			s.mgr.images.Want(f.Tab, w.Hashes)
 		}
 	case protocol.TypeAdapterCmd:

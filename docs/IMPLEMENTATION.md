@@ -1347,6 +1347,70 @@ asset that is only ever asked for once has no second chance to paper over a
 race, and this path has three of those (background images, webfonts, and now
 region shots when a push is dropped).
 
+**And an asset pushed once must not be pushed again.** The other half of the
+same path had the opposite fault. An above-the-fold picture is shipped unasked
+the moment its key is known, and the pipeline ships it again — the whole of it —
+every time a snapshot submits that key. A snapshot is submitted on every resync,
+so a client that had fallen behind was answered with the repair *and* with every
+picture above the fold, in full, down the link that had made it late. The client
+needed none of it: images live in a cache keyed by content hash, a resync
+neither empties that cache nor clears what the client has already asked for, and
+the pictures were still on screen throughout.
+
+The pipeline cannot know that — it is shared by every session and knows keys,
+not clients — so the session keeps the ledger instead: the keys this client has
+been given. A key on it is not sent again, and `Want` takes it off, because a
+client asking for a hash is the one signal that means its own cache no longer
+has it. That leaves the failure this must not trade for — a picture withheld
+from a client that needs it — resting on a path the client already had and uses.
+The dead option it replaced said something similar and did nothing:
+`IdleSnapshotAfter` was documented as re-snapshotting a silent page for a client
+that asked, and was read by nothing, `planResync` having decided that from ring
+coverage since before it was written.
+
+**What the check does while a page acquires frames, measured rather than
+assumed.** Chaining the hash across agents (§11f) made one measurement into a
+walk: the page, then every mirrored frame, then the sequence number. Three
+things about that were worth establishing rather than reasoning about, because
+the guess was wrong twice. The walk is cheap — six milliseconds on a page
+holding six cross-origin frames, being round trips to agents that are already
+running rather than work. A check is paced by the client's acknowledgement, not
+by the ticker: it anchors to a sequence number and waits for the client to
+report its hash for that one, so on a quiet page a check costs an ack interval,
+and at the real cadence of thirty seconds that is invisible. And a page whose
+frames are still arriving is checked, concludes, and is not reported as
+diverged — `TestTheCheckKeepsWorkingWhileFramesArrive` holds all of that down.
+
+**A walk that spans an arrival describes no document at all.** The walk asks each
+agent in turn and reads the sequence number when it has them all, which leaves
+two ways to hash something other than what the client holds. A frame that has
+been adopted and not yet spliced is a document the client has never been sent,
+and hashing it reports a divergence against nodes nobody sent. A frame that
+splices *during* the walk has put its document on the wire behind it, so the
+sequence number just read counts nodes that none of the hashes covered. Either
+way the check says the mirror is wrong when what happened is that a frame
+arrived, and the answer to a divergence is the whole document, again, over the
+link.
+
+So the walk now visits exactly the frames the client has, and a counter says
+whether that set held still: a generation that moved between the first agent and
+the sequence number means the measurement describes a document that never
+existed, and the check reports no measurement rather than a divergence.
+
+This one was found the honest way round, and only just. It was written down here
+first as a known, rare, self-healing wrong answer, because every fixture built to
+provoke it deliberately was defeated by how fast the walk is — six milliseconds
+on a page holding six frames. It reproduced on the next full-suite run at
+`-parallel 8`, where eight browsers make the walk slow enough to span a splice,
+and the test that had been passing all along printed exactly what it was written
+to print. The lesson is about the fixture rather than the fix: a race that will
+not reproduce on an idle machine may only need the machine to be busy, which is
+the one condition CI has and a developer's laptop does not.
+
+What also changed is that a measurement which cannot be taken now says so. It
+used to return in silence, and a check that quietly does nothing reads exactly
+like a check that passed.
+
 ### 23. Bookmarks are a navigation surface, not a list that gets written to
 
 The design asks for bookmarks in one clause of R5, beside tabs and the URL bar,

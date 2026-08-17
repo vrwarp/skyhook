@@ -1087,6 +1087,19 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, lateUpgradePage)
 	})
+	// A picture at the top of the page, which is what makes it above the fold
+	// and so shipped unasked. Everything below the fold waits to be asked for,
+	// and a client that has already asked does not ask twice — so a page whose
+	// pictures are all below the fold cannot tell whether a resync re-sent
+	// them, and would answer this question by not posing it.
+	mux.HandleFunc("/hero-image", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Hero</title></head>
+			<body style="margin:0">
+			<img id="hero" src="/pixel.png" width="320" height="200" alt="the picture at the top">
+			<h1>the page with a picture at the top</h1>
+			</body></html>`)
+	})
 	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
@@ -1498,6 +1511,26 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			  <iframe id="launcher" width="320" height="200" style="border:0"
 			    src="`+widget+`"></iframe>
 			</div>
+			</body></html>`)
+	})
+	// A page that keeps acquiring cross-origin frames, one after another. The
+	// integrity check hashes the page and then each frame in turn, so a page
+	// where that set keeps changing is the page that says whether the check
+	// still works while it does.
+	mux.HandleFunc("/late-frames", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Late frames</title></head>
+			<body><h1>the page that keeps acquiring frames</h1>
+			<script>
+			  var made = 0;
+			  var add = setInterval(function () {
+			    if (++made > 6) { clearInterval(add); return; }
+			    var f = document.createElement('iframe');
+			    f.width = 200; f.height = 80; f.style.border = '0';
+			    f.src = '`+cdn.URL+`/widget-app.html?n=' + made;
+			    document.body.appendChild(f);
+			  }, 250);
+			</script>
 			</body></html>`)
 	})
 	// A frame whose document lays out taller than the box the page gave it.
