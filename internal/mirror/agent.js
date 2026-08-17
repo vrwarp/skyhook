@@ -18,17 +18,59 @@
   'use strict';
   if (globalThis.__skyhook && globalThis.__skyhook.version === 1) return;
 
-  // Only the top-level document is mirrored. The host installs this script into
-  // every frame's isolated world, so without this check a subframe runs its own
-  // agent and sends a snapshot of the subframe's document on the tab's stream —
-  // and the client, which has no idea a frame produced it, replaces the whole
-  // page with the contents of the frame. Same-origin frames are inlined by the
-  // top-level agent below; cross-origin frames cannot be reached at all, and a
-  // frame that mirrors itself into the wrong document is worse than an empty
-  // box.
+  /*
+   * Which documents mirror themselves, and which are mirrored for them.
+   *
+   * This script runs in the isolated world of every frame the host can reach,
+   * so a rule is needed: without one, a subframe would send a snapshot of
+   * itself on the tab's stream and the client — which cannot tell one document
+   * from another — would replace the whole page with the contents of a frame.
+   *
+   * The rule is `frameElement`. A same-origin frame can see the element that
+   * holds it, and so can the agent above it: that document is read and inlined
+   * by the agent that owns the page, and this one has nothing to do. A frame
+   * whose parent is another origin sees null, and nothing above it can read it
+   * either — so it mirrors itself, and the host splices the result into the
+   * parent's document at the element that stands for the frame.
+   *
+   * Such a frame does not know what it is called or where it hangs, so it says
+   * hello and waits: the host answers with `adopt`, which hands it a *slot* —
+   * the id space its nodes live in — and starts it. The two shapes of frame
+   * this covers arrive by different roads and meet here. One is a frame in a
+   * process of its own, which the host had to attach to as a target before this
+   * script could run in it at all. The other is a frame that is cross-origin
+   * but same-site — mail.google.com holding ogs.google.com, which is most of
+   * the real ones — where Chromium keeps one process, no target is ever
+   * created, and this script was already running with nothing to do.
+   */
   var isTop = true;
   try { isTop = globalThis.top === globalThis.self; } catch (e) { isTop = false; }
-  if (!isTop) return;
+  var isFrameRoot = true;
+  try { isFrameRoot = !globalThis.frameElement; } catch (e) { isFrameRoot = true; }
+  if (!isTop && !isFrameRoot) return;
+  var SLOT = 0;
+  var adopted = isTop;
+
+  /*
+   * Ids are namespaced by slot, so two agents feeding one client can never
+   * collide. The client, the Go replica and the integrity check all sort ids
+   * ascending and hash them in that order, which puts each frame's nodes in one
+   * contiguous run — so the hash of the whole mirror is each agent's hash
+   * chained into the next, in slot order, and nothing has to know how many
+   * agents there were.
+   *
+   * Every id stays inside 32 bits, which is not an implementation detail: the
+   * client encodes an id above 2^32-1 as a float, and the host's decoder
+   * refuses to put a float into an integer field and drops the frame whole.
+   * That is the bug `safeInt` exists for, and an id space wider than the wire
+   * would have brought it back as "clicks inside a frame do nothing".
+   *
+   * So the page keeps everything below 2^31 — two billion ids, which is more
+   * than a document that fits in memory will ever want — and the frames divide
+   * what is above it: 8 million ids each, 254 frames to a tab.
+   */
+  var FRAME_BASE = 2147483648;
+  var FRAME_SPAN = 8388608;
 
   var SEND = globalThis.__skyhookSend;
   if (typeof SEND !== 'function') {
@@ -88,6 +130,9 @@
   var FRAME_LABEL_MIN_W = 64, FRAME_LABEL_MIN_H = 32;
   var SENSITIVE_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i;
 
+  // Ids start inside this agent's slot; slot 0 is the top-level document, whose
+  // ids are exactly what they always were. A frame's slot arrives with adopt,
+  // before anything has been serialised.
   var nextId = 1;
   // A mirrored sub-document -> the shadow-root node id it was serialised into.
   // The CSS pass needs it to say which sheet a rule belongs to; without it the
@@ -135,6 +180,8 @@
   var liveWatch = new Map();
   // Elements the shadow sweep has already re-read once. See sweepShadowRoots.
   var shadowSwept = new WeakSet();
+  // Frames the host is mirroring with an agent of their own. See opaqueHost.
+  var mirroredFrames = new WeakSet();
   // The page's own name and address as the client last heard them. See
   // syncDocInfo: neither is a node, so neither has a mutation to ride on.
   var lastInfo = { url: '', title: '' };
@@ -420,6 +467,10 @@
    * failure the HUD makes elsewhere: this much did not come, and here is why.
    */
   function opaqueHost(el, box) {
+    // A frame the host has attached to is mirrored by an agent of its own, and
+    // its content is spliced in under this element. Naming it as missing would
+    // put a "not mirrored" panel on top of the thing it is mirroring.
+    if (mirroredFrames.has(el)) return '';
     try {
       if (el.contentDocument && el.contentDocument.documentElement) return '';
     } catch (e) { /* cross-origin: nothing to read, which is the point */ }
@@ -589,6 +640,10 @@
    * host discards would leave the two counting differently.
    */
   function syncDocInfo() {
+    // An attached frame's address and title are its own, and the tab wears the
+    // top-level document's. A frame reporting them would rename the tab to
+    // whatever a widget calls itself.
+    if (SLOT) return false;
     var url = location.href;
     var title = document.title || '';
     if (url === lastInfo.url && title === lastInfo.title) return false;
@@ -2120,6 +2175,11 @@
     var id = 0;
     var x = 0, y = 0;
     if (t === document || t === document.documentElement || t === document.body || !t.tagName) {
+      // An attached frame scrolling its own document is not the page scrolling:
+      // the client would take it for the mirror's own scroll position and throw
+      // the reader somewhere they never asked to be. What scrolls inside the
+      // frame is the frame's root, which the client scrolls on its own.
+      if (SLOT) return;
       x = globalThis.scrollX | 0; y = globalThis.scrollY | 0;
     } else {
       id = idOf.get(t) || 0;
@@ -2207,7 +2267,27 @@
     lastInfo = { url: location.href, title: document.title || '' };
 
     var rows = [];
-    serializeNode(document.documentElement, 0, rows);
+    if (SLOT) {
+      /*
+       * An attached frame mirrors itself into a root of its own, exactly as an
+       * inlined same-origin frame is mirrored into one: a document's stylesheet
+       * is written on the assumption that it governs a document, and flattened
+       * into the page's it would dress the page.
+       *
+       * The row says parent 0 — this agent has no idea what it hangs from — and
+       * the host rewrites that to the element in the parent's document that
+       * stands for this frame. Neither hash covers parents, so rewriting one on
+       * the wire is invisible to both ends; what matters is that the root is
+       * registered *here*, and so is counted by this agent's hash exactly as
+       * the client counts it.
+       */
+      var fragId = idFor(document);
+      rows.push([fragId, 0, KIND_FRAGMENT, -1, 0, null]);
+      docRoot.set(document, fragId);
+      serializeNode(document.documentElement, fragId, rows);
+    } else {
+      serializeNode(document.documentElement, 0, rows);
+    }
     // Handles to nodes this snapshot did not reach are dead. An iframe that
     // navigated is the case that matters: its old document is discarded whole,
     // without a mutation record, so nothing ever called forget() on its nodes.
@@ -2339,6 +2419,61 @@
         tag: el.tagName, editable: isEditable(el),
         href: el.tagName === 'A' ? (el.href || '') : ''
       };
+    },
+    /*
+     * The id this agent has for a node it is handed, and 0 for one it has never
+     * serialised.
+     *
+     * The host calls this on the element that owns a cross-origin frame, by
+     * resolving the frame's owner into this world and asking. That id is what
+     * the frame's own document is spliced under, and there is no other way to
+     * learn it: CDP knows the element, and only the agent knows what the client
+     * calls it.
+     */
+    idOfNode: function (node) {
+      var id = idOf.get(node);
+      return id === undefined ? 0 : id;
+    },
+    /*
+     * Where a frame element's content begins, in this document's own viewport
+     * coordinates, and whether it is worth clicking into.
+     *
+     * A frame mirrored by its own agent measures everything against its own
+     * viewport, and the host replays input at a point in the top-level one. The
+     * difference is exactly this: the frame element's border-box origin plus
+     * its border and padding, added up the chain of documents above it.
+     */
+    frameOrigin: function (id) {
+      var el = byId.get(id);
+      if (!el || !el.getBoundingClientRect) return null;
+      var r = viewportRect(el);
+      return {
+        x: r.left + frameEdge(el, 'Left'),
+        y: r.top + frameEdge(el, 'Top'),
+        w: r.width, h: r.height
+      };
+    },
+    /*
+     * Marks a frame element as mirrored by an agent of its own, so the box for
+     * it stops saying that its content did not come. Reported straight away:
+     * the label is already on the client, and the panel it draws sits on top of
+     * the document about to be spliced in behind it.
+     */
+    mirroredFrame: function (id, yes) {
+      var el = byId.get(id);
+      if (!el) return false;
+      if (yes === false) {
+        mirroredFrames.delete(el);
+        boxDirty.add(el);
+        scheduleFlush(false);
+        return true;
+      }
+      mirroredFrames.add(el);
+      var state = boxWatch.get(el);
+      if (state !== undefined) boxWatch.set(el, state.split(' ')[0] + ' ');
+      pendingOps.push([3, id, intern(OPAQUE_ATTR), -1]);
+      scheduleFlush(false);
+      return true;
     },
     // shots lists the boxes the host has to photograph, because their content
     // is pixels rather than DOM: canvas, WebGL and video. Sorted largest
@@ -2621,15 +2756,25 @@
      * JavaScript is single-threaded, so nothing can change between the drain
      * and the hash.
      */
-    checkpoint: function () {
+    checkpoint: function (seed) {
       for (var i = 0; i < observers.length; i++) {
         var records = observers[i].takeRecords();
         if (records.length) handleMutations(records);
       }
       if (pendingOps.length || pendingImages.length) scheduleFlush(true);
-      return { seq: seq, hash: api.docHash() };
+      return { seq: seq, hash: api.docHash(seed) };
     },
-    docHash: function () {
+    /*
+     * The hash of what this agent holds, continuing from `seed`.
+     *
+     * One tab can be fed by several agents — the page and every cross-origin
+     * frame the host attached to — and the client hashes the one document they
+     * add up to, in ascending id order. Ids are namespaced by slot, so that
+     * order visits each frame's nodes in one run, and the whole hash is each
+     * agent's chained into the next. Passing nothing starts from the FNV basis,
+     * which is what a page with no attached frames has always computed.
+     */
+    docHash: function (seed) {
       // Cheap whole-document fingerprint for divergence checks. Two details
       // decide whether this is worth anything at all, because the Go replica
       // and the TypeScript patcher have to reproduce it exactly:
@@ -2642,7 +2787,7 @@
       //     ones are silently rounded away — so this returned a number no exact
       //     uint32 implementation could ever produce, and the integrity check
       //     re-snapshotted every document on the planet every thirty seconds.
-      var h = 0x811c9dc5;
+      var h = seed === undefined || seed === null ? 0x811c9dc5 : (seed >>> 0);
       var ids = Array.from(byId.keys()).sort(function (a, b) { return a - b; });
       for (var k = 0; k < ids.length; k++) {
         var id = ids[k];
@@ -2663,14 +2808,44 @@
     }
   };
 
+  /*
+   * adopt hands a frame the id space its nodes live in, and starts it.
+   *
+   * Ids are namespaced by slot so that two agents feeding one client can never
+   * collide. Every hash on both sides visits ids in ascending order, which puts
+   * each frame's nodes in one contiguous run — so the hash of the whole mirror
+   * is each agent's chained into the next, in slot order, and nothing has to
+   * know how many agents there were. 2^32 ids per frame, and a JavaScript
+   * number holds every one of them exactly up to slot 2^21.
+   */
+  api.adopt = function (slot) {
+    if (adopted || !(slot > 0)) return false;
+    adopted = true;
+    SLOT = slot;
+    nextId = FRAME_BASE + (SLOT - 1) * FRAME_SPAN + 1;
+    startWhenReady();
+    return true;
+  };
+
   Object.defineProperty(globalThis, '__skyhook', { value: api, configurable: true });
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start, { once: true });
+  function startWhenReady() {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start, { once: true });
+    } else {
+      start();
+    }
+  }
+
+  if (adopted) {
+    startWhenReady();
   } else {
-    start();
+    // Nothing above this frame can read it, and it does not know what the
+    // client calls the box it sits in. The host does; this says where to look.
+    SEND(JSON.stringify({ t: 'frame', url: location.href }));
   }
   globalThis.addEventListener('load', function () {
+    if (!adopted) return;
     scheduleCSS();
     scheduleFlush(false);
   }, { once: true });

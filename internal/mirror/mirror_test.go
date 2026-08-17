@@ -838,3 +838,63 @@ func TestLocalFragmentReferencesAreNotAssets(t *testing.T) {
 		t.Errorf("the queued fetch was %q", reqs[0].URL)
 	}
 }
+
+/*
+A bad link paces the repair of a missing frame; it never calls it off.
+
+This was a real regression, and the shape of it is worth keeping a test on. A
+frame the client does not have is a hole in the document, and the reconciler is
+the only thing that closes it. Skipping the re-send while the link is behind
+looks like restraint and is not: the missing frame is itself a reason the
+integrity check keeps resyncing, so the backlog suppresses the repair and the
+absent repair sustains the backlog. Both cross-origin frame tests spent three
+minutes on that deadlock.
+*/
+func TestABacklogPacesAFrameResendRatherThanStoppingIt(t *testing.T) {
+	frames := []*subFrame{{slot: 1}, {slot: 2}, {slot: 3}}
+	now := time.Now()
+
+	if due := framesDue(frames, false, now); len(due) != 3 {
+		t.Errorf("with room on the link, %d of 3 frames were asked", len(due))
+	}
+	due := framesDue(frames, true, now)
+	if len(due) != 1 {
+		t.Fatalf("with the link behind, %d frames were asked, want exactly one", len(due))
+	}
+	if due[0].slot != 1 {
+		t.Errorf("the one frame asked was slot %d, want the first", due[0].slot)
+	}
+}
+
+// The states that mean "not now": on the client already, gone with its
+// document, holding a snapshot that is waiting on the parent rather than on
+// being asked, and one that ran out of retries and is being left alone.
+func TestAFrameIsNotAskedTwiceForTheSameThing(t *testing.T) {
+	now := time.Now()
+	spliced := &subFrame{slot: 1, spliced: true}
+	gone := &subFrame{slot: 2, gone: true}
+	holding := &subFrame{slot: 3, pending: &agentSnapshot{}}
+	quiet := &subFrame{slot: 4, quietUntil: now.Add(30 * time.Second)}
+	ready := &subFrame{slot: 5}
+
+	due := framesDue([]*subFrame{spliced, gone, holding, quiet, ready}, false, now)
+	if len(due) != 1 || due[0].slot != 5 {
+		t.Fatalf("frames asked = %v, want only the one with nothing else in hand", slotsOf(due))
+	}
+
+	// A frame left alone is left alone for a while, not for good: nothing else
+	// will ever ask for it, so if this never came back the frame would stay a
+	// labelled box for the life of the page.
+	later := framesDue([]*subFrame{quiet}, false, now.Add(31*time.Second))
+	if len(later) != 1 {
+		t.Error("a frame that ran out of retries was never asked again")
+	}
+}
+
+func slotsOf(fs []*subFrame) []int64 {
+	out := make([]int64, 0, len(fs))
+	for _, f := range fs {
+		out = append(out, f.slot)
+	}
+	return out
+}

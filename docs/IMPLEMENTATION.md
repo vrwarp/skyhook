@@ -421,10 +421,154 @@ mark is kept current by the same watch as the box, because a frame is readable
 `about:blank` until the moment it is not. `TestPWASaysWhichFrameItCouldNotRead`
 covers it.
 
-Mirroring what is *inside* such a frame is a different piece of work: it needs
-the host to attach to the frame's own target, an agent per frame, and an id
-space and hash contract that span the two, since the integrity check compares
-one hash for the whole tab.
+That label is now the fallback rather than the answer: §11f mirrors the frame
+itself, and the mark is cleared on any frame the host has an agent in. What is
+left wearing it is a frame nothing could reach — one nested past the depth limit,
+or a target that would not take the agent.
+
+### 11f. A cross-origin frame, mirrored by an agent of its own
+
+The label above was honest and no use to a reader who wanted the app launcher.
+So a frame nothing can read now reads itself: the agent runs in it, in an
+isolated world, and the host splices what comes back into the document above it.
+`internal/mirror/frames.go` is the whole of it. Five things had to be true.
+
+**Every frame that needs one gets an agent — and the interesting half is not the
+one the design predicted.** A frame on another *site* is a target of its own, in
+a process of its own, and the host has to attach to that target with
+`Target.setAutoAttach` before any script of ours runs in it. A frame that is
+cross-origin but *same-site* is not a target at all: mail.google.com holding
+ogs.google.com is one process, and no attachment event will ever fire. That is
+the shape of nearly every real one — the app launcher included — so a mirror
+that followed only targets would have missed the bug this was written for. It
+did, in fact, on the first run of the tests: nothing attached, because
+`127.0.0.1:A` and `127.0.0.1:B` are the same site too.
+
+Both are covered by having the frame speak first. The tab's own script already
+runs in every frame of its process, so the test is local: a document whose
+`frameElement` is null has a parent that cannot read it, and nothing above it is
+mirroring it. Such a frame announces itself and waits; the host answers with
+`adopt`, which hands it a slot and starts it. A same-origin frame sees its own
+element, says nothing, and is inlined by the agent above it exactly as before.
+
+**Ids are namespaced, inside 32 bits.** Each frame allocates in a block of its
+own, so two agents cannot collide. The width is not arbitrary: the client
+encodes an id above 2^32-1 as a float and the host's decoder refuses to put a
+float in an integer field, dropping the frame whole — the bug `safeInt` exists
+for. The first cut used 2^32 ids per frame and brought it straight back, as
+`node 4294967295 not found landside` on every click inside a frame. The page now
+keeps everything below 2^31 and the frames divide what is above: 8M ids each,
+254 to a tab.
+
+**One client table, several interning agents.** Strings travel as indices into a
+table the client appends to, which is exactly right while one agent is writing.
+A second agent numbers from zero in a table of its own, so its `ref: 0` means
+its first string and arrives at a client whose zero is the page's. Nothing
+errors — the indices are all in range — and the frame renders in the page's
+words. The first tags of any HTML document are the same everywhere, so it even
+looked like it was working: `<html><head>`, and then the rest of the document
+silently missing. The host now maps each agent's table onto the client's and
+rewrites every ref it forwards (`internal/mirror/strings.go`). The client is
+unchanged.
+
+**The stream has one writer's worth of order.** Sequence numbers are consecutive
+and the client drops a batch with a gap in front of it, so taking the next number
+and putting the frame on the wire has to be one step. With the page's agent and
+every frame's each on a queue of its own, it was not. Emission is now serialised
+on the tab, and splicing is serialised per frame and made idempotent — two
+concurrent splices of one document built it twice under the same ids, leaving
+the client's map pointing at nodes that were not the ones in its tree, which
+renders as two half-documents inside one box.
+
+**The hash chains.** §12's three-way contract assumed one landside writer. The
+integrity check now asks each agent in slot order for the hash of what it holds,
+seeded with the answer from the one before; ids sort by slot, so that is exactly
+the order the client hashes in. The sequence number the client is checked against
+is the tab's, taken after fencing every event queue (`cdp.Client.Fence`) —
+reading it before the queues had drained named a frame the client already had
+while the hash described the document one frame later, which is a divergence
+report that is only a race with itself.
+
+**An insert waits for its parent instead of being dropped.** The client used to
+throw away an insert addressed at a node it did not have, silently, which is
+exactly what a frame's document is when it overtakes the element it hangs from —
+and the host had no way to know, so it believed the frame was mirrored while the
+reader looked at an empty box. Ordering is the client's to know, because the
+client is the only one that knows what it has; it holds such an insert and
+applies it when the parent arrives. (One more of these was self-inflicted: the
+frame's parent was looked up over CDP while the tab's lock was held, which
+stalled every frame waiting to go out behind a browser round trip. Batches that
+took ninety seconds take twenty-three.)
+
+**It converges on a clock, not on a chain of events.** Splicing a frame depends
+on a run of things going right in an order nobody controls: the frame announces,
+the page serialises the element it hangs from, the snapshot arrives, the insert
+goes out. Each step got a retry, and each retry hung off an event — the parent
+emitting again, a backoff timer, the frame speaking. Every one of those was
+reached by a path that sometimes did not happen, and the symptom was always
+identical: a frame adopted, mirroring, sending mutations landside, and simply
+absent on the client until the integrity check noticed thirty seconds later and
+resynced the whole tab. Which is to say the *recovery* worked and the arrival did
+not. So the last piece is a reconciler: every two seconds the tab compares what
+it is mirroring against what the client has, and asks any frame that is out of
+place to say itself again. One CDP call per frame that is wrong, none for a frame
+that is right, and every race above collapses into the same convergent loop.
+
+**Eight levels down, once the levels stopped taking each other away.** This was
+capped at one for a while and the cap was honest: the levels below the first
+arrived and then went. The cause is worth keeping. Splicing a frame replaces its
+subtree, so the client drops what was inside it — including any frame spliced in
+there — while those frames' agents saw nothing happen at all and went on
+describing a document nobody had. The reconciler could not help: it looks for
+frames that believe they are absent, and these believed they were fine. So a
+splice now invalidates everything mirrored inside it and asks each of those
+frames to say itself afresh, which is the whole of what deep nesting needed.
+
+**A bad link paces the repair; it never calls it off.** The reconciler re-sends a
+frame's whole document, and a page is re-snapshotted on every resync, so a page
+with several frames in it can put all of them onto a queue the reader is already
+waiting on. Gating that on the emitter's backlog signal — the trade `shotSoon`
+makes for a screenshot — looks like the same restraint and is not: a screenshot
+is worth skipping because something else will ask for it, and a missing frame is
+a hole in the document that nothing else closes. Worse, the hole is itself a
+reason the integrity check keeps resyncing, so the backlog suppresses the repair
+and the absent repair sustains the backlog. Both cross-origin frame tests spent
+three minutes in that deadlock, and the fast end-to-end job, which had been
+green, lost them too. What the link buys is pacing: every frame at once when
+there is room, one per two-second tick when there is not (`framesDue`), which
+converges on any link and floods none. A re-splice also asks only the frames
+inside the one it replaced — asking the whole tab made a page eight frames deep
+send forty snapshot requests in fifty milliseconds, each splice re-asking every
+frame not yet spliced.
+
+**And the test that fails is not always the code that is wrong.** The two tests
+that failed over the emulated link were waiting for a sentence the fixture's
+widget painted over 1.2 seconds after loading. A client that has not rendered
+the frame by then is waiting for text that exists nowhere, and 250 kbps
+guarantees it — as does a loaded machine, which is how it finally reproduced
+locally. The frame now leaves its first line alone and changes its mind on a
+line of its own, repeatedly, saying how many times; the test reads the count it
+can already see and waits for a higher one. That is the general shape for
+"followed a change" over a link with no promised speed: assert on something
+monotonic that the client itself has seen, never on a state the page passes
+through.
+
+rrweb has this bug open against its own cross-origin recording — "when the
+parent is reset during its FullSnapshot, the iframe context is wiped, and
+subsequent child events can't be played in the DOM correctly" — and it is harder
+there: a recorder living inside a page cannot ask a child frame to re-snapshot.
+Driving the browser from outside is what makes the fix available here.
+
+Eight is measured — nine documents deep, every level arriving and staying — and
+bounded by what a click costs: one round trip per level to walk a rectangle up
+into the top-level viewport.
+
+Also not covered: a frame the page hides and shows repeatedly pays a re-snapshot
+each time, for the same reason; and a closed shadow root inside such a frame is
+as invisible as it is anywhere else. `test/foreignframe_test.go` covers the
+document, its scoping, its later mutations, a click landing on a control inside
+it, and the hash agreeing; `TestPWAMirrorsFramesInsideFramesAndSaysWhereItStops` covers
+the floor.
 
 ### 11d. The frame's box was one of five, and they now share a sweep
 

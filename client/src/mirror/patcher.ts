@@ -142,6 +142,8 @@ export class Patcher {
    * second one would come until the reader did something.
    */
   private shots = new Map<number, ImageMeta>();
+  /** Inserts waiting for the node they hang from. See holdOrphan. */
+  private orphans = new Map<number, Mutation['ops'][number]>();
 
   constructor(doc: Document, hooks: PatcherHooks = {}) {
     this.doc = doc;
@@ -178,6 +180,7 @@ export class Patcher {
     this.flags = new Map();
     this.images = new Map();
     this.shots = new Map();
+    this.orphans = new Map();
     this.seq = 0;
     for (const im of snap.images) this.images.set(im.hash, im);
 
@@ -226,6 +229,7 @@ export class Patcher {
     body.replaceChildren(container);
     for (const sc of snap.scoped ?? []) this.setScopedCSS(sc.root, sc.rules);
     this.doc.title = snap.title || this.doc.title;
+    this.flushOrphans();
     this.hooks.onApplied?.(0);
   }
 
@@ -237,7 +241,10 @@ export class Patcher {
       switch (op.op) {
         case OpCode.Insert: {
           const parent = this.nodes.get(op.parent);
-          if (!parent) break; // parent already gone; a resync will fix it
+          if (!parent) {
+            this.holdOrphan(op);
+            break;
+          }
           if (this.isOwnedNode(parent)) {
             this.hooks.onDeferred?.(op);
             break;
@@ -328,9 +335,51 @@ export class Patcher {
           break;
       }
     }
+    this.flushOrphans();
     this.seq = seq;
     this.hooks.onApplied?.(seq);
     return true;
+  }
+
+  /*
+   * An insert whose parent is not here yet, kept rather than dropped.
+   *
+   * This used to break quietly and cost a whole document. A tab is described by
+   * the page's agent and by one per cross-origin frame it holds, each on a
+   * queue of its own, so a frame's document can arrive before the element it
+   * hangs from — and the batch that carried it was thrown away with nothing
+   * anywhere to say so. Landside believed the frame was mirrored, the frame's
+   * agent went on sending changes to a subtree that was never built, and the
+   * reader saw an empty box until the integrity check noticed thirty seconds
+   * later and resynced the tab.
+   *
+   * Ordering is the client's to know, because the client is the only one that
+   * knows what it has. So the insert waits for its parent, and the arrival of
+   * any node is what wakes it.
+   */
+  private holdOrphan(op: Mutation['ops'][number]): void {
+    if (!op.parent || !op.nodes?.length) return;
+    // A page cannot be waiting on many of these: it is one per frame that is
+    // still arriving, and a parent that never comes is a subtree nothing is
+    // mirroring. The cap is what keeps a broken stream from being a leak.
+    if (this.orphans.size >= 32) {
+      const oldest = this.orphans.keys().next();
+      if (!oldest.done) this.orphans.delete(oldest.value);
+    }
+    this.orphans.set(op.parent, op);
+  }
+
+  /** Applies the held inserts whose parents have since arrived. */
+  private flushOrphans(): void {
+    if (!this.orphans.size) return;
+    for (const [parentID, op] of [...this.orphans]) {
+      if (!this.nodes.has(parentID)) continue;
+      this.orphans.delete(parentID);
+      // Sent again in the meantime: building it twice would leave this map
+      // pointing at nodes that are not the ones in the tree.
+      if (this.nodes.has(op.nodes[0].id)) continue;
+      this.applyMutation({ strings: [], docHash: 0, flush: false, ops: [op] }, this.seq);
+    }
   }
 
   private isOwnedNode(node: Node): boolean {
