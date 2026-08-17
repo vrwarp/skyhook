@@ -223,19 +223,19 @@ Every milestone is measured against an emulated 1.2 s RTT / 250 kbps / 2% loss
 link, not against a LAN:
 
 ```sh
-make test-slow            # shape four lanes, run the suite four-wide, unshape
+make test-slow            # shape eight lanes, run the suite eight-wide, unshape
 ```
 
-which is this, and `LANES=8 make test-slow` to widen it:
+which is this, and `LANES=4 make test-slow` on a smaller box:
 
 ```sh
-sudo scripts/netem.sh lanes 45123 4 1200 250 2   # shape only the Skyhook ports
-SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 SKYHOOK_TEST_PORTS=45123-45126 \
-  go test ./test -parallel 4 -v
+sudo scripts/netem.sh lanes 45123 8 1200 250 2   # shape only the Skyhook ports
+SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 SKYHOOK_TEST_PORTS=45123-45130 \
+  go test ./test -parallel 8 -v
 sudo scripts/netem.sh down
 ```
 
-Four *lanes*, not one shaped port shared four ways. A netem qdisc's rate is a
+Eight *lanes*, not one shaped port shared eight ways. A netem qdisc's rate is a
 budget for everything queued into it, so tests sharing a port would divide the
 250 kbit between them and finish no sooner than they would have one at a time.
 Each lane is a netem qdisc of its own, and a test leases one for its lifetime —
@@ -247,6 +247,10 @@ A test here is almost entirely waiting on a 1.2 s round trip, using neither the
 link nor the CPU while it does, and tests that are waiting can wait together.
 Every test already builds its own Chromium, fixture servers, manager and
 temporary directories, so the shaped port was the only thing they ever shared.
+
+That the lanes are independent rather than a shared link in disguise is
+measurable: at four lanes the median test took 1.01x as long as it did running
+alone. The CI step went from 37m06s to 9m46s.
 
 `sudo scripts/netem.sh outage 60` drops the link entirely for a minute, which
 is how the reconnect-and-resync path is exercised. It replaces the whole qdisc,

@@ -14,15 +14,25 @@ build:
 test:
 	go test -race -count=1 $$(go list ./... | grep -v '/test$$')
 
-# How many e2e tests run at once. Each owns a Chromium and the PWA ones own
-# two, so the ceiling is the box; under test-slow it must also equal the number
-# of shaped lanes, because that is what a test leases.
-LANES ?= 4
+# How many e2e tests run at once, and so how many shaped lanes test-slow builds
+# — a test leases one, so the two numbers have to match.
+#
+# Eight because the shaped suite is waiting, not working: measured over the
+# emulated link, the tests total ~2135s of wall clock but only ~439s of that is
+# CPU, and eight of them at once need about 1.6 of the runner's 4 cores. The
+# unshaped suite already sustains 2.66 cores, so this is headroom that has been
+# demonstrated rather than hoped for. Past eight the returns thin out: the
+# longest single test is ~91s and becomes the floor.
+LANES ?= 8
 LANE_BASE ?= 45123
 
 # Needs a Chromium; skips without one unless SKYHOOK_E2E=1.
+#
+# Four rather than $(LANES): nothing is shaped here, so these tests are working
+# rather than waiting and the runner's cores are the limit. At four they
+# already keep 2.66 of them busy, and oversubscribing buys little.
 test-e2e:
-	SKYHOOK_E2E=1 go test -count=1 -timeout 20m -parallel $(LANES) -v ./test
+	SKYHOOK_E2E=1 go test -count=1 -timeout 20m -parallel 4 -v ./test
 
 # The link the whole project exists for: 1.2s RTT, 250 kbps, 2% loss.
 #
