@@ -273,6 +273,9 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 	for i := range s.sendQ {
 		s.sendQ[i] = newFairQueue(1024)
 	}
+	// Ctrl is the exception: small frames whose order across tabs is the plane
+	// side's only way of knowing which tab it asked for first. See fairQueue.
+	s.sendQ[protocol.ChCtrl.Priority()] = newOrderedQueue(1024)
 	go s.writer()
 	go s.integrityLoop()
 	return s, nil

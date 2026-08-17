@@ -2504,10 +2504,21 @@ background tab can be reached — makes the spinner on a loading row the target
 that ends it. What has landed stays: the mirror is patched rather than replaced,
 so a page stopped half-drawn leaves a half-drawn page and not a blank one.
 
-Two things the netem run found that a loopback run could not, both of them
-consequences of the drop above rather than of the capture. **A tab being opened
-looks exactly like a tab that has closed** from the emit path: neither has a
-tabState, because a tab starts mirroring inside `mirror.NewTab` — the moment its
+Three things the netem run found that a loopback run could not, and the first is
+the one worth remembering: **fairness is not free where order is the message.**
+Rotating between tabs inside the ctrl class reordered the *announcements* of two
+tabs opened a moment apart — the newer one was the active one, so it jumped the
+queue — and the shell decides which tab to put the reader in from exactly that
+order, because the server has no opinion about focus and never has. The reader
+asked for a saved page and was left in the empty tab they had opened before it.
+Nothing on ctrl is big enough to starve anything, so the class it buys the least
+in is the one it broke: ctrl keeps a single line now, still queued per tab so a
+close can take its frames out of it.
+
+The other two are consequences of the drop above rather than of the capture.
+**A tab being opened looks exactly like a tab that has closed** from the emit
+path: neither has a tabState, because a tab starts mirroring inside
+`mirror.NewTab` — the moment its
 agent is installed — and `OpenTab` has nothing to register until that returns.
 The frames in that window are the tab's whole first document, and dropping them
 left a tab acknowledging nothing for four minutes with an empty frame in front
@@ -2529,9 +2540,10 @@ where it mattered most.
 `internal/session/sched_test.go` pins the scheduling and the purge — that a tab
 which queued sixteen frames first does not get served completely first, that the
 active tab takes most of the link and still yields, that a tab's own frames keep
-their order, that closing takes back that tab's frames and nobody else's, that
-the only thing left for a closed tab is the close itself, and that ctrl traffic
-queued during an outage is still there when the link returns.
+their order, that ctrl keeps its order across tabs too, that closing takes back
+that tab's frames and nobody else's, that the only thing left for a closed tab
+is the close itself, and that ctrl traffic queued during an outage is still
+there when the link returns.
 `internal/session/inbound_test.go` pins the dispatch path: a tab stuck in a call
 that will not return does not stop another tab's work, a stop ends what the tab
 is doing without ending the tab, and a close ends it outright.
@@ -2543,8 +2555,10 @@ starvation test reports the read tab waiting behind sixteen frames, with the
 purge removed the close leaves all thirteen frames queued, with dispatch inline
 the blocked-tab test times out, without the interrupt the stop test waits out
 its thirty seconds on a page that never commits, without `opening` a tab being
-built loses both its snapshot and its state frame, and with `acked >= seq` alone
-a client that never heard the document is never repaired.
+built loses both its snapshot and its state frame, with `acked >= seq` alone a
+client that never heard the document is never repaired, and with ctrl rotating
+the second of two tabs is announced first — which is the netem failure, in three
+lines and without a browser.
 
 ## Measured results
 

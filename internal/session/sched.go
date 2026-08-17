@@ -17,6 +17,9 @@ type outbound struct {
 	object bool
 	// dropIfOffline marks traffic not worth queueing across an outage.
 	dropIfOffline bool
+	// at is the order this message was queued in, which is the order an ordered
+	// class hands it back in. See fairQueue.ordered.
+	at uint64
 }
 
 /*
@@ -47,6 +50,14 @@ definition not being watched and this link has nothing to spare. Not
 exclusively, though — a foreground tab that keeps producing would otherwise
 hold a background page at whatever fraction of itself it had arrived at,
 forever. After activeBurst frames the active tab yields one to the rotation.
+
+One class opts out: ctrl. Rotating there buys nothing — a tab state is a hundred
+bytes, and starvation is a problem about documents and images — and it costs
+something real, because the *order of the announcements* is how the plane side
+knows which tab to put the reader in. A shell that asks for two tabs and is told
+about them in the other order lands in the wrong one. So ctrl keeps a single
+line while still being a queue per tab, which is what lets closing a tab take
+its frames out of it.
 */
 type fairQueue struct {
 	mu    sync.Mutex
@@ -58,6 +69,12 @@ type fairQueue struct {
 	order   []uint32
 	// burst counts how many frames in a row the active tab has been served.
 	burst int
+	// ordered makes the class hand messages back in the order they arrived,
+	// across tabs as well as within one.
+	ordered bool
+	// pushes counts everything ever queued here, and stamps each message so an
+	// ordered class can find the oldest without keeping a second list.
+	pushes uint64
 }
 
 // activeBurst is how many frames the tab in front of the reader may take before
@@ -74,6 +91,14 @@ func newFairQueue(limit int) *fairQueue {
 	return &fairQueue{limit: limit, pending: map[uint32][]outbound{}}
 }
 
+// newOrderedQueue is a class that keeps arrival order across tabs as well as
+// within a tab. See the note about ctrl above.
+func newOrderedQueue(limit int) *fairQueue {
+	q := newFairQueue(limit)
+	q.ordered = true
+	return q
+}
+
 // push adds a message, reporting false if the class is full.
 func (q *fairQueue) push(m outbound) bool {
 	q.mu.Lock()
@@ -84,6 +109,8 @@ func (q *fairQueue) push(m outbound) bool {
 	if _, ok := q.pending[m.tab]; !ok {
 		q.order = append(q.order, m.tab)
 	}
+	q.pushes++
+	m.at = q.pushes
 	q.pending[m.tab] = append(q.pending[m.tab], m)
 	q.n++
 	return true
@@ -95,6 +122,9 @@ func (q *fairQueue) pop(active uint32) (outbound, bool) {
 	defer q.mu.Unlock()
 	if q.n == 0 {
 		return outbound{}, false
+	}
+	if q.ordered {
+		return q.take(q.oldest()), true
 	}
 	// The session's own traffic — a pong, the stats, a tab state — belongs to no
 	// tab and is answering something the reader did this second. It never waits
@@ -112,6 +142,19 @@ func (q *fairQueue) pop(active uint32) (outbound, bool) {
 	// The rotation may have come back round to the active tab, which is fine:
 	// it is a turn taken in order rather than one taken ahead of the queue.
 	return q.take(tab), true
+}
+
+// oldest names the tab whose next message was queued first. Called with the
+// lock held, and only when something is queued.
+func (q *fairQueue) oldest() uint32 {
+	var pick uint32
+	var at uint64
+	for tab, msgs := range q.pending {
+		if at == 0 || msgs[0].at < at {
+			pick, at = tab, msgs[0].at
+		}
+	}
+	return pick
 }
 
 // take removes the head of one tab's FIFO. Called with the lock held, and only

@@ -53,12 +53,20 @@ are already compressed.
 Priority is enforced by the server's outbound scheduler: a burst of image bytes
 can never delay a DOM diff or an acknowledgement.
 
-Within a priority class the scheduler is fair between *tabs*, rotating between
-one queue per tab rather than draining a single line. The tab the reader is
-looking at is served first and yields a turn every fourth frame, so a page
-loading in a background tab arrives slowly instead of arriving instead of the
-page being read. Order within a tab is preserved exactly — the intern table
-makes it load-bearing — and order between tabs guarantees nothing.
+Within the `dom`, `media` and `bulk` classes the scheduler is fair between
+*tabs*, rotating between one queue per tab rather than draining a single line.
+The tab the reader is looking at is served first and yields a turn every fourth
+frame, so a page loading in a background tab arrives slowly instead of arriving
+instead of the page being read. Order within a tab is preserved exactly — the
+intern table makes it load-bearing.
+
+`ctrl` does not rotate, and the difference is a guarantee rather than an
+oversight: **its frames arrive in the order they were queued, across tabs as
+well as within one.** Nothing on it is big enough to starve anything, and the
+order carries meaning the plane side has no other source for — the server has no
+opinion about which tab the reader wants to be in, so a client that asked for
+two tabs decides from the order they are announced. Rotating that put readers in
+the wrong tab.
 
 Closing a tab discards whatever it still has queued, in every class. A close is
 the reader saying they are no longer willing to spend the link on that page, and

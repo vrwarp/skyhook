@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -156,6 +157,51 @@ func TestSessionTrafficDoesNotWaitItsTurn(t *testing.T) {
 	m, ok := q.pop(1)
 	if !ok || m.tab != 0 {
 		t.Errorf("popped tab %d, want the session's own frame first", m.tab)
+	}
+}
+
+/*
+Ctrl keeps its order, across tabs as well as within one.
+
+Rotating there buys nothing — a tab state is a hundred bytes, and starvation is
+a problem about documents and images — and it costs something the shell depends
+on. The server has no opinion about which tab the reader wants to land in, so
+the plane side answers it from the order the announcements arrive: two tabs
+asked for, two tabs announced, the second one is where the reader goes.
+
+A netem run had them announced in the other order, because the newer tab was the
+active one and jumped the rotation, and the reader was left in an empty tab
+looking at the page they had asked to leave. The order is the message.
+*/
+func TestTheControlChannelKeepsItsOrder(t *testing.T) {
+	q := newOrderedQueue(64)
+	// Tab 2's announcement is queued first, and then tab 3's — while tab 3 is
+	// the tab the session considers active, which in a rotating class is enough
+	// to overtake.
+	q.push(msg(2, 10))
+	q.push(msg(3, 10))
+	q.push(msg(2, 10))
+
+	if got := drain(q, 3); !reflect.DeepEqual(got, []uint32{2, 3, 2}) {
+		t.Errorf("ctrl handed frames back as %v, want them in the order they "+
+			"were queued: a tab announced out of turn puts the reader in the "+
+			"wrong tab", got)
+	}
+}
+
+// Ordered or not, a class must still be able to give up one tab's frames.
+func TestAnOrderedClassCanStillDropATab(t *testing.T) {
+	q := newOrderedQueue(64)
+	q.push(msg(1, 10))
+	q.push(msg(2, 100))
+	q.push(msg(1, 10))
+
+	frames, bytes := q.dropTab(2)
+	if frames != 1 || bytes != 100 {
+		t.Errorf("dropped %d frames / %d bytes, want 1 / 100", frames, bytes)
+	}
+	if got := drain(q, 0); !reflect.DeepEqual(got, []uint32{1, 1}) {
+		t.Errorf("what is left is %v, want tab 1's two frames in order", got)
 	}
 }
 
