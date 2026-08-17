@@ -29,15 +29,8 @@ type Session struct {
 	log     *slog.Logger
 	mgr     *Manager
 
-	mu   sync.Mutex
-	tabs map[uint32]*tabState
-	// opening holds ids that have been handed out and whose tabState is not in
-	// place yet. A tab starts mirroring the moment its agent is installed —
-	// before OpenTab has anything to register — and the frames it produces in
-	// that window are the tab's whole first document. Without this they are
-	// frames for a tab the session does not know, which is indistinguishable
-	// from frames for a tab that has closed.
-	opening  map[uint32]bool
+	mu       sync.Mutex
+	tabs     map[uint32]*tabState
 	nextTab  uint32
 	viewport protocol.Viewport
 	caps     map[string]bool
@@ -77,7 +70,16 @@ type connHolder struct {
 }
 
 type tabState struct {
-	tab     *mirror.Tab
+	// tab is the landside page, and is nil until it has been built. A tab is
+	// registered — and can be asked for things — from the moment its id is
+	// handed out, which is a target creation and a dozen CDP calls before there
+	// is a page to ask. The queue below is what turns that into a wait rather
+	// than an error: the build is the first job on it, and everything the
+	// reader does arrives behind it, in order. Guarded by Session.mu.
+	tab *mirror.Tab
+	// openURL is where the tab was asked to go, which is all it can say about
+	// itself until the page exists.
+	openURL string
 	ring    *Ring
 	journal *Journal
 	// work is this tab's inbound queue and life is how long it has to drain it.
@@ -262,7 +264,7 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 	}
 	s := &Session{
 		ID: id, created: time.Now(), log: opts.Logger, mgr: mgr,
-		tabs: map[uint32]*tabState{}, opening: map[uint32]bool{}, nextTab: 1,
+		tabs: map[uint32]*tabState{}, nextTab: 1,
 		viewport: opts.Viewport, caps: map[string]bool{},
 		codec: codec, closed: make(chan struct{}),
 		lastSeen: time.Now(),
@@ -505,14 +507,14 @@ func (s *Session) nudge() {
 	}
 }
 
-// liveTab reports whether a tab is open, or on its way to being open.
+// liveTab reports whether a tab is open, or on its way to being open. A tab is
+// registered when its id is handed out, so the frames its agent produces while
+// the page is still being built belong to a tab the session knows about.
 func (s *Session) liveTab(id uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.tabs[id]; ok {
-		return true
-	}
-	return s.opening[id]
+	_, ok := s.tabs[id]
+	return ok
 }
 
 /*
@@ -607,26 +609,79 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 
 // ------------------------------------------------------------------- tabs
 
-// OpenTab creates a mirrored tab.
-func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
+// OpenTab creates a mirrored tab. It returns as soon as the tab has an id and
+// has been announced; the page is built as the first job on the tab's own
+// queue.
+//
+// Building a page is a target creation, a dozen sequential CDP calls and, when
+// the tab was asked for a URL, a navigation that only resolves when the origin
+// commits it. Doing that before the tab existed meant the connection's reader
+// was held for all of it — so every other frame the client sent waited behind a
+// tab it had nothing to do with — and meant the client could not be told the
+// tab's id until the page was ready, which is what made "+" cost a round trip
+// it did not need to.
+//
+// The tab is registered first instead, queue and all. Everything the reader
+// does to it arrives behind the build, in order, and waits exactly as long as
+// the build takes rather than being refused for naming a tab that "does not
+// exist".
+func (s *Session) OpenTab(ctx context.Context, n protocol.Navigate) (uint32, error) {
+	url := n.URL
+	if url == "about:blank" {
+		url = ""
+	}
+	// Not the caller's context: a session outlives the connection that opened
+	// its tabs, and a tab whose work was cancelled when a client disconnected
+	// would stop mirroring the moment the aircraft lost coverage.
+	life, kill := context.WithCancel(context.Background())
 	s.mu.Lock()
 	id := s.nextTab
 	s.nextTab++
 	vp := s.viewport
-	// Held from here to the moment the tabState is in the map, so that what the
-	// tab emits while it is being built is treated as a live tab's output and
-	// not as a dead one's. See the opening field.
-	s.opening[id] = true
+	ts := &tabState{
+		openURL: url,
+		ring:    NewRing(s.mgr.opts.RingBytes),
+		journal: NewJournal(s.mgr.opts.Capture.JournalBytes),
+		work:    make(chan tabJob, tabDepth),
+		life:    life,
+		kill:    kill,
+	}
+	s.tabs[id] = ts
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.opening, id)
-		s.mu.Unlock()
-	}()
+	go s.tabLoop(id, ts)
 
+	// A background tab is one the reader is not looking at, so it must not take
+	// image priority away from the page they are still on.
+	if !n.Background {
+		s.activeTab.Store(id)
+	}
+	s.events.Add("tab-open", id, map[string]any{"url": url})
+
+	// Announce the tab the moment it has a name, which is before it has a page.
+	// Every other TabState rides on a page lifecycle event, and a tab parked on
+	// about:blank may never produce one — which left a client that asked for a
+	// tab with no way to learn it got one, and no id to navigate.
+	opened := protocol.TabState{URL: "about:blank", Ref: n.Ref}
+	if url != "" {
+		opened.URL, opened.Loading = url, true
+	}
+	s.Send(protocol.ChCtrl, protocol.TypeTabState, id, opened)
+
+	if err := s.submit(id, tabJob{what: "open", run: func(ctx context.Context) error {
+		return s.buildTab(ctx, id, ts, vp, url)
+	}}); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// buildTab makes the page for an already-announced tab. It runs as that tab's
+// first job, so nothing else the tab is asked to do can overtake it.
+func (s *Session) buildTab(ctx context.Context, id uint32, ts *tabState, vp protocol.Viewport, url string) error {
 	sess, err := s.mgr.browser.NewPage(ctx, "about:blank")
 	if err != nil {
-		return 0, err
+		s.openFailed(id, ts, err)
+		return err
 	}
 	t, err := mirror.NewTab(ctx, id, s.mgr.browser, sess, s, mirror.Options{
 		Viewport: vp, Logger: s.log, UserAgent: s.mgr.opts.UserAgent,
@@ -635,43 +690,52 @@ func (s *Session) OpenTab(ctx context.Context, url string) (uint32, error) {
 		StreamEvery:    s.mgr.opts.CanvasStream,
 	})
 	if err != nil {
-		return 0, err
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = s.mgr.browser.CloseTarget(closeCtx, sess.Target)
+		cancel()
+		s.openFailed(id, ts, err)
+		return err
 	}
-	// Not the caller's context: a session outlives the connection that opened
-	// its tabs, and a tab whose work was cancelled when a client disconnected
-	// would stop mirroring the moment the aircraft lost coverage.
-	life, kill := context.WithCancel(context.Background())
-	ts := &tabState{
-		tab:     t,
-		ring:    NewRing(s.mgr.opts.RingBytes),
-		journal: NewJournal(s.mgr.opts.Capture.JournalBytes),
-		work:    make(chan tabJob, tabDepth),
-		life:    life,
-		kill:    kill,
-	}
+
 	s.mu.Lock()
-	s.tabs[id] = ts
+	live := s.tabs[id] == ts
+	if live {
+		ts.tab = t
+	}
 	s.mu.Unlock()
-	go s.tabLoop(id, ts)
-	s.activeTab.Store(id)
-	s.events.Add("tab-open", id, map[string]any{"url": url})
-
-	// Announce the tab the moment it exists. Every other TabState rides on a
-	// page lifecycle event, and a tab parked on about:blank may never produce
-	// one — which left a client that asked for a tab with no way to learn it
-	// got one, and no id to navigate.
-	opened := protocol.TabState{URL: "about:blank"}
-	if url != "" && url != "about:blank" {
-		opened.URL, opened.Loading = url, true
+	if !live {
+		// Closed while it was being built. The close could not take a page that
+		// did not exist yet, so it falls to here.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = t.Close(closeCtx)
+		cancel()
+		return nil
 	}
-	s.Send(protocol.ChCtrl, protocol.TypeTabState, id, opened)
-
-	if url != "" && url != "about:blank" {
-		if err := t.Navigate(ctx, protocol.Navigate{URL: url}); err != nil {
-			s.log.Warn("navigate failed", "url", url, "err", err)
-		}
+	if url == "" {
+		return nil
 	}
-	return id, nil
+	return t.Navigate(ctx, protocol.Navigate{URL: url})
+}
+
+// openFailed retires a tab whose page could never be built.
+func (s *Session) openFailed(id uint32, ts *tabState, err error) {
+	s.mu.Lock()
+	live := s.tabs[id] == ts
+	delete(s.tabs, id)
+	s.mu.Unlock()
+	ts.kill()
+	// A tab closed, or a session torn down, while its page was still being
+	// built: the failure is the teardown, and nobody is waiting to hear it.
+	if !live || errors.Is(err, context.Canceled) {
+		return
+	}
+	s.log.Error("opening a tab failed", "session", s.ID, "tab", id, "err", err)
+	// The client is already showing this tab. Telling it the tab is gone, and
+	// why, is the only honest thing left: silence would leave a tab that can
+	// never load anything and never says so.
+	s.Send(protocol.ChCtrl, protocol.TypeTabState, id, protocol.TabState{
+		Closed: true, Error: "the tab could not be opened landside",
+	})
 }
 
 /*
@@ -724,6 +788,12 @@ func (s *Session) CloseTab(ctx context.Context, id uint32) error {
 	// can block on the browser — and a reader who closes a tab and then loses
 	// the link would otherwise have the teardown cancelled with their
 	// connection, leaving the page running landside with nothing to show it in.
+	// The page may not exist yet — a tab closed inside the round trip it was
+	// opened in is easy on this link. Its build sees the tab is gone and closes
+	// the target it made.
+	if ts.tab == nil {
+		return nil
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), tabCloseWait)
 		defer cancel()
@@ -771,6 +841,27 @@ func (s *Session) dropQueued(id uint32) (frames, bytes int) {
 	return frames, bytes
 }
 
+// HasTab reports whether a tab id belongs to this session, whether or not its
+// page has finished being built. Ownership is the question the image router
+// asks, and a tab still loading its first document is exactly the one whose
+// images are wanted.
+func (s *Session) HasTab(id uint32) bool {
+	return s.liveTab(id)
+}
+
+// page returns a tab's live page, for a job running on that tab's own queue.
+// By the time a job runs, the build that precedes it there has finished — so
+// the only way this comes back empty is a tab that has since gone away.
+func (s *Session) page(id uint32) (*mirror.Tab, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ts := s.tabs[id]
+	if ts == nil || ts.tab == nil {
+		return nil, errNoTab
+	}
+	return ts.tab, nil
+}
+
 // Tab returns a tab by id.
 func (s *Session) Tab(id uint32) *mirror.Tab {
 	s.mu.Lock()
@@ -800,10 +891,16 @@ func (s *Session) TabRefs() []protocol.TabRef {
 	out := make([]protocol.TabRef, 0, len(s.tabs))
 	active := s.activeTab.Load()
 	for id, ts := range s.tabs {
-		out = append(out, protocol.TabRef{
-			Tab: id, URL: ts.tab.URL(), Title: ts.tab.Title(),
-			Seq: ts.tab.Seq(), Active: id == active, Loading: ts.tab.Loading(),
-		})
+		ref := protocol.TabRef{Tab: id, Active: id == active}
+		if ts.tab == nil {
+			// Still being built. Where it was headed is the one thing the
+			// client's strip needs from it.
+			ref.URL, ref.Loading = ts.openURL, ts.openURL != ""
+		} else {
+			ref.URL, ref.Title = ts.tab.URL(), ts.tab.Title()
+			ref.Seq, ref.Loading = ts.tab.Seq(), ts.tab.Loading()
+		}
+		out = append(out, ref)
 	}
 	// In the order they were opened, because that is the order the strip is in
 	// on the client that opened them. Ranging a map hands them over shuffled, so
@@ -827,7 +924,10 @@ func (s *Session) RefreshTabs(ctx context.Context) {
 	s.mu.Lock()
 	tabs := make([]*mirror.Tab, 0, len(s.tabs))
 	for _, ts := range s.tabs {
-		tabs = append(tabs, ts.tab)
+		// A tab with no page yet has no state to refresh; its first is coming.
+		if ts.tab != nil {
+			tabs = append(tabs, ts.tab)
+		}
 	}
 	s.mu.Unlock()
 	for _, t := range tabs {
@@ -838,7 +938,7 @@ func (s *Session) RefreshTabs(ctx context.Context) {
 func (s *Session) tabURL(id uint32) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ts := s.tabs[id]; ts != nil {
+	if ts := s.tabs[id]; ts != nil && ts.tab != nil {
 		return ts.tab.URL()
 	}
 	return ""
@@ -876,7 +976,11 @@ func (s *Session) SetViewport(ctx context.Context, vp protocol.Viewport) {
 	s.viewport = vp
 	tabs := make([]*mirror.Tab, 0, len(s.tabs))
 	for _, ts := range s.tabs {
-		tabs = append(tabs, ts.tab)
+		// A tab still being built is given the current viewport when its page
+		// is made, so there is nothing to re-apply to it here.
+		if ts.tab != nil {
+			tabs = append(tabs, ts.tab)
+		}
 	}
 	s.mu.Unlock()
 	for _, t := range tabs {
@@ -1023,11 +1127,18 @@ func (s *Session) Resync(ctx context.Context, tab uint32, haveTo uint64, reason 
 		}
 		return
 	}
+	// A tab whose page is still being built has nothing to snapshot, and its
+	// first snapshot is already on its way. A replay above needed no page: the
+	// ring holds everything it sends.
+	page, err := s.page(tab)
+	if err != nil {
+		return
+	}
 	s.log.Info("resync by snapshot", "tab", tab, "reason", reason)
 	s.events.Add("resync", tab, map[string]any{
 		"how": "snapshot", "reason": reason, "haveTo": haveTo, "cold": true,
 	})
-	if err := ts.tab.Snapshot(ctx); err != nil {
+	if err := page.Snapshot(ctx); err != nil {
 		s.log.Warn("resnapshot failed", "tab", tab, "err", err)
 	}
 }
@@ -1077,7 +1188,10 @@ func (s *Session) integrityLoop() {
 			s.mu.Lock()
 			tabs := make(map[uint32]*tabState, len(s.tabs))
 			for id, ts := range s.tabs {
-				tabs[id] = ts
+				// A tab still being built has no document to compare yet.
+				if ts.tab != nil {
+					tabs[id] = ts
+				}
 			}
 			s.mu.Unlock()
 			for id, ts := range tabs {
@@ -1350,7 +1464,7 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 	case protocol.TypeTabOpen:
 		var n protocol.Navigate
 		_ = f.DecodeBody(&n)
-		_, err := s.OpenTab(ctx, n.URL)
+		_, err := s.OpenTab(ctx, n)
 		return err
 	case protocol.TypeTabClose:
 		return s.CloseTab(ctx, f.Tab)
@@ -1358,10 +1472,6 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 		var n protocol.Navigate
 		if err := f.DecodeBody(&n); err != nil {
 			return err
-		}
-		t := s.Tab(f.Tab)
-		if t == nil {
-			return errNoTab
 		}
 		s.activeTab.Store(f.Tab)
 		// Recorded here rather than where it runs, so the session's event log
@@ -1376,6 +1486,10 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			s.interrupt(f.Tab)
 		}
 		return s.submit(f.Tab, tabJob{what: "navigate", run: func(ctx context.Context) error {
+			t, err := s.page(f.Tab)
+			if err != nil {
+				return err
+			}
 			return t.Navigate(ctx, n)
 		}})
 	case protocol.TypeInput:
@@ -1383,13 +1497,13 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 		if err := f.DecodeBody(&ev); err != nil {
 			return err
 		}
-		t := s.Tab(f.Tab)
-		if t == nil {
-			return errNoTab
-		}
 		s.activeTab.Store(f.Tab)
 		s.recordInput(f.Tab, &ev)
 		return s.submit(f.Tab, tabJob{what: "input", run: func(ctx context.Context) error {
+			t, err := s.page(f.Tab)
+			if err != nil {
+				return err
+			}
 			return t.HandleInput(ctx, &ev)
 		}})
 	case protocol.TypeScroll:
@@ -1397,16 +1511,18 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 		if err := f.DecodeBody(&ev); err != nil {
 			return err
 		}
-		t := s.Tab(ev.Tab)
-		if t == nil {
-			return nil
-		}
 		// Expendable: a scroll position is only interesting until the next one,
 		// and it is what image priority is read from rather than anything the
 		// reader sees.
 		return s.submit(ev.Tab, tabJob{
 			what: "scroll", expendable: true,
-			run: func(ctx context.Context) error { return t.HandleScroll(ctx, &ev) },
+			run: func(ctx context.Context) error {
+				t, err := s.page(ev.Tab)
+				if err != nil {
+					return err
+				}
+				return t.HandleScroll(ctx, &ev)
+			},
 		})
 	case protocol.TypeViewport:
 		var vp protocol.Viewport

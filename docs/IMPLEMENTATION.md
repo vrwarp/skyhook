@@ -1134,8 +1134,53 @@ discovery walk and discarded the result — but a walk *records* what it collect
 as emitted, so every rule that walk was the first to see was dropped from the
 page for good. That is the late-arriving stylesheets, on every load. Everything
 that walks the sheets now goes through `emitCSSDelta`.
+### 22. A new tab is drawn before it exists, and built off the reader
 
-### 22. A click has to be answered before the page can be
+Opening a tab was the one chrome action that still cost a visible round trip in
+both directions, and it was worse than it looked.
+
+Plane-side, pressing "+" only sent a frame. Nothing was drawn until the server's
+`TabState` came back — one round trip, seconds on this link — so the button
+looked broken and got pressed again. The tab is now drawn immediately with a
+provisional (negative) id and a `ref` the server echoes on the frame that names
+it; the URL bar is cleared and focused in the same gesture, because that is
+where the user was going anyway. When the answer arrives the drawn tab *becomes*
+the real one — same strip entry, same mirror frame — and anything the user did
+to it meanwhile is replayed under the real id, in order
+(`client/src/app/tabs.ts`). The tab costs zero round trips to appear and one,
+unavoidably, before its content can start arriving.
+
+Landside, `OpenTab` ran on the connection's single reader: a target creation, a
+dozen sequential CDP calls, and a `Page.navigate` that only resolves when the
+origin commits. Everything else the user did queued behind it — a keystroke in
+another tab, a scroll, an acknowledgement — so opening a tab onto a slow origin
+froze the whole browser for as long as that origin took to answer.
+`TestOpeningATabDoesNotStallTheRestOfTheBrowser` measured six seconds of it. The
+tab is now announced synchronously and built on its own goroutine; frames that
+arrive for a tab whose page does not exist yet are deferred and drained in order
+when it does, and the page is only published once nothing is left waiting, so
+ordering survives.
+
+Two things fell out of the same change. `TabOpen` now carries `background`, so a
+middle-click tab no longer takes image priority away from the page the reader
+is still on. And the URL bar tracks its tab unless it is *edited*
+rather than unless it is *focused* — a new tab focuses it, and the old test
+would have left it stuck showing an address the tab had long since left.
+
+The welcome is not the moment the link comes up. The transport reports itself
+online and *then* sends `Hello`, so the `Welcome` that answers it is a full
+round trip behind — a second and a half of a client that says it is connected,
+with an enabled "+" button. A first draft treated every welcome as grounds for
+discarding tabs the server had not named, on the reasoning that they belonged to
+a connection that was gone. That is right for a reconnect and wrong for the
+connection the request was actually sent on: anyone reaching for "+" in that
+first round trip lost the tab, and whatever they had typed into it, to the
+welcome that followed. Provisional tabs now carry the connection they were asked
+for on, and a welcome only discards the ones from earlier connections. Nothing
+plane-side made this visible — the netem job did, by failing five PWA tests that
+pass at loopback latency.
+
+### 23. A click has to be answered before the page can be
 
 Every affordance a browser shows while a page loads — the bar, the tab spinner,
 the address bar going grey — it shows because it started the navigation itself.

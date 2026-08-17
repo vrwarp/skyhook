@@ -103,6 +103,7 @@ func buildFixtures(t *testing.T) map[string]string {
 
 	f, err = protocol.NewFrame(protocol.TypeTabState, 1, protocol.TabState{
 		URL: "https://example.test/", Title: "Example", Loading: false, CanBack: true,
+		Ref: "t7",
 	})
 	if err != nil {
 		t.Fatal(err)

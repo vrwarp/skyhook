@@ -574,8 +574,13 @@ self.addEventListener('message', (event: MessageEvent) => {
       redial();
       break;
     case 'openTab':
-      void send(Channel.Ctrl,
-        encodeFrame(FrameType.TabOpen, 0, navigateBody(String(cmd.args.url ?? ''))));
+      // The ref is the client's own name for a tab it has already drawn; the
+      // server echoes it on the frame that names the tab for real.
+      void send(Channel.Ctrl, encodeFrame(FrameType.TabOpen, 0,
+        navigateBody(String(cmd.args.url ?? ''), '', {
+          ref: String(cmd.args.ref ?? ''),
+          background: cmd.args.background === true,
+        })));
       break;
     case 'closeTab': {
       const tab = Number(cmd.args.tab);

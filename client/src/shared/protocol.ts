@@ -257,6 +257,8 @@ export interface TabState {
   faviconId: string;
   closed: boolean;
   error: string;
+  /** Echo of the ref sent with TabOpen, on the frame that announces the tab. */
+  ref: string;
 }
 
 export interface Welcome {
@@ -351,8 +353,11 @@ export const F = {
   tabAck: { tab: 1, seq: 2, hash: 3 },
   viewport: { w: 1, h: 2, dpr: 3, mobile: 4 },
   resync: { tab: 1, haveTo: 2, reason: 3 },
-  navigate: { url: 1, action: 2 },
-  tabState: { url: 1, title: 2, loading: 3, canBack: 4, canForward: 5, faviconId: 6, closed: 7, error: 8 },
+  navigate: { url: 1, action: 2, ref: 3, background: 4 },
+  tabState: {
+    url: 1, title: 2, loading: 3, canBack: 4, canForward: 5, faviconId: 6,
+    closed: 7, error: 8, ref: 9,
+  },
   stats: {
     rttMicros: 1, sendRateBps: 2, lossPct: 3, queueDepth: 4,
     bytesSent: 5, bytesRecv: 6, tabs: 7, pendingImages: 8,

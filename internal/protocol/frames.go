@@ -222,10 +222,21 @@ type Resync struct {
 	Reason string `cbor:"3,keyasint,omitempty"` // "gap", "hash-mismatch", "cold"
 }
 
-// Navigate drives a tab.
+// Navigate drives a tab. On TabOpen it also carries the two things only the
+// client knows: which of its provisional tabs the answer belongs to, and
+// whether the user asked for this one in front or behind.
 type Navigate struct {
 	URL    string `cbor:"1,keyasint,omitempty"`
 	Action string `cbor:"2,keyasint,omitempty"` // "", "back", "forward", "reload", "stop"
+	// Ref is an opaque client token echoed back on the opening TabState. The
+	// client draws a tab the instant the user asks for one, a round trip before
+	// the server can name it; the ref is how the drawn tab and the real one are
+	// recognised as the same tab. TabOpen only.
+	Ref string `cbor:"3,keyasint,omitempty"`
+	// Background marks an open the user did not ask to look at — a middle click,
+	// or "open link in a new tab". Such a tab must not take image priority away
+	// from the page they are still reading. TabOpen only.
+	Background bool `cbor:"4,keyasint,omitempty"`
 }
 
 // TabState reports chrome-UI-relevant tab state.
@@ -238,6 +249,9 @@ type TabState struct {
 	FaviconID  string `cbor:"6,keyasint,omitempty"`
 	Closed     bool   `cbor:"7,keyasint,omitempty"`
 	Error      string `cbor:"8,keyasint,omitempty"`
+	// Ref echoes Navigate.Ref on the frame that announces an opened tab, and is
+	// absent on every other TabState.
+	Ref string `cbor:"9,keyasint,omitempty"`
 }
 
 // Stats is the HUD payload.

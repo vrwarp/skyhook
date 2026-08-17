@@ -125,6 +125,23 @@ time, in the wrong nodes. Nothing catches it — the table is not part of the
 document hash, and a re-inserted node reuses its id — so the tab stays wrong
 until it is reloaded.
 
+### Tabs
+
+`TabOpen` carries `Navigate{url, ref, background}` and is answered immediately
+with a `TabState{ref, url, loading}` naming the tab — before the landside page
+has been built, and before anything has been mirrored. That ordering is the
+point: the client draws a tab the moment the user asks for one and needs the id
+a round trip before any content can exist, and a tab parked on `about:blank`
+produces no lifecycle event to announce it with.
+
+- `ref` is the client's own name for the tab it has already drawn. It appears on
+  exactly one `TabState` per tab, the one that names it.
+- `background` marks a tab the user is not looking at, so image priority stays
+  with the page they are still reading.
+
+Frames may arrive for a tab whose page is still being built; the server defers
+them and applies them in order once it is.
+
 ### Sequencing, acks and resync
 
 - The client acknowledges each applied batch with its own document hash.

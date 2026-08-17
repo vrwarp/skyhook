@@ -12,6 +12,7 @@ import { pairingFromFragment, transportUrls } from './pairing.js';
 import { gather } from './capture.js';
 import * as clientlog from './clientlog.js';
 import { Progress, type Ask } from './progress.js';
+import { TabModel, type TabView } from './tabs.js';
 import {
   BOOKMARK_LIMIT, Bookmarks, exportText, normalizeUrl, parseImport, type Bookmark,
 } from './bookmarks.js';
@@ -34,27 +35,11 @@ import { PROTOCOL_VERSION } from '../shared/protocol.js';
 
 const store = new Store();
 const hosts = new Map<number, MirrorHost>();
-const tabs = new Map<number, TabView>();
-/**
- * Tabs the reader has closed. The shell is told about a tab by frames, and the
- * frames for a closed one keep arriving for a round trip after the close —
- * which on this link is seconds, and while a document is streaming is far
- * longer than that.
- *
- * Without this, every one of those frames went to `hostFor`, which builds a
- * mirror frame for a tab it does not know: closing a tab put a fresh iframe
- * back into the page and patched the rest of the dead tab's document into it,
- * off the strip and invisible, competing for the main thread with the tab the
- * reader kept. The worker drops most of them now, but the shell holds the last
- * word on what a tab is, so it says no here too.
- */
-const closedTabs = new Set<number>();
 const archive: AdapterRecord[] = [];
 const spaces = new Map<string, { name: string; unread: number }>();
 /** Navigations asked for and not yet answered. See progress.ts. */
 const progress = new Progress();
 let worker: Worker | null = null;
-let active = 0;
 let currentSpace = '';
 /**
  * The session this app was last reading, offered back to the server on the next
@@ -67,8 +52,6 @@ let connected = false;
 let linkRtt = 0;
 /** One timer for every outstanding ask, armed at the earliest deadline. */
 let sweepTimer: ReturnType<typeof setTimeout> | null = null;
-/** How many tabs have been asked for that the reader expects to land in. */
-let wantForeground = 0;
 /**
  * Addresses typed into the address bar and not yet answered, by the tab they
  * were typed for — 0 meaning "the tab this is about to open".
@@ -87,14 +70,45 @@ const typedAsks = new Map<number, number>();
  */
 const TYPED_TTL_MS = 120_000;
 
-interface TabView {
-  id: number;
-  url: string;
-  title: string;
-  loading: boolean;
-  canBack: boolean;
-  canForward: boolean;
-}
+/**
+ * The tabs, including the ones drawn before the server has named them. Every
+ * command aimed at a tab goes through this rather than straight to the worker,
+ * because a tab the user opened half a round trip ago has no id to send under
+ * yet — the model holds those until it does.
+ *
+ * Which tab the reader meant to land in is settled here too, at the moment of
+ * the gesture: a foreground open is the front tab from the instant it is drawn,
+ * so nothing has to be counted or guessed when the server answers.
+ */
+const tabs = new TabModel({
+  send,
+  adopted: (from, to) => {
+    // The tab kept its frame and whatever was asked of it; both were filed
+    // under a name it has now outgrown.
+    const host = hosts.get(from);
+    if (host) {
+      hosts.delete(from);
+      host.adopt(to);
+      hosts.set(to, host);
+    }
+    progress.rekey(from, to);
+    // An address typed into a tab before the server named it was filed under
+    // the name it had then. History is written from where the tab arrives, and
+    // the arrival will be under this one.
+    const typed = typedAsks.get(from);
+    if (typed !== undefined) {
+      typedAsks.delete(from);
+      typedAsks.set(to, typed);
+    }
+  },
+  dropped: (id) => {
+    hosts.get(id)?.destroy();
+    hosts.delete(id);
+    progress.forget(id);
+    renderTabs();
+    layout();
+  },
+});
 
 const el = {
   strip: byId<HTMLDivElement>('tabstrip'),
@@ -270,35 +284,21 @@ function handle(kind: string, args: Record<string, unknown>): void {
       // A different session hands out tab ids from one again, so everything
       // this side had learned to ignore is about tabs that no longer exist
       // anywhere — and the ids are about to be handed out afresh.
-      if (w.sessionId !== resumeSession) closedTabs.clear();
+      const sameSession = w.sessionId === resumeSession;
       resumeSession = w.sessionId;
       void store.writeSessionId(w.sessionId);
       // Before the tabs, because it is the one thing in this frame that is not
       // about tabs: which build each half is, and whether they are the same.
       noteVersions(w);
-      const held = new Set<number>();
-      for (const t of w.tabs ?? []) {
-        held.add(t.tab);
-        // Welcome carries a URL and a title and no history flags, so a tab this
-        // side already knows keeps the ones it has rather than being told it
-        // cannot go back. A tab arriving cold gets them from the state frame
-        // the server sends behind this.
-        const known = tabs.get(t.tab);
-        upsertTab({
-          id: t.tab, url: t.url, title: t.title, loading: t.loading,
-          canBack: known?.canBack ?? false, canForward: known?.canForward ?? false,
-        });
-        void hostFor(t.tab);
-        if (t.active) active = t.tab;
-      }
-      // Whatever this side holds and the session does not is gone: a server
-      // restarted under a reconnect answers with a session that never had those
-      // tabs, and a strip of tabs that cannot be reached is worse than a short
-      // one — every click on them would go to a tab id the server will refuse.
-      for (const id of Array.from(tabs.keys())) {
-        if (!held.has(id)) closeTabLocally(id, false);
-      }
-      if (!tabs.has(active)) active = tabs.keys().next().value ?? 0;
+      // The session's list is the truth for every tab but the ones asked for
+      // on this connection, whose answers are still in flight. Anything else
+      // this side holds is gone: a server restarted under a reconnect answers
+      // with a session that never had those tabs, and a strip of tabs that
+      // cannot be reached is worse than a short one — every click on them would
+      // go to a tab id the server will refuse.
+      tabs.reset(w.tabs ?? [], sameSession);
+      for (const t of w.tabs ?? []) void hostFor(t.tab);
+      renderTabs();
       // The tab the session says is the active one is the tab to show. Each
       // frame above was laid out as it was created, so without this the visible
       // one is whichever tab happened to be first rather than the one the strip
@@ -317,56 +317,35 @@ function handle(kind: string, args: Record<string, unknown>): void {
       void applyMutation(Number(args.tab), args.mutation as Mutation, Number(args.seq));
       break;
     case 'tabState': {
-      const id = Number(args.tab);
       const st = args.state as TabState;
-      if (st.closed) {
-        closeTabLocally(id);
+      if (st.error) log(`tab ${String(args.tab)}: ${st.error}`);
+      // Adoption happens in here: a state carrying a ref renames the tab this
+      // side already drew — frame, place in the strip and whether the reader
+      // was sent to it — rather than adding a second one beside it.
+      const before = tabs.get(Number(args.tab))?.url ?? '';
+      const id = tabs.applyState(Number(args.tab), st);
+      if (id === undefined) {
+        renderTabs();
+        layout();
+        renderProgress();
         break;
       }
-      // A state frame for a closed tab would put the tab back in the strip,
-      // where clicking it reaches a tab the server has already been told to
-      // close.
-      if (closedTabs.has(id)) break;
-      const known = tabs.get(id);
-      const tab = known ?? {
-        id, url: '', title: '', loading: false, canBack: false, canForward: false,
-      };
       // A tab we have never seen needs its frame now, not when its first
       // snapshot happens to arrive: a tab opened onto about:blank has nothing
       // to snapshot until it navigates somewhere.
-      if (!known) {
-        void hostFor(id);
-        // The tab the reader asked for has arrived, so its placeholder in the
-        // strip has a real tab to become.
-        progress.appeared();
-        // And if it was asked for by a gesture that means "go there" — the +
-        // button, an address typed with no tab open — this is where the reader
-        // lands. The server has no opinion about focus, so the answer has to be
-        // remembered from the gesture, and it matters more now that an empty
-        // tab has the saved list in it rather than nothing.
-        if (wantForeground > 0) {
-          wantForeground -= 1;
-          active = id;
-          layout();
-        }
-      }
+      void hostFor(id);
       // Once the server says a tab is loading it is telling this side what it
       // had been guessing, and it is the better source.
       progress.serverLoading(id, st.loading);
-      const before = tab.url;
-      tab.url = st.url || tab.url;
-      tab.title = st.title || tab.title;
       // Relative links in the mirror resolve against this; a tab that navigates
       // without a fresh snapshot would otherwise keep the old base.
-      hosts.get(id)?.setPageUrl(tab.url);
-      tab.loading = st.loading;
-      tab.canBack = st.canBack;
-      tab.canForward = st.canForward;
+      const view = tabs.get(id);
+      if (view?.url) hosts.get(id)?.setPageUrl(view.url);
       // After the tab is complete, so the entry carries the title the strip is
       // about to show rather than the one it had a moment ago.
-      recordArrival(tab, before);
-      upsertTab(tab);
-      if (!active) active = id;
+      if (view) recordArrival(view, before);
+      renderTabs();
+      layout();
       renderProgress();
       break;
     }
@@ -389,6 +368,10 @@ function handle(kind: string, args: Record<string, unknown>): void {
       const online = args.online === true;
       const changed = online !== connected;
       connected = online;
+      // One of these per transport that comes up, and the welcome for it is a
+      // round trip behind. Tabs opened in that window belong to this
+      // connection and must survive the welcome that follows.
+      if (online) tabs.connectionUp();
       // Nothing asked for is on its way during an outage: the worker drops
       // navigate frames while the link is down. Saying a page is coming would
       // be a promise the shell cannot keep, and the HUD's "offline" is the
@@ -433,7 +416,7 @@ async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
   if (!host) return;
   // A whole new document arrived: whatever the open menu was pointing at is
   // gone, and half its entries would act on a node that no longer exists.
-  if (tab === active) closeMenu();
+  if (tab === tabs.active) closeMenu();
   host.applySnapshot(snap);
   // The page the reader asked for is on screen. Waiting for the tab-state frame
   // behind it to say so would leave the bar running over a page that has
@@ -447,17 +430,17 @@ async function applyMutation(tab: number, m: Mutation, seq: number): Promise<voi
 }
 
 async function hostFor(tab: number): Promise<MirrorHost | null> {
-  if (closedTabs.has(tab)) return null;
+  if (tabs.isClosed(tab)) return null;
   const existing = hosts.get(tab);
   if (existing) {
     await existing.whenReady();
     return existing;
   }
   const host = new MirrorHost(tab, {
-    input: (t, ev) => send('input', { ...ev, tab: t }),
-    scroll: (t, ev) => send('scroll', { ...ev, tab: t }),
-    applied: (t, seq, hash) => send('ack', { tab: t, seq, hash }),
-    wantImages: (t, hashes) => send('wantImage', { tab: t, hashes }),
+    input: (t, ev) => tabs.forTab('input', t, { ...ev }),
+    scroll: (t, ev) => tabs.forTab('scroll', t, { ...ev }),
+    applied: (t, seq, hash) => tabs.forTab('ack', t, { seq, hash }),
+    wantImages: (t, hashes) => tabs.forTab('wantImage', t, { hashes }),
     openLink: (_t, url) => openInNewTab(url),
     navigating: (t, url) => asking(t, 'Loading', url),
     menu: (t, target) => showMenu(target.x, target.y, mirrorMenu(t, target)),
@@ -474,7 +457,6 @@ async function hostFor(tab: number): Promise<MirrorHost | null> {
   });
   hosts.set(tab, host);
   el.frames.appendChild(host.frame);
-  if (!active) active = tab;
   layout();
   await host.whenReady();
   return host;
@@ -482,16 +464,17 @@ async function hostFor(tab: number): Promise<MirrorHost | null> {
 
 // ------------------------------------------------------------------ tab strip
 
-function upsertTab(tab: TabView): void {
-  tabs.set(tab.id, tab);
-}
-
 function renderTabs(): void {
   el.strip.textContent = '';
-  for (const tab of tabs.values()) {
+  for (const tab of tabs.list()) {
     const busy = isBusy(tab.id);
     const node = document.createElement('div');
-    node.className = `tab${tab.id === active ? ' active' : ''}${busy ? ' loading' : ''}`;
+    // A tab the server has not named yet is drawn like one that is not quite
+    // real, because it is not quite real: it is a tab this side is holding
+    // open until the answer arrives. Everything else about it works.
+    node.className = `tab${tab.id === tabs.active ? ' active' : ''}`
+      + `${busy ? ' loading' : ''}${tab.provisional ? ' ghost' : ''}`;
+    if (tab.provisional) node.title = 'Waiting for the server to open this tab';
     node.setAttribute('role', 'tab');
     // The landside tab this row stands for, for the same reason the frame
     // carries it: a row in the strip is otherwise identified only by a title it
@@ -526,21 +509,6 @@ function renderTabs(): void {
     });
     el.strip.appendChild(node);
   }
-  // A tab is opened by the server, so between the gesture and the tab there is
-  // a round trip in which the strip is unchanged and the reader has no way to
-  // tell a middle click that was heard from one that was missed. They press
-  // again, and come back to two tabs.
-  for (const open of progress.opening) {
-    const ghost = document.createElement('div');
-    ghost.className = 'tab ghost loading';
-    ghost.title = 'Waiting for the server to open this tab';
-    ghost.appendChild(spinner());
-    const title = document.createElement('span');
-    title.className = 'title';
-    title.textContent = (open.url && hostOf(open.url)) || 'New tab';
-    ghost.appendChild(title);
-    el.strip.appendChild(ghost);
-  }
   const add = document.createElement('button');
   add.id = 'newtab';
   add.textContent = '+';
@@ -556,7 +524,11 @@ function renderTabs(): void {
 
 /** Brings a tab to the front, from the strip or from the list that replaces it. */
 function selectTab(id: number): void {
-  active = id;
+  tabs.select(id);
+  // Switching tabs abandons a half-typed address: the bar belongs to whichever
+  // tab is in front.
+  urlbarEdited = false;
+  renderTabs();
   renderProgress();
   layout();
   syncToolbar();
@@ -571,9 +543,9 @@ function selectTab(id: number): void {
  * switches to it or keeps reading.
  */
 function syncTabsButton(): void {
-  const count = tabs.size + progress.opening.length;
+  const count = tabs.size;
   el.tabs.textContent = String(count);
-  const busy = Array.from(tabs.keys()).some(isBusy) || progress.opening.length > 0;
+  const busy = tabs.ids().some(isBusy);
   el.tabs.classList.toggle('loading', busy);
   el.tabs.setAttribute(
     'aria-label',
@@ -585,11 +557,13 @@ function syncTabsButton(): void {
 
 function renderTabList(): void {
   tabList.render(
-    Array.from(tabs.values()).map((t) => ({
+    tabs.list().map((t) => ({
       id: t.id, title: t.title, url: t.url, loading: isBusy(t.id),
     })),
-    progress.opening.map((o) => ({ url: o.url })),
-    active,
+    // Nothing here: a tab asked for and not yet named is in the list above,
+    // with an id of its own and a place the reader can already reach.
+    [],
+    tabs.active,
     connected,
   );
 }
@@ -606,36 +580,33 @@ function spinner(): HTMLElement {
 }
 
 function closeTab(id: number): void {
-  send('closeTab', { tab: id });
-  closeTabLocally(id);
+  // The model sends the close, holding it if the tab has no server id yet, and
+  // calls back to drop the frame and redraw.
+  tabs.close(id);
+  renderProgress();
 }
 
-function closeTabLocally(id: number, remember = true): void {
-  // Remembered, so the frames still crossing the link for this tab — and on a
-  // slow link there can be a document's worth of them — find a shell that has
-  // stopped believing in it. Not remembered when the caller is reconciling
-  // against a session that never had the tab: nothing is in flight for a tab
-  // the server does not have, and an id it has never used is one it may yet.
-  if (remember) closedTabs.add(id);
-  hosts.get(id)?.destroy();
-  hosts.delete(id);
-  tabs.delete(id);
-  progress.forget(id);
-  if (active === id) {
-    const next = tabs.keys().next().value;
-    active = typeof next === 'number' ? next : 0;
-  }
-  renderProgress();
-  layout();
+/**
+ * Whether the URL bar holds something the user typed and has not committed.
+ * The bar tracks the tab, except while it is being edited — and *edited* is the
+ * test, not *focused*: a new tab focuses the bar for the reader's convenience,
+ * and a focused-but-untouched bar that stopped following its tab would sit
+ * there showing the address of a page long since navigated away from.
+ */
+let urlbarEdited = false;
+
+function setUrlbar(url: string): void {
+  el.urlbar.value = addressText(url);
+  urlbarEdited = false;
 }
 
 function syncToolbar(): void {
-  const tab = tabs.get(active);
+  const tab = tabs.current();
   const url = tab?.url ?? '';
   // A tab that has not been anywhere shows an empty address bar rather than
   // `about:blank`: the reader is about to type over it, and a placeholder that
   // has to be cleared first is a placeholder in the way.
-  if (document.activeElement !== el.urlbar) el.urlbar.value = addressText(url);
+  if (!urlbarEdited) setUrlbar(url);
   el.back.disabled = !tab?.canBack;
   el.forward.disabled = !tab?.canForward;
   syncReloadButton();
@@ -656,12 +627,12 @@ function syncToolbar(): void {
  * and the toolbar is a phone's, with no room for a second.
  */
 function syncReloadButton(): void {
-  const busy = isBusy(active);
+  const busy = isBusy(tabs.active);
   el.reload.textContent = busy ? '✕' : '↻';
   el.reload.title = busy ? 'Stop' : 'Reload';
   el.reload.setAttribute('aria-label', busy ? 'Stop loading' : 'Reload');
   el.reload.classList.toggle('stop', busy);
-  el.reload.disabled = !connected || !active;
+  el.reload.disabled = !connected || !tabs.active;
 }
 
 /** A tab that has not been anywhere yet. `about:blank` is not a page. */
@@ -689,7 +660,7 @@ function addressText(url: string): string {
 
 function layout(): void {
   for (const [id, host] of hosts) {
-    host.frame.style.display = id === active ? 'block' : 'none';
+    host.frame.style.display = id === tabs.active ? 'block' : 'none';
   }
 }
 
@@ -736,10 +707,10 @@ function asking(tab: number, verb: string, url?: string): void {
 /** Redraws everything that says a page is on its way. */
 function renderProgress(): void {
   renderTabs();
-  const busy = isBusy(active);
+  const busy = isBusy(tabs.active);
   el.progress.hidden = !busy;
   el.status.hidden = !busy;
-  if (busy) el.status.textContent = busyLabel(active);
+  if (busy) el.status.textContent = busyLabel(tabs.active);
   for (const [id, host] of hosts) host.setBusy(isBusy(id));
   armSweep();
 }
@@ -809,24 +780,46 @@ function armSweep(): void {
  * the page behind it is the one already paid for.
  */
 function openInNewTab(url: string): void {
-  if (!connected) {
-    log('offline: a new tab needs the link');
-    return;
-  }
   openTab(url);
 }
 
-/** Asks the server for a tab, and puts a placeholder in the strip until it
- *  arrives. Every gesture that opens one comes through here. */
-function openTab(url: string, where: 'background' | 'focus' = 'background'): void {
-  send('openTab', { url });
-  if (!connected) return;
-  // A tab the reader means to be in, rather than one opened beside what they
-  // are reading: the + button and the menus mean the first, a middle click on a
-  // link means the second, and only the gesture knows which.
-  if (where === 'focus') wantForeground += 1;
-  progress.askOpen({ verb: 'Opening', url: url || undefined }, clock(), linkRtt);
+/**
+ * Opens a tab and, when the reader means to be in it, puts the cursor where
+ * they were going to put it anyway. Everything here is plane-side and
+ * immediate: the strip entry, the empty frame, the focused URL bar. The server
+ * is told in the same breath, but nothing waits for it — a "+" that does
+ * nothing for a second and a half is a "+" that gets pressed three times.
+ * Every gesture that opens a tab comes through here.
+ *
+ * Which tab the reader lands in is settled here rather than when the server
+ * answers: the + button and the menus mean "go there", a middle click on a link
+ * means "leave it beside what I am reading", and only the gesture knows which.
+ */
+function openTab(url: string, where: 'background' | 'focus' = 'background'): number {
+  // Only the server can make a page, so a tab asked for during an outage is a
+  // tab that can never load anything. The "+" button is disabled offline for
+  // the same reason; this covers the URL bar, which is reachable with no tabs
+  // open at all.
+  if (!connected) {
+    log('offline: a new tab needs the link');
+    return 0;
+  }
+  const background = where !== 'focus';
+  const id = tabs.open(url, background);
+  void hostFor(id);
+  // The tab is real enough to wait on: it has an id of its own, so the spinner
+  // and the status line can name what it is fetching before the server has
+  // agreed the tab exists.
+  if (url) asking(id, 'Opening', url);
+  if (!background) {
+    setUrlbar(url);
+    el.urlbar.focus();
+    el.urlbar.select();
+  }
+  renderTabs();
+  layout();
   renderProgress();
+  return id;
 }
 
 function navigateTo(tab: number, url: string): void {
@@ -834,7 +827,9 @@ function navigateTo(tab: number, url: string): void {
     openTab(url, 'focus');
     return;
   }
-  send('navigate', { tab, url });
+  // Held if the tab was opened less than a round trip ago and has no server id
+  // yet — typing a URL straight into a brand new tab is the ordinary case.
+  tabs.forTab('navigate', tab, { url });
   asking(tab, 'Loading', url);
 }
 
@@ -881,7 +876,7 @@ function recordArrival(tab: TabView, before: string): void {
 
 /** Reloads a tab, from wherever the gesture came from. */
 function reloadTab(tab: number): void {
-  send('navigate', { tab, action: 'reload' });
+  tabs.forTab('navigate', tab, { action: 'reload' });
   asking(tab, 'Reloading', tabs.get(tab)?.url);
 }
 
@@ -907,8 +902,10 @@ function stopTab(tab: number): void {
   if (view?.loading) {
     // The server confirms this a round trip from now. Until then the spinner
     // would go on turning over a page the reader has just stopped.
+    // The model holds the view, so this is the strip's copy: setting it here
+    // is what the redraw below reads.
     view.loading = false;
-    upsertTab(view);
+    renderTabs();
     renderProgress();
   }
 }
@@ -1031,8 +1028,8 @@ function openCompletion(row: Completion): void {
   // Picking a completion is naming a destination at the address bar, which is
   // the same act as typing the whole thing — so it counts as one, and the row
   // the reader keeps choosing keeps rising.
-  markTyped(active);
-  navigateTo(active, row.url);
+  markTyped(tabs.active);
+  navigateTo(tabs.active, row.url);
 }
 
 /**
@@ -1081,14 +1078,14 @@ function startShouldShow(): boolean {
   // A tab with a page on the way is not an empty tab, even while it still looks
   // like one: `isBusy` is the same fact the bar and the tab spinner are drawn
   // from, so the start page cannot disagree with them about what is happening.
-  if (isBusy(active)) return false;
-  const tab = tabs.get(active);
+  if (isBusy(tabs.active)) return false;
+  const tab = tabs.current();
   if (!tab) return true;
   return isBlank(tab.url);
 }
 
 function syncBookmarkButton(): void {
-  const url = tabs.get(active)?.url ?? '';
+  const url = tabs.current()?.url ?? '';
   const savable = !isBlank(url);
   const saved = savable && bookmarks.has(url);
   el.bookmark.disabled = !savable;
@@ -1105,7 +1102,7 @@ function syncBookmarkButton(): void {
 }
 
 /** The star, Ctrl+D, and the page menu all land here. */
-function toggleBookmark(id = active): void {
+function toggleBookmark(id = tabs.active): void {
   const tab = tabs.get(id);
   const url = tab?.url ?? '';
   if (isBlank(url)) {
@@ -1177,7 +1174,7 @@ function openBookmark(mark: Bookmark, where: 'here' | 'newTab'): void {
     openInNewTab(mark.url);
     return;
   }
-  navigateTo(active, mark.url);
+  navigateTo(tabs.active, mark.url);
 }
 
 /** The menu on a saved row, in either view. */
@@ -1465,7 +1462,7 @@ function tabMenu(id: number): MenuGroups {
         label: 'Close other tabs',
         disabled: tabs.size < 2,
         run: () => {
-          for (const other of Array.from(tabs.keys())) {
+          for (const other of tabs.ids()) {
             if (other !== id) closeTab(other);
           }
         },
@@ -1479,7 +1476,7 @@ function shellMenu(): MenuGroups {
   const groups: MenuGroups = [
     [{ label: 'New tab', disabled: !connected, run: () => openTab('', 'focus') }],
   ];
-  if (active) groups.push(...pageGroups(active));
+  if (tabs.active) groups.push(...pageGroups(tabs.active));
   // The bulk counterpart to the X on a single completion. It lives here rather
   // than in the dropdown because a list you are typing at is the wrong place to
   // put a gesture that empties it, and because the reader who wants it wants it
@@ -1517,17 +1514,23 @@ document.addEventListener('contextmenu', (ev) => {
 // phone: the reader who wanted to edit one character can still do it, and the
 // far more common one who is replacing the whole address has it gone already.
 el.urlbar.addEventListener('focus', () => {
-  const url = tabs.get(active)?.url ?? '';
+  const url = tabs.current()?.url ?? '';
   if (isBlank(url) || el.urlbar.value === url) return;
   el.urlbar.value = url;
   el.urlbar.select();
 });
 
+// Typing is what stops the bar following its tab; focus alone is not.
+el.urlbar.addEventListener('input', () => {
+  urlbarEdited = true;
+});
+
 el.urlbar.addEventListener('blur', () => {
+  urlbarEdited = false;
   // Not over something half-typed: a reader who tapped away mid-address is
   // coming back to it, and replacing it with where they currently are would
   // throw the typing away.
-  const url = tabs.get(active)?.url ?? '';
+  const url = tabs.current()?.url ?? '';
   if (el.urlbar.value === url) el.urlbar.value = addressText(url);
 });
 
@@ -1542,17 +1545,19 @@ el.urlbar.addEventListener('keydown', (ev) => {
   // a URL whose beginning — the host — is the part worth looking at while
   // waiting for it.
   if (isPhone()) el.urlbar.blur();
+  // Committed: the bar goes back to following the tab it belongs to.
+  urlbarEdited = false;
   // Before the navigation, because with no tab open that call creates one and
   // the arrival has to find the ask already filed.
-  markTyped(active);
-  navigateTo(active, url);
+  markTyped(tabs.active);
+  navigateTo(tabs.active, url);
 });
 
-el.back.addEventListener('click', () => goHistory(active, 'back'));
-el.forward.addEventListener('click', () => goHistory(active, 'forward'));
+el.back.addEventListener('click', () => goHistory(tabs.active, 'back'));
+el.forward.addEventListener('click', () => goHistory(tabs.active, 'forward'));
 el.reload.addEventListener('click', () => {
-  if (isBusy(active)) stopTab(active);
-  else reloadTab(active);
+  if (isBusy(tabs.active)) stopTab(tabs.active);
+  else reloadTab(tabs.active);
 });
 el.bookmark.addEventListener('click', () => toggleBookmark());
 el.marks.addEventListener('click', () => showPanel('marks'));
@@ -1602,12 +1607,12 @@ window.addEventListener('popstate', (ev) => {
     // would rearm on the next tab state — in the window before the restore
     // lands — pushing a fresh pair of entries under a step already on its way
     // back to the middle.
-    if (goHistory(active, 'back')) history.forward();
+    if (goHistory(tabs.active, 'back')) history.forward();
     else centred = false;
     return;
   }
   if (state === HISTORY_STATES.forward) {
-    goHistory(active, 'forward');
+    goHistory(tabs.active, 'forward');
     // Restored either way: an unanswerable forward gesture is inert, and
     // leaving the shell parked at the end would cost the next back gesture.
     history.back();
@@ -1979,8 +1984,8 @@ function waitReport(ask: Ask | undefined): Record<string, unknown> | null {
 function shellReport(): Record<string, unknown> {
   return {
     connected,
-    activeTab: active,
-    tabs: Array.from(tabs.values()).map((t) => ({
+    activeTab: tabs.active,
+    tabs: tabs.list().map((t) => ({
       tab: t.id, url: t.url, title: t.title, loading: t.loading,
       canBack: t.canBack, canForward: t.canForward,
       hasFrame: hosts.has(t.id),
@@ -1989,7 +1994,6 @@ function shellReport(): Record<string, unknown> {
       // wrong": a capture taken mid-navigation is a picture of the old page.
       waitingFor: waitReport(progress.waiting(t.id)),
     })),
-    openingTabs: progress.opening.map((o) => waitReport(o)),
     chatPanelOpen: !el.panel.hidden,
     archivedRecords: archive.length,
   };
@@ -2259,8 +2263,8 @@ document.addEventListener('keydown', (ev) => {
   // there is nothing else for it to mean — a panel or a menu takes it first —
   // and only over a page that is actually coming, so it never quietly does
   // something on a page that has arrived.
-  if (ev.key === 'Escape' && !ev.defaultPrevented && isBusy(active)) {
-    stopTab(active);
+  if (ev.key === 'Escape' && !ev.defaultPrevented && isBusy(tabs.active)) {
+    stopTab(tabs.active);
     return;
   }
   if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;

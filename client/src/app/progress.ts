@@ -62,8 +62,13 @@ export function patience(rttMs: number): number {
 }
 
 /**
- * The asks outstanding: one per tab that has been sent somewhere, plus the
- * tabs that have been asked for and do not exist yet.
+ * The asks outstanding: one per tab that has been sent somewhere.
+ *
+ * A tab the reader has asked for but the server has not yet named is one of
+ * these too. It has an id from the moment the gesture goes out — a provisional
+ * one, until the server answers (see tabs.ts) — so it needs no separate list:
+ * it is a tab in the strip, waiting like any other, and `rekey` moves its ask
+ * across when the real id arrives.
  *
  * Server-reported loading is deliberately not held here. It is the tab's own
  * state and the shell already keeps it; this tracks only the window in which
@@ -71,7 +76,6 @@ export function patience(rttMs: number): number {
  */
 export class Progress {
   private asks = new Map<number, Ask>();
-  private opens: Ask[] = [];
   /**
    * Where each tab was last asked to go, kept from the moment of asking until
    * a document actually arrives.
@@ -109,25 +113,20 @@ export class Progress {
     return this.going.get(tab) ?? '';
   }
 
-  /** Records a tab asked for that the server has not yet opened. */
-  askOpen(init: AskInit, now: number, rttMs: number): void {
-    this.opens.push({
-      verb: init.verb,
-      url: init.url,
-      from: '',
-      at: now,
-      until: now + patience(rttMs),
-    });
+  /**
+   * Moves an ask onto the id the server gave the tab it was filed under. A tab
+   * is drawn, and can be waiting on something, a round trip before it is named.
+   */
+  rekey(from: number, to: number): void {
+    const ask = this.asks.get(from);
+    if (!ask) return;
+    this.asks.delete(from);
+    this.asks.set(to, ask);
   }
 
   /** What this tab is waiting for, if anything. */
   waiting(tab: number): Ask | undefined {
     return this.asks.get(tab);
-  }
-
-  /** The tabs asked for and not yet arrived, oldest first. */
-  get opening(): readonly Ask[] {
-    return this.opens;
   }
 
   /**
@@ -165,11 +164,6 @@ export class Progress {
     return this.asks.delete(tab);
   }
 
-  /** Retires the oldest pending open: a tab this side asked for has appeared. */
-  appeared(): boolean {
-    return this.opens.shift() !== undefined;
-  }
-
   /** Forgets a closed tab. */
   forget(tab: number): boolean {
     this.going.delete(tab);
@@ -178,9 +172,8 @@ export class Progress {
 
   /** Drops everything, for a link that has gone down or a session restarting. */
   clear(): boolean {
-    const had = this.asks.size > 0 || this.opens.length > 0;
+    const had = this.asks.size > 0;
     this.asks.clear();
-    this.opens = [];
     this.going.clear();
     return had;
   }
@@ -194,11 +187,6 @@ export class Progress {
         dropped = true;
       }
     }
-    const keep = this.opens.filter((o) => o.until > now);
-    if (keep.length !== this.opens.length) {
-      this.opens = keep;
-      dropped = true;
-    }
     return dropped;
   }
 
@@ -206,7 +194,6 @@ export class Progress {
   deadline(): number {
     let next = Infinity;
     for (const ask of this.asks.values()) next = Math.min(next, ask.until);
-    for (const open of this.opens) next = Math.min(next, open.until);
     return next;
   }
 }

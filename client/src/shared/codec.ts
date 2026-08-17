@@ -258,6 +258,7 @@ export function decodeTabState(body: unknown): TabState {
     faviconId: str(f, F.tabState.faviconId),
     closed: bool(f, F.tabState.closed),
     error: str(f, F.tabState.error),
+    ref: str(f, F.tabState.ref),
   };
 }
 
@@ -403,10 +404,16 @@ export function resyncBody(tab: number, haveTo: number, reason: string): Map<num
   return m;
 }
 
-export function navigateBody(url: string, action = ''): Map<number, unknown> {
+export function navigateBody(
+  url: string,
+  action = '',
+  open: { ref?: string; background?: boolean } = {},
+): Map<number, unknown> {
   const m = new Map<number, unknown>();
   if (url) m.set(F.navigate.url, url);
   if (action) m.set(F.navigate.action, action);
+  if (open.ref) m.set(F.navigate.ref, open.ref);
+  if (open.background) m.set(F.navigate.background, true);
   return m;
 }
 

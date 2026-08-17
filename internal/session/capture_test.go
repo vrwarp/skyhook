@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -493,4 +494,48 @@ func TestInputTextKeptWhenTheOperatorAsks(t *testing.T) {
 	if !strings.Contains(string(blob), "hunter2") {
 		t.Errorf("captureText was on but the text was still redacted: %s", blob)
 	}
+}
+
+// A tab is announced before its landside page exists, and a capture taken in
+// that window used to walk straight into the nil page and take the server down
+// with it. "A tab was still opening" is a state worth capturing, not one worth
+// crashing on.
+func TestCaptureSurvivesATabThatIsStillOpening(t *testing.T) {
+	opts := defaultCaptureOptions(t)
+	s := newTestSession(t, opts)
+
+	s.mu.Lock()
+	s.tabs[1] = &tabState{
+		ring:    NewRing(1 << 16),
+		journal: NewJournal(opts.JournalBytes),
+		openURL: "https://example.test/slow",
+	}
+	s.mu.Unlock()
+
+	if _, err := s.StartCapture(protocol.CaptureManual, "opened mid-build", false); err != nil {
+		t.Fatal(err)
+	}
+	files := bundleFiles(t, waitForBundle(t, opts.Dir))
+
+	report, ok := files["landside/tabs/1/state.json"]
+	if !ok {
+		t.Fatalf("the half-open tab is missing from the bundle: %v", fileNames(files))
+	}
+	var tab map[string]any
+	if err := json.Unmarshal(report, &tab); err != nil {
+		t.Fatalf("tab report is not readable JSON: %v", err)
+	}
+	// All it can say is where it was headed, and that is worth saying.
+	if tab["url"] != "https://example.test/slow" {
+		t.Errorf("the tab report lost the URL the tab was opening: %v", tab["url"])
+	}
+}
+
+func fileNames(files map[string][]byte) []string {
+	out := make([]string, 0, len(files))
+	for name := range files {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }

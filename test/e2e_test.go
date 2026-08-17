@@ -1202,6 +1202,20 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, tallPage())
 	})
+	// An origin that takes even longer than /slow, and is nobody else's: what
+	// this one is for is proving that a tab opening onto it does not hold up
+	// the rest of the browser, and the margin has to be unmistakable. Sharing
+	// /slow would tie that margin to another test's timing.
+	mux.HandleFunc("/stalled", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(stalledOriginDelay):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Stalled</title></head>
+			<body><h1>the stalled page</h1></body></html>`)
+	})
 	// A three-page site with the shape of a link aggregator: an index of stories,
 	// a comments page per story, and the story itself somewhere else entirely.
 	mux.HandleFunc("/index", func(w http.ResponseWriter, _ *http.Request) {
@@ -3074,6 +3088,69 @@ func TestNavigationReplacesDocument(t *testing.T) {
 	}
 	if strings.Contains(cl.Model(tab).Text(), "first message") {
 		t.Error("stale content survived the navigation")
+	}
+}
+
+// stalledOriginDelay is how long /stalled sits on a request before answering.
+// Long enough that a blocked reader is unmistakable, short enough to be cheap.
+const stalledOriginDelay = 6 * time.Second
+
+// Opening a tab is a dozen sequential CDP calls and a navigation the origin
+// commits whenever it feels like it. All of that used to happen on the
+// connection's only reader, so everything else the user did — a click, a
+// keystroke, following a link in the page they were already reading — waited
+// behind a tab that had nothing to do with it.
+func TestOpeningATabDoesNotStallTheRestOfTheBrowser(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(150*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	tab := h.openFixture(ctx, cl)
+
+	// A tab onto an origin that will not answer for six seconds.
+	if err := cl.OpenTab(h.site.URL + "/stalled"); err != nil {
+		t.Fatal(err)
+	}
+	// And, immediately behind it, ordinary work on the tab already open.
+	if err := cl.Navigate(tab, h.site.URL+"/second"); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	if err := cl.WaitForText(ctx, tab, "the second page", budget(20*time.Second)); err != nil {
+		t.Fatalf("a tab opening elsewhere held up a navigation: %v", err)
+	}
+	if waited := time.Since(start); waited > budget(stalledOriginDelay) {
+		t.Errorf("the navigation took %v, which is the slow tab's latency, not its own", waited)
+	}
+}
+
+// The client draws a tab the moment the user asks for one and starts using it
+// straight away, which is a round trip before the landside page can exist. Work
+// aimed at a tab that is still being built has to wait for it, not be dropped.
+func TestATabCanBeDrivenBeforeItsPageExists(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTabRef("", "r1", false); err != nil {
+		t.Fatal(err)
+	}
+	// The announcement arrives before the page is built, which is the whole
+	// point of it; navigating on the back of it lands in the deferred queue.
+	tab, err := cl.WaitForOpenedTab(ctx, "r1", budget(30*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Navigate(tab, h.site.URL+"/second"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the second page", budget(45*time.Second)); err != nil {
+		t.Fatalf("a navigation sent while the tab was still being built was lost: %v", err)
 	}
 }
 

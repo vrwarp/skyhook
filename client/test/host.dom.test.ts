@@ -91,6 +91,22 @@ async function mount(): Promise<{ host: MirrorHost; ev: ReturnType<typeof events
 }
 
 describe('MirrorHost', () => {
+  // A tab is drawn, frame and all, a round trip before the server names it.
+  // Everything that goes looking for one tab's document goes by the frame's
+  // label, so the label has to follow the tab across being named.
+  it('relabels its frame with the id the server gives the tab', async () => {
+    const ev = events();
+    const host = new MirrorHost(-1, ev);
+    document.body.appendChild(host.frame);
+    await host.whenReady();
+    expect(host.frame.dataset.tab).toBe('-1');
+
+    host.adopt(7);
+    expect(host.tab).toBe(7);
+    expect(host.frame.dataset.tab).toBe('7');
+    host.destroy();
+  });
+
   beforeEach(() => {
     document.body.innerHTML = '';
   });
