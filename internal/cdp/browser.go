@@ -376,7 +376,15 @@ func (b *Browser) Close() error {
 			case <-b.exited:
 			case <-time.After(8 * time.Second):
 				_ = b.cmd.Process.Kill()
-				<-b.exited
+				// Reaped, so nothing is left as a zombie — but not waited for
+				// without end. A process that will not die is one this call
+				// cannot fix, and shutting the server down matters more.
+				select {
+				case <-b.exited:
+				case <-time.After(5 * time.Second):
+					b.log.Warn("chromium did not exit after being killed",
+						"pid", b.cmd.Process.Pid)
+				}
 			}
 		}
 		if b.tmpDir != "" {
