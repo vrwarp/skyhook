@@ -1347,6 +1347,27 @@ asset that is only ever asked for once has no second chance to paper over a
 race, and this path has three of those (background images, webfonts, and now
 region shots when a push is dropped).
 
+**And an asset pushed once must not be pushed again.** The other half of the
+same path had the opposite fault. An above-the-fold picture is shipped unasked
+the moment its key is known, and the pipeline ships it again — the whole of it —
+every time a snapshot submits that key. A snapshot is submitted on every resync,
+so a client that had fallen behind was answered with the repair *and* with every
+picture above the fold, in full, down the link that had made it late. The client
+needed none of it: images live in a cache keyed by content hash, a resync
+neither empties that cache nor clears what the client has already asked for, and
+the pictures were still on screen throughout.
+
+The pipeline cannot know that — it is shared by every session and knows keys,
+not clients — so the session keeps the ledger instead: the keys this client has
+been given. A key on it is not sent again, and `Want` takes it off, because a
+client asking for a hash is the one signal that means its own cache no longer
+has it. That leaves the failure this must not trade for — a picture withheld
+from a client that needs it — resting on a path the client already had and uses.
+The dead option it replaced said something similar and did nothing:
+`IdleSnapshotAfter` was documented as re-snapshotting a silent page for a client
+that asked, and was read by nothing, `planResync` having decided that from ring
+coverage since before it was written.
+
 ### 23. Bookmarks are a navigation surface, not a list that gets written to
 
 The design asks for bookmarks in one clause of R5, beside tabs and the URL bar,

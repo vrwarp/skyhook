@@ -1087,6 +1087,19 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, lateUpgradePage)
 	})
+	// A picture at the top of the page, which is what makes it above the fold
+	// and so shipped unasked. Everything below the fold waits to be asked for,
+	// and a client that has already asked does not ask twice — so a page whose
+	// pictures are all below the fold cannot tell whether a resync re-sent
+	// them, and would answer this question by not posing it.
+	mux.HandleFunc("/hero-image", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Hero</title></head>
+			<body style="margin:0">
+			<img id="hero" src="/pixel.png" width="320" height="200" alt="the picture at the top">
+			<h1>the page with a picture at the top</h1>
+			</body></html>`)
+	})
 	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)

@@ -312,6 +312,59 @@ describe('MirrorHost', () => {
     expect(img.dataset.skyhookImg).toBe('deadbeef');
   });
 
+  /*
+   * An asset is asked for once per hash, which leaves a dropped answer with no
+   * second chance. Media is expendable on a full queue by design, and the
+   * server no longer re-sends bytes it has already sent, so the only thing
+   * standing between a dropped push and a picture that never arrives is this:
+   * a resync rebuilds the document, and whatever is still empty is asked for
+   * again.
+   */
+  it('asks again, after a resync, for an image whose bytes never came', async () => {
+    const { host, ev } = await mount();
+    const snap = imageSnapshot();
+    host.applySnapshot(snap);
+    expect(ev.wantImages).toHaveBeenCalledWith(1, ['deadbeef']);
+
+    ev.wantImages.mockClear();
+    // The same document again, which is what a resync is.
+    host.applySnapshot(imageSnapshot());
+    expect(ev.wantImages).toHaveBeenCalledWith(1, ['deadbeef']);
+  });
+
+  it('does not ask again for an image it already has', async () => {
+    stubCache({ [imageCacheKey('deadbeef')]: 'pretend pixels' });
+    const { host, ev } = await mount();
+    host.applySnapshot(imageSnapshot());
+    // The bytes land, so nothing is waiting for them any more. Minting the
+    // blob is asynchronous — the cache read is — so this waits for the element
+    // to be showing it rather than for a fixed number of microtasks.
+    host.imageArrived('deadbeef');
+    const img = host.frame.contentDocument!.querySelector('img')!;
+    await vi.waitFor(() => expect(img.getAttribute('src')).toBe('blob:mirror/c0ffee'));
+
+    ev.wantImages.mockClear();
+    host.applySnapshot(imageSnapshot());
+    expect(ev.wantImages).not.toHaveBeenCalled();
+  });
+
+  /** A snapshot with one above-the-fold image in it. */
+  function imageSnapshot(): Snapshot {
+    const snap = snapshot();
+    snap.strings.push('img', 'skyhook://img/deadbeef', 'src');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('img'),
+      attrs: [snap.strings.indexOf('src'), snap.strings.indexOf('skyhook://img/deadbeef')],
+      flags: 2,
+    });
+    snap.images.push({
+      node: 10, hash: 'deadbeef', w: 10, h: 10, blur: '', mime: 'image/png',
+      bytes: 100, priority: 0, alt: '', box: [], missing: false,
+    });
+    return snap;
+  }
+
   /** Mounts a snapshot holding one image, and returns the element. */
   async function withImage(): Promise<{ host: MirrorHost; img: HTMLImageElement }> {
     const { host } = await mount();

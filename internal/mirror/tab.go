@@ -134,9 +134,6 @@ type Options struct {
 	// replaced but whose language header was not is a browser with a story that
 	// does not add up.
 	AcceptLanguage string
-	// IdleSnapshotAfter re-snapshots if the page has been silent this long and
-	// the client asked for a resync. Zero disables.
-	IdleSnapshotAfter time.Duration
 	// StreamEvery keeps photographing a canvas that animates with nobody
 	// touching it — a clock, an idle game loop — at this interval. Zero, the
 	// default, means a canvas is only ever photographed because of something
