@@ -169,6 +169,31 @@ describe('TabModel', () => {
     expect(sent[1]).toEqual({ name: 'navigate', args: { url: 'https://example.test/', tab: 1 } });
   });
 
+  // The link reports itself up a round trip before the welcome arrives, and a
+  // tab opened in that window is the one the reader is waiting to see. The
+  // session's idea of the active tab was formed before they asked for it.
+  it('does not move the reader off a tab they asked for on this connection', () => {
+    model.connectionUp();
+    model.reset([
+      { tab: 1, url: 'https://a.test/', title: 'A', seq: 0, active: true, loading: false },
+    ]);
+    expect(model.active).toBe(1);
+
+    // A reload: online again, the reader opens something, and the welcome for
+    // that connection lands behind it naming the tab it resumed.
+    model.connectionUp();
+    const asked = model.open('https://b.test/');
+    expect(model.active).toBe(asked);
+    model.reset([
+      { tab: 1, url: 'https://a.test/', title: 'A', seq: 0, active: true, loading: false },
+    ]);
+    expect(model.active).toBe(asked);
+
+    // And it is still the front tab once the server names it.
+    model.applyState(2, state({ ref: refOf(0), url: 'https://b.test/' }));
+    expect(model.active).toBe(2);
+  });
+
   it('keeps the front tab across a resume that does not name one', () => {
     model.reset([
       { tab: 1, url: 'https://a.test/', title: 'A', seq: 0, active: false, loading: false },

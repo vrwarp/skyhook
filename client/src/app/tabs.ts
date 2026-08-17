@@ -200,6 +200,12 @@ export class TabModel {
     for (const id of this.ids()) {
       if (id > 0 && !held.has(id)) this.remove(id);
     }
+    // Where the reader is, if they asked for it on this connection. The
+    // session's idea of the active tab was formed before they asked — the link
+    // reports itself up a round trip before this frame arrives, and a tab
+    // opened in that window is the one they are waiting to see. Letting the
+    // welcome override it moves them off the page they just asked for.
+    const asked = this.isProvisional(this.active) ? this.active : 0;
     for (const r of refs) {
       const known = this.tabs.get(r.tab);
       this.tabs.set(r.tab, {
@@ -211,10 +217,10 @@ export class TabModel {
         canForward: known?.canForward ?? false,
         provisional: false,
       });
-      if (r.active) this.active = r.tab;
+      if (r.active && !asked) this.active = r.tab;
     }
     if (!this.tabs.has(this.active)) {
-      this.active = refs.length ? (refs[0]?.tab ?? 0) : 0;
+      this.active = asked || (refs.length ? (refs[0]?.tab ?? 0) : 0);
     }
   }
 
