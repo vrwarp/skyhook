@@ -10,7 +10,11 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"math/rand"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -172,8 +176,8 @@ func TestDiskCacheEvictsOldest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.put("aaaaaaaa", make([]byte, 200), "image/png")
-	c.put("bbbbbbbb", make([]byte, 200), "image/png")
+	c.put("aaaaaaaa", make([]byte, 200), cacheHeader{Mime: "image/png"})
+	c.put("bbbbbbbb", make([]byte, 200), cacheHeader{Mime: "image/png"})
 	if _, _, ok := c.get("aaaaaaaa"); ok {
 		t.Fatal("oldest entry should have been evicted")
 	}
@@ -192,7 +196,7 @@ func TestDiskCacheRecoversFromDisk(t *testing.T) {
 	if err := png.Encode(&buf, sprite(8, 8)); err != nil {
 		t.Fatal(err)
 	}
-	c.put("cafebabe", buf.Bytes(), "image/png")
+	c.put("cafebabe", buf.Bytes(), cacheHeader{W: 8, H: 8, Blur: "LEHV6n", Mime: "image/png"})
 
 	// A restart must not lose the cross-flight cache.
 	c2, err := newDiskCache(dir, 1<<20)
@@ -615,8 +619,11 @@ func TestOnlyARecognisedPictureIsSentBackToTheBrowser(t *testing.T) {
 
 	select {
 	case meta := <-d.ready:
-		t.Fatalf("an HTML document was published as an image: %+v", meta)
+		if !meta.Missing {
+			t.Fatalf("an HTML document was published as an image: %+v", meta)
+		}
 	case <-time.After(500 * time.Millisecond):
+		t.Fatal("nothing was said at all; the client is still holding a space for it")
 	}
 	if n := browser.asked(); n != 0 {
 		t.Errorf("the browser was asked %d times to decode a web page", n)
@@ -651,8 +658,11 @@ func TestWithoutABrowserAnUnreadableFormatSaysSo(t *testing.T) {
 	p.Submit(Request{Tab: 1, Key: "gone", Priority: 0, Src: avifBytes(), W: 16, H: 16})
 	select {
 	case meta := <-d.ready:
-		t.Fatalf("an undecoded image was published: %+v", meta)
+		if !meta.Missing {
+			t.Fatalf("an undecoded image was published as though it had arrived: %+v", meta)
+		}
 	case <-time.After(500 * time.Millisecond):
+		t.Fatal("nothing was said at all; the client is still holding a space for it")
 	}
 }
 
@@ -687,5 +697,422 @@ func TestUndecodableFormatNamesOnlyWhatIsWorthAskingAbout(t *testing.T) {
 				t.Errorf("UndecodableFormat = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// failingFetcher answers every URL the same way, and counts the asking.
+type failingFetcher struct {
+	mu   sync.Mutex
+	n    int
+	body []byte
+	err  error
+}
+
+func (f *failingFetcher) FetchImage(_ context.Context, _ uint32, _ string, _ int) ([]byte, error) {
+	f.mu.Lock()
+	f.n++
+	f.mu.Unlock()
+	return f.body, f.err
+}
+
+func (f *failingFetcher) asked() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
+}
+
+/*
+An asset that fails is said to fail, to everyone waiting for it.
+
+This is the shape the AVIF bug turned out to be one instance of. Nothing here
+ever announced a failure: the key went unmentioned, the waiting list kept the
+tabs on it forever, and the client — which asks for a hash exactly once,
+because a second ask costs a round trip on the link this project exists for —
+held a transparent pixel over the picture until the tab was closed. A missing
+codec made that the whole page and got it noticed; a 403 had been doing it one
+image at a time all along.
+*/
+func TestAnAssetThatFailsIsSaidToFail(t *testing.T) {
+	d := &recorder{ready: make(chan protocol.ImageMeta, 8), bytes: make(chan protocol.ImageData, 8)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher: &failingFetcher{err: errors.New("http 403 Forbidden")},
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// Priority 1: nothing is pushed, so this is the client's one question.
+	p.Submit(Request{Tab: 1, Key: "d34db33f", Node: 12, Priority: 1,
+		URL: "https://cdn.test/paywalled.png", Alt: "a chart of the results"})
+	p.Want(1, []string{"d34db33f"})
+
+	select {
+	case meta := <-d.ready:
+		if !meta.Missing {
+			t.Fatalf("a failed asset was announced as though it had arrived: %+v", meta)
+		}
+		if meta.Hash != "d34db33f" {
+			t.Errorf("meta.Hash = %q", meta.Hash)
+		}
+		if meta.Alt != "a chart of the results" {
+			t.Errorf("meta.Alt = %q: the alt text is the whole of what is left to show", meta.Alt)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("nothing was ever said; the reader waits on this for the rest of the session")
+	}
+
+	// The waiting list is emptied, or it grows by one entry per failed asset
+	// for as long as the process lives.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		n := len(p.wanted)
+		p.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	p.mu.Lock()
+	stranded, remembered := len(p.wanted), len(p.meta)
+	p.mu.Unlock()
+	if stranded != 0 {
+		t.Errorf("%d tabs left on the waiting list for an asset that is not coming", stranded)
+	}
+	// And the failure is deliberately not recorded: a later snapshot submits
+	// the key again, which is the only second chance anything here has.
+	if remembered != 0 {
+		t.Errorf("the failure was recorded as a result (%d entries), which costs the retry", remembered)
+	}
+}
+
+// Every tab holding a space for the asset is told, and none of them twice.
+func TestEveryTabWaitingOnAFailedAssetIsTold(t *testing.T) {
+	d := &recorder{ready: make(chan protocol.ImageMeta, 16), bytes: make(chan protocol.ImageData, 16)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher: &failingFetcher{err: errors.New("origin is gone")},
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// Three tabs on one shared asset — a sprite sheet, or a logo on every page
+	// of the same site — and the submitting tab asks twice.
+	p.Want(2, []string{"5ee1e55"})
+	p.Want(3, []string{"5ee1e55"})
+	p.Want(1, []string{"5ee1e55"})
+	p.Submit(Request{Tab: 1, Key: "5ee1e55", Priority: 1, URL: "https://cdn.test/logo.png"})
+
+	seen := map[string]int{}
+	deadline := time.After(10 * time.Second)
+	for i := 0; i < 3; i++ {
+		select {
+		case meta := <-d.ready:
+			if !meta.Missing {
+				t.Fatalf("announced as arrived: %+v", meta)
+			}
+			seen[meta.Hash]++
+		case <-deadline:
+			t.Fatalf("only %d of 3 waiting tabs were told", i)
+		}
+	}
+	select {
+	case meta := <-d.ready:
+		t.Errorf("a fourth notice for %d tabs: %+v", 3, meta)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// A successful fetch that returned nothing is a fetch failure, and used to be
+// reported as a decode one — which sends an operator hunting for a codec for
+// an asset that never arrived.
+//
+// `loadNetworkResource` answers a request whose body it could not read with
+// success and no stream, and FetchResource passes that on as the empty
+// resource it honestly is. The zero bytes then reached the codecs, where "no
+// bytes" and "bytes in a format I do not know" are the same answer.
+func TestAnEmptyFetchIsNotADecodeFailure(t *testing.T) {
+	empty := &failingFetcher{body: nil, err: nil}
+	d := &recorder{ready: make(chan protocol.ImageMeta, 4), bytes: make(chan protocol.ImageData, 4)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher: empty,
+		// The direct path is the second chance an empty browser read gets, so
+		// it has to come up empty too for this to be the answer.
+		Client: &http.Client{Transport: emptyTransport{}},
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	_, ferr := p.fetch(context.Background(), Request{Tab: 1, Key: "f8380b7b",
+		URL: "https://dlcdnwebimgs.test/icon/close.svg"})
+	if !errors.Is(ferr, ErrEmptyResource) {
+		t.Fatalf("err = %v, want ErrEmptyResource", ferr)
+	}
+	if empty.asked() == 0 {
+		t.Error("the browser was never asked")
+	}
+	if strings.Contains(ferr.Error(), "unknown format") {
+		t.Error("still reported as something the codecs could not read")
+	}
+
+	// And the whole way through: the client hears it is not coming, rather
+	// than hearing nothing.
+	p.Submit(Request{Tab: 1, Key: "f8380b7b", Priority: 1,
+		URL: "https://dlcdnwebimgs.test/icon/close.svg"})
+	select {
+	case meta := <-d.ready:
+		if !meta.Missing {
+			t.Errorf("an empty fetch was announced as an image: %+v", meta)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("nothing was said about an asset that fetched to nothing")
+	}
+}
+
+// emptyTransport answers every request with a successful, bodyless 200 — what
+// a CDN returns for an asset it has decided to serve nothing for.
+type emptyTransport struct{}
+
+func (emptyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK, Status: "200 OK",
+		Body: io.NopCloser(strings.NewReader("")), Request: r,
+	}, nil
+}
+
+/*
+The landside cache is readable after a restart.
+
+It always survived on disk and was never once consulted: both readers ask the
+in-memory metadata table first, that table starts empty, and so a directory of
+already-transcoded assets was re-fetched from the origin and re-encoded, every
+page, every restart. What was missing was not the bytes but everything needed
+to announce them — size, type, blurhash — which lived only in the map that had
+just been thrown away.
+*/
+func TestTheDiskCacheIsReadableAfterARestart(t *testing.T) {
+	dir := t.TempDir()
+	first := &failingFetcher{body: encodePNG(t, sprite(48, 32))}
+	d1 := &recorder{ready: make(chan protocol.ImageMeta, 4), bytes: make(chan protocol.ImageData, 4)}
+	p1, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: dir, Transcode: Options{Encoder: EncoderPNG}, Fetcher: first,
+	}, d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1.Submit(Request{Tab: 1, Key: "abc123", Priority: 0, URL: "https://x.test/a.png", W: 48, H: 32})
+	var was protocol.ImageMeta
+	select {
+	case was = <-d1.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first run never finished")
+	}
+	<-d1.bytes
+	p1.Close()
+
+	// Restart over the same directory, with an origin that is now unreachable:
+	// anything delivered can only have come from the cache.
+	gone := &failingFetcher{err: errors.New("the origin is not there any more")}
+	d2 := &recorder{ready: make(chan protocol.ImageMeta, 4), bytes: make(chan protocol.ImageData, 4)}
+	p2, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: dir, Transcode: Options{Encoder: EncoderPNG}, Fetcher: gone,
+	}, d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+
+	p2.Submit(Request{Tab: 1, Key: "abc123", Priority: 0, URL: "https://x.test/a.png", W: 48, H: 32})
+	select {
+	case meta := <-d2.ready:
+		if meta.Missing {
+			t.Fatal("the cached asset was announced as not coming")
+		}
+		// The description has to survive too, or the element cannot reserve its
+		// space and the reader loses their place when the bytes land.
+		if meta.W != was.W || meta.H != was.H {
+			t.Errorf("size = %dx%d, want the %dx%d it was cached at", meta.W, meta.H, was.W, was.H)
+		}
+		if meta.Blur != was.Blur || meta.Blur == "" {
+			t.Errorf("blurhash = %q, want %q", meta.Blur, was.Blur)
+		}
+		if meta.Mime != was.Mime {
+			t.Errorf("mime = %q, want %q", meta.Mime, was.Mime)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the restarted server did not know about an asset it had already transcoded")
+	}
+	select {
+	case data := <-d2.bytes:
+		if len(data.Data) == 0 {
+			t.Fatal("the cached asset arrived with no bytes")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the bytes were never sent")
+	}
+	if gone.asked() != 0 {
+		t.Errorf("the origin was fetched %d time(s) for an asset already on disk", gone.asked())
+	}
+
+	// And the client's own request path answers from the same place.
+	p2.Want(1, []string{"abc123"})
+	select {
+	case <-d2.bytes:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a request for a cached key went unanswered")
+	}
+}
+
+// An entry from a build that stored bare bytes cannot be quoted, and is
+// dropped rather than served as an asset with no size and no type.
+func TestACacheEntryWithNoDescriptionIsDiscarded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "0ldcache"), encodePNG(t, sprite(8, 8)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := newDiskCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := c.header("0ldcache"); ok {
+		t.Error("a headerless entry was quoted")
+	}
+	if c.has("0ldcache") {
+		t.Error("a headerless entry was left in the index")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "0ldcache")); !os.IsNotExist(err) {
+		t.Error("a headerless entry was left occupying space it can never be read from")
+	}
+}
+
+// Sniff has to know every type Transcode emits, because it is the fallback for
+// an entry whose description could not be read — and it answered
+// "application/octet-stream" for exactly the two kinds where the type is
+// load-bearing on the client: a vector image and a webfont.
+func TestSniffKnowsEveryTypeTheTranscoderEmits(t *testing.T) {
+	tc := New(Options{Encoder: EncoderPNG})
+	for name, src := range map[string][]byte{
+		"svg":   []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><rect/></svg>`),
+		"woff2": append([]byte("wOF2"), make([]byte, 256)...),
+		"woff":  append([]byte("wOFF"), make([]byte, 256)...),
+		"otf":   append([]byte("OTTO"), make([]byte, 256)...),
+		"ttf":   append([]byte("\x00\x01\x00\x00"), make([]byte, 256)...),
+		"png":   encodePNG(t, sprite(16, 16)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := tc.Transcode(context.Background(), src, 0, 0)
+			if err != nil {
+				t.Fatalf("transcode: %v", err)
+			}
+			if got := Sniff(res.Data); got != res.Mime {
+				t.Errorf("emitted %q, sniffs back as %q", res.Mime, got)
+			}
+		})
+	}
+}
+
+// A vector image is not a bitmap just because its copyright notice is long.
+//
+// The root element used to have to appear in the first kilobyte, which is
+// enough for a declaration and a doctype and not enough for what an export
+// tool puts in front of them.
+func TestAnSVGIsFoundPastALongProlog(t *testing.T) {
+	tc := New(Options{Encoder: EncoderPNG})
+	prolog := `<?xml version="1.0" encoding="UTF-8"?>` + "\n<!--\n" +
+		strings.Repeat("  Copyright (c) 2026. All rights reserved. Generated by an export tool.\n", 40) +
+		"-->\n"
+	src := []byte(prolog + `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><rect/></svg>`)
+	if len(src) < 1024 {
+		t.Fatalf("the fixture is only %d bytes; it has to clear the old window", len(src))
+	}
+	res, err := tc.Transcode(context.Background(), src, 0, 0)
+	if err != nil {
+		t.Fatalf("an SVG behind its own licence header failed: %v", err)
+	}
+	if res.Mime != "image/svg+xml" {
+		t.Errorf("mime = %q", res.Mime)
+	}
+	if res.W != 24 || res.H != 12 {
+		t.Errorf("size = %dx%d, want the viewBox's 24x12", res.W, res.H)
+	}
+
+	// And looking further must not start finding markup inside bitmaps: a
+	// picture carries zero bytes and XML may not carry one anywhere.
+	binary := append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\x0d"), []byte("<svg fake")...)
+	if looksLikeSVG(binary) {
+		t.Error("a PNG carrying those four bytes was taken for markup")
+	}
+}
+
+/*
+A key whose bytes have been evicted is not announced as though they were there.
+
+The metadata table is bounded by a count and the cache by a size, so on a page
+busy enough to fill either they part company — and an announcement the cache
+cannot answer is the same silence as any other failure, arriving by a route
+nobody chose. Above the fold there is a request in hand and the work is simply
+done again; on the client's own request there is not, and it is told.
+*/
+func TestAnEvictedKeyIsNotAnnouncedAsThoughItsBytesWereThere(t *testing.T) {
+	dir := t.TempDir()
+	fetch := &failingFetcher{body: encodePNG(t, sprite(24, 24))}
+	d := &recorder{ready: make(chan protocol.ImageMeta, 8), bytes: make(chan protocol.ImageData, 8)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: dir, Transcode: Options{Encoder: EncoderPNG}, Fetcher: fetch,
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	p.Submit(Request{Tab: 1, Key: "e71c7ed", Priority: 0, URL: "https://x.test/a.png", W: 24, H: 24})
+	select {
+	case <-d.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first pass never finished")
+	}
+	<-d.bytes
+
+	// Evict the bytes behind the table's back, which is what a size limit does
+	// on a busy page.
+	p.cache.drop("e71c7ed")
+	p.mu.Lock()
+	_, stillRemembered := p.meta["e71c7ed"]
+	p.mu.Unlock()
+	if !stillRemembered {
+		t.Fatal("the table forgot on its own; this test has nothing left to check")
+	}
+
+	// The client's one question, for a key the table says is finished.
+	p.Want(2, []string{"e71c7ed"})
+	select {
+	case meta := <-d.ready:
+		if !meta.Missing {
+			t.Errorf("announced as arrived with no bytes to send: %+v", meta)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("neither bytes nor a word about them")
+	}
+
+	// And above the fold the work is done again rather than announced away.
+	before := fetch.asked()
+	p.Submit(Request{Tab: 1, Key: "e71c7ed", Priority: 0, URL: "https://x.test/a.png", W: 24, H: 24})
+	select {
+	case data := <-d.bytes:
+		if len(data.Data) == 0 {
+			t.Fatal("re-fetched to nothing")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an above-the-fold image whose bytes were evicted was never re-fetched")
+	}
+	if fetch.asked() <= before {
+		t.Error("the bytes came from somewhere without a fetch, which the cache no longer has")
 	}
 }

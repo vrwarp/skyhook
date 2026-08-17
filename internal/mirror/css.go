@@ -582,7 +582,17 @@ func rewriteCSSImages(rules []string, base string, maxDim int) ([]string, []Imag
 	for i, r := range rules {
 		out[i] = replaceCSSURLs(r, func(raw string) string {
 			raw = strings.TrimSpace(raw)
-			if raw == "" || strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "skyhook://") {
+			// A fragment names something in the document — an SVG gradient, a
+			// clip path, a filter, a mask — and not a file. It is the one
+			// reference that must be left exactly as written: resolved against
+			// the page it becomes an address, which fetches the page's own
+			// HTML and then fails to decode it, and rewriting it to a cache key
+			// is worse still, because `clip-path: url(skyhook://img/eda649fa)`
+			// names nothing at all and the element simply stops being clipped.
+			// absolutizeCSSURLs and the agent's resolveCSSURL both say this;
+			// this one had stopped.
+			if raw == "" || strings.HasPrefix(raw, "#") ||
+				strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "skyhook://") {
 				return ""
 			}
 			abs := resolveAgainst(baseURL, raw)

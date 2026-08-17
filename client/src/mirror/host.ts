@@ -350,6 +350,16 @@ export class MirrorHost {
   private pendingCSS = new Set<string>();
   /** Hashes already asked of the server. */
   private requested = new Set<string>();
+
+  /**
+   * Hashes the server has said are not coming.
+   *
+   * Kept separately from `requested` because the two answer different
+   * questions: `requested` stops a second ask for something still on its way,
+   * this stops an element joining a queue that has already been told there is
+   * nothing in it.
+   */
+  private missing = new Set<string>();
   private cssRefresh: ReturnType<typeof setTimeout> | null = null;
   private imageRequest: ReturnType<typeof setTimeout> | null = null;
   private ready: Promise<void>;
@@ -1201,7 +1211,54 @@ export class MirrorHost {
   }
 
   setImageMeta(meta: ImageMeta): void {
+    if (meta.missing) this.noteMissing(meta);
+    // A hash can come back: nothing records a failure landside, so the next
+    // snapshot submits it again and it may well succeed the second time.
+    else if (meta.hash) this.missing.delete(meta.hash);
     this.patcher?.setImageMeta(meta);
+  }
+
+  /**
+   * Stops waiting for an asset the server says is not coming.
+   *
+   * The client asks for a hash exactly once, so before there was anything to
+   * say this, a landside failure left every element that referenced it holding
+   * a transparent pixel until the tab was closed. Dropping the hash from the
+   * waiting lists is most of the point; showing the alt text is the rest of
+   * it, and is what the page's author wrote for this case.
+   */
+  private noteMissing(meta: ImageMeta): void {
+    const hash = meta.hash;
+    if (!hash) return;
+    this.missing.add(hash);
+    const waiting = this.pendingImages.get(hash);
+    if (waiting) {
+      this.pendingImages.delete(hash);
+      for (const el of waiting) {
+        if (meta.alt && !el.getAttribute('alt')) el.setAttribute('alt', meta.alt);
+        this.showMissing(el);
+      }
+    }
+    // A background image that is not coming stays the transparent pixel it
+    // already is: there is no alt text for one, and a broken-image marker
+    // tiled across a panel is worse than nothing at all.
+    this.pendingCSS.delete(hash);
+    this.pendingShots.delete(hash);
+  }
+
+  /**
+   * Lets an image fall back to its alt text.
+   *
+   * An <img> with no `src` draws its alt text and a broken-image marker, which
+   * is exactly what PENDING_PIXEL exists to avoid *while bytes are still on
+   * their way*. Once they are not, the same behaviour is the honest one — with
+   * one exception: an element already wearing a blurhash has an approximation
+   * of the real picture on it, which beats a marker saying the picture failed.
+   */
+  private showMissing(el: HTMLImageElement): void {
+    el.dataset.skyhookMissing = '1';
+    if (el.dataset.skyhookBlur === '1') return;
+    el.removeAttribute('src');
   }
 
   /** Called when the store has bytes for a hash: show them. */
@@ -1238,6 +1295,9 @@ export class MirrorHost {
     return rule.replace(/skyhook:\/\/img\/([0-9a-f]+)/gi, (_m, hash: string) => {
       const known = this.blobs.get(hash);
       if (known) return known;
+      // Not coming: the transparent pixel is the final answer, not a
+      // placeholder, and nothing should queue or ask for it again.
+      if (this.missing.has(hash)) return PENDING_PIXEL;
       if (!this.pendingCSS.has(hash)) {
         this.pendingCSS.add(hash);
         this.requestImagesSoon();
@@ -1370,6 +1430,13 @@ export class MirrorHost {
     const known = this.blobs.get(hash);
     if (known) {
       this.showImage(el, known);
+      return;
+    }
+    // Announced as not coming. Joining the waiting list would hold a
+    // transparent pixel over the alt text for the rest of the session, and
+    // asking again would spend a round trip to be told the same thing.
+    if (this.missing.has(hash)) {
+      this.showMissing(el);
       return;
     }
     if (meta?.blur && !el.dataset.skyhookBlur) {
@@ -1548,6 +1615,10 @@ export class MirrorHost {
       // complete-looking rule landside; without this list the capture shows a
       // blank box and nothing at all to say the client was still waiting.
       pendingCSSImages: Array.from(this.pendingCSS),
+      // Told about and given up on, which a capture could not previously tell
+      // apart from still waiting — the difference between a slow link and a
+      // landside failure, and the whole reason this list exists.
+      missingImages: Array.from(this.missing),
       // A canvas is the one element whose emptiness a capture cannot show:
       // the mirrored markup is identical whether or not its photograph
       // arrived. These two say which it was.
@@ -1592,6 +1663,7 @@ export class MirrorHost {
     this.probed.clear();
     this.pendingCSS.clear();
     this.requested.clear();
+    this.missing.clear();
   }
 
   destroy(): void {

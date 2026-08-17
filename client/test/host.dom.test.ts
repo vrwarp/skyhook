@@ -279,7 +279,7 @@ describe('MirrorHost', () => {
     });
     snap.images.push({
       node: 10, hash: 'deadbeef', w: 10, h: 10, blur: '', mime: 'image/png',
-      bytes: 100, priority: 0, alt: '', box: [],
+      bytes: 100, priority: 0, alt: '', box: [], missing: false,
     });
     host.applySnapshot(snap);
 
@@ -327,6 +327,72 @@ describe('MirrorHost', () => {
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
     return { match };
   }
+
+  it('stops waiting for an image the server says is not coming', async () => {
+    // The client asks for a hash exactly once, so before there was anything to
+    // say this, a landside failure left the element holding a transparent
+    // pixel until the tab was closed.
+    const { host, img } = await withImage();
+    expect(img.getAttribute('src')?.startsWith('data:image/gif')).toBe(true);
+
+    host.setImageMeta({
+      node: 10, hash: 'c0ffee', w: 0, h: 0, blur: '', mime: '',
+      bytes: 0, priority: 0, alt: 'a chart of the results', box: [], missing: true,
+    });
+
+    // No src at all is what makes an <img> draw its alt text, which is the
+    // thing the page's author wrote for exactly this case.
+    expect(img.hasAttribute('src')).toBe(false);
+    expect(img.getAttribute('alt')).toBe('a chart of the results');
+    expect(img.dataset.skyhookMissing).toBe('1');
+    const state = host.freeze().state as Record<string, unknown>;
+    expect(state.pendingImages).not.toContain('c0ffee');
+    // And a capture can now tell "given up on" from "still waiting", which is
+    // the difference between a landside failure and a slow link.
+    expect(state.missingImages).toContain('c0ffee');
+  });
+
+  it('keeps a blurhash rather than replacing it with a broken-image marker', async () => {
+    // An element already wearing an approximation of the picture is better off
+    // keeping it than being told in a small grey icon that the picture failed.
+    const { host, img } = await withImage();
+    host.setImageMeta({
+      node: 10, hash: 'c0ffee', w: 8, h: 8, blur: 'LEHV6nWB2yk8', mime: 'image/png',
+      bytes: 40, priority: 0, alt: '', box: [], missing: false,
+    });
+    await vi.waitFor(() => expect(img.dataset.skyhookBlur).toBe('1'));
+
+    host.setImageMeta({
+      node: 10, hash: 'c0ffee', w: 0, h: 0, blur: '', mime: '',
+      bytes: 0, priority: 0, alt: '', box: [], missing: true,
+    });
+    expect(img.dataset.skyhookMissing).toBe('1');
+    expect(img.getAttribute('src')?.startsWith('data:image/gif')).toBe(true);
+  });
+
+  it('does not ask again for a hash it has been told is not coming', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.strings.push('img', 'skyhook://img/c0ffee', 'src');
+    snap.nodes.push({
+      id: 10, parent: 2, kind: NodeKind.Element,
+      ref: snap.strings.indexOf('img'),
+      attrs: [snap.strings.indexOf('src'), snap.strings.indexOf('skyhook://img/c0ffee')],
+      flags: 2,
+    });
+    host.applySnapshot(snap);
+    ev.wantImages.mockClear();
+
+    host.setImageMeta({
+      node: 10, hash: 'c0ffee', w: 0, h: 0, blur: '', mime: '',
+      bytes: 0, priority: 0, alt: '', box: [], missing: true,
+    });
+    // Re-announcing the same element must not put it back on a queue that has
+    // already been told there is nothing in it.
+    host.applySnapshot(snap);
+    expect(ev.wantImages).not.toHaveBeenCalledWith(1, expect.arrayContaining(['c0ffee']));
+    expect((host.freeze().state as Record<string, unknown>).pendingImages).not.toContain('c0ffee');
+  });
 
   it('shows an image out of a blob the shell minted for it', async () => {
     // The bytes reach the frame as a blob URL because the shell can read them
@@ -379,7 +445,7 @@ describe('MirrorHost', () => {
   function shotMeta(hash: string, box: number[]): ImageMeta {
     return {
       node: 10, hash, w: 200, h: 120, blur: '', mime: 'image/png',
-      bytes: 400, priority: 0, alt: '', box,
+      bytes: 400, priority: 0, alt: '', box, missing: false,
     };
   }
 
@@ -526,7 +592,7 @@ describe('MirrorHost', () => {
 
     host.setImageMeta({
       node: 10, hash: 'c0ffee', w: 320, h: 240, blur: '', mime: 'image/png',
-      bytes: 900, priority: 0, alt: '', box: [],
+      bytes: 900, priority: 0, alt: '', box: [], missing: false,
     });
     expect(img.getAttribute('width')).toBe('320');
     expect(img.getAttribute('height')).toBe('240');
@@ -948,7 +1014,7 @@ describe('MirrorHost', () => {
       });
       snap.images = [{
         node: 40, hash: 'abc123', w: 10, h: 10, blur: '', mime: 'image/webp',
-        bytes: 1, priority: 0, alt: '', box: [],
+        bytes: 1, priority: 0, alt: '', box: [], missing: false,
       }];
       host.applySnapshot(snap);
 

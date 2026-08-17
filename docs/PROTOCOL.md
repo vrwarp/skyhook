@@ -187,6 +187,14 @@ tiny. Bytes follow immediately for above-the-fold images; below-the-fold images
 wait for the client to say it does not already have that hash. That is the
 mechanism that makes a warm cross-flight cache pay off.
 
+A client asks for a hash exactly once, so the server has to say when an asset is
+*not* coming: `ImageMeta.Missing` carries no size, no type and no blurhash,
+because a fetch or a decode failed landside before anything could measure one.
+Without it a failure is indistinguishable from slowness, and the element waits
+on a placeholder for the rest of the session. It is an ordinary optional field —
+a client that does not know it ignores it and behaves as every client did
+before.
+
 Two things that are not images travel this way, because what the channel
 actually carries is "bytes identified by their content hash", and both need
 exactly that:
