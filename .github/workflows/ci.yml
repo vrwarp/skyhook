@@ -152,7 +152,23 @@ jobs:
         # leased; the only limit on concurrency here is the runner. Each test
         # owns a Chromium and the PWA ones own two, so four at a time is about
         # what the box will carry.
-        run: go test -count=1 -timeout 20m -parallel 4 -v ./test
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 20m -parallel 4 -v ./test 2>&1 | tee /tmp/e2e.log
+
+      # Which test failed, on its own, at the end of the log.
+      #
+      # A verbose suite of parallel tests buries the one line that matters under
+      # a browser's startup noise: the tail of a failed run is whatever finished
+      # last, and the failure is somewhere in the middle with no way to grep a
+      # log this size through the API. Naming the tests here is a minute now
+      # against a quarter of an hour of guessing later.
+      - name: Which tests failed
+        if: failure()
+        run: |
+          echo '### Failed tests' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^(\s+)?--- FAIL' /tmp/e2e.log | tee -a "$GITHUB_STEP_SUMMARY" || true
+          grep -B 20 -E '^(\s+)?--- FAIL' /tmp/e2e.log | grep -E '_test\.go:[0-9]+:' || true
 
   netem:
     name: End-to-end over an emulated 1.2s / 250kbps link
@@ -246,7 +262,17 @@ jobs:
         # 45m stays, and it is now a very wide margin over a short run rather
         # than a number that tracks the measurement. The next time it is close,
         # the lane count is the dial to turn, not this.
-        run: go test -count=1 -timeout 45m -parallel 8 -v ./test
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 45m -parallel 8 -v ./test 2>&1 | tee /tmp/netem.log
+
+      # As above: the failure of a parallel suite is not where the log ends.
+      - name: Which tests failed
+        if: failure()
+        run: |
+          echo '### Failed tests over the bad link' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^(\s+)?--- FAIL' /tmp/netem.log | tee -a "$GITHUB_STEP_SUMMARY" || true
+          grep -B 20 -E '^(\s+)?--- FAIL' /tmp/netem.log | grep -E '_test\.go:[0-9]+:' || true
 
       - name: Remove the link profile
         if: always()
