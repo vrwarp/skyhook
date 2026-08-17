@@ -258,6 +258,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
+        # Both directories by glob rather than by name. deploy/ was named a
+        # file at a time, which held for as long as it had one script in it:
+        # the dns-01 hook example arrived beside entrypoint.sh and was not
+        # checked, and that one is worse to leave unchecked than most, because
+        # it is meant to be copied and edited rather than run from here.
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck scripts/*.sh deploy/entrypoint.sh
+          shellcheck scripts/*.sh deploy/*.sh
