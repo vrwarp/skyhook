@@ -172,6 +172,22 @@ func TestTheShellOffersStopWhileAPageIsComing(t *testing.T) {
 		t.Errorf("%d tabs after a stop, want the one that was there: stop keeps "+
 			"the tab, close is the other button", tabs)
 	}
+
+	// And the key that has meant stop for as long as there have been browsers.
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/hangs"), nil)
+	waitFor(ctx, t, page,
+		`document.getElementById('reload').classList.contains('stop')`,
+		budget(30*time.Second), "the second page to be on its way")
+	evalJSON(ctx, t, page,
+		`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`,
+		nil)
+	waitFor(ctx, t, page, `document.getElementById('progress').hidden`,
+		budget(45*time.Second), "Escape to end the waiting")
 }
 
 /*
