@@ -248,9 +248,13 @@ link nor the CPU while it does, and tests that are waiting can wait together.
 Every test already builds its own Chromium, fixture servers, manager and
 temporary directories, so the shaped port was the only thing they ever shared.
 
-That the lanes are independent rather than a shared link in disguise is
-measurable: at four lanes the median test took 1.01x as long as it did running
-alone. The CI step went from 37m06s to 9m46s.
+That the lanes are independent rather than one link divided up is measurable:
+against the same tests run alone, the median test took 1.01x as long at four
+lanes and 1.02x at eight. The CI step went from 37m06s to 9m46s to 5m34s.
+
+What is left is the longest single test, at around 98s: no number of lanes puts
+the suite below that, so shortening it is the next thing to do rather than
+adding lanes.
 
 `sudo scripts/netem.sh outage 60` drops the link entirely for a minute, which
 is how the reconnect-and-resync path is exercised. It replaces the whole qdisc,

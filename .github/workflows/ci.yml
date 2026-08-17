@@ -231,11 +231,17 @@ jobs:
         # on a round trip is using neither the link nor the CPU, so eight of
         # them wait together.
         #
-        # Measured on this branch: the step took 37m06s before, and 9m46s at
-        # four lanes. Eight is not a guess either — the suite is ~2135s of wall
-        # clock over ~439s of CPU, so eight at once want about 1.6 of the
-        # runner's 4 cores, where the unshaped job above already sustains 2.66.
-        # Past eight the ~91s longest test starts setting the floor.
+        # Measured on this branch: 37m06s before, 9m46s at four lanes, 5m34s
+        # at eight. Contention stayed flat across that — against the same tests
+        # run alone, the median test took 1.01x as long at four lanes and 1.02x
+        # at eight, so the lanes really are separate links and not one link
+        # divided up.
+        #
+        # Eight rather than more because the gain is thinning and the cost is
+        # not: the longest single test is ~98s, which floors the suite near
+        # 165s however many lanes it gets, and every extra lane is another one
+        # or two Chromiums resident. If this ever needs to be faster again, the
+        # thing to shorten is that longest test, not this number.
         #
         # 45m stays, and it is now a very wide margin over a short run rather
         # than a number that tracks the measurement. The next time it is close,
