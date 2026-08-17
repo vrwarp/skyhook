@@ -24,7 +24,7 @@ test:
 # demonstrated rather than hoped for. Past eight the returns thin out: the
 # longest single test is ~91s and becomes the floor.
 LANES ?= 8
-LANE_BASE ?= 45123
+LANE_BASE ?= 21123
 
 # Needs a Chromium; skips without one unless SKYHOOK_E2E=1.
 #

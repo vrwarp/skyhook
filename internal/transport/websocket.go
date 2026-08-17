@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -92,6 +93,21 @@ func (s *WSServer) ListenAndServe() error {
 		return s.http.ListenAndServeTLS("", "")
 	}
 	return s.http.ListenAndServe()
+}
+
+// Serve runs on a listener the caller already holds, and blocks.
+//
+// The difference from ListenAndServe is the gap it does not leave. A caller
+// that needs to know the port before the server starts — anything on a port it
+// did not name — otherwise has to bind a socket, read the number off it, close
+// it and hand the number over, and between that close and this bind the port
+// belongs to whoever asks the kernel for one next. Passing the listener keeps
+// it held throughout.
+func (s *WSServer) Serve(ln net.Listener) error {
+	if s.http.TLSConfig != nil {
+		return s.http.ServeTLS(ln, "", "")
+	}
+	return s.http.Serve(ln)
 }
 
 // Close stops the listener.
