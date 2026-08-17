@@ -206,9 +206,15 @@ export class TabModel {
     // opened in that window is the one they are waiting to see. Letting the
     // welcome override it moves them off the page they just asked for.
     const asked = this.isProvisional(this.active) ? this.active : 0;
+    // Rebuilt in the session's order rather than updated in place. A Map keeps
+    // a key where it was first put, so setting one that is already there leaves
+    // it where this client first heard of it — and a reload whose frames arrive
+    // out of order left the reader's tabs rearranged, which is the one thing
+    // the server sorts its own list to prevent. Tab order is muscle memory.
+    const ordered = new Map<number, TabView>();
     for (const r of refs) {
       const known = this.tabs.get(r.tab);
-      this.tabs.set(r.tab, {
+      ordered.set(r.tab, {
         id: r.tab,
         url: r.url || known?.url || '',
         title: r.title || known?.title || '',
@@ -219,6 +225,13 @@ export class TabModel {
       });
       if (r.active && !asked) this.active = r.tab;
     }
+    // Then whatever this side asked for on this connection, which the session
+    // cannot have named yet. It is the newest thing the reader did, so it goes
+    // where they last saw it: the end.
+    for (const [id, view] of this.tabs) {
+      if (!ordered.has(id)) ordered.set(id, view);
+    }
+    this.tabs = ordered;
     if (!this.tabs.has(this.active)) {
       this.active = asked || (refs.length ? (refs[0]?.tab ?? 0) : 0);
     }

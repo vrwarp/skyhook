@@ -2866,3 +2866,60 @@ Other behaviours the suite pins down:
 - Typing reaches real page JavaScript landside (the fixture's own input
   handler rewrites a paragraph), and the live field value comes back as an
   attribute so a resync restores what was typed.
+
+### 43. Three more the busy machine found, and one the slow link did
+
+§41 and §42 took most of the end-to-end suite's load sensitivity. Underneath
+them were two faults belonging to the reader, and a third that only a link with
+no room could show.
+
+**A stop still queued behind the navigation it calls off.** §41 says
+`navigate{stop}` "cancels whatever call is holding the queue", and that is
+exactly true when the navigation being stopped is the one holding it. When the
+landside browser is behind, it is not: the reader's navigation is still
+*queued*, `interrupt` cancels whatever is running instead, and the stop goes in
+behind the navigation it was meant to end. That navigation then starts, does not
+commit — which is why stop was pressed — and the queue never reaches the frame
+that would have called it off. `tabDepth`'s own comment says a wedged tab is
+answered by "stop or close, neither of which queues"; the code and its account
+of itself had come apart, and only on a machine slow enough for the difference
+to show. A stop now bumps a generation and the loop drops *navigations* queued
+before it — only navigations, because the rest of that queue is what the reader
+typed, and `tabDepth` is sized so none of it is lost.
+
+**The tab strip was ordered by hearsay.** `Map.set` keeps a key where it was
+first put, so re-setting one already there leaves it in place. The tab model
+updated in place, which made the strip's order the order this client first heard
+of each tab rather than the order the session gives — and the session sorts its
+own list for exactly this reason, saying in its comment that tab order is muscle
+memory. The two agree whenever frames arrive tidily; on a reload where they do
+not, the reader comes back to their tabs rearranged. Reset now rebuilds in the
+order it was given, then appends what this side asked for on this connection and
+the session cannot have named yet.
+
+**Deciding to send a picture and recording that it was sent were two steps.**
+The image ledger refuses a key the client already holds, and a picture is
+submitted several times for one page: the snapshot that names it, a mutation
+that names it again, the snapshot a resync sends. On loopback the ledger logs
+one send and three refusals and looks perfect. With an encode and a queue push
+between the decision and the record, though, any two submissions that overlapped
+both read "not sent yet" before either wrote "sent" — and a link where one send
+is still going when the next submission arrives overlaps them constantly. The
+emulated 1.2 s / 250 kbps link spent **27870 bytes delivering a 13664-byte
+picture the client was already holding**, against 471 on loopback.
+
+The key is claimed under the same lock that decides, and the claim says whether
+it was this attempt's own, so a frame the queue refuses gives back what this
+attempt took and nothing else — a key already on the books stays there, which is
+what keeps an ask that crossed the bytes on the wire from costing a re-send.
+
+Two things about how it was found are worth more than the fix. The test that
+caught it had to be rewritten twice: waiting for any image frame after a resync
+called the client's own second-chance path a failure, and counting bytes without
+separating keys called a picture re-fetched at a new laid-out size a failure
+too. The invariant is narrower than either — *a key the client was already
+holding must not cross again* — and only that version was both true on the bad
+link and able to fail. And the race itself is asked of the ledger directly, two
+submissions in a row answered yes then no, because a race asked of goroutines
+reproduces when it feels like it: the first concurrent test passed against the
+broken code.

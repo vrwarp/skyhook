@@ -20,6 +20,12 @@ type outbound struct {
 	// at is the order this message was queued in, which is the order an ordered
 	// class hands it back in. See fairQueue.ordered.
 	at uint64
+	// onSent runs when this message has actually been handed to the transport,
+	// and never if it is dropped on the way. Queued is not delivered: a frame
+	// waiting in here when the link goes is a frame nobody sends, and anything
+	// keeping a record of what the client has been given has to learn that from
+	// the write rather than from the queue accepting it.
+	onSent func(ok bool)
 }
 
 /*

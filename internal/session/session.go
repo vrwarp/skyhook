@@ -94,6 +94,10 @@ type tabState struct {
 	work chan tabJob
 	life context.Context
 	kill context.CancelFunc
+	// stopGen counts the times the reader has called this tab off. Queued
+	// navigations from before the last one are dropped rather than run: see
+	// interrupt and tabLoop.
+	stopGen uint64
 	// jobCancel ends the one thing the tab is doing this instant, and is nil
 	// while it is idle. It is what stop pulls: a navigation that has not
 	// committed is holding the queue, and the reader asking for it to end must
@@ -145,7 +149,12 @@ type tabJob struct {
 	// expendable marks work that is only worth doing while it is fresh: a
 	// scroll position superseded by the next one is not worth a queue slot.
 	expendable bool
-	run        func(context.Context) error
+	// gen is the tab's stop generation when this was queued. A navigation from
+	// before the reader pressed stop is a navigation they have called off, and
+	// running it afterwards is the spinner going straight back on. See
+	// interrupt.
+	gen uint64
+	run func(context.Context) error
 }
 
 /*
@@ -180,6 +189,17 @@ func (s *Session) tabLoop(id uint32, ts *tabState) {
 		case <-s.closed:
 			return
 		case job := <-ts.work:
+			s.mu.Lock()
+			calledOff := job.what == "navigate" && job.gen < ts.stopGen
+			s.mu.Unlock()
+			if calledOff {
+				// Only navigations. What else is in the queue is what the
+				// reader typed and clicked, which they have not called off and
+				// which dropping would lose.
+				s.log.Debug("dropping a navigation the reader stopped",
+					"session", s.ID, "tab", id)
+				continue
+			}
 			ctx, cancel := context.WithCancel(ts.life)
 			s.mu.Lock()
 			ts.jobCancel = cancel
@@ -218,6 +238,13 @@ func (s *Session) interrupt(tab uint32) {
 	var cancel context.CancelFunc
 	if ts := s.tabs[tab]; ts != nil {
 		cancel = ts.jobCancel
+		// And the navigations that have not started. Cancelling the running job
+		// covers the reader who gives up on a page already coming; a landside
+		// browser that is behind has not started it yet, so the stop would go
+		// into the queue behind the very navigation it was meant to end — which
+		// then runs, does not commit, and holds the queue against the frame
+		// that would have called it off.
+		ts.stopGen++
 	}
 	s.mu.Unlock()
 	if cancel != nil {
@@ -238,6 +265,9 @@ const tabDepth = 64
 func (s *Session) submit(tab uint32, job tabJob) error {
 	s.mu.Lock()
 	ts := s.tabs[tab]
+	if ts != nil {
+		job.gen = ts.stopGen
+	}
 	s.mu.Unlock()
 	if ts == nil || ts.work == nil {
 		return errNoTab
@@ -388,6 +418,9 @@ func (s *Session) writer() {
 			err = holder.conn.SendObject(m.ch, m.msg)
 		} else {
 			err = holder.conn.Send(m.ch, m.msg)
+		}
+		if m.onSent != nil {
+			m.onSent(err == nil)
 		}
 		if err != nil {
 			s.log.Debug("send failed", "session", s.ID, "err", err)
@@ -599,14 +632,38 @@ which is the one thing that means its own cache no longer has it. That path is
 `Want`, it was already the client's way of saying so, and nothing here changes
 it.
 */
-func (s *Session) mayShipImage(hash string) bool {
+func (s *Session) mayShipImage(hash string) (send, claimed bool) {
 	if hash == "" {
-		return true
+		return true, false
 	}
 	s.imgMu.Lock()
 	defer s.imgMu.Unlock()
-	// Asked for: the client's cache has lost it, whatever the ledger says.
-	return s.imgAsked[hash] || !s.imgSent[hash]
+	// Asked for: the client's cache has lost it, whatever the ledger says. The
+	// permit is spent here rather than when the attempt finishes, so that two
+	// attempts cannot spend one permit.
+	if s.imgAsked[hash] {
+		delete(s.imgAsked, hash)
+		return true, false
+	}
+	if s.imgSent[hash] {
+		return false, false
+	}
+	// A key nothing has sent is claimed by the act of deciding to send it,
+	// because deciding and recording have to be one step. A picture is
+	// submitted several times for one page — the snapshot that names it, a
+	// mutation that names it again, the snapshot a resync sends; on loopback
+	// the ledger logs one send and three refusals for a single load. With an
+	// encode and a queue push between the decision and the record, any two
+	// submissions that overlapped both read "not sent yet" before either wrote
+	// "sent", and both went. Loopback never overlaps them; a link where one
+	// send is still going when the next submission arrives overlaps them
+	// constantly, and the same page spent 27870 bytes delivering a 13664-byte
+	// picture over the emulated 1.2s/250kbps link against 471 on loopback.
+	//
+	// The second answer says the claim is this attempt's own, so a frame that
+	// never goes gives back what this attempt took and nothing else.
+	s.noteImageSent(hash)
+	return true, true
 }
 
 /*
@@ -623,15 +680,23 @@ a delivery. What stops that from losing the picture is the client: every
 snapshot it applies, it asks again for what is still empty, so a dropped answer
 is re-asked rather than waited for forever.
 */
-func (s *Session) noteImageAnswered(hash string, took bool) {
+func (s *Session) noteImageAnswered(hash string, took, claimed bool) {
 	if hash == "" {
 		return
 	}
 	s.imgMu.Lock()
 	defer s.imgMu.Unlock()
-	delete(s.imgAsked, hash)
 	if took {
 		s.noteImageSent(hash)
+		return
+	}
+	// A frame that never went gives back what this attempt claimed, and only
+	// that. A key already on the books stays on them: that attempt was
+	// answering an ask that crossed the bytes on the wire, and forgetting a
+	// picture the client is looking at would have the next resync send it all
+	// over again.
+	if claimed {
+		delete(s.imgSent, hash)
 	}
 }
 
@@ -702,7 +767,8 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 	if !s.worthSending(protocol.ChMedia, protocol.TypeImageData, tab) {
 		return
 	}
-	if !s.mayShipImage(data.Hash) {
+	send, claimed := s.mayShipImage(data.Hash)
+	if !send {
 		return
 	}
 	f, err := protocol.NewFrame(protocol.TypeImageData, tab, data)
@@ -715,8 +781,17 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 	}
 	// Each image is its own stream: independently cancellable, and incapable of
 	// head-of-line-blocking a DOM diff.
-	took := s.enqueue(outbound{ch: protocol.ChMedia, tab: tab, msg: msg, object: true}, true)
-	s.noteImageAnswered(data.Hash, took)
+	// Settled by the write rather than by the queue taking it: a frame sitting
+	// in the queue when the link goes is a frame nobody sends, and a ledger
+	// that counted it would leave the client looking at a space where a picture
+	// is, with the server certain it had sent one.
+	hash := data.Hash
+	if !s.enqueue(outbound{
+		ch: protocol.ChMedia, tab: tab, msg: msg, object: true,
+		onSent: func(ok bool) { s.noteImageAnswered(hash, ok, claimed) },
+	}, true) {
+		s.noteImageAnswered(hash, false, claimed)
+	}
 }
 
 // ------------------------------------------------------------------- tabs
