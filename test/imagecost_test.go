@@ -64,6 +64,29 @@ func TestAResyncDoesNotResendThePicturesTheClientHas(t *testing.T) {
 			total(held))
 	}
 
+	// And quiet, before anything is charged to the resync. On this link the
+	// page's own traffic is still draining seconds after the client can show
+	// the picture — the unasked push and the answer to the ask that crossed it
+	// are both on their way — and bytes queued before the resync are not bytes
+	// the resync spent. Loopback drains before the test can blink, which is why
+	// this had to fail over the emulated link to be noticed at all.
+	quiet := time.Now().Add(budget(45 * time.Second))
+	_, last := cl.BytesTransferred()
+	still := 0
+	for time.Now().Before(quiet) && still < 3 {
+		time.Sleep(budget(500 * time.Millisecond))
+		_, now := cl.BytesTransferred()
+		if now == last {
+			still++
+		} else {
+			still = 0
+		}
+		last = now
+	}
+	if still < 3 {
+		t.Fatalf("the link never went quiet, so nothing can be charged to the resync")
+	}
+
 	sessions := h.mgr.Sessions()
 	if len(sessions) != 1 {
 		t.Fatalf("sessions = %d, want exactly the client's", len(sessions))
