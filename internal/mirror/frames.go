@@ -685,7 +685,11 @@ func (t *Tab) invalidateInside(frameID string) {
 		f.quietUntil = time.Time{}
 		f.mu.Unlock()
 	}
-	t.resnapshotFrames()
+	// Only the frames inside this one. Asking every frame in the tab here is
+	// what turns a page of eight nested frames into forty snapshot requests:
+	// each splice re-asks everything not yet spliced, and each answer splices
+	// and re-asks again. The reconciler covers the rest, two seconds later.
+	t.askFrames(inside)
 }
 
 // framesInside lists the frames whose chain of parents reaches this one.
@@ -1037,8 +1041,14 @@ is room, and one per two-second tick when there is not, which converges on any
 link and floods none.
 */
 func (t *Tab) resnapshotFrames() {
+	t.askFrames(t.framesInOrder())
+}
+
+// askFrames is resnapshotFrames over a given set: the whole tab, or just the
+// frames inside one that has been re-spliced.
+func (t *Tab) askFrames(frames []*subFrame) {
 	backlogged := t.out.Backlogged()
-	for _, f := range framesDue(t.framesInOrder(), backlogged, time.Now()) {
+	for _, f := range framesDue(frames, backlogged, time.Now()) {
 		t.log.Debug("asking a frame to say itself again",
 			"tab", t.ID, "slot", f.slot, "behind", backlogged)
 		go func(f *subFrame) {

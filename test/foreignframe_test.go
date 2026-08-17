@@ -10,6 +10,7 @@ package e2e
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -90,20 +91,44 @@ func TestPWAMirrorsACrossOriginFrame(t *testing.T) {
 	}
 }
 
-// The frame keeps mirroring after its first snapshot: what it does a second
-// later has to arrive as a mutation on the tab's stream, spliced in the same
-// place, or the reader is looking at a photograph.
+/*
+The frame keeps mirroring after its first snapshot: what it does a second later
+has to arrive as a mutation on the tab's stream, spliced in the same place, or
+the reader is looking at a photograph.
+
+Which is asked here by counting rather than by waiting for one sentence to
+replace another. A frame that changes its mind once tells you nothing if the
+change beat the client to it: the first document to arrive already holds the new
+text, and the test passes without a mutation ever having been followed. The
+frame instead says how many times it has changed its mind, and this waits for a
+number higher than the one it can already see — which is a mutation that
+happened after the client had the document, on any link, with no timing in it.
+*/
 func TestPWAFollowsACrossOriginFrameAsItChanges(t *testing.T) {
 	h := newPWAHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
 	defer cancel()
 	page := h.openClient(ctx, t)
-	openPage(ctx, t, h, page, "/foreign-frame", "the page around the launcher")
+	openPage(ctx, t, h, page, "/foreign-frame?live=1", "the page around the launcher")
 
 	waitFor(ctx, t, page, mirrorText+`.includes("the launcher's own words")`,
 		budget(60*time.Second), "the frame's document")
-	waitFor(ctx, t, page, mirrorText+`.includes('the launcher changed its mind')`,
-		budget(60*time.Second), "the frame's own later mutation")
+
+	// Whatever it has said so far, the next one has to cross on its own.
+	waitFor(ctx, t, page, mirrorText+`.includes('changed its mind')`,
+		budget(60*time.Second), "the frame to change its mind at all")
+	var seen int
+	evalJSON(ctx, t, page, `(() => {
+      const m = `+mirrorText+`.match(/changed its mind (\d+) times/);
+      return m ? Number(m[1]) : 0;
+    })()`, &seen)
+	if seen == 0 {
+		t.Fatal("the frame said it had changed its mind, without saying how often")
+	}
+	waitFor(ctx, t, page, `(() => {
+      const m = `+mirrorText+`.match(/changed its mind (\d+) times/);
+      return !!m && Number(m[1]) > `+strconv.Itoa(seen)+`;
+    })()`, budget(60*time.Second), "the frame's own later mutation")
 }
 
 /*

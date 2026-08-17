@@ -935,7 +935,7 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	// A document on the other origin with something to do in it: a control the
 	// reader can only reach if the frame is mirrored, and if a click aimed at it
 	// lands where the frame actually is rather than where its coordinates say.
-	cdnMux.HandleFunc("/widget-app.html", func(w http.ResponseWriter, _ *http.Request) {
+	cdnMux.HandleFunc("/widget-app.html", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>The other origin</title>
 			<style>
@@ -950,13 +950,27 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			<p id="line">the launcher's own words</p>
 			<span id="shout" role="button">press me</span>
 			<p id="said">nothing yet</p>
+			<p id="mind">the launcher has not spoken</p>
 			<script>
 			  document.getElementById('shout').addEventListener('click', () => {
 			    document.getElementById('said').textContent = 'the frame heard it';
 			  });
-			  setTimeout(() => {
-			    document.getElementById('line').textContent = 'the launcher changed its mind';
-			  }, 1200);
+			  // The frame goes on changing its mind for as long as anyone is
+			  // watching, and says how many times. A test that only wanted to see
+			  // it change once had to catch the change after the client had the
+			  // first version — which is a race the client loses on a slow link or
+			  // a busy machine, and it lost it by being told to wait for a
+			  // sentence the page had already painted over. What it waits for now
+			  // is a number higher than the one it already saw, which no delay can
+			  // take away. Anything the frame's first document says stays true.
+			  if (location.search.indexOf('live=1') >= 0) {
+			    var minds = 0;
+			    setInterval(() => {
+			      minds++;
+			      document.getElementById('mind').textContent =
+			        'the launcher changed its mind ' + minds + ' times';
+			    }, 700);
+			  }
 			</script>
 			</body></html>`)
 	})
@@ -1453,15 +1467,22 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	// A cross-origin frame with content worth having. Pushed down and across the
 	// page on purpose: a coordinate taken inside the frame and used unmodified
 	// lands on the heading rather than on the control.
-	mux.HandleFunc("/foreign-frame", func(w http.ResponseWriter, _ *http.Request) {
+	// `?live=1` asks the frame for a document that keeps changing, which is what
+	// a test of the frame's own mutations needs and what every other test of
+	// this page must not have: see widget-app.html.
+	mux.HandleFunc("/foreign-frame", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		widget := cdn.URL + "/widget-app.html"
+		if r.URL.Query().Get("live") == "1" {
+			widget += "?live=1"
+		}
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Foreign</title>
 			<style>p { color: rgb(200, 201, 202) }</style></head>
 			<body><h1>the page around the launcher</h1>
 			<p id="outsider">the page's own words</p>
 			<div style="margin: 140px 0 0 160px">
 			  <iframe id="launcher" width="320" height="200" style="border:0"
-			    src="`+cdn.URL+`/widget-app.html"></iframe>
+			    src="`+widget+`"></iframe>
 			</div>
 			</body></html>`)
 	})
