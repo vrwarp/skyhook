@@ -149,7 +149,7 @@ func TestPropagationWaitGivesUpRatherThanHanging(t *testing.T) {
 		Resolvers: []string{"127.0.0.1:1"},
 	}
 	start := time.Now()
-	err := w.forTXT(context.Background(), "_acme-challenge.example.com",
+	_, err := w.forTXT(context.Background(), "_acme-challenge.example.com",
 		[]string{"expected"}, quietLog())
 	if err == nil {
 		t.Fatal("a record that never appeared was reported as visible")
@@ -168,7 +168,7 @@ func TestPropagationWaitHonoursCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	w := DNSWait{Timeout: time.Minute, Resolvers: []string{"127.0.0.1:1"}}
-	if err := w.forTXT(ctx, "_acme-challenge.example.com", []string{"v"}, quietLog()); err == nil {
+	if _, err := w.forTXT(ctx, "_acme-challenge.example.com", []string{"v"}, quietLog()); err == nil {
 		t.Fatal("a cancelled wait reported success")
 	}
 }
@@ -225,5 +225,26 @@ func TestALookupFailureDoesNotNameAResolverWeNeverAsked(t *testing.T) {
 	}
 	if got := dnsReason(errors.New("something else")); got != "something else" {
 		t.Errorf("reason = %q", got)
+	}
+}
+
+// A hook that exits 0 and publishes nothing is the commonest broken one, and
+// the self-test exists to catch exactly that. When there is no nameserver to
+// ask — a name that is not delegated, usually a typo — nothing was checked, and
+// reporting success would bless the hook this check was written to catch.
+func TestTheHookSelfTestWillNotBlessWhatItCouldNotCheck(t *testing.T) {
+	hook, _ := hookScript(t, `exit 0`)
+	p, err := NewExecDNSProvider([]string{hook}, time.Minute, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// .invalid is reserved and delegated nowhere, so no nameserver can be found.
+	err = CheckDNSHook(context.Background(), p,
+		DNSWait{Timeout: 10 * time.Second, Settle: -1}, "skyhook.invalid", quietLog())
+	if err == nil {
+		t.Fatal("a hook that published nothing was reported as working")
+	}
+	if !strings.Contains(err.Error(), "no nameserver was found") {
+		t.Errorf("error = %v, want it to say what could not be checked", err)
 	}
 }

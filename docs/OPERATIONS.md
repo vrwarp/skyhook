@@ -46,6 +46,34 @@ The unit runs as a dedicated user with `ProtectSystem=strict` and a writable
 path limited to the data directory, which is the "Chromium profile under a
 dedicated Unix user" mitigation from the design.
 
+## Setting it up by answering questions
+
+```sh
+scripts/setup.sh          # from a checkout
+skyhookd -setup           # or against an installed binary
+```
+
+`-setup` asks what this deployment is, writes a configuration file, and — this
+is the part worth having — **checks each answer while the person who typed it is
+still there**. It connects to the browser you said to attach to, resolves the
+name you gave, tries to bind the challenge port, and runs your DNS hook for real
+against a throwaway record. Every one of those otherwise fails minutes later, in
+somebody else's vocabulary, at a moment when the cause is no longer on screen.
+
+It is a conversation and not a form: how many questions you get depends on the
+answers, and each choice says what it costs before you make it. Nothing is
+written until it has shown you the whole plan, so an abandoned run leaves the
+disk exactly as it was, and an existing config is moved to `.bak` rather than
+overwritten. At the end it offers to do the work of `-init` — create the data
+directory, settle the token, get the certificate — because that is the step that
+proves the answers were right.
+
+It needs a terminal. For an unattended install, write the config however you
+like and use `skyhookd -init`, which does the same work without the questions.
+
+Re-run it whenever the deployment changes: it is the quickest way to move
+between the four shapes below, and it will tell you what each one gives up.
+
 ## Configuration
 
 A JSON file, passed with `-config` or `SKYHOOK_CONFIG`. Everything has a usable
@@ -115,10 +143,18 @@ not start at all. The container image probes for this at startup and falls back
 to `--no-sandbox` with a loud log line; set the variable yourself to override
 the probe either way.
 
-`webRoot` is the built client (`client/dist`). The container image builds it and
-sets `SKYHOOK_WEB_ROOT` already; a bare-metal install should either set the path
-or copy the build to `<dataDir>/webapp`. With neither present the server serves a
-page explaining how to build it, rather than nothing at all.
+`webRoot` is the built client (`client/dist`), and is usually not needed. The
+server looks in three places, in order: `webRoot`, then `<dataDir>/webapp`, then
+`client/dist` in the checkout the running binary came out of. That last one is
+why `go run ./cmd/skyhookd` from a working copy serves the app with no
+configuration at all — it used to serve nothing, and the fix was a step nobody
+could guess. It cannot fire on a real deployment: the container image and the
+systemd unit both set `webRoot`, and neither `/usr/local/bin` nor `/` has a
+`client/dist` above it.
+
+Set it explicitly when the build lives somewhere else, or copy the build to
+`<dataDir>/webapp`. With none of the three present the server serves a page
+explaining how to build it, rather than nothing at all.
 
 A missing token is generated on first start and kept in `<dataDir>/token`, so a
 restart comes back with the credential its clients already hold. It is written

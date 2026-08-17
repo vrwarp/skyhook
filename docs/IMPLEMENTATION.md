@@ -2367,6 +2367,54 @@ instead of a name, a wildcard, no agreement to the subscriber terms — is refus
 at startup with a sentence naming the fix, because the alternative is an
 authority error some minutes later written for people implementing ACME.
 
+### 40. Everything that had to line up first, and nothing that said so
+
+Three separate things have to be true before a first run works, and not one of
+them is discoverable from the others.
+
+The client is a separate build, and the server only looked for it in `webRoot`
+or `<dataDir>/webapp` — so `go run ./cmd/skyhookd` in a checkout with a freshly
+built client served *nothing*, and the fix (copy or symlink `client/dist` into
+the data directory) is only obvious to somebody who has read `resolveWebRoot`.
+A browser you already have open needs two flags it was not started with, and
+without them the server fails on a devtools port in a message about a devtools
+port. And a certificate needs a name, a challenge, and either a free port or a
+DNS hook, each of which fails minutes later in a certificate authority's
+vocabulary rather than a browser operator's.
+
+Two changes, and they are different in kind.
+
+The first is that the server now finds the build in the checkout it came out of,
+by walking up from the working directory and from the binary for a `go.mod` with
+a `client/dist` beside it. That is a default, not a feature: the build twenty
+metres away in the same repository is what the operator meant. It cannot fire
+anywhere it should not, because a container and a systemd unit both set
+`webRoot` and neither `/usr/local/bin` nor `/` has a `client/dist` above it.
+
+The second is `skyhookd -setup`, and the thing that makes it worth having is not
+that it asks — it is that it **looks**. Every answer that can be checked is
+checked while the person who typed it is still there: it connects to the
+devtools endpoint and prints the browser's version back, resolves the name,
+tries to bind the challenge port, and runs the DNS hook for real against a
+throwaway record. A configuration file full of plausible answers is exactly what
+the old path produced, and each wrong one surfaced later, somewhere else, as
+something that looked like a different problem.
+
+Writing that check found a bug in the code it was checking. The propagation wait
+returned "no error" when it could find no nameserver for the zone — which is
+right for issuance, where the authority is perfectly able to judge for itself,
+and catastrophic for a self-test, where it means a hook that publishes nothing
+at all is reported as working. `forTXT` now returns whether it actually saw the
+record, and the two callers want opposite things from that: issuance warns and
+carries on, the self-test refuses to bless what it could not check.
+
+Two rules hold the whole thing together. Nothing is written until the entire
+plan has been shown and agreed, so an abandoned run leaves no trace and an
+existing config is moved aside rather than overwritten. And the file it writes
+is run through `config.Load` — the same loader the server uses — before it is
+installed, because a setup program that produces a configuration the server then
+refuses would be worse than no setup program at all.
+
 ## Measured results
 
 From the end-to-end suite. The design asks for every milestone to be measured

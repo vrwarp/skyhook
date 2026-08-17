@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"github.com/vrwarp/skyhook/internal/diag"
 	"github.com/vrwarp/skyhook/internal/server"
 	"github.com/vrwarp/skyhook/internal/session"
+	"github.com/vrwarp/skyhook/internal/setup"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -26,7 +28,9 @@ func main() {
 		printVer   = flag.Bool("version", false, "print version and exit")
 		showPair   = flag.Bool("pair", false, "print the pairing file and exit")
 		initOnly   = flag.Bool("init", false, "create data dir, token and certificate, then exit")
-		demo       = flag.Bool("demo", false,
+		setupOnly  = flag.Bool("setup", false,
+			"ask what this deployment looks like, check the answers, write a config, then exit")
+		demo = flag.Bool("demo", false,
 			"loopback demo: plain HTTP on 127.0.0.1, no TLS, no QUIC, no pairing certificate")
 		demoFor = flag.Duration("demo-for", 0, "with -demo, stop after this long (0 = until Ctrl-C)")
 	)
@@ -37,6 +41,15 @@ func main() {
 		return
 	}
 	session.SetVersion(version)
+
+	if *setupOnly {
+		// Before the configuration is loaded, because setup exists precisely for
+		// the case where there is not a usable one yet.
+		if err := runSetup(*configPath); err != nil {
+			fatal("setup", err)
+		}
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -96,6 +109,24 @@ func main() {
 		fatal("serve", err)
 	}
 	log.Info("skyhook server stopped")
+}
+
+// runSetup drives the interactive setup.
+//
+// It insists on a terminal. Every question has a default and would silently
+// take it from a pipe, which would turn a mistyped command in a script into a
+// configuration nobody chose — and the non-interactive path already exists and
+// is called `-init`.
+func runSetup(configPath string) error {
+	st, err := os.Stdin.Stat()
+	if err != nil || st.Mode()&os.ModeCharDevice == 0 {
+		return errors.New("-setup needs a terminal to ask questions on; " +
+			"use -init with a config file for an unattended install")
+	}
+	log, _ := newLogger("warn", 0)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return setup.Run(ctx, setup.Options{ConfigPath: configPath, Log: log})
 }
 
 // ensureToken settles what this server will accept as a credential, in the

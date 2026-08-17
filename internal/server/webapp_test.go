@@ -336,8 +336,60 @@ func TestResolveWebRootPrefersExplicitSetting(t *testing.T) {
 		t.Fatalf("resolveWebRoot = %q, want the data dir fallback", got)
 	}
 
+	// With neither set, the checkout this test is running inside is the last
+	// place looked — which is the point of it, and is why running from source
+	// needs no configuration. In a tree with no built client there is nothing to
+	// find and the answer is empty; both are correct, so the assertion is on the
+	// rule rather than on which of the two this machine happens to be.
 	cfg.DataDir = t.TempDir()
-	if got := resolveWebRoot(cfg); got != "" {
-		t.Fatalf("resolveWebRoot = %q, want empty when nothing is built", got)
+	got := resolveWebRoot(cfg)
+	switch repo := RepoClientDist(); {
+	case repo != "":
+		if got != repo {
+			t.Fatalf("resolveWebRoot = %q, want the checkout's build at %q", got, repo)
+		}
+	default:
+		if got != "" {
+			t.Fatalf("resolveWebRoot = %q, want empty when nothing is built", got)
+		}
+	}
+}
+
+// The discovery that removes the step nobody could guess: a server run out of a
+// working copy serves the build sitting in it.
+func TestTheCheckoutsBuildIsFound(t *testing.T) {
+	root := RepoClientDist()
+	if root == "" {
+		t.Skip("this tree has no built client to find")
+	}
+	if _, err := os.Stat(filepath.Join(root, "index.html")); err != nil {
+		t.Fatalf("%s was reported as a web root and has no index.html", root)
+	}
+	// It has to lose to both of the explicit answers, or an operator who
+	// configured one would be quietly served the other.
+	explicit := buildRoot(t)
+	cfg := testConfig(explicit)
+	cfg.DataDir = t.TempDir()
+	if got := resolveWebRoot(cfg); got != explicit {
+		t.Errorf("resolveWebRoot = %q, want the configured root to win", got)
+	}
+}
+
+// Nothing about this may fire on a real deployment. A container and a systemd
+// unit set webRoot, and neither /usr/local/bin nor / has a client/dist above
+// it — so the search must stop rather than wander up to the filesystem root.
+func TestTheCheckoutSearchStaysInACheckout(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	// A directory with no go.mod anywhere above it, which is what /usr/local/bin
+	// looks like. The binary running the test is still in a checkout, so this
+	// asserts the working-directory half of the search on its own.
+	deep := filepath.Join(dir, "a", "b", "c", "d", "e")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(deep)
+	if got := repoDistFrom(deep); got != "" {
+		t.Errorf("found %q outside any checkout", got)
 	}
 }

@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -120,6 +122,71 @@ func (p *ExecDNSProvider) run(ctx context.Context, action, fqdn, value string) e
 	return nil
 }
 
+// CheckDNSHook publishes a throwaway record, waits for it to become visible,
+// and takes it down again — the whole dns-01 conversation except the part that
+// involves a certificate authority.
+//
+// It is what `skyhookd -setup` runs before writing a configuration, because
+// every way a hook can be wrong is invisible until an order is already in
+// flight: a token that cannot write, a zone that is not the one serving the
+// name, a script that replaces instead of appending. Finding out here costs a
+// few seconds; finding out during issuance costs a failed authorization and a
+// message written for somebody implementing ACME.
+//
+// The value is not a real challenge response — nothing is being proved to
+// anybody — so a leftover record is inert. It is still cleaned up.
+func CheckDNSHook(ctx context.Context, p DNSProvider, wait DNSWait, domain string, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	fqdn := "_acme-challenge." + strings.TrimSuffix(strings.TrimPrefix(domain, "*."), ".")
+	value, err := throwawayValue()
+	if err != nil {
+		return err
+	}
+	if err := p.Present(ctx, fqdn, value); err != nil {
+		return fmt.Errorf("publishing a test record: %w", err)
+	}
+	defer func() {
+		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		if err := p.CleanUp(cleanCtx, fqdn, value); err != nil {
+			log.Warn("the test record could not be retracted; remove it by hand",
+				"name", fqdn, "value", value, "err", err)
+		}
+	}()
+	verified, err := wait.forTXT(ctx, fqdn, []string{value}, log)
+	if err != nil {
+		return err
+	}
+	if !verified {
+		// The hook exited 0 and nothing could confirm it. That is precisely the
+		// case this check exists for, so it is a failure here even though
+		// issuance would carry on and let the authority decide.
+		return fmt.Errorf("%w: nothing could be asked about %s, because no nameserver "+
+			"was found for that zone", ErrDNSUnverifiable, fqdn)
+	}
+	return nil
+}
+
+// ErrDNSUnverifiable means the record could not be checked at all — no
+// nameserver answered for the zone — as opposed to being checked and found
+// missing. The two want different things next: this one is a name that is not
+// delegated where this machine can see it, and is often answered by naming the
+// server to ask instead.
+var ErrDNSUnverifiable = errors.New("acme: the challenge record could not be checked")
+
+// throwawayValue looks like a challenge response — 32 random bytes, base64url,
+// unpadded — so a provider that validates the shape of what it is given is
+// tested rather than tripped over.
+func throwawayValue() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // DNSWait is how long, and against whom, the issuer waits for a published
 // record to become visible.
 type DNSWait struct {
@@ -150,13 +217,16 @@ func (w DNSWait) withDefaults() DNSWait {
 }
 
 // forTXT blocks until every value is visible at fqdn, or the timeout runs out.
+// It reports whether the record was actually seen, which is not the same thing
+// as returning no error: when there is no nameserver to ask, there is nothing
+// to check against and saying so is the only honest answer.
 //
 // The zone's own nameservers are asked directly, not the machine's resolver.
 // A recursive resolver caches the answer it got a moment ago — including the
 // empty one from just before the record was published — and a negative cache
 // entry is precisely the thing standing between a freshly written record and a
 // challenge that would now pass.
-func (w DNSWait) forTXT(ctx context.Context, fqdn string, values []string, log *slog.Logger) error {
+func (w DNSWait) forTXT(ctx context.Context, fqdn string, values []string, log *slog.Logger) (verified bool, err error) {
 	w = w.withDefaults()
 	ctx, cancel := context.WithTimeout(ctx, w.Timeout)
 	defer cancel()
@@ -166,9 +236,14 @@ func (w DNSWait) forTXT(ctx context.Context, fqdn string, values []string, log *
 		servers = authoritativeFor(ctx, fqdn, log)
 	}
 	if len(servers) == 0 {
+		// Nothing was checked. Issuance carries on regardless — a transient NS
+		// lookup failure is no reason to abandon an order the authority is
+		// perfectly able to judge for itself — but it must not be reported as a
+		// record that was seen, or the hook self-test would bless a hook that
+		// publishes nothing at all.
 		log.Warn("no nameserver to check the challenge record against; "+
-			"waiting the settle time and hoping", "name", fqdn)
-		return sleep(ctx, w.Settle)
+			"the authority will be the first to look", "name", fqdn)
+		return false, sleep(ctx, w.Settle)
 	}
 	log.Info("waiting for the challenge record to be visible",
 		"name", fqdn, "servers", servers)
@@ -189,10 +264,10 @@ func (w DNSWait) forTXT(ctx context.Context, fqdn string, values []string, log *
 		if missing == "" {
 			log.Info("challenge record is visible", "name", fqdn,
 				"settling", w.Settle.String())
-			return sleep(ctx, w.Settle)
+			return true, sleep(ctx, w.Settle)
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("acme: %s did not appear in DNS within %s (%s); "+
+			return false, fmt.Errorf("acme: %s did not appear in DNS within %s (%s); "+
 				"the record was published, so this is propagation or a zone the "+
 				"command wrote to that is not the one serving the name",
 				fqdn, w.Timeout, missing)
@@ -201,7 +276,7 @@ func (w DNSWait) forTXT(ctx context.Context, fqdn string, values []string, log *
 			log.Info("still waiting on the challenge record", "name", fqdn, "why", missing)
 		}
 		if err := sleep(ctx, 5*time.Second); err != nil {
-			return fmt.Errorf("acme: %s did not appear in DNS within %s (%s)",
+			return false, fmt.Errorf("acme: %s did not appear in DNS within %s (%s)",
 				fqdn, w.Timeout, missing)
 		}
 	}

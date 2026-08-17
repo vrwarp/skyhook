@@ -308,8 +308,15 @@ func (i *dns01Issuer) settle(ctx context.Context, pending []challenge) error {
 		want[c.fqdn] = append(want[c.fqdn], c.value)
 	}
 	for fqdn, values := range want {
-		if err := i.wait.forTXT(ctx, fqdn, values, i.log); err != nil {
+		verified, err := i.wait.forTXT(ctx, fqdn, values, i.log)
+		if err != nil {
 			return err
+		}
+		if !verified {
+			// Nothing could be asked, so the authority is the first to look.
+			// Not a reason to abandon an order it is perfectly able to judge.
+			i.log.Warn("could not confirm the challenge record before accepting it",
+				"name", fqdn)
 		}
 	}
 	return nil

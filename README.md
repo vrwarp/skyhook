@@ -77,7 +77,24 @@ server refuses to bind anything but loopback in this mode.
 
 ## Quick start
 
-### Landside (the VPS)
+### Set it up by answering questions
+
+```sh
+scripts/setup.sh          # or: skyhookd -setup
+```
+
+It asks what your deployment looks like — which browser, how the plane side
+reaches it, which certificate — and **checks each answer while you are still
+there to fix it**: that the browser you want to attach to is actually listening,
+that the name resolves, that the port is free, that your DNS hook really
+publishes a record. Then it writes a configuration file and prints the pairing
+link. Nothing is written until it has shown you the whole plan.
+
+It is the fastest way to a working server, and the fastest way to find out which
+of the four deployments you actually want, since each one says what it costs
+before you pick it.
+
+### Or by hand
 
 ```sh
 # With Docker
@@ -89,6 +106,9 @@ docker compose -f deploy/docker-compose.yml exec skyhook \
 go build -o skyhookd ./cmd/skyhookd
 SKYHOOK_DATA_DIR=~/.skyhook ./skyhookd
 ```
+
+Run from a checkout, the server finds `client/dist` by itself, so a built client
+needs no configuration at all.
 
 By default the server launches Chromium itself and owns it. To drive a browser
 that is already running instead, point the server at its DevTools endpoint:
@@ -164,8 +184,10 @@ npm ci
 npm run build      # -> client/dist
 ```
 
-Set `"webRoot": "/path/to/client/dist"` in the server config (the container
-image builds and ships it already), then open the link from the server's log:
+Running from a checkout, that is all: the server finds `client/dist` in the
+repository it came out of and serves it. Elsewhere, set
+`"webRoot": "/path/to/client/dist"` (the container image builds and ships it
+already). Either way, open the link from the server's log:
 
 ```
 level=INFO msg="pair the client by opening this link once" url="https://vps:4434/#token=…"
