@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,35 @@ import (
 	"strings"
 	"testing"
 )
+
+// builtClient makes the run believe there is a client build already, which is
+// what most of these tests want to be true and none of them should have to
+// depend on. Whether this machine has run `npm run build` decides how many
+// questions get asked, and a scripted answer list that is right on a developer's
+// laptop and wrong on a build machine is not a test of anything.
+func builtClient(t *testing.T) string {
+	t.Helper()
+	dist := filepath.Join(t.TempDir(), "dist")
+	if err := os.MkdirAll(dist, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWorld(t, dist, filepath.Dir(dist), nil)
+	return dist
+}
+
+// setWorld fixes what the machine looks like for one test: a build or not, a
+// checkout or not, npm or not.
+func setWorld(t *testing.T, dist, repo string, npmErr error) {
+	t.Helper()
+	oldDist, oldRepo, oldNPM := findClientDist, findRepoRoot, findNPM
+	findClientDist = func() string { return dist }
+	findRepoRoot = func() string { return repo }
+	findNPM = func() error { return npmErr }
+	t.Cleanup(func() { findClientDist, findRepoRoot, findNPM = oldDist, oldRepo, oldNPM })
+}
 
 // drive runs a whole session from a script of answers and hands back what the
 // operator would have seen. Every test here is "somebody typed this, and got
@@ -58,6 +88,7 @@ func mustContain(t *testing.T, transcript string, phrases ...string) {
 // The shortest useful run: everything on one machine. Four answers and the
 // server can start.
 func TestLoopbackNeedsFourAnswers(t *testing.T) {
+	builtClient(t)
 	transcript, dir := drive(t,
 		"",  // data directory: the default
 		"",  // browser: Skyhook starts one
@@ -84,6 +115,7 @@ func TestLoopbackNeedsFourAnswers(t *testing.T) {
 // Setup asks for the endpoint, and then actually connects to it — so the two
 // flags that browser needed are discovered here rather than at first run.
 func TestAttachingToARunningBrowserIsChecked(t *testing.T) {
+	builtClient(t)
 	devtools := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/json/version" {
 			w.WriteHeader(http.StatusNotFound)
@@ -116,6 +148,7 @@ func TestAttachingToARunningBrowserIsChecked(t *testing.T) {
 // without the flags. Setup has to say so and let it be fixed in place, rather
 // than writing a configuration that will fail at first run.
 func TestAnUnreachableBrowserIsReportedAndRetried(t *testing.T) {
+	builtClient(t)
 	devtools := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"Browser":"Chrome/141.0.0.0"}`))
 	}))
@@ -137,6 +170,7 @@ func TestAnUnreachableBrowserIsReportedAndRetried(t *testing.T) {
 // Declining the retry still writes a configuration — the browser can be started
 // later — but the transcript has to end with the thing that is still missing.
 func TestGivingUpOnTheBrowserLeavesAReminder(t *testing.T) {
+	builtClient(t)
 	transcript, _ := drive(t,
 		"", "2", "http://127.0.0.1:1", "n", "1", "y", "n",
 	)
@@ -146,6 +180,7 @@ func TestGivingUpOnTheBrowserLeavesAReminder(t *testing.T) {
 // The pinned deployment is the one whose cost is invisible until somebody is
 // offline, so setup says it at the moment of choosing and again at the end.
 func TestSelfSignedSaysWhatItCosts(t *testing.T) {
+	builtClient(t)
 	transcript, dir := drive(t,
 		"",                    // data directory
 		"1",                   // Skyhook's own browser
@@ -166,6 +201,7 @@ func TestSelfSignedSaysWhatItCosts(t *testing.T) {
 }
 
 func TestBehindAProxyWritesBothSettingsThatHaveToAgree(t *testing.T) {
+	builtClient(t)
 	_, dir := drive(t,
 		"", "1", "4",
 		"https://skyhook.example.com",
@@ -184,6 +220,7 @@ func TestBehindAProxyWritesBothSettingsThatHaveToAgree(t *testing.T) {
 // Saying no at the summary has to leave the disk exactly as it was. That is the
 // promise made in the first paragraph of the run.
 func TestSayingNoWritesNothing(t *testing.T) {
+	builtClient(t)
 	dir := t.TempDir()
 	var out bytes.Buffer
 	err := Run(context.Background(), Options{
@@ -223,6 +260,7 @@ func TestClosingTheInputCancels(t *testing.T) {
 // An existing configuration is moved aside rather than overwritten. Somebody
 // re-running setup to change one answer should not lose the file they had.
 func TestAnExistingConfigIsKept(t *testing.T) {
+	builtClient(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"logLevel":"debug"}`), 0o600); err != nil {
@@ -250,6 +288,7 @@ func TestAnExistingConfigIsKept(t *testing.T) {
 // Refusing the subscriber agreement stops the run rather than writing a
 // configuration that can never get a certificate.
 func TestRefusingTheAgreementStops(t *testing.T) {
+	builtClient(t)
 	dir := t.TempDir()
 	var out bytes.Buffer
 	err := Run(context.Background(), Options{
@@ -273,6 +312,7 @@ func TestRefusingTheAgreementStops(t *testing.T) {
 // because every way it can be wrong is otherwise invisible until an order is
 // already in flight.
 func TestTheDNSHookIsTestedBeforeAnythingIsWritten(t *testing.T) {
+	builtClient(t)
 	// A hook that reports success and publishes nothing — the commonest shape of
 	// a broken one, and the one an untested configuration hides.
 	hookDir := t.TempDir()
@@ -336,6 +376,7 @@ func TestEveryPathWritesAConfigTheServerAccepts(t *testing.T) {
 	}
 	for name, answers := range paths {
 		t.Run(name, func(t *testing.T) {
+			builtClient(t)
 			_, dir := drive(t, answers...)
 			// config.Load is what the server uses; setup runs it before writing,
 			// so reaching this point at all means it passed. Re-read to be sure
@@ -359,6 +400,7 @@ func TestEveryPathWritesAConfigTheServerAccepts(t *testing.T) {
 // and the three things that are wrong when a DNS hook is wrong, in the order
 // they are worth checking.
 func TestAFailingDNSHookIsExplainedWithSomethingToTry(t *testing.T) {
+	builtClient(t)
 	hookDir := t.TempDir()
 	hook := filepath.Join(hookDir, "hook.sh")
 	script := "#!/bin/sh\necho 'cloudflare: Invalid API token (9109)' >&2\nexit 1\n"
@@ -391,4 +433,72 @@ func TestAFailingDNSHookIsExplainedWithSomethingToTry(t *testing.T) {
 	if acme, _ := cfg["acme"].(map[string]any); acme["challenge"] != "dns-01" {
 		t.Errorf("challenge = %v", acme["challenge"])
 	}
+}
+
+// How many questions the client section asks depends on what is on the machine,
+// and all three shapes are real: a developer with a build, a fresh checkout, and
+// an installed binary with neither. CI is the middle one, which is how it found
+// that the tests only knew about the first.
+func TestTheClientSectionFitsWhateverIsOnTheMachine(t *testing.T) {
+	t.Run("already built: nothing to ask", func(t *testing.T) {
+		dist := builtClient(t)
+		transcript, dir := drive(t, "", "1", "1", "y", "n")
+		mustContain(t, transcript, "found a built client at "+dist)
+		if cfg := loadWritten(t, dir); cfg["webRoot"] != "" {
+			t.Errorf("webRoot = %v, want it left to discovery", cfg["webRoot"])
+		}
+	})
+
+	t.Run("a checkout with no build: offers to build it", func(t *testing.T) {
+		setWorld(t, "", t.TempDir(), nil)
+		transcript, _ := drive(t,
+			"", "1", "1",
+			"n", // do not build it now
+			"y", "n",
+		)
+		mustContain(t, transcript,
+			"the client has not been built yet",
+			"Build it now?",
+			"npm ci && npm run build", // the note that says what to do instead
+		)
+	})
+
+	t.Run("a checkout with no npm: says so instead of offering", func(t *testing.T) {
+		setWorld(t, "", t.TempDir(), errors.New("not found"))
+		transcript, _ := drive(t, "", "1", "1", "y", "n")
+		mustContain(t, transcript, "npm is not installed", "Still to do:")
+		if strings.Contains(transcript, "Build it now?") {
+			t.Error("offered to run a build with no npm to run it with")
+		}
+	})
+
+	t.Run("no checkout: asks for a path, and checks it", func(t *testing.T) {
+		setWorld(t, "", "", nil)
+		dist := filepath.Join(t.TempDir(), "dist")
+		if err := os.MkdirAll(dist, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		transcript, cfgDir := drive(t,
+			"", "1", "1",
+			"/nowhere/at/all", // refused: nothing there
+			dist,              // accepted
+			"y", "n",
+		)
+		mustContain(t, transcript, "no index.html in /nowhere/at/all")
+		if cfg := loadWritten(t, cfgDir); cfg["webRoot"] != dist {
+			t.Errorf("webRoot = %v, want %q", cfg["webRoot"], dist)
+		}
+	})
+
+	t.Run("no checkout, skipped: leaves a note rather than a wrong path", func(t *testing.T) {
+		setWorld(t, "", "", nil)
+		transcript, dir := drive(t, "", "1", "1", "", "y", "n")
+		mustContain(t, transcript, "Still to do:", "npm ci && npm run build")
+		if cfg := loadWritten(t, dir); cfg["webRoot"] != "" {
+			t.Errorf("webRoot = %v, want empty", cfg["webRoot"])
+		}
+	})
 }

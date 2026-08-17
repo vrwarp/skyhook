@@ -72,6 +72,19 @@ func Run(ctx context.Context, opts Options) error {
 	return err
 }
 
+// The client-app questions depend on what is on this machine — whether there is
+// a checkout, whether it has been built, whether npm exists — so how many
+// questions get asked does too. Left to discover themselves, these make a
+// scripted test pass on a developer's machine and fail on a build machine,
+// which is precisely what happened: CI has the checkout and no `client/dist`,
+// so setup asked one more question than the test had answers for and the run
+// was cancelled halfway through.
+var (
+	findClientDist = server.RepoClientDist
+	findRepoRoot   = repoRoot
+	findNPM        = func() error { _, err := exec.LookPath("npm"); return err }
+)
+
 type session struct {
 	ui  *ui
 	log *slog.Logger
@@ -80,13 +93,17 @@ type session struct {
 	// repo is the checkout this binary came out of, when there is one. It is
 	// what makes "build the client for me" possible.
 	repo string
+	// clientDist is a build already on disk, found once so the question and the
+	// summary can never disagree about whether there is one.
+	clientDist string
 	// notes are the things to say at the end: what to run, what still has to be
 	// true, what was deliberately left undone.
 	notes []string
 }
 
 func (s *session) run(ctx context.Context, configPath string) error {
-	s.repo = repoRoot()
+	s.repo = findRepoRoot()
+	s.clientDist = findClientDist()
 
 	s.ui.say("Skyhook setup")
 	s.ui.blank()
@@ -626,8 +643,8 @@ func (s *session) askClient(ctx context.Context) error {
 		"",
 	)
 
-	if root := server.RepoClientDist(); root != "" {
-		s.ui.good("found a built client at %s", root)
+	if s.clientDist != "" {
+		s.ui.good("found a built client at %s", s.clientDist)
 		s.ui.note("", "  It is in the checkout this binary came from, so the server finds it",
 			"  by itself and webRoot can stay empty.")
 		return nil
@@ -665,7 +682,7 @@ func (s *session) askClient(ctx context.Context) error {
 	}
 
 	s.ui.warn("the client has not been built yet")
-	if _, err := exec.LookPath("npm"); err != nil {
+	if err := findNPM(); err != nil {
 		s.ui.bad("npm is not installed, so it cannot be built here")
 		s.notes = append(s.notes,
 			"Build the client where npm is available and copy client/dist across, "+
@@ -707,7 +724,8 @@ func (s *session) buildClient(ctx context.Context) error {
 			return nil
 		}
 	}
-	if root := server.RepoClientDist(); root != "" {
+	if root := findClientDist(); root != "" {
+		s.clientDist = root
 		s.ui.good("built: %s", root)
 	} else {
 		s.ui.warn("the build reported success but produced no index.html")
@@ -781,8 +799,8 @@ func (s *session) summary() []string {
 	}
 	if s.cfg.WebRoot != "" {
 		lines = append(lines, "Client app       "+s.cfg.WebRoot)
-	} else if root := server.RepoClientDist(); root != "" {
-		lines = append(lines, "Client app       "+root+" (found automatically)")
+	} else if s.clientDist != "" {
+		lines = append(lines, "Client app       "+s.clientDist+" (found automatically)")
 	}
 	return lines
 }
@@ -974,7 +992,7 @@ func bindWhy(err error) string {
 // repoRoot finds the checkout this binary was run from, which is what makes
 // building the client and pointing at the example hook possible.
 func repoRoot() string {
-	if dist := server.RepoClientDist(); dist != "" {
+	if dist := findClientDist(); dist != "" {
 		return filepath.Dir(filepath.Dir(dist))
 	}
 	wd, err := os.Getwd()
