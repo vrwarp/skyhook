@@ -39,7 +39,10 @@ type Server struct {
 	mgr     *session.Manager
 	cert    *transport.CertBundle
 	acme    *transport.ACME
-	logs    *diag.Ring
+	// acmeReady says the certificate was actually obtained. Only the renewal
+	// loop reads it, and only that loop writes it after New has returned.
+	acmeReady bool
+	logs      *diag.Ring
 
 	wt *transport.WTServer
 	ws *transport.WSServer
@@ -126,6 +129,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 			log.Error("could not get a certificate; TLS will fail until this succeeds",
 				"domains", acmeMgr.Domains(), "err", err)
 		} else {
+			s.acmeReady = true
 			log.Info("certificate ready", "domains", acmeMgr.Domains(),
 				"expires", notAfter.UTC().Format(time.RFC3339))
 		}
@@ -570,23 +574,48 @@ func (s *Server) acmeRenewalLoop(ctx context.Context) {
 	if s.acme == nil {
 		return
 	}
-	t := time.NewTicker(12 * time.Hour)
-	defer t.Stop()
+	// A server that has a certificate is asked twice a day and says nothing.
+	// A server that does not have one is in a different situation entirely —
+	// it cannot serve TLS at all — and that is usually a mistyped hostname or a
+	// DNS hook that does not work yet, both of which are being actively fixed by
+	// somebody watching the log. Making them wait twelve hours to find out
+	// whether the fix took is no way to set a thing up, so a failure retries
+	// soon and backs off if it keeps failing.
+	const healthy = 12 * time.Hour
+	const firstRetry = 1 * time.Minute
+	delay := healthy
+	if !s.acmeReady {
+		// The fetch in New failed, so there is nothing to serve TLS with and
+		// somebody is very likely still typing.
+		delay = firstRetry
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			notAfter, err := s.acme.Ensure(ctx)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				s.log.Error("certificate renewal failed", "err", err)
-				continue
-			}
-			s.log.Debug("certificate checked", "expires", notAfter.UTC().Format(time.RFC3339))
+		case <-time.After(delay):
 		}
+		notAfter, err := s.acme.Ensure(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			delay *= 2
+			if delay < firstRetry {
+				delay = firstRetry
+			}
+			if delay > healthy {
+				delay = healthy
+			}
+			s.log.Error("could not get a certificate", "err", err, "retrying in", delay.String())
+			continue
+		}
+		if !s.acmeReady {
+			s.acmeReady = true
+			s.log.Info("certificate obtained", "expires", notAfter.UTC().Format(time.RFC3339))
+		}
+		delay = healthy
+		s.log.Debug("certificate checked", "expires", notAfter.UTC().Format(time.RFC3339))
 	}
 }
 
@@ -701,7 +730,7 @@ func setupCert(cfg config.Config, log *slog.Logger) (
 		b, err := loadOrCreateCert(cfg, log)
 		return b, nil, err
 	}
-	a, err := transport.NewACME(transport.ACMEOptions{
+	opts := transport.ACMEOptions{
 		Domains:   cfg.ACME.Domains,
 		Email:     cfg.ACME.Email,
 		Directory: cfg.ACME.Directory,
@@ -713,7 +742,24 @@ func setupCert(cfg config.Config, log *slog.Logger) (
 		// redirect to a port that is not serving it.
 		RedirectTo: appOrigin(cfg),
 		Logger:     log,
-	})
+	}
+	if cfg.ACME.Challenge == config.ChallengeDNS01 {
+		// Built here rather than inside the ACME package so that a command which
+		// is not on the path is a startup error naming the command, instead of a
+		// failure two minutes into an order with a record already published.
+		p, err := transport.NewExecDNSProvider(
+			cfg.ACME.DNS.Command, cfg.ACME.DNS.Timeout.Get(), log)
+		if err != nil {
+			return nil, nil, err
+		}
+		opts.DNSProvider = p
+		opts.DNSWait = transport.DNSWait{
+			Timeout:   cfg.ACME.DNS.PropagationTimeout.Get(),
+			Settle:    cfg.ACME.DNS.Settle.Get(),
+			Resolvers: cfg.ACME.DNS.Resolvers,
+		}
+	}
+	a, err := transport.NewACME(opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -724,7 +770,7 @@ func setupCert(cfg config.Config, log *slog.Logger) (
 	log.Info("getting a certificate from a certificate authority",
 		"domains", a.Domains(), "challenge", cfg.ACME.Challenge,
 		"directory", directoryName(cfg.ACME.Directory))
-	if bound, wants := challengePorts(cfg); bound != wants {
+	if bound, wants, ok := challengePorts(cfg); ok && bound != wants {
 		// Not an error: a container publishes 80:8080, and an unprivileged
 		// process on a bare-metal box often cannot have port 80 at all. Both are
 		// fine as long as something forwards. Said once, loudly, because a
@@ -740,11 +786,16 @@ func setupCert(cfg config.Config, log *slog.Logger) (
 // challengePorts reports the port the challenge listener bound and the port the
 // authority will connect to, which are the same number in a deployment that
 // owns its own ports and different in one behind a published container port.
-func challengePorts(cfg config.Config) (bound, dialled int) {
-	if cfg.ACME.Challenge == config.ChallengeTLSALPN01 {
-		return portOf(cfg.FallbackListen), 443
+//
+// dns-01 has neither, which is the whole reason it exists.
+func challengePorts(cfg config.Config) (bound, dialled int, ok bool) {
+	switch cfg.ACME.Challenge {
+	case config.ChallengeTLSALPN01:
+		return portOf(cfg.FallbackListen), 443, true
+	case config.ChallengeHTTP01:
+		return portOf(cfg.ACME.HTTPListen), 80, true
 	}
-	return portOf(cfg.ACME.HTTPListen), 80
+	return 0, 0, false
 }
 
 // directoryName renders the authority for a log line, so "staging" is never

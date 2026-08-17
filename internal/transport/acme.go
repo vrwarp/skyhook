@@ -38,9 +38,9 @@ import (
 // opposite of the self-signed path, where every rotation invalidates the pin
 // every client holds.
 type ACME struct {
-	mgr  *autocert.Manager
-	opts ACMEOptions
-	log  *slog.Logger
+	issuer issuer
+	opts   ACMEOptions
+	log    *slog.Logger
 
 	// srv answers HTTP-01 challenges. It is nil for TLS-ALPN-01, which is
 	// answered by the fallback listener instead.
@@ -49,10 +49,28 @@ type ACME struct {
 	stop sync.Once
 }
 
+// issuer is where the certificate comes from. There are two, because the
+// challenges differ in a way that goes deeper than which port they use.
+//
+// http-01 and tls-alpn-01 are answered by a socket this process already owns,
+// in the time one handshake takes, so they can be — and by autocert are —
+// satisfied lazily during a handshake. dns-01 is answered by a record the world
+// has to agree about, which takes tens of seconds at best. Nothing waits that
+// long mid-handshake, so that one issues ahead of time and serves what it got.
+//
+// Both end up behind the same GetCertificate, which is why the rest of the
+// server never has to know which one it has.
+type issuer interface {
+	GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	// Ensure issues or renews whatever needs it, and reports when the
+	// certificate now being served expires.
+	Ensure(ctx context.Context) (time.Time, error)
+}
+
 // ACMEChallenge is how the authority satisfies itself that this server answers
-// for the name it is being asked to certify. The choice is really a choice of
-// port: the authority connects to the name from the outside, and only one of
-// these two ports can be the one it finds us on.
+// for the name it is being asked to certify. Two of them are a choice of port —
+// the authority connects to the name from the outside — and the third is a
+// choice not to be connected to at all.
 type ACMEChallenge string
 
 const (
@@ -61,22 +79,32 @@ const (
 	// ChallengeTLSALPN01 is answered on TCP 443, by the fallback listener —
 	// which therefore has to be the thing on 443.
 	ChallengeTLSALPN01 ACMEChallenge = "tls-alpn-01"
+	// ChallengeDNS01 is answered in the zone, by a command the operator
+	// supplies. It is the only one that needs no inbound port at all, which
+	// makes it the answer for a machine behind a NAT, on a link that filters 80
+	// and 443, or simply already using them for something else.
+	ChallengeDNS01 ACMEChallenge = "dns-01"
 )
 
 // ACMEALPN is the ALPN protocol a TLS-ALPN-01 challenge arrives on. A listener
 // that does not offer it cannot answer one.
 const ACMEALPN = acme.ALPNProto
 
-// acmeIssueTimeout bounds one attempt at getting a certificate. Issuance is
-// several round trips to the authority plus however long it takes that
-// authority to connect back, so this is generous; what it is really guarding
-// against is a startup that hangs forever because port 80 is firewalled.
+// acmeIssueTimeout bounds one attempt at getting a certificate over a challenge
+// answered on a socket. Issuance is several round trips to the authority plus
+// however long it takes that authority to connect back, so this is generous;
+// what it is really guarding against is a startup that hangs forever because
+// port 80 is firewalled.
+//
+// dns-01 gets its own budget, because the wait for a record to propagate is the
+// bulk of it and the operator sets that.
 const acmeIssueTimeout = 3 * time.Minute
 
 // ACMEOptions configures the manager.
 type ACMEOptions struct {
-	// Domains are the names to certify. Every one of them has to resolve to
-	// this machine, because the authority checks by connecting to it.
+	// Domains are the names to certify. For the two socket-answered challenges
+	// every one of them has to resolve to this machine, because the authority
+	// checks by connecting to it; dns-01 asks nothing of where they point.
 	Domains []string
 	// Email is the contact the authority warns about impending expiry. Optional,
 	// and worth setting: it is the only warning anybody gets if renewal has been
@@ -88,10 +116,16 @@ type ACMEOptions struct {
 	// persist: losing it means a new account and a fresh issuance on every start,
 	// which is how a deployment walks into a rate limit.
 	CacheDir string
-	// Challenge selects http-01 or tls-alpn-01.
+	// Challenge selects http-01, tls-alpn-01 or dns-01.
 	Challenge ACMEChallenge
-	// HTTPAddr is where the HTTP-01 listener binds. Ignored for tls-alpn-01.
+	// HTTPAddr is where the HTTP-01 listener binds. Ignored by the others.
 	HTTPAddr string
+	// DNSProvider publishes the dns-01 challenge record. Required for dns-01
+	// and unused otherwise.
+	DNSProvider DNSProvider
+	// DNSWait is how long, and against whom, to wait for a published record to
+	// become visible before the authority is invited to look at it.
+	DNSWait DNSWait
 	// HTTPClient talks to the authority. Empty is the right answer for a public
 	// one; it exists for an internal authority whose root is not in the system
 	// pool, and for the tests, which stand up an authority of their own.
@@ -119,7 +153,7 @@ func NewACME(opts ACMEOptions) (*ACME, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	domains, err := NormalizeACMEDomains(opts.Domains)
+	domains, err := NormalizeACMEDomains(opts.Domains, opts.Challenge)
 	if err != nil {
 		return nil, err
 	}
@@ -134,9 +168,13 @@ func NewACME(opts ACMEOptions) (*ACME, error) {
 			return nil, errors.New("acme: http-01 needs a listen address, e.g. \":80\"")
 		}
 	case ChallengeTLSALPN01:
+	case ChallengeDNS01:
+		if opts.DNSProvider == nil {
+			return nil, errors.New("acme: dns-01 needs a way to publish the challenge record")
+		}
 	default:
-		return nil, fmt.Errorf("acme: unknown challenge %q, want %q or %q",
-			opts.Challenge, ChallengeHTTP01, ChallengeTLSALPN01)
+		return nil, fmt.Errorf("acme: unknown challenge %q, want %q, %q or %q",
+			opts.Challenge, ChallengeHTTP01, ChallengeTLSALPN01, ChallengeDNS01)
 	}
 	if opts.Directory != "" {
 		if u, err := url.Parse(opts.Directory); err != nil || u.Scheme != "https" || u.Host == "" {
@@ -147,8 +185,20 @@ func NewACME(opts ACMEOptions) (*ACME, error) {
 		return nil, fmt.Errorf("acme: cache directory: %w", err)
 	}
 
+	cache := autocert.DirCache(opts.CacheDir)
+	a := &ACME{opts: opts, log: opts.Logger}
+
+	if opts.Challenge == ChallengeDNS01 {
+		iss, err := newDNS01Issuer(opts, cache)
+		if err != nil {
+			return nil, err
+		}
+		a.issuer = iss
+		return a, nil
+	}
+
 	m := &autocert.Manager{
-		Cache:  autocert.DirCache(opts.CacheDir),
+		Cache:  cache,
 		Prompt: autocert.AcceptTOS,
 		// A whitelist rather than "anything that connects": this server answers
 		// for a handful of names its operator chose, and an open policy would
@@ -159,8 +209,8 @@ func NewACME(opts ACMEOptions) (*ACME, error) {
 	if opts.Directory != "" || opts.HTTPClient != nil {
 		m.Client = &acme.Client{DirectoryURL: opts.Directory, HTTPClient: opts.HTTPClient}
 	}
+	a.issuer = &autocertIssuer{mgr: m, domains: domains}
 
-	a := &ACME{mgr: m, opts: opts, log: opts.Logger}
 	if opts.Challenge == ChallengeHTTP01 {
 		// Calling HTTPHandler is what enables HTTP-01 at all; without it the
 		// manager only ever attempts TLS-ALPN-01.
@@ -193,7 +243,7 @@ func (a *ACME) Addr() string { return a.addr }
 func (a *ACME) Bundle() *CertBundle {
 	b := &CertBundle{
 		TLS: &tls.Config{
-			GetCertificate: a.mgr.GetCertificate,
+			GetCertificate: a.issuer.GetCertificate,
 			NextProtos:     alpn,
 			MinVersion:     tls.VersionTLS13,
 		},
@@ -238,15 +288,30 @@ func (a *ACME) Start() error {
 }
 
 // Ensure gets a certificate for every configured name, issuing or renewing as
-// needed, and reports the earliest expiry among them.
+// needed, and reports when the earliest of them expires.
 //
 // It is called at startup and then on a timer. The timer is the part that is
-// not obvious: the manager renews inside GetCertificate, so a server nobody
+// not obvious: renewal otherwise happens inside a handshake, so a server nobody
 // connects to for two months would let a perfectly good certificate lapse and
 // then fail the first handshake after it.
 func (a *ACME) Ensure(ctx context.Context) (time.Time, error) {
+	return a.issuer.Ensure(ctx)
+}
+
+// autocertIssuer is the socket-answered path: http-01 and tls-alpn-01, both
+// delegated to autocert, which has been doing this correctly for years.
+type autocertIssuer struct {
+	mgr     *autocert.Manager
+	domains []string
+}
+
+func (a *autocertIssuer) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return a.mgr.GetCertificate(hello)
+}
+
+func (a *autocertIssuer) Ensure(ctx context.Context) (time.Time, error) {
 	var earliest time.Time
-	for _, d := range a.opts.Domains {
+	for _, d := range a.domains {
 		leaf, err := a.ensureOne(ctx, d)
 		if err != nil {
 			return earliest, fmt.Errorf("acme: %s: %w", d, err)
@@ -258,7 +323,7 @@ func (a *ACME) Ensure(ctx context.Context) (time.Time, error) {
 	return earliest, nil
 }
 
-func (a *ACME) ensureOne(ctx context.Context, domain string) (time.Time, error) {
+func (a *autocertIssuer) ensureOne(ctx context.Context, domain string) (time.Time, error) {
 	ctx, cancel := context.WithTimeout(ctx, acmeIssueTimeout)
 	defer cancel()
 
@@ -354,7 +419,7 @@ func hostWithoutPort(next http.Handler) http.Handler {
 // Every rejection here is a name a public authority will refuse anyway, and
 // refusing it at configuration time is the difference between a clear message
 // now and a failed challenge with an opaque authority error in a fortnight.
-func NormalizeACMEDomains(in []string) ([]string, error) {
+func NormalizeACMEDomains(in []string, challenge ACMEChallenge) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	for _, d := range in {
@@ -367,13 +432,15 @@ func NormalizeACMEDomains(in []string) ([]string, error) {
 				"a public authority certifies names, so this deployment needs a hostname "+
 				"(or the self-signed certificate, which is what an address gets)", d)
 		}
-		if !strings.Contains(d, ".") {
+		bare := strings.TrimPrefix(d, "*.")
+		if !strings.Contains(bare, ".") {
 			return nil, fmt.Errorf("acme: %q is not a public name: "+
 				"a public authority will not certify it", d)
 		}
-		if strings.HasPrefix(d, "*.") {
-			return nil, fmt.Errorf("acme: %q is a wildcard: "+
-				"wildcards need the dns-01 challenge, which this server does not do", d)
+		if strings.HasPrefix(d, "*.") && challenge != ChallengeDNS01 {
+			return nil, fmt.Errorf("acme: %q is a wildcard, and only the dns-01 challenge "+
+				"can prove one: an authority checks a wildcard by asking the zone, never "+
+				"by connecting to a host", d)
 		}
 		if seen[d] {
 			continue

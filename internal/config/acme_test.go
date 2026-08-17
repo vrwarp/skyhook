@@ -185,7 +185,7 @@ func TestACMERefusesConfigurationsThatCannotWork(t *testing.T) {
 		},
 		{
 			"a challenge nothing implements",
-			map[string]any{"acme": with(map[string]any{"challenge": "dns-01"})},
+			map[string]any{"acme": with(map[string]any{"challenge": "email-01"})},
 			"challenge",
 		},
 		{
@@ -267,5 +267,133 @@ func TestACMEAcceptsAForwardedChallengePort(t *testing.T) {
 	}
 	if cfg.ACME.HTTPListen != ":8080" {
 		t.Errorf("httpListen = %q", cfg.ACME.HTTPListen)
+	}
+}
+
+// dns-01 is the challenge for a machine that cannot be connected to at all —
+// behind a NAT, on a link that filters 80 and 443, or with both already spoken
+// for. It asks for no ports, so none of the port reasoning applies to it.
+func TestACMEDNS01NeedsNoPorts(t *testing.T) {
+	cfg, err := acmeConfig(t, map[string]any{
+		"acme": map[string]any{
+			"enabled": true, "agreeTos": true,
+			"domains":   []string{"skyhook.example.com"},
+			"challenge": "dns-01",
+			"dns":       map[string]any{"command": []string{"/bin/true"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ACME.Challenge != ChallengeDNS01 {
+		t.Errorf("challenge = %q", cfg.ACME.Challenge)
+	}
+	if len(cfg.ACME.DNS.Command) != 1 || cfg.ACME.DNS.Command[0] != "/bin/true" {
+		t.Errorf("command = %v", cfg.ACME.DNS.Command)
+	}
+	// The fallback listener is on 4434 and nothing is on 80, which would be a
+	// problem for either of the other two and is none here.
+	if cfg.ACME.HTTPListen != "" {
+		t.Errorf("dns-01 reserved a challenge port: %q", cfg.ACME.HTTPListen)
+	}
+}
+
+// It is never chosen for anybody, because it cannot be: the record has to be
+// published by a command only the operator can write.
+func TestACMEDNS01IsNeverTheDefault(t *testing.T) {
+	for _, fallback := range []string{":4434", ":443"} {
+		cfg, err := acmeConfig(t, map[string]any{
+			"fallbackListen": fallback,
+			"acme": map[string]any{
+				"enabled": true, "agreeTos": true,
+				"domains": []string{"skyhook.example.com"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.ACME.Challenge == ChallengeDNS01 {
+			t.Errorf("fallbackListen %s chose dns-01 by itself", fallback)
+		}
+	}
+}
+
+func TestACMEDNS01RefusesWhatItCannotDo(t *testing.T) {
+	dns01 := func(over map[string]any) map[string]any {
+		acme := map[string]any{
+			"enabled": true, "agreeTos": true,
+			"domains": []string{"skyhook.example.com"}, "challenge": "dns-01",
+			"dns": map[string]any{"command": []string{"/bin/true"}},
+		}
+		for k, v := range over {
+			acme[k] = v
+		}
+		return map[string]any{"acme": acme}
+	}
+	cases := []struct {
+		name string
+		cfg  map[string]any
+		want string
+	}{
+		{
+			"no way to publish the record",
+			dns01(map[string]any{"dns": map[string]any{}}),
+			"acme.dns.command",
+		},
+		{
+			"a resolver with no port",
+			dns01(map[string]any{"dns": map[string]any{
+				"command": []string{"/bin/true"}, "resolvers": []string{"1.1.1.1"},
+			}}),
+			"needs a port",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := acmeConfig(t, tc.cfg)
+			if err == nil {
+				t.Fatal("accepted a dns-01 configuration that cannot work")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A wildcard is proved by asking the zone, so dns-01 is the only challenge that
+// can get one — and a wildcard is not a host anybody can dial, so it is
+// certified and then kept out of everything built from `hosts`.
+func TestACMEWildcardIsCertifiedButNeverDialled(t *testing.T) {
+	cfg, err := acmeConfig(t, map[string]any{
+		"acme": map[string]any{
+			"enabled": true, "agreeTos": true, "challenge": "dns-01",
+			"domains": []string{"skyhook.example.com", "*.skyhook.example.com"},
+			"dns":     map[string]any{"command": []string{"/bin/true"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.ACME.Domains) != 2 {
+		t.Errorf("domains = %v, want the wildcard certified", cfg.ACME.Domains)
+	}
+	if len(cfg.Hosts) != 1 || cfg.Hosts[0] != "skyhook.example.com" {
+		t.Errorf("hosts = %v, want the wildcard kept out of it", cfg.Hosts)
+	}
+	if p := cfg.PairingFor("", ""); p.Host != "skyhook.example.com" {
+		t.Errorf("pairing host = %q; a client cannot dial a wildcard", p.Host)
+	}
+
+	// Nothing but wildcards names no server at all.
+	_, err = acmeConfig(t, map[string]any{
+		"acme": map[string]any{
+			"enabled": true, "agreeTos": true, "challenge": "dns-01",
+			"domains": []string{"*.skyhook.example.com"},
+			"dns":     map[string]any{"command": []string{"/bin/true"}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "all wildcards") {
+		t.Errorf("error = %v, want a refusal naming the problem", err)
 	}
 }

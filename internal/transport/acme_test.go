@@ -262,19 +262,24 @@ func TestEnsureHonoursItsDeadline(t *testing.T) {
 // the fix and an authority error some minutes later.
 func TestACMEDomainsAreCheckedBeforeAnythingIsRequested(t *testing.T) {
 	cases := []struct {
-		name    string
-		domains []string
-		want    string
+		name      string
+		domains   []string
+		challenge ACMEChallenge
+		want      string
 	}{
-		{"an address", []string{"203.0.113.7"}, "not a name"},
-		{"a v6 address", []string{"2001:db8::1"}, "not a name"},
-		{"a bare name", []string{"localhost"}, "not a public name"},
-		{"a wildcard", []string{"*.example.com"}, "wildcard"},
-		{"nothing at all", []string{"", "  "}, "no domains"},
+		{"an address", []string{"203.0.113.7"}, ChallengeHTTP01, "not a name"},
+		{"a v6 address", []string{"2001:db8::1"}, ChallengeHTTP01, "not a name"},
+		{"a bare name", []string{"localhost"}, ChallengeHTTP01, "not a public name"},
+		{"a bare wildcard", []string{"*.localhost"}, ChallengeDNS01, "not a public name"},
+		{"nothing at all", []string{"", "  "}, ChallengeHTTP01, "no domains"},
+		// A wildcard is proved by asking the zone, so the challenges that work
+		// by connecting to a host cannot get one however the operator asks.
+		{"a wildcard over http-01", []string{"*.example.com"}, ChallengeHTTP01, "only the dns-01"},
+		{"a wildcard over tls-alpn-01", []string{"*.example.com"}, ChallengeTLSALPN01, "only the dns-01"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NormalizeACMEDomains(tc.domains)
+			_, err := NormalizeACMEDomains(tc.domains, tc.challenge)
 			if err == nil {
 				t.Fatalf("%v was accepted", tc.domains)
 			}
@@ -284,11 +289,23 @@ func TestACMEDomainsAreCheckedBeforeAnythingIsRequested(t *testing.T) {
 		})
 	}
 
-	got, err := NormalizeACMEDomains([]string{" Skyhook.Example.COM. ", "skyhook.example.com"})
+	got, err := NormalizeACMEDomains(
+		[]string{" Skyhook.Example.COM. ", "skyhook.example.com"}, ChallengeHTTP01)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0] != "skyhook.example.com" {
+		t.Errorf("normalised = %v", got)
+	}
+
+	// dns-01 is the one challenge that can prove a wildcard, so it is the one
+	// that may ask for one.
+	got, err = NormalizeACMEDomains(
+		[]string{"skyhook.example.com", "*.example.com"}, ChallengeDNS01)
+	if err != nil {
+		t.Fatalf("dns-01 refused a wildcard: %v", err)
+	}
+	if len(got) != 2 {
 		t.Errorf("normalised = %v", got)
 	}
 }
@@ -312,7 +329,10 @@ func TestACMEOptionsAreChecked(t *testing.T) {
 		want string
 	}{
 		{"no cache", mutate(func(o *ACMEOptions) { o.CacheDir = "" }), "survive a restart"},
-		{"unknown challenge", mutate(func(o *ACMEOptions) { o.Challenge = "dns-01" }), "unknown challenge"},
+		{"unknown challenge", mutate(func(o *ACMEOptions) { o.Challenge = "email-01" }), "unknown challenge"},
+		{"dns-01 with no way to publish", mutate(func(o *ACMEOptions) {
+			o.Challenge = ChallengeDNS01
+		}), "publish the challenge record"},
 		{"no http address", mutate(func(o *ACMEOptions) { o.HTTPAddr = "" }), "listen address"},
 		{"plain directory", mutate(func(o *ACMEOptions) { o.Directory = "http://ca.example" }), "https URL"},
 	}

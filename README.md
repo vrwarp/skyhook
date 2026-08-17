@@ -125,8 +125,20 @@ halves of what makes the client work. TLS terminates here, so WebTransport
 survives; the certificate is one Chrome already trusts, so the app installs and
 starts with no network — which a self-signed certificate never allows, however
 firmly the client pins it. Renewal needs no restart and no re-pairing.
-[docs/OPERATIONS.md](docs/OPERATIONS.md#a-certificate-of-its-own) has the DNS
-record, the challenge port and how to rehearse it against staging.
+
+If ports 80 and 443 are not available — a machine behind a NAT, a link that
+filters them, or something else already listening — answer in DNS instead, which
+needs no inbound port at all:
+
+```json
+"acme": { "enabled": true, "agreeTos": true, "challenge": "dns-01",
+          "dns": { "command": ["/usr/local/bin/skyhook-dns-hook"] } }
+```
+
+The hook is a command you supply, because every DNS provider has its own API and
+none of them belong in here; `deploy/acme-dns-hook.example.sh` is a working one
+for Cloudflare. [docs/OPERATIONS.md](docs/OPERATIONS.md#a-certificate-of-its-own)
+has the DNS record, the three challenges and how to rehearse against staging.
 
 Behind a reverse proxy, tell the server the address the proxy answers on —
 everything it hands the client is built from it, and it cannot infer it:

@@ -12,7 +12,13 @@
     "domains": [],
     "challenge": "",
     "httpListen": "",
-    "directory": ""
+    "directory": "",
+    "dns": {
+      "command": [],
+      "propagationTimeout": "5m",
+      "settle": "15s",
+      "resolvers": []
+    }
   },
   "headless": false,
   "lang": "en-US",

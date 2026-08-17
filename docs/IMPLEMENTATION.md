@@ -2312,8 +2312,52 @@ not obvious:
   is the shortest path to a rate limit. The suites are set for that reason and
   nothing else.
 
-The challenge port is where deployments actually fail, and it is deliberately
-not validated to death. Ports 80 and 443 are what the authority *dials*, not
+There is a third challenge, and it is a different shape. `dns-01` proves the
+name by publishing a TXT record rather than by being connected to, so it needs
+no inbound port at all — which is the point for a machine behind a NAT, on a
+link that filters 80 and 443, or with both already spoken for. autocert does not
+implement it and cannot be made to: it picks challenges itself, and its whole
+design is issuance *during* a handshake. That design does not survive contact
+with DNS, where publishing a record and waiting for the world to agree about it
+takes tens of seconds at best. So dns-01 is a second issuer over
+`x/crypto/acme` directly, behind the same `GetCertificate`, and it issues ahead
+of time and keeps the result — which is a plainer thing anyway, and makes
+renewal a scheduled job rather than a lucky handshake. It is also the only
+challenge that can prove a wildcard, so it is the only one allowed to ask for
+one; a wildcard is then kept out of `hosts`, because it certifies a name and
+names no server anyone can dial.
+
+The two issuers share the account key file, in autocert's name and encoding, so
+changing challenge type keeps the registration instead of quietly opening a
+second account with the authority. They share the certificate encoding too, so
+`<dataDir>/acme` looks the same either way and neither strands the other's
+files.
+
+Three things about dns-01 are worth naming:
+
+  * **There is no provider list and will not be one.** Every DNS API is
+    different, and a personal browser has no business carrying a matrix of
+    cloud SDKs so that one of them can be used. Skyhook runs a command, passing
+    the action, name and value as arguments *and* in the environment because
+    half the scripts people already have read one and half read the other. The
+    provider's own error text is quoted into Skyhook's, since a message about a
+    bad token is the most useful thing anybody could be shown at that moment.
+  * **The propagation wait is the feature, not the timeout.** Accepting a
+    challenge the instant the provider's API returns is the classic way to have
+    an authorization refused. Skyhook finds the zone's own nameservers and asks
+    them directly, rather than asking the machine's resolver — which has cached
+    the empty answer from just before the record was published, and that cached
+    "no" is exactly what stands between a correct record and a challenge that
+    would now pass.
+  * **Killing a hook is not enough to get its output back.** A hook is usually
+    a shell script, and a script that runs `curl` hands it the same stdout;
+    cancelling kills the shell and leaves curl holding the pipe, which is what
+    `CombinedOutput` is reading. Without `WaitDelay` a hook with a hanging child
+    blocks for as long as the child likes, whatever timeout was configured. A
+    test asserts the call returns well before its own child does.
+
+The challenge port is where the two socket-answered deployments actually fail,
+and it is deliberately not validated to death. Ports 80 and 443 are what the authority *dials*, not
 what this process *binds*: a container publishes `80:8080` because an
 unprivileged uid cannot have port 80, and refusing that would refuse the
 deployment this feature is most useful in. So the server compares the two

@@ -215,11 +215,17 @@ type ACMEConfig struct {
 	// trusts and whose rate limits are generous — which is where to find out
 	// that port 80 is firewalled.
 	Directory string `json:"directory"`
-	// Challenge is how the authority checks the name, which is really a choice
-	// of the port it will reach this server on: "http-01" (port 80, answered by
-	// a listener of our own) or "tls-alpn-01" (port 443, answered by the
-	// fallback listener). Empty picks tls-alpn-01 when the fallback listener is
-	// already on 443, and http-01 otherwise.
+	// Challenge is how the authority checks the name. Two of them are a choice
+	// of the port it will reach this server on — "http-01" (port 80, answered by
+	// a listener of our own) and "tls-alpn-01" (port 443, answered by the
+	// fallback listener) — and "dns-01" is the choice not to be reached at all:
+	// the answer goes in the zone, published by a command you supply, and no
+	// inbound port is involved. That is the one for a machine behind a NAT, on a
+	// link that filters 80 and 443, or already using them for something else.
+	//
+	// Empty picks tls-alpn-01 when the fallback listener is already on 443, and
+	// http-01 otherwise. dns-01 is never chosen by default, because it needs a
+	// command that only the operator can write.
 	Challenge string `json:"challenge"`
 	// HTTPListen is where the HTTP-01 listener binds; empty means ":80".
 	//
@@ -230,6 +236,51 @@ type ACMEConfig struct {
 	// and is not refused; the server says at startup when what it bound is not
 	// what the authority will dial, and leaves the forwarding to the operator.
 	HTTPListen string `json:"httpListen"`
+	// DNS configures the dns-01 challenge. Ignored by the other two.
+	DNS ACMEDNSConfig `json:"dns"`
+}
+
+// ACMEDNSConfig is how the dns-01 challenge gets its record into the zone, and
+// how long the server waits before believing it is there.
+//
+// There is no list of providers here and there will not be one: every DNS API
+// is different, and a personal browser has no business carrying a matrix of
+// cloud SDKs so that one of them can be used. Instead Skyhook runs a command
+// you supply, twice per record:
+//
+//	<command...> present <fqdn> <value>
+//	<command...> cleanup <fqdn> <value>
+//
+// with the same three facts also in the environment (SKYHOOK_ACME_ACTION,
+// SKYHOOK_ACME_FQDN, SKYHOOK_ACME_VALUE), because half the scripts people
+// already have read arguments and half read the environment. A non-zero exit
+// fails the challenge and whatever the command printed goes into the error.
+// `deploy/acme-dns-hook.example.sh` is a working one for Cloudflare.
+//
+// One requirement is easy to miss: `present` must *add* a value, not replace
+// what is there. A single order can need two records at the same name — a host
+// and a wildcard over it both answer at `_acme-challenge.<zone>` — and a script
+// that overwrites makes the first challenge fail in a way that reads exactly
+// like slow propagation.
+type ACMEDNSConfig struct {
+	// Command is the program and its fixed arguments.
+	Command []string `json:"command"`
+	// Timeout bounds one run of it. Empty means 2m.
+	Timeout Duration `json:"timeout"`
+	// PropagationTimeout gives up on a record that never becomes visible.
+	// Empty means 5m.
+	PropagationTimeout Duration `json:"propagationTimeout"`
+	// Settle is held after the record is first seen, before the authority is
+	// invited to look. Empty means 15s. Seeing it on one server is not the same
+	// as every server having it, and the authority may well ask another.
+	Settle Duration `json:"settle"`
+	// Resolvers are asked about the record instead of the zone's own
+	// nameservers, as "host:port". Empty is right for a public zone: Skyhook
+	// finds the zone's nameservers and asks them directly, which is the only
+	// way to get an answer that a recursive resolver has not cached from
+	// before the record existed. Set them for a split horizon, or when the
+	// delegated servers are not the ones actually serving.
+	Resolvers []string `json:"resolvers"`
 }
 
 // ACMEStagingURL is Let's Encrypt's staging directory, reachable as
@@ -240,6 +291,7 @@ const ACMEStagingURL = "https://acme-staging-v02.api.letsencrypt.org/directory"
 const (
 	ChallengeHTTP01    = "http-01"
 	ChallengeTLSALPN01 = "tls-alpn-01"
+	ChallengeDNS01     = "dns-01"
 )
 
 // Duration is a JSON-friendly time.Duration ("90s", "12h").
@@ -410,12 +462,27 @@ func (c *Config) validateACME() error {
 			"there is no TLS in that mode, and no authority certifies 127.0.0.1")
 	}
 
+	// The challenge is settled first because it decides what counts as a
+	// certifiable name: only dns-01 can prove a wildcard.
+	//
+	// It is a choice of the port the authority will find us on, so the default
+	// follows from where the listeners already are. dns-01 is never the default:
+	// it needs a command only the operator can write.
+	fallback443 := c.WebSocketFallback && portOf(c.FallbackListen) == 443
+	if c.ACME.Challenge == "" {
+		if fallback443 {
+			c.ACME.Challenge = ChallengeTLSALPN01
+		} else {
+			c.ACME.Challenge = ChallengeHTTP01
+		}
+	}
+
 	// Naming the domains is the one thing this cannot infer, but `hosts` is
 	// almost always already the answer.
 	if len(c.ACME.Domains) == 0 {
 		c.ACME.Domains = append([]string(nil), c.Hosts...)
 	}
-	domains, err := normalizeDomains(c.ACME.Domains)
+	domains, err := normalizeDomains(c.ACME.Domains, c.ACME.Challenge)
 	if err != nil {
 		return err
 	}
@@ -424,7 +491,20 @@ func (c *Config) validateACME() error {
 	// else built from `hosts` — the pairing file, the pairing link, the app's
 	// connect-src — has to agree with them or the client is sent somewhere the
 	// certificate does not cover.
-	c.Hosts = append([]string(nil), domains...)
+	//
+	// A wildcard is not one of those names. It is a fine thing to certify and an
+	// impossible thing to connect to, so it is certified and then dropped here,
+	// and a configuration with nothing else in it has named no server.
+	c.Hosts = nil
+	for _, d := range domains {
+		if !strings.HasPrefix(d, "*.") {
+			c.Hosts = append(c.Hosts, d)
+		}
+	}
+	if len(c.Hosts) == 0 {
+		return fmt.Errorf("config: acme domains %v are all wildcards: a client has to "+
+			"dial a name, so one of them has to be the host this server answers on", domains)
+	}
 
 	if !c.ACME.AgreeTOS {
 		return errors.New("config: acme needs agreeTos: nothing is requested from a " +
@@ -446,16 +526,6 @@ func (c *Config) validateACME() error {
 		}
 	}
 
-	// The challenge is a choice of the port the authority will find us on, so
-	// the default follows from where the listeners already are.
-	fallback443 := c.WebSocketFallback && portOf(c.FallbackListen) == 443
-	if c.ACME.Challenge == "" {
-		if fallback443 {
-			c.ACME.Challenge = ChallengeTLSALPN01
-		} else {
-			c.ACME.Challenge = ChallengeHTTP01
-		}
-	}
 	switch c.ACME.Challenge {
 	case ChallengeHTTP01:
 		if c.ACME.HTTPListen == "" {
@@ -475,16 +545,28 @@ func (c *Config) validateACME() error {
 				"listener's TLS handshake, and webSocketFallback is off; turn it on, " +
 				"or use the http-01 challenge")
 		}
+	case ChallengeDNS01:
+		if len(c.ACME.DNS.Command) == 0 {
+			return errors.New("config: acme dns-01 needs acme.dns.command: the record " +
+				"has to be published by something, and which API that is depends on who " +
+				"runs the zone. See deploy/acme-dns-hook.example.sh")
+		}
+		for _, r := range c.ACME.DNS.Resolvers {
+			if _, _, err := net.SplitHostPort(r); err != nil {
+				return fmt.Errorf("config: acme dns resolver %q needs a port, "+
+					"e.g. %q: %w", r, r+":53", err)
+			}
+		}
 	default:
-		return fmt.Errorf("config: acme challenge %q: want %q or %q",
-			c.ACME.Challenge, ChallengeHTTP01, ChallengeTLSALPN01)
+		return fmt.Errorf("config: acme challenge %q: want %q, %q or %q",
+			c.ACME.Challenge, ChallengeHTTP01, ChallengeTLSALPN01, ChallengeDNS01)
 	}
 	return nil
 }
 
 // normalizeDomains checks the names to be certified. Every rejection is one a
 // public authority makes anyway, made here where the message can say why.
-func normalizeDomains(in []string) ([]string, error) {
+func normalizeDomains(in []string, challenge string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	for _, d := range in {
@@ -497,11 +579,12 @@ func normalizeDomains(in []string) ([]string, error) {
 				"and a public authority certifies names. Give this deployment a hostname, "+
 				"or leave acme off and keep the pinned self-signed certificate", d)
 		}
-		if strings.HasPrefix(d, "*.") {
-			return nil, fmt.Errorf("config: acme cannot certify %q: a wildcard needs the "+
-				"dns-01 challenge, which this server does not do", d)
+		if strings.HasPrefix(d, "*.") && challenge != ChallengeDNS01 {
+			return nil, fmt.Errorf("config: acme cannot certify %q with the %s challenge: "+
+				"an authority proves a wildcard by asking the zone, never by connecting to "+
+				"a host, so only dns-01 can get one", d, challenge)
 		}
-		if !strings.Contains(d, ".") {
+		if !strings.Contains(strings.TrimPrefix(d, "*."), ".") {
 			// "localhost" is what an operator gets by leaving `hosts` alone, so
 			// it is worth naming the setting rather than the value.
 			hint := ""
@@ -700,6 +783,14 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SKYHOOK_ACME_HTTP_LISTEN"); v != "" {
 		cfg.ACME.HTTPListen = v
+	}
+	if v := os.Getenv("SKYHOOK_ACME_DNS_COMMAND"); v != "" {
+		// Space separated, like SKYHOOK_CHROME_ARGS. A path with a space in it
+		// needs the config file, which is the same trade that one makes.
+		cfg.ACME.DNS.Command = strings.Fields(v)
+	}
+	if v := os.Getenv("SKYHOOK_ACME_DNS_RESOLVERS"); v != "" {
+		cfg.ACME.DNS.Resolvers = strings.Split(v, ",")
 	}
 	if v := os.Getenv("SKYHOOK_CAPTURE_KEEP"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

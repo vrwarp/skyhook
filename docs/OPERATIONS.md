@@ -60,7 +60,7 @@ default; this is the whole surface:
   "dataDir": "/var/lib/skyhook",
   "hosts": ["vps.example.com"],
   "token": "",
-  "acme": { "enabled": false, "agreeTos": false, "email": "", "domains": [] },
+  "acme": { "enabled": false, "agreeTos": false, "email": "", "domains": [], "dns": {} },
   "headless": false,
   "lang": "en-US",
   "sessionTtl": "12h",
@@ -95,7 +95,8 @@ Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_CAPTURE_TEXT`, `SKYHOOK_CAPTURE_ON_DIVERGENCE`, `SKYHOOK_ACME`,
 `SKYHOOK_ACME_DOMAINS`, `SKYHOOK_ACME_EMAIL`, `SKYHOOK_ACME_AGREE_TOS`,
 `SKYHOOK_ACME_DIRECTORY`, `SKYHOOK_ACME_CHALLENGE`,
-`SKYHOOK_ACME_HTTP_LISTEN`.
+`SKYHOOK_ACME_HTTP_LISTEN`, `SKYHOOK_ACME_DNS_COMMAND`,
+`SKYHOOK_ACME_DNS_RESOLVERS`.
 
 `acme` has the server get its own certificate and keep it renewed — see
 [a certificate of its own](#a-certificate-of-its-own).
@@ -245,14 +246,18 @@ restart, no re-pairing, no new fingerprint for anybody to copy.
 
 What it costs:
 
-* **A DNS record.** An A or AAAA for each name in `domains`, pointing here. The
-  authority checks by connecting to it from the outside; there is no way to
-  certify an address, and no way to certify `localhost`. `domains` defaults to
+* **A DNS record.** An A or AAAA for each name in `domains`, pointing here — the
+  authority checks by connecting to it from the outside. (`dns-01` does not care
+  where the names point, but the client still has to reach the server, so in
+  practice they point here too.) There is no way to certify an address, and no
+  way to certify `localhost`. `domains` defaults to
   `hosts`, and the certified names then *become* `hosts`, so the pairing link,
   `pairing.json` and the app's `connect-src` all name the certificate's names.
-* **A reachable challenge port.** Port 80 by default (`http-01`). If the
-  fallback listener is already on 443, `tls-alpn-01` is chosen instead and
-  answers on that listener, with nothing extra bound.
+* **A reachable challenge port** — unless you use `dns-01`, which needs none.
+  Port 80 by default (`http-01`); if the fallback listener is already on 443,
+  `tls-alpn-01` is chosen instead and answers on that listener with nothing
+  extra bound. See [answering in DNS instead](#answering-in-dns-instead) for
+  the third option.
 * **Accepting the subscriber agreement.** `agreeTos` has to be set, because
   agreeing to <https://letsencrypt.org/repository/> on somebody's behalf is not
   this program's decision to make. Nothing is requested without it.
@@ -270,6 +275,73 @@ library tries `tls-alpn-01` first and falls back when it fails, so a refused
 challenge appears once per issuance before the certificate arrives. It costs a
 few seconds and is well inside any authority's failure allowance. Putting the
 fallback listener on 443 — which selects `tls-alpn-01` by default — avoids it.
+
+#### Answering in DNS instead
+
+`dns-01` proves the name by publishing a TXT record rather than by being
+connected to, so it needs **no inbound port at all**. That is the answer for a
+machine behind a NAT, on a link that filters 80 and 443, or with both already
+spoken for — and the only way to get a wildcard.
+
+Skyhook has no list of DNS providers and will not grow one: every API is
+different, and a personal browser has no business carrying a matrix of cloud
+SDKs. It runs a command you supply instead.
+
+```json
+{
+  "hosts": ["skyhook.example.com"],
+  "acme": {
+    "enabled": true, "agreeTos": true, "email": "you@example.com",
+    "challenge": "dns-01",
+    "dns": { "command": ["/usr/local/bin/skyhook-dns-hook"] }
+  }
+}
+```
+
+The command is run twice per record, with the same three facts as arguments and
+in the environment — use whichever your script finds convenient:
+
+```sh
+<command...> present <fqdn> <value>     # SKYHOOK_ACME_ACTION=present
+<command...> cleanup <fqdn> <value>     # SKYHOOK_ACME_FQDN=_acme-challenge.skyhook.example.com
+                                        # SKYHOOK_ACME_VALUE=<the TXT value>
+```
+
+A non-zero exit fails the challenge, and whatever the command printed is quoted
+back in the server's error — so print the provider's own message about a bad
+token rather than "failed". Anything in `command` after the program itself is
+passed before those arguments, so one script can serve several zones by
+dispatching on its own first argument.
+
+`deploy/acme-dns-hook.example.sh` is a working hook for Cloudflare. Two things
+in it are worth copying whatever your provider is, because both fail in ways
+that look like something else:
+
+* **`present` must add, never replace.** A certificate covering a host *and* a
+  wildcard over it needs two values at the same record name. A hook that
+  overwrites leaves one, and the first challenge then fails in a way
+  indistinguishable from slow propagation.
+* **`cleanup` must remove only the value it was given**, and succeed when there
+  is nothing to remove — it runs after failures too.
+
+Keep the provider credential out of the script and in the environment
+(`Environment=` or `EnvironmentFile=` in the unit, `-e` on the container). Scope
+it to editing DNS on the one zone; it is a credential for everything that name
+resolves to.
+
+Before accepting a challenge, Skyhook waits for the record to actually be
+visible. It finds the zone's own nameservers and asks them directly rather than
+asking the machine's resolver, because a recursive resolver caches the empty
+answer from just before the record was published — and that cached "no" is
+exactly what stands between a correctly written record and a challenge that
+would now pass. `propagationTimeout` (5m) gives up; `settle` (15s) is held after
+the record first appears, since seeing it on one server is not the same as every
+server having it. `resolvers` overrides which servers are asked, for a split
+horizon or when the delegated nameservers are not the ones actually serving.
+
+Renewal is unattended, so the hook has to keep working without anybody watching
+— a rotated API token is the usual way this breaks, months later. `email` is
+what gets you the authority's warning before that becomes an outage.
 
 Work it out against staging first if there is any doubt. Its certificates are
 refused by every browser, and its rate limits are generous enough to fail
@@ -627,7 +699,10 @@ patcher in your tree.
 | Client cannot connect over QUIC | UDP blocked. The client falls back to WebSocket automatically; check the HUD, which shows which transport is live. |
 | The app shows "The client has not been built" | `webRoot` is unset or wrong. Build `client/` and point at `client/dist`. |
 | The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. Turn on [`acme`](#a-certificate-of-its-own). |
-| ACME: the log says `could not get a certificate` | The authority could not reach the challenge port. Check DNS resolves each name here, that port 80 (or 443 for `tls-alpn-01`) reaches this process from the outside, and that a published container port is mapped to what the server bound — the startup log says when those two numbers differ. Reproduce against `SKYHOOK_ACME_DIRECTORY=staging` rather than burning production quota. |
+| ACME: the log says `could not get a certificate` | The authority could not reach the challenge port. Check DNS resolves each name here, that port 80 (or 443 for `tls-alpn-01`) reaches this process from the outside, and that a published container port is mapped to what the server bound — the startup log says when those two numbers differ. Reproduce against `SKYHOOK_ACME_DIRECTORY=staging` rather than burning production quota. With no usable ports at all, switch to [`dns-01`](#answering-in-dns-instead). |
+| ACME dns-01: `did not appear in DNS within…` | The hook exited 0 and the record is not visible. Usually it wrote to a zone that is not the one serving the name (a delegated subdomain, or a registrar's zone that is no longer authoritative), or the TTL is enormous. Run the hook by hand — `hook present _acme-challenge.<name> testvalue` — then `dig +short TXT _acme-challenge.<name> @<the zone's nameserver>`. Raise `propagationTimeout` for a genuinely slow provider; set `resolvers` if the delegated nameservers are not the ones actually answering. |
+| ACME dns-01: a host-plus-wildcard order times out on the record they share | The hook replaced instead of appending. Both names answer at the same `_acme-challenge.<zone>`, and both values have to be there at once. Use an add API (Cloudflare: POST, not PUT). |
+| ACME dns-01: worked at setup, failed months later | The provider credential expired or was rotated, and renewal is unattended. Set `acme.email` so the authority warns you before the certificate actually lapses. |
 | ACME: worked once, now the authority refuses | Almost always a lost `<dataDir>/acme`: without the account key the server registers and re-issues on every start, until a rate limit stops it. Persist the data directory. Rate limits are per week; staging has its own. |
 | ACME: browsers say the certificate is not trusted | `directory` is still `staging`. Clear it, delete `<dataDir>/acme` so the staging certificate is not reused, and restart. |
 | Stale UI after a deploy | Expected: the app runs from the service worker's cache and a reload is answered from it. The client compares builds with the server on every connection and offers *Update Skyhook…* in the shell menu; see [versions and updates](#versions-and-updates). |
