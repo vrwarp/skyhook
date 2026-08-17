@@ -410,11 +410,19 @@ export class MirrorHost {
     this.ready = new Promise<void>((resolve) => {
       const attach = (): void => {
         const doc = this.frame.contentDocument;
+        // No document to patch yet. The listener stays on: this used to be a
+        // one-shot, and a load event that arrived before the frame had a
+        // document spent it — leaving `ready` pending for the life of the tab.
+        // Nothing reports that. Every snapshot and every batch for the tab is
+        // awaiting this promise, so the page is never drawn and never
+        // acknowledged, and the server sees a client that has silently stopped
+        // short of a page it has already sent.
         if (!doc) return;
+        this.frame.removeEventListener('load', attach);
         this.attach(doc);
         resolve();
       };
-      this.frame.addEventListener('load', attach, { once: true });
+      this.frame.addEventListener('load', attach);
       // about:blank can be ready before the load event lands.
       queueMicrotask(() => {
         if (this.frame.contentDocument?.readyState === 'complete') attach();

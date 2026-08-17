@@ -167,7 +167,14 @@ type Tab struct {
 	url     string
 	title   string
 	loading bool
-	closed  bool
+	// calledOff is set by stop and cleared by anything that starts a load the
+	// reader is waiting for. While it is set, a lifecycle event saying the page
+	// has started loading is about the load that was just called off: the CDP
+	// event and the stop cross on the wire, and believing the late one puts the
+	// spinner back on with nothing behind it to take it off again. See
+	// startedLoading.
+	calledOff bool
+	closed    bool
 	// blockedFor is the denylist currently installed, so a navigation within a
 	// host does not re-send it.
 	blockedFor []string
@@ -306,7 +313,7 @@ func (t *Tab) install(ctx context.Context) error {
 	s.Subscribe("Page.loadEventFired", func(string, json.RawMessage) { t.onLoad() })
 	s.Subscribe("Page.frameStartedLoading", func(_ string, p json.RawMessage) {
 		if t.isMainFrame(p) {
-			t.setLoading(true)
+			t.startedLoading()
 		}
 	})
 	s.Subscribe("Page.frameStoppedLoading", func(_ string, p json.RawMessage) {
@@ -346,6 +353,44 @@ func (t *Tab) SetViewport(ctx context.Context, vp protocol.Viewport) error {
 		"deviceScaleFactor": vp.DPR,
 		"mobile":            vp.Mobile,
 	}, nil)
+}
+
+/*
+startedLoading takes the browser's word that the page is on its way, unless the
+reader has just said they do not want it.
+
+Page.stopLoading and Page.frameStartedLoading cross: the event describes the
+load the stop is ending, and it can arrive after. Acting on it turns the spinner
+back on — and because the stopped load then produces no lifecycle event of its
+own (which is why stop says "not loading" itself rather than waiting to be
+told), nothing ever turns it off again. The tab spins until it is navigated or
+closed, which is exactly what the reader pressed stop to escape.
+*/
+func (t *Tab) startedLoading() {
+	t.mu.Lock()
+	calledOff := t.calledOff
+	t.mu.Unlock()
+	if calledOff {
+		return
+	}
+	t.setLoading(true)
+}
+
+// callOff records that the reader has stopped the page, and says so. Anything
+// that starts a load they are waiting for clears it again — a navigation they
+// asked for, or one the page commits on its own.
+func (t *Tab) callOff() {
+	t.mu.Lock()
+	t.calledOff = true
+	t.mu.Unlock()
+	t.setLoading(false)
+}
+
+// wantsLoading marks the tab as waiting for a page again.
+func (t *Tab) wantsLoading() {
+	t.mu.Lock()
+	t.calledOff = false
+	t.mu.Unlock()
 }
 
 func (t *Tab) setLoading(v bool) {
@@ -443,6 +488,9 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		//
 		// Asking first costs one landside CDP call before the URL bar updates,
 		// which is nothing next to the second that frame then spends in the air.
+		// A commit is a page arriving, whoever asked for it: whatever the
+		// reader called off, this is not it.
+		t.wantsLoading()
 		t.syncHistory(ctx)
 		t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})
 

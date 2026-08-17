@@ -683,9 +683,11 @@ func (t *Tab) Navigate(ctx context.Context, n protocol.Navigate) error {
 		if idx < 0 || idx >= len(hist.Entries) {
 			return nil
 		}
+		t.wantsLoading()
 		return t.sess.Do(ctx, "Page.navigateToHistoryEntry",
 			map[string]any{"entryId": hist.Entries[idx].ID}, nil)
 	case "reload":
+		t.wantsLoading()
 		return t.sess.Do(ctx, "Page.reload", map[string]any{"ignoreCache": false}, nil)
 	case "stop":
 		err := t.sess.Do(ctx, "Page.stopLoading", nil, nil)
@@ -695,13 +697,19 @@ func (t *Tab) Navigate(ctx context.Context, n protocol.Navigate) error {
 		// pressed stop precisely because this tab has been spinning for
 		// minutes. The one thing they must get for the round trip they spent is
 		// the spinner going out.
-		t.setLoading(false)
+		//
+		// And it has to stay out: the load being ended has a "started" event of
+		// its own somewhere on the wire, and arriving after this it would put
+		// the spinner back on for good. callOff holds the answer until there is
+		// a new page to wait for.
+		t.callOff()
 		return err
 	}
 	if n.URL == "" {
 		return nil
 	}
 	url := normalizeURL(n.URL)
+	t.wantsLoading()
 	t.setLoading(true)
 	return t.sess.Do(ctx, "Page.navigate", map[string]any{"url": url}, nil)
 }

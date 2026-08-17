@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +57,13 @@ type Browser struct {
 	log     *slog.Logger
 	tmpDir  string
 	closeMu sync.Once
+
+	// exited is closed when the browser process is reaped, and waitErr holds
+	// what it exited with. One waiter, started at launch: a second call to
+	// Wait on the same command is an error, and everything that wants to know
+	// whether Chromium is still alive reads it from here.
+	exited  chan struct{}
+	waitErr error
 
 	// attached records that the browser was already running when we arrived,
 	// which makes every destructive call somebody else's business.
@@ -148,11 +154,24 @@ func Launch(ctx context.Context, opts BrowserOptions) (*Browser, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
+	// Port 0 means "Chromium picks", and Chromium writes down what it picked.
+	//
+	// Choosing the number here instead would mean binding a socket, closing it
+	// and handing the number over — and between the close and Chromium's bind
+	// anything on the machine can take it. The suite that runs eight browsers
+	// at once alongside a server, a fixture and a CDN per test loses that race
+	// often enough to be the leading cause of "chromium did not expose
+	// devtools": the port is gone, Chromium's DevTools server never comes up on
+	// it, and forty-five seconds later the dial gives up on a browser that
+	// started perfectly well.
+	//
+	// A profile that has been used before has last flight's number in the file.
+	// Reading that would be the same bug with an older port in it.
 	port := opts.Port
+	activePort := filepath.Join(dataDir, "DevToolsActivePort")
 	if port == 0 {
-		port, err = freePort()
-		if err != nil {
-			return nil, err
+		if err := os.Remove(activePort); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("cdp: clearing %s: %w", activePort, err)
 		}
 	}
 	w, h := opts.Width, opts.Height
@@ -228,23 +247,56 @@ func Launch(ctx context.Context, opts BrowserOptions) (*Browser, error) {
 	if runtime.GOOS == "linux" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
-	stderr, err := cmd.StderrPipe()
+	// Our own pipe rather than StderrPipe: cmd.Wait closes the pipe it hands
+	// out, and the waiter below runs from the moment the process starts, which
+	// would pull the fd out from under the drain mid-read.
+	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
+	cmd.Stderr = pw
 	if err := cmd.Start(); err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
 		return nil, err
 	}
+	// The child holds the only writing end now, so the drain sees EOF when it
+	// exits rather than blocking on a copy of the fd we forgot to let go of.
+	_ = pw.Close()
 	b.cmd = cmd
-	go drainStderr(stderr, opts.Logger)
+	b.exited = make(chan struct{})
+	go func() {
+		b.waitErr = cmd.Wait()
+		close(b.exited)
+	}()
+	go func() {
+		drainStderr(pr, opts.Logger)
+		_ = pr.Close()
+	}()
 
-	devtools := "http://127.0.0.1:" + strconv.Itoa(port)
-	deadline := time.Now().Add(45 * time.Second)
 	var cl *Client
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
-		cl, err = DialBrowser(ctx, devtools, opts.Logger)
-		if err == nil {
-			break
+		// A browser that has died is not going to answer, and saying so beats
+		// spending the rest of the deadline on it and then reporting the
+		// silence rather than the cause. An out-of-memory kill on a loaded
+		// machine reads as "signal: killed" here and as nothing at all before.
+		select {
+		case <-b.exited:
+			_ = b.Close()
+			return nil, fmt.Errorf("cdp: chromium exited before it was ready: %w", b.waitErr)
+		default:
+		}
+		if port == 0 {
+			if p, rerr := readActivePort(activePort); rerr == nil {
+				port = p
+			}
+		}
+		if port != 0 {
+			cl, err = DialBrowser(ctx, "http://127.0.0.1:"+strconv.Itoa(port), opts.Logger)
+			if err == nil {
+				break
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -255,7 +307,11 @@ func Launch(ctx context.Context, opts BrowserOptions) (*Browser, error) {
 	}
 	if cl == nil {
 		_ = b.Close()
-		return nil, fmt.Errorf("cdp: chromium did not expose devtools: %w", err)
+		if port == 0 {
+			return nil, fmt.Errorf("cdp: chromium never wrote %s, so it never "+
+				"opened a devtools port", activePort)
+		}
+		return nil, fmt.Errorf("cdp: chromium did not expose devtools on port %d: %w", port, err)
 	}
 	b.Client = cl
 	opts.Logger.Info("chromium started", "bin", bin, "port", port, "headless", headless, "profile", dataDir)
@@ -316,12 +372,19 @@ func (b *Browser) Close() error {
 			_ = b.Client.Close()
 		}
 		if b.cmd != nil && b.cmd.Process != nil {
-			done := make(chan struct{})
-			go func() { _, _ = b.cmd.Process.Wait(); close(done) }()
 			select {
-			case <-done:
+			case <-b.exited:
 			case <-time.After(8 * time.Second):
 				_ = b.cmd.Process.Kill()
+				// Reaped, so nothing is left as a zombie — but not waited for
+				// without end. A process that will not die is one this call
+				// cannot fix, and shutting the server down matters more.
+				select {
+				case <-b.exited:
+				case <-time.After(5 * time.Second):
+					b.log.Warn("chromium did not exit after being killed",
+						"pid", b.cmd.Process.Pid)
+				}
 			}
 		}
 		if b.tmpDir != "" {
@@ -637,13 +700,28 @@ func (b *Browser) DefaultUserAgent(ctx context.Context) (string, error) {
 // RawJSON is a helper for callers that want the raw event payload.
 func RawJSON(v json.RawMessage) string { return string(v) }
 
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+// readActivePort reads the port Chromium bound from the file it writes into the
+// profile once the DevTools server is listening. The first line is the port, the
+// second the browser's websocket path.
+//
+// The file appears before it is complete: Chromium creates it and writes to it,
+// and a read landing in between gets an empty or half-written first line. That
+// is a "not yet", not a failure, so anything unparseable is reported as one and
+// the caller comes back.
+func readActivePort(path string) (int, error) {
+	b, err := os.ReadFile(path) //nolint:gosec // path is inside our own profile dir
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().(*net.TCPAddr).Port, nil
+	line, _, _ := strings.Cut(string(b), "\n")
+	port, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		return 0, fmt.Errorf("cdp: %s does not hold a port yet: %w", path, err)
+	}
+	if port <= 0 {
+		return 0, fmt.Errorf("cdp: %s holds port %d", path, port)
+	}
+	return port, nil
 }
 
 // needsDisplay reports whether this platform requires an X display to run a
