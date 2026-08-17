@@ -239,8 +239,8 @@ make test-slow            # shape eight lanes, run the suite eight-wide, unshape
 which is this, and `LANES=4 make test-slow` on a smaller box:
 
 ```sh
-sudo scripts/netem.sh lanes 45123 8 1200 250 2   # shape only the Skyhook ports
-SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 SKYHOOK_TEST_PORTS=45123-45130 \
+sudo scripts/netem.sh lanes 21123 8 1200 250 2   # shape only the Skyhook ports
+SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 SKYHOOK_TEST_PORTS=21123-21130 \
   go test ./test -parallel 8 -v
 sudo scripts/netem.sh down
 ```

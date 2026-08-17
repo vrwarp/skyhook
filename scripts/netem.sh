@@ -28,6 +28,13 @@
 # time worth anything.
 #
 # `port <p>` and `lanes <p> 1` build the identical qdisc tree.
+#
+# Pick a base below net.ipv4.ip_local_port_range (32768 by default). Shaping a
+# port does not reserve it, and the kernel assigns ephemeral ports out of that
+# range to anything asking for "any port" — which a suite running eight tests,
+# their fixture servers and sixteen browsers does constantly. A lane inside the
+# range gets handed to somebody else mid-run and the test that leased it dies
+# on `bind: address already in use`.
 set -euo pipefail
 
 IFACE="${SKYHOOK_NETEM_IFACE:-lo}"

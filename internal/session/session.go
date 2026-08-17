@@ -609,22 +609,42 @@ func (s *Session) mayShipImage(hash string) bool {
 	return s.imgAsked[hash] || !s.imgSent[hash]
 }
 
-// noteImageShipped records a key the link actually took. Deliberately not
-// recorded when the queue drops it: media is expendable, and a ledger that
-// counts a dropped push as delivered turns "the reader waits a moment longer"
-// into "the picture never comes".
-func (s *Session) noteImageShipped(hash string) {
+/*
+noteImageAnswered closes out one delivery attempt.
+
+The ask is spent either way. It is a permit to send a key the ledger already
+holds, and answering it uses the permit up — including when the queue drops the
+frame, which is the case that matters. Media is expendable on a full queue, and
+a permit that outlives the attempt it authorised is one the next resync will
+spend again on a picture the client has had all along.
+
+Only a frame the queue took is recorded as sent, because a dropped push is not
+a delivery. What stops that from losing the picture is the client: every
+snapshot it applies, it asks again for what is still empty, so a dropped answer
+is re-asked rather than waited for forever.
+*/
+func (s *Session) noteImageAnswered(hash string, took bool) {
 	if hash == "" {
 		return
 	}
 	s.imgMu.Lock()
 	defer s.imgMu.Unlock()
 	delete(s.imgAsked, hash)
-	s.noteImageSent(hash)
+	if took {
+		s.noteImageSent(hash)
+	}
 }
 
 // imageWanted records that the client has asked for these keys, so the answer
 // reaches it even though it has had them before.
+//
+// The permit is all it takes; what the client has been sent is left standing.
+// Forgetting that too would mean believing an ask that crossed the bytes on the
+// wire — which is every ask on a slow link, where a snapshot reaches the client
+// on the DOM channel long before the pictures do on the media one. The client
+// asks for what it does not have yet, the answer is dropped by a queue the link
+// has already filled, and the ledger is left saying the client has never been
+// sent a picture it is looking at.
 func (s *Session) imageWanted(hashes []string) {
 	s.imgMu.Lock()
 	defer s.imgMu.Unlock()
@@ -636,7 +656,6 @@ func (s *Session) imageWanted(hashes []string) {
 			continue
 		}
 		s.imgAsked[h] = true
-		delete(s.imgSent, h)
 	}
 }
 
@@ -696,9 +715,8 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 	}
 	// Each image is its own stream: independently cancellable, and incapable of
 	// head-of-line-blocking a DOM diff.
-	if s.enqueue(outbound{ch: protocol.ChMedia, tab: tab, msg: msg, object: true}, true) {
-		s.noteImageShipped(data.Hash)
-	}
+	took := s.enqueue(outbound{ch: protocol.ChMedia, tab: tab, msg: msg, object: true}, true)
+	s.noteImageAnswered(data.Hash, took)
 }
 
 // ------------------------------------------------------------------- tabs

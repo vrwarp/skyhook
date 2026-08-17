@@ -903,11 +903,20 @@ func (t *Tab) spliceFrame(f *subFrame, s *agentSnapshot) {
 			ops = append(ops, protocol.Op{Op: protocol.OpStyle, Node: sc.Root, Add: sc.Rules})
 		}
 	}
+	// Counted before it is sent, and that order is the whole of the guard.
+	//
+	// A measurement reads the generation first, walks, and reads the sequence
+	// number last; it is sound only if a splice that reaches the sequence
+	// number has already moved the generation. Bumping afterwards left exactly
+	// the window where it had not: the walk had the frame set from before the
+	// splice, the sequence number was from after it, and the generation still
+	// agreed with itself — so a hash of one document was compared against a
+	// client holding another, and a frame arriving was reported as a diverged
+	// mirror and cost a whole resync.
+	t.spliceGen.Add(1)
 	t.emitFrameOps(f.slot, ops, s.Strings, s.Images, s.URL)
 	t.log.Debug("a frame's document is on its way to the client",
 		"tab", t.ID, "slot", f.slot, "owner", owner, "root", root.ID, "nodes", len(nodes))
-
-	t.spliceGen.Add(1)
 
 	// Whatever was mirrored inside this document went with the subtree the
 	// client just replaced.

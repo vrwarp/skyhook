@@ -213,7 +213,7 @@ jobs:
 
       - name: Apply the link profile from the design document
         # 1.2s RTT, 250 kbps, 2% loss on loopback: the link every milestone is
-        # measured against. Eight lanes of it, on ports 45123-45130, each with
+        # measured against. Eight lanes of it, on ports 21123-21130, each with
         # a netem qdisc of its own — a rate is a per-qdisc budget, so tests on
         # one shaped port would divide the link between them and save nothing.
         # One lane per concurrent test is what makes this parallel.
@@ -222,13 +222,13 @@ jobs:
         # assumed: at four lanes the median test took 1.01x as long as it did
         # running alone, so each was getting a whole link and not a quarter of
         # one.
-        run: sudo scripts/netem.sh lanes 45123 8 1200 250 2
+        run: sudo scripts/netem.sh lanes 21123 8 1200 250 2
 
       - name: End-to-end tests over the bad link
         env:
           SKYHOOK_E2E: '1'
           SKYHOOK_SLOW_LINK: '1'
-          SKYHOOK_TEST_PORTS: '45123-45130'
+          SKYHOOK_TEST_PORTS: '21123-21130'
           SKYHOOK_CHROME: ${{ steps.browser.outputs.path }}
         # Every test here pays 1.2s of latency per round trip, so this suite
         # grows with the test count far faster than the one above it, and the

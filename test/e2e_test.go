@@ -755,9 +755,16 @@ of doubling up on one, since two tests on one shaped port would be sharing that
 port's 250 kbit rather than each getting a link — which is the whole reason the
 suite is slow, and would make running them together pointless.
 
-SKYHOOK_TEST_PORTS takes "45123-45126" or "45123,45124", and SKYHOOK_TEST_PORT
+SKYHOOK_TEST_PORTS takes "21123-21126" or "21123,21124", and SKYHOOK_TEST_PORT
 still takes the single port it always did. Neither set means nothing is shaped:
 every harness binds :0 and the pool never comes into it.
+
+The numbers are low on purpose. A lease settles which test may use a port; it
+says nothing to the kernel, which assigns ephemeral ports from
+ip_local_port_range — 32768-60999 by default — to anything asking for "any
+port", and this suite asks constantly. Lanes used to sit at 45123 and up, in
+the middle of that range, and the kernel handed them out from under the lease.
+See lanesAreOursToKeep, which refuses a pool that would do it again.
 */
 var shapedLanes = sync.OnceValues(func() (chan int, error) {
 	spec := os.Getenv("SKYHOOK_TEST_PORTS")
@@ -771,12 +778,54 @@ var shapedLanes = sync.OnceValues(func() (chan int, error) {
 	if len(ports) == 0 {
 		return nil, nil
 	}
+	if err := lanesAreOursToKeep(ports); err != nil {
+		return nil, err
+	}
 	lanes := make(chan int, len(ports))
 	for _, p := range ports {
 		lanes <- p
 	}
 	return lanes, nil
 })
+
+/*
+lanesAreOursToKeep refuses a pool the kernel also hands out.
+
+A lane is leased for a whole test, but leasing only settles which test may use
+the port — it says nothing to the kernel, which assigns ephemeral ports from
+ip_local_port_range and will happily give one of them to the next thing that
+asks for "any port". The suite asks constantly: a fixture server, a CDN and an
+app listener per test, two Chromiums each with a debugging port, and an
+outbound socket for every connection any of them makes.
+
+So a lane inside that range is a lane that will be taken, and what it looks
+like when it happens is `bind: address already in use` on a port the pool
+believed was free — three tests in one netem run, all on the same lane. Ports
+below the range are never assigned this way, which is the whole requirement.
+
+Read from /proc, so this is Linux-only; everywhere else the pool is taken as
+given, since the shaped suite only runs where tc does.
+*/
+func lanesAreOursToKeep(ports []int) error {
+	lo, hi, ok := localPortRange()
+	if !ok {
+		return nil
+	}
+	var clashing []string
+	for _, p := range ports {
+		if p >= lo && p <= hi {
+			clashing = append(clashing, strconv.Itoa(p))
+		}
+	}
+	if len(clashing) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"shaped lanes %s are inside this kernel's ephemeral port range %d-%d, so the "+
+			"kernel will hand them out from under the lease; pick lanes below %d "+
+			"(SKYHOOK_TEST_PORTS, and the same base for scripts/netem.sh lanes)",
+		strings.Join(clashing, ","), lo, hi, lo)
+}
 
 // parseLanes reads a port spec: comma-separated ports and "first-last" ranges,
 // in any mixture.
@@ -1630,30 +1679,36 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		h.mgr.Close(c)
 	})
 
+	// The listener is opened once and handed over still open.
+	//
+	// This used to bind, read the address, close, and let the server bind it
+	// again — and in the window between those two the port was nobody's. On the
+	// netem job that window is wide open: eight tests at a time, each with a
+	// fixture server, a CDN, an app listener and two Chromiums, every one of
+	// them asking the kernel for a port. It answers from ip_local_port_range,
+	// and a lane inside that range is a port the kernel will hand to somebody
+	// else. Three tests lost that race to the same lane in one run.
 	ln, err := net.Listen("tcp", h.listenAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
 
 	h.ws = transport.NewWSServer(transport.WSConfig{
 		Addr: addr, Path: "/skyhook", Logger: log,
 	}, h.mgr.Serve)
-	go func() { _ = h.ws.ListenAndServe() }()
-	t.Cleanup(func() { _ = h.ws.Close() })
+	go func() { _ = h.ws.Serve(ln) }()
+	// Both, and in this order: Close is what stops the server, but a Close that
+	// lands before Serve has started leaves the listener with nobody to shut it,
+	// and a lane nobody hands back is one the next test waits on forever.
+	t.Cleanup(func() {
+		_ = h.ws.Close()
+		_ = ln.Close()
+	})
 	h.url = "ws://" + addr + "/skyhook"
 
-	// Wait for the listener to accept.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			_ = c.Close()
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	// No wait for the listener here: it is bound and listening before Serve is
+	// called, so a connection that arrives first waits in the backlog.
 	return h
 }
 

@@ -128,8 +128,8 @@ Then, in roughly this order:
 SKYHOOK_TEST_LOG=debug go test ./test -run TestThing -v
 
 # The same test over the bad link, which is where timing bugs actually live.
-sudo scripts/netem.sh lanes 45123 1 1200 250 2
-SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 SKYHOOK_TEST_PORTS=45123 \
+sudo scripts/netem.sh lanes 21123 1 1200 250 2
+SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 SKYHOOK_TEST_PORTS=21123 \
   go test ./test -run TestThing -v
 sudo scripts/netem.sh down
 ```
