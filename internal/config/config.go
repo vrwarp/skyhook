@@ -28,10 +28,16 @@ type Config struct {
 	Token string `json:"token"`
 	// Hosts are the names/IPs the self-signed certificate covers.
 	Hosts []string `json:"hosts"`
-	// TLSCert and TLSKey point at a real certificate (Let's Encrypt); when
-	// empty, a short-lived self-signed pair is generated and pinned instead.
+	// TLSCert and TLSKey point at a certificate obtained elsewhere — certbot,
+	// an internal authority, a wildcard the rest of the estate already uses.
+	// When they and acme are both empty, a short-lived self-signed pair is
+	// generated and pinned instead.
 	TLSCert string `json:"tlsCert"`
 	TLSKey  string `json:"tlsKey"`
+	// ACME has the server get its own certificate from Let's Encrypt and keep
+	// it renewed, which is the only arrangement in which the plane-side app
+	// installs *and* WebTransport works. See ACMEConfig.
+	ACME ACMEConfig `json:"acme"`
 	// Chrome overrides the browser binary.
 	Chrome string `json:"chrome"`
 	// ChromeAttach is the DevTools endpoint of an already-running browser
@@ -172,6 +178,122 @@ type Config struct {
 	BehindProxy bool `json:"behindProxy"`
 }
 
+// ACMEConfig asks the server to get its own publicly-trusted certificate and
+// keep it renewed, instead of minting a self-signed one or standing behind a
+// proxy that holds the real one.
+//
+// It is worth the DNS record it costs. The self-signed certificate is fine for
+// the mirror connection — the client pins it, which is stronger than public
+// trust — but Chrome will not register a service worker behind one, so the app
+// cannot install and cannot start with no network, which is the situation it
+// was written for. A reverse proxy solves that and takes WebTransport away,
+// because no HTTP proxy forwards HTTP/3 upstream. A real certificate on this
+// server's own listeners is the only way to have both, and this fetches one:
+//
+//	"acme": { "enabled": true, "domains": ["skyhook.example.com"], "agreeTos": true }
+//
+// Renewal needs no restart and no re-pairing, unlike the fortnightly self-signed
+// rotation: the certificate is answered per handshake out of a directory in the
+// data directory, so a renewed one is simply what the next handshake gets.
+type ACMEConfig struct {
+	// Enabled turns the whole thing on.
+	Enabled bool `json:"enabled"`
+	// Domains are the names to certify. Empty means Hosts, which is usually
+	// what an operator meant. Each has to resolve to this machine: the
+	// authority checks by connecting to it from outside.
+	Domains []string `json:"domains"`
+	// Email is the contact the authority warns before a certificate expires.
+	// Optional, and the only notice anybody gets if renewal has been failing.
+	Email string `json:"email"`
+	// AgreeTOS records that the operator accepts the authority's subscriber
+	// agreement (https://letsencrypt.org/repository/ for Let's Encrypt).
+	// Nothing is requested without it. Agreeing on somebody's behalf is not
+	// this program's decision to make, and it is one line to make it yourself.
+	AgreeTOS bool `json:"agreeTos"`
+	// Directory is the ACME directory URL. Empty is Let's Encrypt production;
+	// "staging" is its staging environment, whose certificates no browser
+	// trusts and whose rate limits are generous — which is where to find out
+	// that port 80 is firewalled.
+	Directory string `json:"directory"`
+	// Challenge is how the authority checks the name. Two of them are a choice
+	// of the port it will reach this server on — "http-01" (port 80, answered by
+	// a listener of our own) and "tls-alpn-01" (port 443, answered by the
+	// fallback listener) — and "dns-01" is the choice not to be reached at all:
+	// the answer goes in the zone, published by a command you supply, and no
+	// inbound port is involved. That is the one for a machine behind a NAT, on a
+	// link that filters 80 and 443, or already using them for something else.
+	//
+	// Empty picks tls-alpn-01 when the fallback listener is already on 443, and
+	// http-01 otherwise. dns-01 is never chosen by default, because it needs a
+	// command that only the operator can write.
+	Challenge string `json:"challenge"`
+	// HTTPListen is where the HTTP-01 listener binds; empty means ":80".
+	//
+	// Those two ports are what the authority connects to from outside, and they
+	// are not negotiable — but they are the ports it dials, not necessarily the
+	// ones this process binds. A container publishing 80:8080, or a machine
+	// where an unprivileged process cannot have port 80, is a normal deployment
+	// and is not refused; the server says at startup when what it bound is not
+	// what the authority will dial, and leaves the forwarding to the operator.
+	HTTPListen string `json:"httpListen"`
+	// DNS configures the dns-01 challenge. Ignored by the other two.
+	DNS ACMEDNSConfig `json:"dns"`
+}
+
+// ACMEDNSConfig is how the dns-01 challenge gets its record into the zone, and
+// how long the server waits before believing it is there.
+//
+// There is no list of providers here and there will not be one: every DNS API
+// is different, and a personal browser has no business carrying a matrix of
+// cloud SDKs so that one of them can be used. Instead Skyhook runs a command
+// you supply, twice per record:
+//
+//	<command...> present <fqdn> <value>
+//	<command...> cleanup <fqdn> <value>
+//
+// with the same three facts also in the environment (SKYHOOK_ACME_ACTION,
+// SKYHOOK_ACME_FQDN, SKYHOOK_ACME_VALUE), because half the scripts people
+// already have read arguments and half read the environment. A non-zero exit
+// fails the challenge and whatever the command printed goes into the error.
+// `deploy/acme-dns-hook.example.sh` is a working one for Cloudflare.
+//
+// One requirement is easy to miss: `present` must *add* a value, not replace
+// what is there. A single order can need two records at the same name — a host
+// and a wildcard over it both answer at `_acme-challenge.<zone>` — and a script
+// that overwrites makes the first challenge fail in a way that reads exactly
+// like slow propagation.
+type ACMEDNSConfig struct {
+	// Command is the program and its fixed arguments.
+	Command []string `json:"command"`
+	// Timeout bounds one run of it. Empty means 2m.
+	Timeout Duration `json:"timeout"`
+	// PropagationTimeout gives up on a record that never becomes visible.
+	// Empty means 5m.
+	PropagationTimeout Duration `json:"propagationTimeout"`
+	// Settle is held after the record is first seen, before the authority is
+	// invited to look. Empty means 15s. Seeing it on one server is not the same
+	// as every server having it, and the authority may well ask another.
+	Settle Duration `json:"settle"`
+	// Resolvers are asked about the record instead of the zone's own
+	// nameservers, as "host:port". Empty is right for a public zone: Skyhook
+	// finds the zone's nameservers and asks them directly, which is the only
+	// way to get an answer that a recursive resolver has not cached from
+	// before the record existed. Set them for a split horizon, or when the
+	// delegated servers are not the ones actually serving.
+	Resolvers []string `json:"resolvers"`
+}
+
+// ACMEStagingURL is Let's Encrypt's staging directory, reachable as
+// `"directory": "staging"`.
+const ACMEStagingURL = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+// Challenge names, matching transport.ACMEChallenge.
+const (
+	ChallengeHTTP01    = "http-01"
+	ChallengeTLSALPN01 = "tls-alpn-01"
+	ChallengeDNS01     = "dns-01"
+)
+
 // Duration is a JSON-friendly time.Duration ("90s", "12h").
 type Duration time.Duration
 
@@ -292,6 +414,9 @@ func (c *Config) validate() error {
 		return errors.New("config: insecureLoopback is for this machine only; " +
 			"drop publicUrl/behindProxy or drop -demo")
 	}
+	if err := c.validateACME(); err != nil {
+		return err
+	}
 	if c.ChromeAttach != "" {
 		u, err := url.Parse(c.ChromeAttach)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
@@ -311,6 +436,192 @@ func (c *Config) validate() error {
 	}
 	return nil
 }
+
+// validateACME settles the certificate settings, and refuses the combinations
+// that would produce a server which cannot get one.
+//
+// Every check here fails at startup with a sentence naming the fix. The
+// alternative is an authority refusing a challenge some minutes later, in an
+// error written for people who implement ACME rather than for people deploying
+// a browser.
+func (c *Config) validateACME() error {
+	if !c.ACME.Enabled {
+		return nil
+	}
+	if c.TLSCert != "" || c.TLSKey != "" {
+		return errors.New("config: acme and tlsCert/tlsKey are two answers to the same " +
+			"question; drop one")
+	}
+	if c.BehindProxy {
+		return errors.New("config: acme cannot be used with behindProxy: " +
+			"the certificate the browser checks is the proxy's, and the authority would " +
+			"be answered by the proxy too — get the certificate there instead")
+	}
+	if c.InsecureLoopback {
+		return errors.New("config: acme cannot be used with insecureLoopback: " +
+			"there is no TLS in that mode, and no authority certifies 127.0.0.1")
+	}
+
+	// The challenge is settled first because it decides what counts as a
+	// certifiable name: only dns-01 can prove a wildcard.
+	//
+	// It is a choice of the port the authority will find us on, so the default
+	// follows from where the listeners already are. dns-01 is never the default:
+	// it needs a command only the operator can write.
+	fallback443 := c.WebSocketFallback && portOf(c.FallbackListen) == 443
+	if c.ACME.Challenge == "" {
+		if fallback443 {
+			c.ACME.Challenge = ChallengeTLSALPN01
+		} else {
+			c.ACME.Challenge = ChallengeHTTP01
+		}
+	}
+
+	// Naming the domains is the one thing this cannot infer, but `hosts` is
+	// almost always already the answer.
+	if len(c.ACME.Domains) == 0 {
+		c.ACME.Domains = append([]string(nil), c.Hosts...)
+	}
+	domains, err := normalizeDomains(c.ACME.Domains, c.ACME.Challenge)
+	if err != nil {
+		return err
+	}
+	c.ACME.Domains = domains
+	// The certified names are the names this server answers on, and everything
+	// else built from `hosts` — the pairing file, the pairing link, the app's
+	// connect-src — has to agree with them or the client is sent somewhere the
+	// certificate does not cover.
+	//
+	// A wildcard is not one of those names. It is a fine thing to certify and an
+	// impossible thing to connect to, so it is certified and then dropped here,
+	// and a configuration with nothing else in it has named no server.
+	c.Hosts = nil
+	for _, d := range domains {
+		if !strings.HasPrefix(d, "*.") {
+			c.Hosts = append(c.Hosts, d)
+		}
+	}
+	if len(c.Hosts) == 0 {
+		return fmt.Errorf("config: acme domains %v are all wildcards: a client has to "+
+			"dial a name, so one of them has to be the host this server answers on", domains)
+	}
+
+	if !c.ACME.AgreeTOS {
+		return errors.New("config: acme needs agreeTos: nothing is requested from a " +
+			"certificate authority until the operator accepts its subscriber agreement " +
+			"(https://letsencrypt.org/repository/). Set \"agreeTos\": true, or " +
+			"SKYHOOK_ACME_AGREE_TOS=1")
+	}
+
+	switch strings.ToLower(strings.TrimSpace(c.ACME.Directory)) {
+	case "", "production", "letsencrypt":
+		c.ACME.Directory = ""
+	case "staging":
+		c.ACME.Directory = ACMEStagingURL
+	default:
+		u, err := url.Parse(c.ACME.Directory)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("config: acme directory %q is not an https URL "+
+				"(or \"staging\")", c.ACME.Directory)
+		}
+	}
+
+	switch c.ACME.Challenge {
+	case ChallengeHTTP01:
+		if c.ACME.HTTPListen == "" {
+			c.ACME.HTTPListen = ":80"
+		}
+		if _, _, err := net.SplitHostPort(c.ACME.HTTPListen); err != nil {
+			return fmt.Errorf("config: acme httpListen %q: %w", c.ACME.HTTPListen, err)
+		}
+	case ChallengeTLSALPN01:
+		// The challenge is answered by the fallback listener's TLS handshake, so
+		// there has to be one. Which port it binds is not checked: a container
+		// answers the world's 443 on some other number, and refusing that would
+		// refuse the deployment this feature is most useful in. Whether it is
+		// reachable is said out loud at startup instead.
+		if !c.WebSocketFallback {
+			return errors.New("config: acme tls-alpn-01 is answered by the fallback " +
+				"listener's TLS handshake, and webSocketFallback is off; turn it on, " +
+				"or use the http-01 challenge")
+		}
+	case ChallengeDNS01:
+		if len(c.ACME.DNS.Command) == 0 {
+			return errors.New("config: acme dns-01 needs acme.dns.command: the record " +
+				"has to be published by something, and which API that is depends on who " +
+				"runs the zone. See deploy/acme-dns-hook.example.sh")
+		}
+		for _, r := range c.ACME.DNS.Resolvers {
+			if _, _, err := net.SplitHostPort(r); err != nil {
+				return fmt.Errorf("config: acme dns resolver %q needs a port, "+
+					"e.g. %q: %w", r, r+":53", err)
+			}
+		}
+	default:
+		return fmt.Errorf("config: acme challenge %q: want %q, %q or %q",
+			c.ACME.Challenge, ChallengeHTTP01, ChallengeTLSALPN01, ChallengeDNS01)
+	}
+	return nil
+}
+
+// normalizeDomains checks the names to be certified. Every rejection is one a
+// public authority makes anyway, made here where the message can say why.
+func normalizeDomains(in []string, challenge string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range in {
+		d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
+		if d == "" {
+			continue
+		}
+		if ip := net.ParseIP(d); ip != nil {
+			return nil, fmt.Errorf("config: acme cannot certify %q: it is an address, "+
+				"and a public authority certifies names. Give this deployment a hostname, "+
+				"or leave acme off and keep the pinned self-signed certificate", d)
+		}
+		if strings.HasPrefix(d, "*.") && challenge != ChallengeDNS01 {
+			return nil, fmt.Errorf("config: acme cannot certify %q with the %s challenge: "+
+				"an authority proves a wildcard by asking the zone, never by connecting to "+
+				"a host, so only dns-01 can get one", d, challenge)
+		}
+		if !strings.Contains(strings.TrimPrefix(d, "*."), ".") {
+			// "localhost" is what an operator gets by leaving `hosts` alone, so
+			// it is worth naming the setting rather than the value.
+			hint := ""
+			if d == "localhost" {
+				hint = "; \"hosts\" is still the default, so put the machine's name " +
+					"there or in acme.domains"
+			}
+			return nil, fmt.Errorf("config: acme cannot certify %q: a public authority "+
+				"will not certify a name with no public suffix%s", d, hint)
+		}
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("config: acme is on but no domains are set, and \"hosts\" " +
+			"names none either")
+	}
+	return out, nil
+}
+
+// portOf extracts the port from a listen address, or 0 when it has none.
+func portOf(addr string) int {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(port)
+	return n
+}
+
+// ACMEDir holds the ACME account key and the certificates issued to it. It is
+// in the data directory because it must survive a restart: a lost account key
+// is a new registration and a fresh issuance every time the server starts,
+// which is the shortest path to a rate limit.
+func (c Config) ACMEDir() string { return filepath.Join(c.DataDir, "acme") }
 
 // PublicEndpoint is where the client reaches the server, which behind a proxy
 // is not where the server listens.
@@ -452,6 +763,35 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SKYHOOK_BEHIND_PROXY"); v != "" {
 		cfg.BehindProxy = v == "1" || strings.EqualFold(v, "true")
 	}
+	if v := os.Getenv("SKYHOOK_ACME"); v != "" {
+		cfg.ACME.Enabled = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("SKYHOOK_ACME_DOMAINS"); v != "" {
+		cfg.ACME.Domains = strings.Split(v, ",")
+	}
+	if v := os.Getenv("SKYHOOK_ACME_EMAIL"); v != "" {
+		cfg.ACME.Email = v
+	}
+	if v := os.Getenv("SKYHOOK_ACME_AGREE_TOS"); v != "" {
+		cfg.ACME.AgreeTOS = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("SKYHOOK_ACME_DIRECTORY"); v != "" {
+		cfg.ACME.Directory = v
+	}
+	if v := os.Getenv("SKYHOOK_ACME_CHALLENGE"); v != "" {
+		cfg.ACME.Challenge = v
+	}
+	if v := os.Getenv("SKYHOOK_ACME_HTTP_LISTEN"); v != "" {
+		cfg.ACME.HTTPListen = v
+	}
+	if v := os.Getenv("SKYHOOK_ACME_DNS_COMMAND"); v != "" {
+		// Space separated, like SKYHOOK_CHROME_ARGS. A path with a space in it
+		// needs the config file, which is the same trade that one makes.
+		cfg.ACME.DNS.Command = strings.Fields(v)
+	}
+	if v := os.Getenv("SKYHOOK_ACME_DNS_RESOLVERS"); v != "" {
+		cfg.ACME.DNS.Resolvers = strings.Split(v, ",")
+	}
 	if v := os.Getenv("SKYHOOK_CAPTURE_KEEP"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.CaptureKeep = n
@@ -571,6 +911,12 @@ type Pairing struct {
 //
 // The pairing file and the pairing link are both built from this, so the two
 // can never describe different servers.
+//
+// An empty certSHA256 means "trust this certificate the ordinary way", which is
+// the right answer whenever the certificate came from an authority the browser
+// already knows — see transport.CertBundle.Pin, which is what decides. The
+// client still prefers WebTransport in that case; only a proxy in front takes
+// that away.
 func (c Config) PairingFor(certSHA256, certExpires string) Pairing {
 	// Something in front of us answers for us: hand out its address, and no
 	// certificate pin — the certificate the browser validates is the proxy's.

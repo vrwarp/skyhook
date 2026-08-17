@@ -5,6 +5,21 @@
   "dataDir": "/var/lib/skyhook",
   "hosts": ["vps.example.com"],
   "token": "",
+  "acme": {
+    "enabled": false,
+    "agreeTos": false,
+    "email": "",
+    "domains": [],
+    "challenge": "",
+    "httpListen": "",
+    "directory": "",
+    "dns": {
+      "command": [],
+      "propagationTimeout": "5m",
+      "settle": "15s",
+      "resolvers": []
+    }
+  },
   "headless": false,
   "lang": "en-US",
   "sessionTtl": "12h",

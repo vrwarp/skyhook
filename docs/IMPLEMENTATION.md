@@ -1875,7 +1875,12 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   list is.
 - **Installability is untested against a real install prompt**: the manifest,
   icons and service worker are all in place and the worker registers in a real
-  browser under test, but nobody has clicked "Install" on a device yet.
+  browser under test, but nobody has clicked "Install" on a device yet. It also
+  needs a certificate the browser trusts, which [§39](#39-the-certificate-was-a-choice-between-the-app-and-the-transport)
+  now makes reachable without a proxy — and the ACME path itself is exercised
+  only against a stand-in authority in `internal/transport/acme_test.go`, never
+  against Let's Encrypt, because a test that issues real certificates spends a
+  real rate limit.
 - **The document is delivered whole, not viewport-first.** A snapshot serialises
   the entire DOM, and only images are prioritised by viewport position. Both
   Menlo's Smart DOM and, twenty years earlier, OBML's pagination send what is
@@ -2249,6 +2254,166 @@ stalled client is repaired on the second check and not the first or third, a
 client working through a backlog is left alone however far behind it is, a
 client behind a page that is still emitting is left alone, and a caught-up
 client is never considered at all.
+
+### 39. The certificate was a choice between the app and the transport
+
+Every deployment had to give up one of the two things the client is built on,
+and nothing in the tree said so.
+
+The self-signed certificate is not a compromise on the wire: the client pins its
+exact SHA-256, which is stronger than trusting the public CA set, and it is what
+lets a personal server run with no public name at all. What it costs is
+elsewhere. Chrome will not register a service worker behind a certificate it
+does not trust, and the service worker is the entire offline story — the app
+that starts from its own cache at 35,000 feet, the shell that survives an
+outage, the install. A pinned deployment can mirror pages perfectly and can
+never be the thing the README describes.
+
+The reverse proxy fixes precisely that and takes WebTransport away, because no
+HTTP proxy forwards HTTP/3 to an upstream. That trade is documented and real —
+stream independence and 0-RTT resume are what make a bad link bearable — but it
+is a trade, and it was the only escape from the first one.
+
+There was a third arrangement all along, `tlsCert`/`tlsKey`, and it was broken
+in a way nobody would find. The pairing file was built from
+`cert.FingerprintB64()` unconditionally, so a server with a real certificate
+handed the client a pin for it. WebTransport refuses `serverCertificateHashes`
+whose certificate is valid for more than 14 days, which is every certificate a
+public authority issues. So the one deployment that should have had both got
+neither: every QUIC dial failed on a rule about validity windows, the client
+fell back to the socket exactly as it does behind a proxy, and the HUD said
+`websocket` with no error anywhere to explain it.
+
+`CertBundle.Pin` is the fix and the statement of the rule: only a certificate
+this process minted is pinnable, because only that one is short-lived by
+construction. Everything else goes out with no `certSha256` and the client uses
+ordinary TLS trust — which is what a real certificate is *for*.
+
+That left getting one easy enough to be the default answer, which is
+`internal/transport/acme.go`. `hosts` are the names, the challenge follows from
+where the listeners already are, and two settings turn it on. Three details are
+not obvious:
+
+- **The certificate is answered per handshake**, never held. `GetCertificate`
+  rather than `Certificates` is what makes renewal invisible: the replacement is
+  simply what the next handshake gets. Contrast the self-signed path, where
+  rotation invalidates the pin every client holds and needs a restart *and* a
+  re-pairing — a fortnightly ritual that this arrangement deletes.
+- **Renewal cannot be left to the handshake.** The manager renews while
+  answering, which covers a server in daily use and covers nothing else. A
+  Skyhook that is opened when somebody flies is exactly the server that goes two
+  months without a handshake and then presents an expired certificate to the one
+  connection that mattered. `acmeRenewalLoop` asks every twelve hours whether
+  anybody is connecting or not.
+- **The warm-up has to look like a browser.** Priming with a synthetic
+  `ClientHelloInfo` orders under a cache key derived from the hello, and a hello
+  with no cipher suites orders an *RSA* certificate. Every real handshake would
+  then miss that entry and order a second one — a warm-up that doubles issuance
+  is the shortest path to a rate limit. The suites are set for that reason and
+  nothing else.
+
+There is a third challenge, and it is a different shape. `dns-01` proves the
+name by publishing a TXT record rather than by being connected to, so it needs
+no inbound port at all — which is the point for a machine behind a NAT, on a
+link that filters 80 and 443, or with both already spoken for. autocert does not
+implement it and cannot be made to: it picks challenges itself, and its whole
+design is issuance *during* a handshake. That design does not survive contact
+with DNS, where publishing a record and waiting for the world to agree about it
+takes tens of seconds at best. So dns-01 is a second issuer over
+`x/crypto/acme` directly, behind the same `GetCertificate`, and it issues ahead
+of time and keeps the result — which is a plainer thing anyway, and makes
+renewal a scheduled job rather than a lucky handshake. It is also the only
+challenge that can prove a wildcard, so it is the only one allowed to ask for
+one; a wildcard is then kept out of `hosts`, because it certifies a name and
+names no server anyone can dial.
+
+The two issuers share the account key file, in autocert's name and encoding, so
+changing challenge type keeps the registration instead of quietly opening a
+second account with the authority. They share the certificate encoding too, so
+`<dataDir>/acme` looks the same either way and neither strands the other's
+files.
+
+Three things about dns-01 are worth naming:
+
+  * **There is no provider list and will not be one.** Every DNS API is
+    different, and a personal browser has no business carrying a matrix of
+    cloud SDKs so that one of them can be used. Skyhook runs a command, passing
+    the action, name and value as arguments *and* in the environment because
+    half the scripts people already have read one and half read the other. The
+    provider's own error text is quoted into Skyhook's, since a message about a
+    bad token is the most useful thing anybody could be shown at that moment.
+  * **The propagation wait is the feature, not the timeout.** Accepting a
+    challenge the instant the provider's API returns is the classic way to have
+    an authorization refused. Skyhook finds the zone's own nameservers and asks
+    them directly, rather than asking the machine's resolver — which has cached
+    the empty answer from just before the record was published, and that cached
+    "no" is exactly what stands between a correct record and a challenge that
+    would now pass.
+  * **Killing a hook is not enough to get its output back.** A hook is usually
+    a shell script, and a script that runs `curl` hands it the same stdout;
+    cancelling kills the shell and leaves curl holding the pipe, which is what
+    `CombinedOutput` is reading. Without `WaitDelay` a hook with a hanging child
+    blocks for as long as the child likes, whatever timeout was configured. A
+    test asserts the call returns well before its own child does.
+
+The challenge port is where the two socket-answered deployments actually fail,
+and it is deliberately not validated to death. Ports 80 and 443 are what the authority *dials*, not
+what this process *binds*: a container publishes `80:8080` because an
+unprivileged uid cannot have port 80, and refusing that would refuse the
+deployment this feature is most useful in. So the server compares the two
+numbers and says once, loudly, when they differ, and leaves the forwarding to
+the operator. Everything that genuinely cannot work — `behindProxy`, an address
+instead of a name, a wildcard, no agreement to the subscriber terms — is refused
+at startup with a sentence naming the fix, because the alternative is an
+authority error some minutes later written for people implementing ACME.
+
+### 40. Everything that had to line up first, and nothing that said so
+
+Three separate things have to be true before a first run works, and not one of
+them is discoverable from the others.
+
+The client is a separate build, and the server only looked for it in `webRoot`
+or `<dataDir>/webapp` — so `go run ./cmd/skyhookd` in a checkout with a freshly
+built client served *nothing*, and the fix (copy or symlink `client/dist` into
+the data directory) is only obvious to somebody who has read `resolveWebRoot`.
+A browser you already have open needs two flags it was not started with, and
+without them the server fails on a devtools port in a message about a devtools
+port. And a certificate needs a name, a challenge, and either a free port or a
+DNS hook, each of which fails minutes later in a certificate authority's
+vocabulary rather than a browser operator's.
+
+Two changes, and they are different in kind.
+
+The first is that the server now finds the build in the checkout it came out of,
+by walking up from the working directory and from the binary for a `go.mod` with
+a `client/dist` beside it. That is a default, not a feature: the build twenty
+metres away in the same repository is what the operator meant. It cannot fire
+anywhere it should not, because a container and a systemd unit both set
+`webRoot` and neither `/usr/local/bin` nor `/` has a `client/dist` above it.
+
+The second is `skyhookd -setup`, and the thing that makes it worth having is not
+that it asks — it is that it **looks**. Every answer that can be checked is
+checked while the person who typed it is still there: it connects to the
+devtools endpoint and prints the browser's version back, resolves the name,
+tries to bind the challenge port, and runs the DNS hook for real against a
+throwaway record. A configuration file full of plausible answers is exactly what
+the old path produced, and each wrong one surfaced later, somewhere else, as
+something that looked like a different problem.
+
+Writing that check found a bug in the code it was checking. The propagation wait
+returned "no error" when it could find no nameserver for the zone — which is
+right for issuance, where the authority is perfectly able to judge for itself,
+and catastrophic for a self-test, where it means a hook that publishes nothing
+at all is reported as working. `forTXT` now returns whether it actually saw the
+record, and the two callers want opposite things from that: issuance warns and
+carries on, the self-test refuses to bless what it could not check.
+
+Two rules hold the whole thing together. Nothing is written until the entire
+plan has been shown and agreed, so an abandoned run leaves no trace and an
+existing config is moved aside rather than overwritten. And the file it writes
+is run through `config.Load` — the same loader the server uses — before it is
+installed, because a setup program that produces a configuration the server then
+refuses would be worse than no setup program at all.
 
 ## Measured results
 

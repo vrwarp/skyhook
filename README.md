@@ -77,7 +77,24 @@ server refuses to bind anything but loopback in this mode.
 
 ## Quick start
 
-### Landside (the VPS)
+### Set it up by answering questions
+
+```sh
+scripts/setup.sh          # or: skyhookd -setup
+```
+
+It asks what your deployment looks like — which browser, how the plane side
+reaches it, which certificate — and **checks each answer while you are still
+there to fix it**: that the browser you want to attach to is actually listening,
+that the name resolves, that the port is free, that your DNS hook really
+publishes a record. Then it writes a configuration file and prints the pairing
+link. Nothing is written until it has shown you the whole plan.
+
+It is the fastest way to a working server, and the fastest way to find out which
+of the four deployments you actually want, since each one says what it costs
+before you pick it.
+
+### Or by hand
 
 ```sh
 # With Docker
@@ -89,6 +106,9 @@ docker compose -f deploy/docker-compose.yml exec skyhook \
 go build -o skyhookd ./cmd/skyhookd
 SKYHOOK_DATA_DIR=~/.skyhook ./skyhookd
 ```
+
+Run from a checkout, the server finds `client/dist` by itself, so a built client
+needs no configuration at all.
 
 By default the server launches Chromium itself and owns it. To drive a browser
 that is already running instead, point the server at its DevTools endpoint:
@@ -111,6 +131,34 @@ On first run the server generates a pairing token and a short-lived,
 self-signed ECDSA certificate, and writes `pairing.json` into its data
 directory. That file is what the client needs: host, port, token, and the
 certificate fingerprint it will pin.
+
+If the box has a name, give it a real certificate instead — the server gets one
+from Let's Encrypt and keeps it renewed:
+
+```sh
+SKYHOOK_ACME_DOMAINS=skyhook.example.com SKYHOOK_ACME_EMAIL=you@example.com \
+  docker compose -f deploy/docker-compose.acme.yml up -d
+```
+
+That is the deployment to want, because it is the only one that keeps both
+halves of what makes the client work. TLS terminates here, so WebTransport
+survives; the certificate is one Chrome already trusts, so the app installs and
+starts with no network — which a self-signed certificate never allows, however
+firmly the client pins it. Renewal needs no restart and no re-pairing.
+
+If ports 80 and 443 are not available — a machine behind a NAT, a link that
+filters them, or something else already listening — answer in DNS instead, which
+needs no inbound port at all:
+
+```json
+"acme": { "enabled": true, "agreeTos": true, "challenge": "dns-01",
+          "dns": { "command": ["/usr/local/bin/skyhook-dns-hook"] } }
+```
+
+The hook is a command you supply, because every DNS provider has its own API and
+none of them belong in here; `deploy/acme-dns-hook.example.sh` is a working one
+for Cloudflare. [docs/OPERATIONS.md](docs/OPERATIONS.md#a-certificate-of-its-own)
+has the DNS record, the three challenges and how to rehearse against staging.
 
 Behind a reverse proxy, tell the server the address the proxy answers on —
 everything it hands the client is built from it, and it cannot infer it:
@@ -136,8 +184,10 @@ npm ci
 npm run build      # -> client/dist
 ```
 
-Set `"webRoot": "/path/to/client/dist"` in the server config (the container
-image builds and ships it already), then open the link from the server's log:
+Running from a checkout, that is all: the server finds `client/dist` in the
+repository it came out of and serves it. Elsewhere, set
+`"webRoot": "/path/to/client/dist"` (the container image builds and ships it
+already). Either way, open the link from the server's log:
 
 ```
 level=INFO msg="pair the client by opening this link once" url="https://vps:4434/#token=…"

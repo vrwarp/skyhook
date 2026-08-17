@@ -46,6 +46,34 @@ The unit runs as a dedicated user with `ProtectSystem=strict` and a writable
 path limited to the data directory, which is the "Chromium profile under a
 dedicated Unix user" mitigation from the design.
 
+## Setting it up by answering questions
+
+```sh
+scripts/setup.sh          # from a checkout
+skyhookd -setup           # or against an installed binary
+```
+
+`-setup` asks what this deployment is, writes a configuration file, and — this
+is the part worth having — **checks each answer while the person who typed it is
+still there**. It connects to the browser you said to attach to, resolves the
+name you gave, tries to bind the challenge port, and runs your DNS hook for real
+against a throwaway record. Every one of those otherwise fails minutes later, in
+somebody else's vocabulary, at a moment when the cause is no longer on screen.
+
+It is a conversation and not a form: how many questions you get depends on the
+answers, and each choice says what it costs before you make it. Nothing is
+written until it has shown you the whole plan, so an abandoned run leaves the
+disk exactly as it was, and an existing config is moved to `.bak` rather than
+overwritten. At the end it offers to do the work of `-init` — create the data
+directory, settle the token, get the certificate — because that is the step that
+proves the answers were right.
+
+It needs a terminal. For an unattended install, write the config however you
+like and use `skyhookd -init`, which does the same work without the questions.
+
+Re-run it whenever the deployment changes: it is the quickest way to move
+between the four shapes below, and it will tell you what each one gives up.
+
 ## Configuration
 
 A JSON file, passed with `-config` or `SKYHOOK_CONFIG`. Everything has a usable
@@ -60,6 +88,7 @@ default; this is the whole surface:
   "dataDir": "/var/lib/skyhook",
   "hosts": ["vps.example.com"],
   "token": "",
+  "acme": { "enabled": false, "agreeTos": false, "email": "", "domains": [], "dns": {} },
   "headless": false,
   "lang": "en-US",
   "sessionTtl": "12h",
@@ -91,7 +120,14 @@ Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 `SKYHOOK_WEB_ROOT`,
 `SKYHOOK_INSECURE_LOOPBACK`, `SKYHOOK_CHROME_ARGS`, `SKYHOOK_LOG_LEVEL`,
 `SKYHOOK_PUBLIC_URL`, `SKYHOOK_BEHIND_PROXY`, `SKYHOOK_CAPTURE_KEEP`,
-`SKYHOOK_CAPTURE_TEXT`, `SKYHOOK_CAPTURE_ON_DIVERGENCE`.
+`SKYHOOK_CAPTURE_TEXT`, `SKYHOOK_CAPTURE_ON_DIVERGENCE`, `SKYHOOK_ACME`,
+`SKYHOOK_ACME_DOMAINS`, `SKYHOOK_ACME_EMAIL`, `SKYHOOK_ACME_AGREE_TOS`,
+`SKYHOOK_ACME_DIRECTORY`, `SKYHOOK_ACME_CHALLENGE`,
+`SKYHOOK_ACME_HTTP_LISTEN`, `SKYHOOK_ACME_DNS_COMMAND`,
+`SKYHOOK_ACME_DNS_RESOLVERS`.
+
+`acme` has the server get its own certificate and keep it renewed — see
+[a certificate of its own](#a-certificate-of-its-own).
 
 The `capture*` and `journal*` settings are the diagnostic bundles — see
 [diagnosing the mirror](#diagnosing-the-mirror).
@@ -107,10 +143,18 @@ not start at all. The container image probes for this at startup and falls back
 to `--no-sandbox` with a loud log line; set the variable yourself to override
 the probe either way.
 
-`webRoot` is the built client (`client/dist`). The container image builds it and
-sets `SKYHOOK_WEB_ROOT` already; a bare-metal install should either set the path
-or copy the build to `<dataDir>/webapp`. With neither present the server serves a
-page explaining how to build it, rather than nothing at all.
+`webRoot` is the built client (`client/dist`), and is usually not needed. The
+server looks in three places, in order: `webRoot`, then `<dataDir>/webapp`, then
+`client/dist` in the checkout the running binary came out of. That last one is
+why `go run ./cmd/skyhookd` from a working copy serves the app with no
+configuration at all — it used to serve nothing, and the fix was a step nobody
+could guess. It cannot fire on a real deployment: the container image and the
+systemd unit both set `webRoot`, and neither `/usr/local/bin` nor `/` has a
+`client/dist` above it.
+
+Set it explicitly when the build lives somewhere else, or copy the build to
+`<dataDir>/webapp`. With none of the three present the server serves a page
+explaining how to build it, rather than nothing at all.
 
 A missing token is generated on first start and kept in `<dataDir>/token`, so a
 restart comes back with the credential its clients already hold. It is written
@@ -199,6 +243,172 @@ The client pins `certSha256` through WebTransport's `serverCertificateHashes`,
 which is stronger than trusting the public CA set and is what lets a personal
 server run without a public certificate. **Treat this file as a credential**: it
 carries the token.
+
+### A certificate of its own
+
+If the box has a name, the server can get a real certificate for it from Let's
+Encrypt and keep it renewed. Two settings and a DNS record:
+
+```json
+{
+  "hosts": ["skyhook.example.com"],
+  "acme": { "enabled": true, "agreeTos": true, "email": "you@example.com" }
+}
+```
+
+or `SKYHOOK_ACME=1`, `SKYHOOK_ACME_DOMAINS=skyhook.example.com`,
+`SKYHOOK_ACME_AGREE_TOS=1`, which is what `deploy/docker-compose.acme.yml` sets:
+
+```sh
+SKYHOOK_ACME_DOMAINS=skyhook.example.com SKYHOOK_ACME_EMAIL=you@example.com \
+  docker compose -f deploy/docker-compose.acme.yml up -d
+```
+
+**This is the arrangement to want.** It is the only one that keeps both halves
+of what makes the client work:
+
+* **WebTransport**, because TLS terminates in this process rather than at a
+  proxy, and no HTTP proxy forwards HTTP/3 upstream.
+* **An installable app**, because the certificate is one Chrome already trusts.
+  Chrome will not register a service worker behind a self-signed certificate, so
+  the pinned deployment can pair and mirror pages but can never start with no
+  network — which is the situation the whole client was written for.
+
+The self-signed path keeps the first and loses the second; a reverse proxy keeps
+the second and loses the first. This keeps both, and it also ends the
+fortnightly rotation dance below: the certificate is answered per handshake out
+of `<dataDir>/acme`, so a renewal is simply what the next handshake gets. No
+restart, no re-pairing, no new fingerprint for anybody to copy.
+
+What it costs:
+
+* **A DNS record.** An A or AAAA for each name in `domains`, pointing here — the
+  authority checks by connecting to it from the outside. (`dns-01` does not care
+  where the names point, but the client still has to reach the server, so in
+  practice they point here too.) There is no way to certify an address, and no
+  way to certify `localhost`. `domains` defaults to
+  `hosts`, and the certified names then *become* `hosts`, so the pairing link,
+  `pairing.json` and the app's `connect-src` all name the certificate's names.
+* **A reachable challenge port** — unless you use `dns-01`, which needs none.
+  Port 80 by default (`http-01`); if the fallback listener is already on 443,
+  `tls-alpn-01` is chosen instead and answers on that listener with nothing
+  extra bound. See [answering in DNS instead](#answering-in-dns-instead) for
+  the third option.
+* **Accepting the subscriber agreement.** `agreeTos` has to be set, because
+  agreeing to <https://letsencrypt.org/repository/> on somebody's behalf is not
+  this program's decision to make. Nothing is requested without it.
+
+The challenge port is the part worth checking twice, because it is the one that
+fails for reasons outside this process. Port 80 and port 443 are what the
+authority *dials*; they need not be what this process *binds*. The container
+publishes `80:8080` and binds 8080, because an unprivileged uid cannot have port
+80; a systemd unit can bind it directly with the `AmbientCapabilities` line in
+`deploy/skyhook.service`. When the two differ the server says so at startup, and
+then it is on you to make the forwarding real.
+
+One thing in the log is expected and not a fault: with `http-01`, the client
+library tries `tls-alpn-01` first and falls back when it fails, so a refused
+challenge appears once per issuance before the certificate arrives. It costs a
+few seconds and is well inside any authority's failure allowance. Putting the
+fallback listener on 443 — which selects `tls-alpn-01` by default — avoids it.
+
+#### Answering in DNS instead
+
+`dns-01` proves the name by publishing a TXT record rather than by being
+connected to, so it needs **no inbound port at all**. That is the answer for a
+machine behind a NAT, on a link that filters 80 and 443, or with both already
+spoken for — and the only way to get a wildcard.
+
+Skyhook has no list of DNS providers and will not grow one: every API is
+different, and a personal browser has no business carrying a matrix of cloud
+SDKs. It runs a command you supply instead.
+
+```json
+{
+  "hosts": ["skyhook.example.com"],
+  "acme": {
+    "enabled": true, "agreeTos": true, "email": "you@example.com",
+    "challenge": "dns-01",
+    "dns": { "command": ["/usr/local/bin/skyhook-dns-hook"] }
+  }
+}
+```
+
+The command is run twice per record, with the same three facts as arguments and
+in the environment — use whichever your script finds convenient:
+
+```sh
+<command...> present <fqdn> <value>     # SKYHOOK_ACME_ACTION=present
+<command...> cleanup <fqdn> <value>     # SKYHOOK_ACME_FQDN=_acme-challenge.skyhook.example.com
+                                        # SKYHOOK_ACME_VALUE=<the TXT value>
+```
+
+A non-zero exit fails the challenge, and whatever the command printed is quoted
+back in the server's error — so print the provider's own message about a bad
+token rather than "failed". Anything in `command` after the program itself is
+passed before those arguments, so one script can serve several zones by
+dispatching on its own first argument.
+
+`deploy/acme-dns-hook.example.sh` is a working hook for Cloudflare. Two things
+in it are worth copying whatever your provider is, because both fail in ways
+that look like something else:
+
+* **`present` must add, never replace.** A certificate covering a host *and* a
+  wildcard over it needs two values at the same record name. A hook that
+  overwrites leaves one, and the first challenge then fails in a way
+  indistinguishable from slow propagation.
+* **`cleanup` must remove only the value it was given**, and succeed when there
+  is nothing to remove — it runs after failures too.
+
+Keep the provider credential out of the script and in the environment
+(`Environment=` or `EnvironmentFile=` in the unit, `-e` on the container). Scope
+it to editing DNS on the one zone; it is a credential for everything that name
+resolves to.
+
+Before accepting a challenge, Skyhook waits for the record to actually be
+visible. It finds the zone's own nameservers and asks them directly rather than
+asking the machine's resolver, because a recursive resolver caches the empty
+answer from just before the record was published — and that cached "no" is
+exactly what stands between a correctly written record and a challenge that
+would now pass. `propagationTimeout` (5m) gives up; `settle` (15s) is held after
+the record first appears, since seeing it on one server is not the same as every
+server having it. `resolvers` overrides which servers are asked, for a split
+horizon or when the delegated nameservers are not the ones actually serving.
+
+Renewal is unattended, so the hook has to keep working without anybody watching
+— a rotated API token is the usual way this breaks, months later. `email` is
+what gets you the authority's warning before that becomes an outage.
+
+Work it out against staging first if there is any doubt. Its certificates are
+refused by every browser, and its rate limits are generous enough to fail
+against all afternoon:
+
+```sh
+SKYHOOK_ACME_DIRECTORY=staging skyhookd -init
+```
+
+`-init` is the short way to find out: it creates the data directory, gets the
+certificate and exits, with no browser and no listeners in the way. A challenge
+that fails is an error there rather than a warning, so it either works or it
+tells you what did not.
+
+Once it is working, the certificate lives in `<dataDir>/acme` along with the
+ACME account key, and **that directory has to persist**. Losing it means
+registering again and re-issuing from scratch on every start, which is the
+shortest route to a rate limit. It is inside the data directory for exactly that
+reason: the data directory is the one thing every deployment already keeps.
+
+The client is not given a pin here. `pairing.json` carries no `certSha256`, and
+that is deliberate rather than an omission: WebTransport refuses a pin whose
+certificate is valid for longer than 14 days, which is every certificate a
+public authority issues, so pinning one would fail every QUIC dial and quietly
+demote the connection to the socket. Ordinary TLS trust is what a real
+certificate is for. The same now applies to `tlsCert`/`tlsKey`, which used to
+hand out a pin the browser could not use.
+
+`acme` is refused alongside `behindProxy` (the certificate that matters there is
+the proxy's), alongside `tlsCert`/`tlsKey` (two answers to one question), and
+alongside `insecureLoopback` (no TLS, and no authority certifies `127.0.0.1`).
 
 ### Behind a reverse proxy
 
@@ -301,9 +511,12 @@ loudly — but the listener keeps serving the old certificate until it restarts.
 Restart the service (a nightly `systemctl restart skyhook` is fine; sessions
 rebuild from the profile) and re-pair the client with the new fingerprint.
 
-If you have a real certificate for the host, set `tlsCert` and `tlsKey` and none
-of this applies: no pinning, no rotation dance. The same is true behind a
-reverse proxy, where the certificate that matters is the proxy's.
+None of this applies once the certificate is a real one. Turn on
+[`acme`](#a-certificate-of-its-own) and the server gets and renews one itself,
+with no restart and no re-pairing; set `tlsCert` and `tlsKey` if you already
+have one from elsewhere; or stand behind a reverse proxy, where the certificate
+that matters is the proxy's. In all three the client uses ordinary TLS trust and
+there is nothing to pin.
 
 ## Security posture
 
@@ -521,7 +734,13 @@ patcher in your tree.
 |---|---|
 | Client cannot connect over QUIC | UDP blocked. The client falls back to WebSocket automatically; check the HUD, which shows which transport is live. |
 | The app shows "The client has not been built" | `webRoot` is unset or wrong. Build `client/` and point at `client/dist`. |
-| The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. |
+| The app loads but never installs | Chrome requires a secure origin: a real certificate, or `localhost`. A pinned self-signed certificate is enough for WebTransport but not for an install prompt. Turn on [`acme`](#a-certificate-of-its-own). |
+| ACME: the log says `could not get a certificate` | The authority could not reach the challenge port. Check DNS resolves each name here, that port 80 (or 443 for `tls-alpn-01`) reaches this process from the outside, and that a published container port is mapped to what the server bound — the startup log says when those two numbers differ. Reproduce against `SKYHOOK_ACME_DIRECTORY=staging` rather than burning production quota. With no usable ports at all, switch to [`dns-01`](#answering-in-dns-instead). |
+| ACME dns-01: `did not appear in DNS within…` | The hook exited 0 and the record is not visible. Usually it wrote to a zone that is not the one serving the name (a delegated subdomain, or a registrar's zone that is no longer authoritative), or the TTL is enormous. Run the hook by hand — `hook present _acme-challenge.<name> testvalue` — then `dig +short TXT _acme-challenge.<name> @<the zone's nameserver>`. Raise `propagationTimeout` for a genuinely slow provider; set `resolvers` if the delegated nameservers are not the ones actually answering. |
+| ACME dns-01: a host-plus-wildcard order times out on the record they share | The hook replaced instead of appending. Both names answer at the same `_acme-challenge.<zone>`, and both values have to be there at once. Use an add API (Cloudflare: POST, not PUT). |
+| ACME dns-01: worked at setup, failed months later | The provider credential expired or was rotated, and renewal is unattended. Set `acme.email` so the authority warns you before the certificate actually lapses. |
+| ACME: worked once, now the authority refuses | Almost always a lost `<dataDir>/acme`: without the account key the server registers and re-issues on every start, until a rate limit stops it. Persist the data directory. Rate limits are per week; staging has its own. |
+| ACME: browsers say the certificate is not trusted | `directory` is still `staging`. Clear it, delete `<dataDir>/acme` so the staging certificate is not reused, and restart. |
 | Stale UI after a deploy | Expected: the app runs from the service worker's cache and a reload is answered from it. The client compares builds with the server on every connection and offers *Update Skyhook…* in the shell menu; see [versions and updates](#versions-and-updates). |
 | `unauthorized` on connect | Token mismatch: re-read `pairing.json`. The client says `unpaired` in the HUD and opens its pairing dialog rather than retrying. |
 | HUD alternates between offline and connected every second or two | The server is refusing the token on every attempt. Older builds retried it forever; check the server log for `unauthorized client`, and for a restart just before it — a server that generated a fresh token has un-paired every client. Pair again from the link in the log. |

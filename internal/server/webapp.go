@@ -194,17 +194,86 @@ func contentTypeOf(name string) string {
 	return "application/octet-stream"
 }
 
-// resolveWebRoot picks the directory the app is served from, preferring an
-// explicit setting and falling back to the data directory.
+// resolveWebRoot picks the directory the app is served from: an explicit
+// setting, then the data directory, then the build sitting in the checkout this
+// binary came out of.
+//
+// That last one is why running from source used to need a step nobody could
+// guess. `go run ./cmd/skyhookd` in a repository with a built client served
+// nothing at all, and the fix — copy or symlink client/dist into
+// <dataDir>/webapp, or set webRoot — is only obvious to somebody who has read
+// this function. A build sitting twenty metres away in the same checkout is
+// what the operator meant, so it is found.
+//
+// It cannot fire anywhere it should not. A container and a systemd install both
+// set webRoot, which wins; and neither /usr/local/bin nor / has a client/dist
+// above it to find.
 func resolveWebRoot(cfg config.Config) string {
 	candidates := []string{cfg.WebRoot, filepath.Join(cfg.DataDir, "webapp")}
+	if repo := RepoClientDist(); repo != "" {
+		candidates = append(candidates, repo)
+	}
 	for _, c := range candidates {
 		if c == "" {
 			continue
 		}
-		if st, err := os.Stat(filepath.Join(c, "index.html")); err == nil && !st.IsDir() {
+		if isWebRoot(c) {
 			return c
 		}
 	}
 	return ""
+}
+
+// RepoClientDist finds client/dist in the checkout this process is running
+// from, by looking up from the working directory and from the binary. It
+// returns "" when there is no such thing, which is every deployment that is not
+// somebody's working copy.
+func RepoClientDist() string {
+	var starts []string
+	if wd, err := os.Getwd(); err == nil {
+		starts = append(starts, wd)
+	}
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
+		starts = append(starts, filepath.Dir(exe))
+	}
+	for _, start := range starts {
+		if found := repoDistFrom(start); found != "" {
+			return found
+		}
+	}
+	return ""
+}
+
+// repoDistFrom walks up from one directory looking for the module this binary
+// belongs to, and the client build beside it.
+//
+// Four levels covers `go run` from a subdirectory and ./bin/skyhookd from the
+// root, and stops well short of wandering into a home directory that happens to
+// contain an unrelated client/dist. The go.mod is what makes it a checkout
+// rather than a coincidence.
+func repoDistFrom(start string) string {
+	dir := start
+	for i := 0; i < 4; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			cand := filepath.Join(dir, "client", "dist")
+			if isWebRoot(cand) {
+				return cand
+			}
+			return ""
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+	return ""
+}
+
+func isWebRoot(dir string) bool {
+	st, err := os.Stat(filepath.Join(dir, "index.html"))
+	return err == nil && !st.IsDir()
 }
