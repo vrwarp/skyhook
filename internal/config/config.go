@@ -502,9 +502,15 @@ func normalizeDomains(in []string) ([]string, error) {
 				"dns-01 challenge, which this server does not do", d)
 		}
 		if !strings.Contains(d, ".") {
+			// "localhost" is what an operator gets by leaving `hosts` alone, so
+			// it is worth naming the setting rather than the value.
+			hint := ""
+			if d == "localhost" {
+				hint = "; \"hosts\" is still the default, so put the machine's name " +
+					"there or in acme.domains"
+			}
 			return nil, fmt.Errorf("config: acme cannot certify %q: a public authority "+
-				"will not certify a name with no public suffix — \"hosts\" is still "+
-				"%q, which is the default", d, d)
+				"will not certify a name with no public suffix%s", d, hint)
 		}
 		if !seen[d] {
 			seen[d] = true
