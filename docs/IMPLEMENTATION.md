@@ -524,6 +524,35 @@ frames that believe they are absent, and these believed they were fine. So a
 splice now invalidates everything mirrored inside it and asks each of those
 frames to say itself afresh, which is the whole of what deep nesting needed.
 
+**A bad link paces the repair; it never calls it off.** The reconciler re-sends a
+frame's whole document, and a page is re-snapshotted on every resync, so a page
+with several frames in it can put all of them onto a queue the reader is already
+waiting on. Gating that on the emitter's backlog signal — the trade `shotSoon`
+makes for a screenshot — looks like the same restraint and is not: a screenshot
+is worth skipping because something else will ask for it, and a missing frame is
+a hole in the document that nothing else closes. Worse, the hole is itself a
+reason the integrity check keeps resyncing, so the backlog suppresses the repair
+and the absent repair sustains the backlog. Both cross-origin frame tests spent
+three minutes in that deadlock, and the fast end-to-end job, which had been
+green, lost them too. What the link buys is pacing: every frame at once when
+there is room, one per two-second tick when there is not (`framesDue`), which
+converges on any link and floods none. A re-splice also asks only the frames
+inside the one it replaced — asking the whole tab made a page eight frames deep
+send forty snapshot requests in fifty milliseconds, each splice re-asking every
+frame not yet spliced.
+
+**And the test that fails is not always the code that is wrong.** The two tests
+that failed over the emulated link were waiting for a sentence the fixture's
+widget painted over 1.2 seconds after loading. A client that has not rendered
+the frame by then is waiting for text that exists nowhere, and 250 kbps
+guarantees it — as does a loaded machine, which is how it finally reproduced
+locally. The frame now leaves its first line alone and changes its mind on a
+line of its own, repeatedly, saying how many times; the test reads the count it
+can already see and waits for a higher one. That is the general shape for
+"followed a change" over a link with no promised speed: assert on something
+monotonic that the client itself has seen, never on a state the page passes
+through.
+
 rrweb has this bug open against its own cross-origin recording — "when the
 parent is reset during its FullSnapshot, the iframe context is wiped, and
 subsequent child events can't be played in the DOM correctly" — and it is harder
@@ -538,7 +567,7 @@ Also not covered: a frame the page hides and shows repeatedly pays a re-snapshot
 each time, for the same reason; and a closed shadow root inside such a frame is
 as invisible as it is anywhere else. `test/foreignframe_test.go` covers the
 document, its scoping, its later mutations, a click landing on a control inside
-it, and the hash agreeing; `TestPWAMirrorsOneFrameDeepAndSaysSoBelowThat` covers
+it, and the hash agreeing; `TestPWAMirrorsFramesInsideFramesAndSaysWhereItStops` covers
 the floor.
 
 ### 11d. The frame's box was one of five, and they now share a sweep
