@@ -776,7 +776,13 @@ document a frame later — a divergence report that is only a race with itself.
 // that, so a second look usually lands in the gap between two of them; a page
 // acquiring frames faster than it can be measured is not going to be measured
 // today, and saying so beats walking it all afternoon.
-const checkpointTries = 3
+//
+// Six rather than three because the walk now notices the page moving as well as
+// its frames — a page mutating on a timer moves under it far more often than
+// frames arrive — and because the tries are cheap next to what they prevent:
+// one wasted eval each, against a whole document re-sent for a divergence that
+// was only the page carrying on while it was being measured.
+const checkpointTries = 6
 
 // Checkpoint measures the page, re-measuring when a frame arrives mid-walk.
 //
@@ -831,6 +837,23 @@ func (t *Tab) checkpointOnce(ctx context.Context) (Checkpoint, error) {
 	}
 	if err := t.fenceAgents(ctx); err != nil {
 		return Checkpoint{}, err
+	}
+	// And the page itself, which the frames are not the only thing moving. Its
+	// hash was taken before the walk and the sequence number is read after, so
+	// anything the page emitted in between is in the number and in none of the
+	// hash — the frame case one level up, for a page that is merely busy. The
+	// agent's checkpoint returns docHash, so asking again says whether the
+	// document that was measured is still the document being counted.
+	raw, err = t.eval(ctx, "__skyhook.docHash()")
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	var pageNow uint64
+	if err := json.Unmarshal(raw, &pageNow); err != nil {
+		return Checkpoint{}, err
+	}
+	if pageNow != cp.Hash {
+		return Checkpoint{}, fmt.Errorf("%w (the page moved under the walk)", errPageMoved)
 	}
 	t.mu.Lock()
 	seq := t.seq
