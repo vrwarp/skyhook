@@ -267,7 +267,7 @@ func (t *Tab) releaseTarget(sessionID string) {
 func (t *Tab) installInTarget(sessionID, targetID, url string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	s := t.sess.Client.Session(sessionID, targetID)
+	s := t.sess.Session(sessionID, targetID)
 
 	err := func() error {
 		for _, m := range []string{"Page.enable", "Runtime.enable", "DOM.enable"} {
@@ -345,7 +345,7 @@ func (t *Tab) adoptFrame(sessionID string, ctxID int64, url string) {
 
 	sess := t.sess
 	if sessionID != t.sess.ID {
-		sess = t.sess.Client.Session(sessionID, "")
+		sess = t.sess.Session(sessionID, "")
 	}
 	depth, err := t.frameDepthOf(ctx, sess, frameID)
 	if err != nil || depth > frameDepthMax {
