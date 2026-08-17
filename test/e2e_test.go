@@ -262,6 +262,168 @@ const fontPage = `<!DOCTYPE html><html><head><title>Fonts</title>
 </body></html>`
 
 /*
+layeredCSSPage is a typography plugin's output, which is to say a sheet whose
+rules are all written inside something else.
+
+Tailwind's typography plugin puts every rule it has inside `@layer utilities`
+and selects into the article rather than onto it: `.prose` carries the colours
+and the measure, and `.prose :where(h2)` — a descendant combinator, then a
+zero-specificity `:where()` so the page can override it — carries the heading
+sizes, the paragraph margins and the link colours. A group at-rule crosses
+whole, so those selectors arrive one block deep in the rule that holds them,
+and anything reading depth to tell a selector from a declaration reads them
+wrong.
+*/
+const layeredCSSPage = `<!DOCTYPE html><html><head><title>Layered</title>
+<style>
+  @layer theme, components, utilities;
+  .prose { color: rgb(1,2,3); max-width: 65ch }
+  @layer utilities {
+    .prose :where(h2):not(:where([class~="not-prose"] *)) { font-size : 30px }
+    .prose :where(p) { margin-top : 20px }
+    .no-such-utility { color : rgb(101,102,103) }
+    .late-utility { color : rgb(7,8,9) }
+  }
+  @layer components {
+    .no-such-component { color : rgb(104,105,106) }
+  }
+  @layer { .anon-layer-rule { color : rgb(10,11,12) } }
+  @container (min-width: 1px) {
+    .prose :where(blockquote) { border-color : rgb(13,14,15) }
+    .no-such-contained { color : rgb(107,108,109) }
+  }
+  @scope (.prose) to (.not-prose) {
+    :scope :where(figcaption) { color : rgb(16,17,18) }
+  }
+  @scope (.no-such-scope-root) {
+    :scope p { color : rgb(110,111,112) }
+  }
+  @media (min-width: 1px) {
+    .prose :where(a) { color : rgb(4,5,6) }
+  }
+</style></head>
+<body>
+  <article class="prose">
+    <h2>the layered heading</h2>
+    <p>a paragraph under it, with <a href="/second">a link</a> in it</p>
+    <blockquote>a quotation</blockquote>
+    <figure><figcaption>a caption</figcaption></figure>
+  </article>
+  <div class="anon-layer-rule">in an anonymous layer</div>
+  <button id="late">late</button>
+  <div id="slot"></div>
+<script>
+  document.getElementById('late').addEventListener('click', function () {
+    var d = document.createElement('div');
+    d.className = 'late-utility';
+    d.textContent = 'the late utility';
+    document.getElementById('slot').appendChild(d);
+  });
+</script>
+</body></html>`
+
+/*
+pseudoCSSPage is the selectors a document cannot answer for.
+
+A pseudo-element is not an element: `querySelector` will parse `::file-selector-
+button` and then match nothing, whatever the page contains, so asking the
+document about a rule that has one is asking a question whose answer is always
+no. A pseudo-class is a live state, and the ones that matter here are the ones
+whose answer is the reader's rather than the page's — the pointer is theirs,
+and so is the text in the fields.
+
+Each rule below is paired with the element it hangs off, so the honest verdict
+on every one of them is keep. The two at the end are the control: nothing on
+this page is a `<marquee>` or carries `.no-such-class`, and a filter that keeps
+everything is no filter at all.
+*/
+const pseudoCSSPage = `<!DOCTYPE html><html><head><title>Pseudo</title>
+<style>
+  input::file-selector-button { background-color: rgb(61, 62, 63); }
+  ::view-transition-old(root) { animation-duration: 610ms; }
+  p::spelling-error { color: rgb(64, 65, 66); }
+  ::selection { background-color: rgb(67, 68, 69); }
+  input:placeholder-shown { border-color: rgb(70, 71, 72); }
+  .field:placeholder-shown ~ label { color: rgb(73, 74, 75); }
+  p::first-line { letter-spacing: 1px; }
+  .field\:hover { outline-color: rgb(76, 77, 78); }
+  marquee::before { content: "gone"; }
+  .no-such-class::file-selector-button { color: rgb(170, 171, 172); }
+</style></head>
+<body>
+  <p id="prose">the pseudo page</p>
+  <input class="field" type="file">
+  <input class="field" type="text" placeholder="type here" value="already typed">
+  <label class="field:hover" for="typed">a floating label</label>
+</body></html>`
+
+/*
+themedComponentPage is a component themed from outside itself.
+
+Custom properties are the one thing that crosses a shadow boundary, and a
+component library is themed by exactly that: the component declares none of its
+palette and reads all of it from whatever the page around it set. The page's
+own rules never mention `--themed-brand` — there would be no point, the only
+thing that reads it is on the other side of the boundary — so a prune that only
+reads the document's own bundle sees a property nothing wants.
+*/
+const themedComponentPage = `<!DOCTYPE html><html><head><title>Themed</title>
+<style>
+  :root { --themed-brand: rgb(81, 82, 83); --themed-dead: rgb(181, 182, 183); }
+  .page-text { color: rgb(84, 85, 86); }
+</style></head>
+<body>
+  <p class="page-text">the page around the component</p>
+  <sky-themed id="themed"></sky-themed>
+<script>
+  class SkyThemed extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync('.chip { color: var(--themed-brand); }');
+      root.adoptedStyleSheets = [sheet];
+      root.innerHTML = '<div class="chip">inside the themed component</div>';
+    }
+  }
+  customElements.define('sky-themed', SkyThemed);
+</script>
+</body></html>`
+
+/*
+lateThemePage is a theme whose reader has not appeared yet.
+
+Nothing in this document is a `.late-panel` when it loads, so the rule that
+dresses one is rejected by the used-CSS filter — correctly, it matches nothing
+— and the property that rule reads is then read by nothing in the bundle. The
+prune is right about the page it is looking at and wrong about the page a
+second later, which is the whole difficulty: a rule can start matching, and a
+property that has been pruned cannot come back on its own.
+
+The dialog is the ordinary shape of this. A page ships the styling for a menu,
+a modal or a toast it is not currently showing, and the theme it draws from
+belongs to the page.
+*/
+const lateThemePage = `<!DOCTYPE html><html><head><title>Late theme</title>
+<style>
+  :root { --late-brand: rgb(91, 92, 93); --late-dead: rgb(191, 192, 193); }
+  .late-panel { color: var(--late-brand); }
+  .page-text { color: rgb(94, 95, 96); }
+</style></head>
+<body>
+  <p class="page-text">the page before the panel</p>
+  <button id="reveal">reveal</button>
+  <div id="slot"></div>
+<script>
+  document.getElementById('reveal').addEventListener('click', function () {
+    var p = document.createElement('p');
+    p.className = 'late-panel';
+    p.textContent = 'the panel nobody had opened';
+    document.getElementById('slot').appendChild(p);
+  });
+</script>
+</body></html>`
+
+/*
 utilityCSSPage is the shape the used-CSS filter exists for and the shape that
 used to defeat it: a utility bundle where all but a handful of rules match
 nothing.
@@ -612,6 +774,14 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			`width: 220px; height: 60px; border: 1px solid rgb(11, 22, 33); `+
 			`background: rgb(0, 160, 90); }`)
 	})
+	// A design system on the CDN, reached by @import rather than by <link>:
+	// unreadable through the CSSOM for the same reason widget.css is, and out of
+	// reach of the sheet walk besides, because nothing owns an imported sheet.
+	cdnMux.HandleFunc("/imported-remote.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w, `.from-the-cdn { color: rgb(31, 32, 33); }
+.absent-from-the-page { color: rgb(131, 132, 133); }`)
+	})
 	// A document on that other origin, for a frame nothing landside can read.
 	cdnMux.HandleFunc("/widget.html", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -663,6 +833,55 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 	mux.HandleFunc("/fonts", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, fontPage)
+	})
+	mux.HandleFunc("/layered-css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, layeredCSSPage)
+	})
+	// A sheet that is nothing but imports, which is how a site with a design
+	// system and a theme keeps them apart. Neither imported sheet is owned by
+	// anything in the document, so neither is in document.styleSheets.
+	mux.HandleFunc("/imported-css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Imported</title>
+			<style>
+			  @import url(/imported-inner.css);
+			  @import url(`+cdn.URL+`/imported-remote.css);
+			  @import url(/imported-print.css) print;
+			</style></head>
+			<body><h1 class="imported-heading">the imported stylesheet</h1>
+			<p class="from-the-cdn">and the one on the CDN</p>
+			<article class="imported-prose"><p>a paragraph the import dresses</p></article>
+			<p class="imported-print">only when printed</p></body></html>`)
+	})
+	mux.HandleFunc("/imported-inner.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w, `.imported-heading { color: rgb(41, 42, 43); }
+.imported-prose :where(p) { margin-top: 41px; }
+.no-such-imported-class { color: rgb(141, 142, 143); }
+#imported-tile { background-image: url(images/imported.png); }`)
+	})
+	mux.HandleFunc("/imported-print.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w, `.imported-print { color: rgb(51, 52, 53); }`)
+	})
+	// The pseudo-elements a document can be asked about and can only answer no
+	// to, beside the pseudo-classes whose answer is the reader's, not the
+	// page's.
+	mux.HandleFunc("/pseudo-css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, pseudoCSSPage)
+	})
+	// A component themed the only way a component can be: by reading properties
+	// the page around it declares and it does not.
+	mux.HandleFunc("/themed-component", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, themedComponentPage)
+	})
+	// A property whose only reader is a rule that has not matched anything yet.
+	mux.HandleFunc("/late-theme", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, lateThemePage)
 	})
 	mux.HandleFunc("/utility-css", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1509,6 +1728,461 @@ func TestABracketInAURLDoesNotTruncateTheSheet(t *testing.T) {
 		if !ruleCloses(rule) {
 			t.Errorf("a rule that cannot close itself reached the client: %q", rule)
 		}
+	}
+}
+
+/*
+The space between a class and a pseudo-class is a selector, not padding.
+
+Minifying dropped it wherever the rule arrived inside another one — a group
+at-rule crosses whole, so `@layer utilities{.prose :where(h2){…}}` put its
+selectors a block deep, and one block deep read as "inside a declaration body,
+where a colon separates a property from its value". `.prose :where(h2)` came
+out as `.prose:where(h2)`, which asks for an <article class="prose"> that is
+also an <h2>.
+
+@tailwindcss/typography writes all ninety-five of its rules that way, so the
+page it dressed arrived with the colour and measure its own `.prose` rule sets
+and nothing else: every heading at body size, every paragraph unspaced, every
+link the colour of the text around it. The bundle showed no rule missing, and
+the capture's rejected-selector list — which is where a missing rule is meant
+to be explained — had nothing to say about it either, because nothing was
+rejected. The rules were all there, and every one of them selected nothing.
+*/
+func TestALayeredSheetKeepsItsDescendantCombinators(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/layered-css"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the layered heading", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, ":where(h2)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// Inside @layer, @container, @scope and @media, and — for the rule that was
+	// never nested — at the top of its own.
+	for _, want := range []string{
+		".prose :where(h2)", ".prose :where(p)", ".prose :where(a)",
+		".prose :where(blockquote)", ":scope :where(figcaption)",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("selector %q never arrived intact: %q", want, css)
+		}
+	}
+	if strings.Contains(css, ".prose:where(") {
+		t.Errorf("a descendant combinator was minified away: %q", css)
+	}
+	// The declaration padding beside it is still worth dropping.
+	if !strings.Contains(css, "font-size:30px") {
+		t.Errorf("declarations went unminified: %q", css)
+	}
+}
+
+/*
+A group at-rule is a rule that holds rules, and the filter has to go in.
+
+`@media` and `@supports` were walked into and nothing else was, because nothing
+else has a number: the legacy `type` was frozen before `@layer`, `@container`,
+`@scope` and `@starting-style` were written, so all four arrive as 0 and took
+the branch that ships an at-rule's text exactly as it stands. Correct, and the
+most expensive thing in the pipeline — Tailwind v4 writes its entire output
+inside `@layer`, so on the capture that prompted this, 93% of a 142 kB bundle
+crossed with the filter never asked about any of it, and the tally the capture
+prints read "29 of 7 style rules" because seven was every rule it had seen.
+
+The wrapper has to survive the walk, though, and it carries meaning of its own:
+a named layer's place in the cascade is fixed by where its name first appears,
+so a layer whose every rule is filtered out still leaves its name behind. A
+`@scope` block is the one that cannot be walked into at all — the rules inside
+are written against the scope root, and asking the document about them as they
+stand is asking the wrong question — so the honest saving there is the root
+itself: no `.no-such-scope-root` on the page means nothing in the block can
+match, whatever it says inside.
+*/
+func TestAGroupAtRuleIsFilteredLikeAnythingElse(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/layered-css"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the layered heading", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, "rgb(13,14,15)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// Nothing on this page is any of these, wherever the rule was written.
+	for _, gone := range []struct{ rgb, where string }{
+		{"rgb(101,102,103)", "@layer"},
+		{"rgb(104,105,106)", "a layer with nothing else in it"},
+		{"rgb(107,108,109)", "@container"},
+		{"rgb(110,111,112)", "@scope, on a root the page does not have"},
+	} {
+		if strings.Contains(css, gone.rgb) {
+			t.Errorf("a rule matching nothing inside %s was shipped: %q", gone.where, css)
+		}
+	}
+	// The wrappers are still there, and so is the cascade they carry: a layer
+	// whose rules all went keeps its name, because a name's first appearance is
+	// what fixes its place in the order.
+	for _, want := range []string{
+		"@layer theme,components,utilities;", // the order statement, minified
+		"@layer utilities{",
+		"@layer components;",
+		"@container (min-width:1px){",
+		"@scope (.prose)",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("the wrapper %q did not survive the walk: %q", want, css)
+		}
+	}
+	// An anonymous layer is a layer of its own and cannot be re-opened by name,
+	// so it crosses whole rather than being taken apart and put back.
+	if !strings.Contains(css, "rgb(10,11,12)") {
+		t.Errorf("an anonymous layer's rule was lost: %q", css)
+	}
+
+	// A rule that starts matching costs its own bytes and not the block's. The
+	// layer has already been sent; adding one utility to it must not send the
+	// two rules that were in it before.
+	before := css
+	btn, err := cl.FindNode(tab, "button", "id", "late")
+	if err != nil {
+		t.Fatalf("find button: %v", err)
+	}
+	if err := cl.Click(tab, btn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the late utility", budget(30*time.Second)); err != nil {
+		t.Fatalf("the late utility never arrived: %v", err)
+	}
+	deadline = time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, "rgb(7,8,9)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !strings.Contains(css, "rgb(7,8,9)") {
+		t.Fatalf("the rule for the late utility never arrived: %q", css)
+	}
+	if n := strings.Count(css, "font-size:30px"); n != 1 {
+		t.Errorf("the layer was re-sent whole to add one rule to it (%d copies of a rule that had already crossed):\nbefore: %q\nafter: %q",
+			n, before, css)
+	}
+}
+
+/*
+An imported stylesheet is in no list of stylesheets.
+
+`document.styleSheets` holds the sheets the document owns — a <link>, a <style>
+— and an imported sheet has no owner node, so it is not there and no walk of
+that list will ever reach a rule in one. The import rule itself was skipped as
+an at-rule the client could not act on, so a site that keeps its design system
+behind `@import` shipped the address and lost the sheet: every rule in it,
+silently, with nothing rejected because nothing was ever asked.
+
+The way in is the import rule's own `styleSheet`, and it is a real sheet with a
+real address — so `url(images/imported.png)` resolves against the imported
+sheet rather than against the page, the same question settled for <link> sheets
+already. A cross-origin import is in the position a cross-origin <link> is in
+and gets the same answer: name it to the host, which reads it over the protocol
+and hands the text back.
+*/
+func TestAnImportedStylesheetReachesTheClient(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/imported-css"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the imported stylesheet", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	// The CDN's sheet takes the recovery path — the agent names it, the host
+	// reads it, the agent re-walks it — so it is the slowest of these to land.
+	var css string
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, "rgb(31,32,33)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	for _, want := range []string{
+		"rgb(41,42,43)",             // the same-origin import
+		"rgb(31,32,33)",             // the cross-origin one, recovered by the host
+		".imported-prose :where(p)", // and its selectors, whole
+		"@media print",              // the condition the import carried
+		"rgb(51,52,53)",             // and the rule that condition governs
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("the imported sheet is missing %q: %q", want, css)
+		}
+	}
+	// An import is not a filter bypass: the rules in one are asked the same
+	// question as any other, and a rule matching nothing still goes.
+	for _, gone := range []string{"rgb(141,142,143)", "rgb(131,132,133)"} {
+		if strings.Contains(css, gone) {
+			t.Errorf("an imported rule that matches nothing was shipped: %q", css)
+		}
+	}
+	// The client cannot fetch, so a bare @import would name a sheet that never
+	// arrives — and mid-bundle it is a parse error besides.
+	if strings.Contains(css, "@import") {
+		t.Errorf("an @import reached the client, which cannot follow one: %q", css)
+	}
+}
+
+/*
+A pseudo-element is not an element, and the filter must not ask as though it is.
+
+`querySelector` parses `input::file-selector-button` and matches nothing —
+there is no element for a pseudo-element to be — so every rule with one in it
+answered no, for every page, for ever. The enumerated list of pseudos to strip
+before asking was the old way of handling this and it aged badly: the platform
+kept adding them, and each new one arrived as a rule that quietly matched
+nothing. `::view-transition-old(root)`, `::spelling-error` and
+`::file-selector-button` were all being dropped from pages that use them.
+
+`:placeholder-shown` is the other half. The list had `:placeholder` in it and no
+end to the name, so the longer one matched the shorter one's rule and left
+`-shown` behind: `input:placeholder-shown` went to the document as
+`input-shown`, an element type nothing is, and every float-label form lost the
+rules that position its labels.
+*/
+func TestThePseudosTheDocumentCannotAnswerForAreKept(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/pseudo-css"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the pseudo page", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, "rgb(61,62,63)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	for _, want := range []string{
+		"rgb(61,62,63)", // input::file-selector-button
+		"610ms",         // ::view-transition-old(root), which hangs off nothing
+		"rgb(64,65,66)", // p::spelling-error
+		"rgb(67,68,69)", // ::selection
+		"rgb(70,71,72)", // input:placeholder-shown, on a field that holds text
+		"rgb(73,74,75)", // .field:placeholder-shown ~ label
+		"rgb(76,77,78)", // .field\:hover — a class named after a state, not a state
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("a rule the document cannot answer for was dropped (%s): %q", want, css)
+		}
+	}
+	// The element a pseudo-element hangs off is still the question, and these
+	// two have no element on this page.
+	for _, gone := range []string{`content:"gone"`, "rgb(170,171,172)"} {
+		if strings.Contains(css, gone) {
+			t.Errorf("keeping the pseudos stopped the filter filtering: %q", css)
+		}
+	}
+	// And the name arrived whole: `input-shown` is what `input:placeholder-shown`
+	// used to be asked as.
+	if strings.Contains(css, "input-shown") {
+		t.Errorf("a selector was truncated mid-name: %q", css)
+	}
+}
+
+/*
+A component's theme is read from outside the component.
+
+Custom properties are the one thing that crosses a shadow boundary, and that is
+the whole mechanism a component library is themed by: the component declares
+none of its palette and reads all of it — `color:var(--themed-brand)` — from
+whatever the page around it set. The page's own rules never mention the
+property, because the only thing that reads it is on the other side of the
+boundary.
+
+The prune that drops properties nothing reads ran over the document's bundle
+alone, so it could not see that read and dropped the property. The component
+then arrived whole — its structure, its layout, its own sheet — drawing its
+colours from a property that no longer existed, which is not a fallback to the
+old value but the property's initial value: nothing at all.
+*/
+func TestAPropertyOnlyAComponentReadsSurvivesThePrune(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/themed-component"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "inside the themed component", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var css, scoped string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		model := cl.Model(tab)
+		css = model.Stylesheet()
+		scoped = ""
+		for _, rules := range model.ScopedRules() {
+			scoped += strings.Join(rules, "\n") + "\n"
+		}
+		if strings.Contains(scoped, "--themed-brand") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	if !strings.Contains(scoped, "var(--themed-brand)") {
+		t.Fatalf("the component's own sheet never arrived: %q", scoped)
+	}
+	if !strings.Contains(css, "--themed-brand:rgb(81,82,83)") {
+		t.Errorf("the property the component reads was pruned from the page: %q", css)
+	}
+	// The prune is still a prune: nothing on either side of the boundary reads
+	// this one.
+	if strings.Contains(css, "--themed-dead") {
+		t.Errorf("kept a property nothing reads: %q", css)
+	}
+}
+
+/*
+A property is pruned against the page as it stands, and the page does not stand
+still.
+
+The prune drops custom properties nothing reads, which on a themed app is most
+of them — but "nothing reads it" is a fact about one moment. The rule that reads
+`--late-brand` dresses a panel this page has not opened yet, so the used-CSS
+filter rejects it (rightly: it matches nothing) and the property it reads is
+then read by nothing in the bundle and goes.
+
+Open the panel and the rule arrives, correct and complete, naming a property
+that was deleted from the sheet a second earlier. `var()` with nothing behind it
+does not fall back to the old value — it is the property's initial value, which
+is nothing — so the panel arrives unpainted, and the sheet it would have been
+painted from shows no sign of having ever held the answer.
+*/
+func TestAPropertyPrunedEarlyComesBackWhenARuleWantsIt(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/late-theme"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the page before the panel", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	// Before the panel exists the prune is right, and this is the saving it
+	// exists for: neither property has a reader on the page as it stands.
+	if css := cl.Model(tab).Stylesheet(); strings.Contains(css, "--late-brand") {
+		t.Logf("the property was never pruned, so this test proves nothing: %q", css)
+	}
+
+	btn, err := cl.FindNode(tab, "button", "id", "reveal")
+	if err != nil {
+		t.Fatalf("find button: %v", err)
+	}
+	if err := cl.Click(tab, btn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the panel nobody had opened", budget(30*time.Second)); err != nil {
+		t.Fatalf("the panel never arrived: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, "var(--late-brand)") && strings.Contains(css, "--late-brand:") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	if !strings.Contains(css, "var(--late-brand)") {
+		t.Fatalf("the panel's own rule never arrived: %q", css)
+	}
+	if !strings.Contains(css, "--late-brand:rgb(91,92,93)") {
+		t.Errorf("the rule arrived reading a property the prune had deleted: %q", css)
+	}
+	// The prune still holds for the property that gained no reader.
+	if strings.Contains(css, "--late-dead") {
+		t.Errorf("kept a property nothing reads: %q", css)
 	}
 }
 

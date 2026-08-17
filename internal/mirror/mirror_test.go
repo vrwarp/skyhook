@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -197,7 +198,7 @@ func TestMinifyCSSDropsEmptyRules(t *testing.T) {
 }
 
 func TestStripUnusedVarsKeepsReferenced(t *testing.T) {
-	out := stripUnusedVars([]string{
+	out, _ := stripUnusedVars([]string{
 		":root{--used:red;--dead:blue;}",
 		".a{color:var(--used);}",
 	}, nil)
@@ -215,7 +216,7 @@ func TestStripUnusedVarsKeepsReferenced(t *testing.T) {
 // CSS parser then swallows every rule after it — one theme rule near the top
 // of a bundle costs the page all of its styling.
 func TestStripUnusedVarsNeverLeavesAnUnclosedRule(t *testing.T) {
-	out := stripUnusedVars([]string{
+	out, _ := stripUnusedVars([]string{
 		":root{--dead:red;--also-dead:blue;}", // nothing survives: drop it
 		".a{color:red;--dead2:blue;}",         // last decl pruned: keep the brace
 		"@media (min-width:480px){:root{--m:1px;}.b{color:red;}}",
@@ -244,10 +245,40 @@ func TestStripUnusedVarsNeverLeavesAnUnclosedRule(t *testing.T) {
 	}
 }
 
+// What the prune took out has to be able to come back: the rule that reads a
+// property may be one the page has not matched yet, and it arrives later
+// naming a declaration that was deleted before the reader ever saw the page.
+func TestStripUnusedVarsHandsBackWhatItTook(t *testing.T) {
+	out, pruned := stripUnusedVars([]string{
+		":root{--brand:red;--kept:green;}",
+		".theme{--brand:blue;}",
+		".a{color:var(--kept);}",
+	}, nil)
+	joined := strings.Join(out, "\n")
+	if strings.Contains(joined, "--brand") {
+		t.Fatalf("kept an unreferenced variable: %v", out)
+	}
+	if len(pruned) != 2 {
+		t.Fatalf("pruned = %+v, want both declarations of --brand", pruned)
+	}
+	// In the order they were written, because that is the order they answer in:
+	// two declarations of one property are two answers, and which of them wins
+	// is decided by the selectors they carry and where they sit.
+	if pruned[0].Rule() != ":root{--brand:red}" || pruned[1].Rule() != ".theme{--brand:blue}" {
+		t.Fatalf("pruned rules = %q, %q", pruned[0].Rule(), pruned[1].Rule())
+	}
+	// A property with a reader was never taken, so it has nothing to give back.
+	for _, p := range pruned {
+		if p.Prop == "--kept" {
+			t.Fatalf("a referenced property was pruned: %+v", pruned)
+		}
+	}
+}
+
 // Inline style attributes travel with the DOM, never with the stylesheet, so a
 // property read only from one looks unused to a bundle-wide scan.
 func TestStripUnusedVarsKeepsPropertiesReadByInlineStyles(t *testing.T) {
-	out := stripUnusedVars(
+	out, _ := stripUnusedVars(
 		[]string{":root{--brand:red;--dead:blue;}"},
 		[]string{"style", "color:var(--brand)"},
 	)
@@ -272,6 +303,41 @@ func TestMinifyCSSPreservesMeaning(t *testing.T) {
 		// calc() needs the spaces around its operators.
 		{".a { width: calc(100% - 10px) }", ".a{width:calc(100% - 10px)}"},
 		{"/* lead */ .a { color: red } /* trail */", ".a{color:red}"},
+	} {
+		got := minifyCSS([]string{tc.in})
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("minify(%q) = %v, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A conditional group at-rule arrives with its contents inside it, so the
+// selectors in one are not at the top of the rule they came in — and a
+// descendant combinator is a descendant combinator wherever it is written.
+// @tailwindcss/typography emits every rule it has inside `@layer utilities`,
+// and `.prose :where(h2)` closed up to `.prose:where(h2)` asks for an article
+// that is also a heading: the page kept its structure and lost its typography.
+func TestMinifyCSSKeepsCombinatorsInsideAtRules(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{
+			`@layer utilities { .prose :where(h2):not(:where([class~="not-prose"] *)) { font-size : 1.5em } }`,
+			`@layer utilities{.prose :where(h2):not(:where([class~="not-prose"] *)){font-size:1.5em}}`,
+		},
+		{
+			"@media (hover: hover) { .menu :hover { color : red } }",
+			"@media (hover:hover){.menu :hover{color:red}}",
+		},
+		{
+			"@supports (display: grid) { @layer base { .a :focus { outline : none } } }",
+			"@supports (display:grid){@layer base{.a :focus{outline:none}}}",
+		},
+		// Native nesting puts a selector inside a declaration body, which is
+		// the same question asked from the other side.
+		{".card { color : red; & :hover { color : blue } }", ".card{color:red;& :hover{color:blue}}"},
+		// A media feature's colon is neither a combinator's neighbour nor a
+		// declaration's, and a feature query takes space on either side of it.
+		// It keeps the byte, which is the reading that cannot be wrong.
+		{"@media (min-width : 40rem) { .a { color : red } }", "@media (min-width :40rem){.a{color:red}}"},
 	} {
 		got := minifyCSS([]string{tc.in})
 		if len(got) != 1 || got[0] != tc.want {
@@ -495,10 +561,14 @@ func TestAgentSourceIsSelfContained(t *testing.T) {
 			t.Fatalf("agent source missing %q", needle)
 		}
 	}
-	if strings.Contains(src, "import ") || strings.Contains(src, "require(") {
+	// A module statement, not the word: the agent is a file about stylesheets
+	// and `@import` is one of the things it has to talk about.
+	if moduleStatement.MatchString(src) || strings.Contains(src, "require(") {
 		t.Fatal("the agent must have no module dependencies: it is injected as-is")
 	}
 }
+
+var moduleStatement = regexp.MustCompile(`(?m)^\s*(?:import|export)\s`)
 
 func rawRow(parts ...string) []json.RawMessage {
 	out := make([]json.RawMessage, 0, len(parts))

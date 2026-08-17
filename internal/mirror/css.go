@@ -365,9 +365,8 @@ func minifyRule(rule string) string {
 	var b strings.Builder
 	b.Grow(len(rule))
 	// pendingSpace defers a run of whitespace until we know whether the next
-	// character wants it. depth tells a selector from a declaration body, which
-	// is the whole difference between `a :hover` and `color : red`.
-	pendingSpace, depth := false, 0
+	// character wants it.
+	pendingSpace := false
 	for i := 0; i < len(rule); i++ {
 		c := rule[i]
 		if c == '/' && i+1 < len(rule) && rule[i+1] == '*' {
@@ -385,11 +384,12 @@ func minifyRule(rule string) string {
 		}
 		if pendingSpace {
 			pendingSpace = false
-			// Drop the space if it sits against structural punctuation. In a
-			// selector a colon is not structural — the space in `a :hover` is a
-			// descendant combinator — but inside a declaration body it is.
+			// Drop the space if it sits against structural punctuation. A colon
+			// is structural only where it separates a property from its value:
+			// the space in `a :hover` is a descendant combinator. See
+			// declarationColon.
 			structural := c == '{' || c == '}' || c == ';' || c == ',' || c == ')' ||
-				(c == ':' && depth > 0)
+				(c == ':' && declarationColon(rule, i))
 			if b.Len() > 0 && !structural {
 				if last := b.String()[b.Len()-1]; !isTrailingTrimmable(last) {
 					b.WriteByte(' ')
@@ -408,17 +408,71 @@ func minifyRule(rule string) string {
 		if (c == ';' || c == '}') && b.Len() > 0 && b.String()[b.Len()-1] == ':' {
 			b.WriteByte(' ')
 		}
-		switch c {
-		case '{':
-			depth++
-		case '}':
-			if depth > 0 {
-				depth--
-			}
-		}
 		b.WriteByte(c)
 	}
 	return b.String()
+}
+
+/*
+declarationColon reports whether the colon at i separates a property from its
+value rather than introducing a pseudo-class in a selector.
+
+That is the whole difference between `color : red`, whose space is padding, and
+`.prose :where(p)`, whose space is a descendant combinator — closing the second
+one up asks for an element that is the `.prose` and the paragraph at once, and
+that element does not exist.
+
+Nesting depth was the first answer to this: a colon inside a block belongs to a
+declaration, one outside it belongs to a selector. It is right only while a
+rule arrives on its own, and rules do not always arrive on their own. A
+conditional group at-rule comes over whole — the agent hands back
+`@layer utilities{…}` and `@media (hover:hover){…}` with their contents inside
+them — so every selector in one is read at depth 1 and every descendant
+combinator standing before a pseudo-class is closed up.
+
+A captured page lost the whole of @tailwindcss/typography that way. The plugin
+emits its ninety-five rules inside `@layer utilities`, each of the form
+
+	.prose :where(h2):not(:where([class~="not-prose"] *)){font-size:1.5em;…}
+
+and each arrived as `.prose:where(h2)`. The article kept the colour and measure
+that its own `.prose` rule sets and lost every heading size, paragraph margin,
+list marker and link colour beneath it: body text where the headings were.
+Nothing in the bundle showed a rule missing — the rules were all there, and
+every one of them selected nothing.
+
+So the text is asked instead of the depth counter, and it answers exactly:
+whichever of `{`, `;` or `}` ends this run says what the run was, and a run
+that ends by opening a block was a selector. Bracket depth is counted along the
+way so that punctuation inside `:is(…)` or an attribute selector cannot end the
+run early.
+*/
+func declarationColon(rule string, i int) bool {
+	for depth := 0; i < len(rule); i++ {
+		switch c := rule[i]; c {
+		case '\\':
+			i++ // escaped: whatever it is, it is not structure
+		case '"', '\'':
+			i = scanCSSString(rule, i) - 1
+		case '(', '[':
+			depth++
+		case ')', ']':
+			if depth > 0 {
+				depth--
+			}
+		case '{':
+			if depth == 0 {
+				return false // the run opens a block: it was a selector
+			}
+		case ';', '}':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	// Nothing ended the run, so this is a fragment rather than a rule. Keeping
+	// the space costs a byte; dropping one that was a combinator costs the rule.
+	return false
 }
 
 // isTrailingTrimmable reports whether a space following this character can go.
@@ -460,11 +514,19 @@ func scanCSSString(s string, i int) int {
 //     the top of a bundle costs the page all of its styling.
 //
 // extra holds text outside the bundle that may still read a property: inline
-// style attributes travel with the DOM, not with the stylesheet, and a page
-// that sets `style="color:var(--brand)"` reads a property no rule mentions.
+// style attributes travel with the DOM, not with the stylesheet, and a shadow
+// root's rules are a sheet of their own. A page that sets
+// `style="color:var(--brand)"`, and a component whose sheet does, both read a
+// property no rule in this bundle mentions.
 //
-// It runs over a whole bundle, so it is a snapshot pass, not an incremental one.
-func stripUnusedVars(rules []string, extra []string) []string {
+// It runs over a whole bundle, so it is a snapshot pass, not an incremental
+// one — and "nothing reads it" is a fact about the page as it stands at that
+// moment. A rule that matches nothing yet is not in the bundle to be read from,
+// so the property it wants looks dead; when the page opens the menu that rule
+// dresses, the rule arrives and the property has to be able to come back. What
+// was taken out is returned alongside what was kept, for whoever holds the
+// tab's later frames. See Tab.restorePrunedVars.
+func stripUnusedVars(rules []string, extra []string) ([]string, []prunedVar) {
 	used := map[string]bool{}
 	note := func(s string) {
 		if !strings.Contains(s, "var(") {
@@ -482,6 +544,7 @@ func stripUnusedVars(rules []string, extra []string) []string {
 	}
 
 	out := make([]string, 0, len(rules))
+	var pruned []prunedVar
 	for _, r := range rules {
 		if !strings.Contains(r, "--") {
 			out = append(out, r)
@@ -495,6 +558,7 @@ func stripUnusedVars(rules []string, extra []string) []string {
 		kept := make([]string, 0, 8)
 		for _, decl := range splitDecls(body) {
 			if m := cssVarDecl.FindStringSubmatch(decl); m != nil && !used[m[1]] {
+				pruned = append(pruned, prunedVar{Prop: m[1], Head: head, Decl: decl})
 				continue
 			}
 			if strings.HasSuffix(decl, ":") {
@@ -507,7 +571,36 @@ func stripUnusedVars(rules []string, extra []string) []string {
 		}
 		out = append(out, head+"{"+strings.Join(kept, ";")+"}")
 	}
-	return out
+	return out, pruned
+}
+
+/*
+prunedVar is one custom-property declaration the prune took out, kept in case a
+rule that reads it turns up later.
+
+The declaration is held apart from its neighbours but remembers the selector it
+was written under, because that is what decides who gets the value: `:root` and
+`.theme` declaring the same property are two different answers, and putting a
+pruned one back under the wrong head would repaint half the page.
+
+Source order is the other half of that, and it is the order this is stored in.
+Every declaration of a given property is pruned together — the prune is by
+property, not by rule — so putting them back in the order they were taken keeps
+the cascade among them exactly as the page wrote it.
+*/
+type prunedVar struct {
+	Prop string // `--brand`
+	Head string // the selector the declaration was written under
+	Decl string // `--brand:#f60`
+}
+
+// Rule is the declaration written back out as a rule of its own.
+func (p prunedVar) Rule() string {
+	decl := p.Decl
+	if strings.HasSuffix(decl, ":") {
+		decl += " " // see minifyRule: an empty custom-property value
+	}
+	return p.Head + "{" + decl + "}"
 }
 
 // flatRule splits `sel{decls}` into its selector and body, reporting false for
