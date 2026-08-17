@@ -37,12 +37,11 @@ missed the bug it was written for. Both are covered by having the frame speak
 first: the agent is already running in every frame the tab's own script reaches,
 so a frame that nothing above it can read says hello and waits to be adopted.
 
-Three things make the results add up to one document.
+Four things make the results add up to one document.
 
-**Ids are namespaced by slot.** Each attached frame is given a number, and its
-agent allocates ids inside `slot * 2^32`. Two agents can then never collide, and
-because every hash on both sides visits ids in ascending order, each frame's
-nodes fall in one contiguous run.
+**Ids are namespaced by slot.** Each frame allocates in a block of its own, so
+two agents can never collide, and because every hash on both sides visits ids in
+ascending order, each frame's nodes fall in one contiguous run.
 
 **The document is spliced, not streamed separately.** A frame's snapshot arrives
 as rows headed by a root — the same shape a same-origin frame is inlined with —
@@ -53,15 +52,20 @@ which it has done since §11.
 
 **The hash is chained.** The integrity check asks each agent in slot order for
 the hash of what it holds, seeded with the answer from the one before, so the
-three-way contract of §12 survives having three writers. The sequence number the
-client is checked against is the tab's, taken after fencing every queue, because
-that is the number the client acks.
+three-way contract of §12 survives having several writers. The sequence number
+the client is checked against is the tab's, taken after fencing every queue,
+because that is the number the client acks.
+
+**Splicing a frame invalidates what was mirrored inside it.** The subtree the
+client drops takes any nested frame with it, and those frames' agents saw
+nothing happen — so each is told, and asked to say itself again. Without this a
+chain of frames arrives and then goes, one level at a time, which is the state
+this shipped in for a day and the bug rrweb still has open against its own
+cross-origin recording.
 
 What is still not covered: a frame that a page hides and shows repeatedly pays a
 re-snapshot each time it comes back, since the client drops the subtree when it
-goes; and a frame whose parent chain is deeper than frameDepthMax is left as a
-labelled box rather than mirrored, because the coordinate walk that makes clicks
-land has to end somewhere.
+goes; and a frame nested deeper than frameDepthMax is left as a labelled box.
 */
 
 /*
