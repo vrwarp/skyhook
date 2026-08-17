@@ -341,6 +341,9 @@ export class MirrorHost {
   private pendingImages = new Map<string, HTMLImageElement[]>();
   /** Canvas and video elements waiting for the bytes of a region shot. */
   private pendingShots = new Map<string, { el: HTMLElement; box: number[] }[]>();
+  /** Where the photograph an element is wearing was taken from, so it can be
+   *  hung again if the page rewrites the style it was painted into. */
+  private shotBox = new WeakMap<HTMLElement, number[]>();
   /** Object URLs handed to the frame, by content hash. Revoked with the tab. */
   private blobs = new Map<string, string>();
   /** Hashes already looked for in the local cache, so a redraw does not ask
@@ -435,6 +438,7 @@ export class MirrorHost {
       isOwned: (node: Node): boolean => this.echo?.isOwned(node) ?? false,
       onImage: (el, meta, hash) => this.applyImage(el, meta, hash),
       onShot: (el, meta) => this.applyShot(el, meta),
+      onRestyled: (el) => this.restyled(el),
       rewriteCSS: (rule) => this.resolveCSSImages(rule),
       onFocus: (node) => {
         if (this.echo?.ownedId) return;
@@ -1373,6 +1377,7 @@ export class MirrorHost {
     // Bytes for a frame the reader has already moved past: the element is
     // wearing a newer photograph and this one would be a step backwards.
     if (el.dataset.skyhookShot !== hash) return;
+    this.shotBox.set(el, box);
     el.style.backgroundImage = `url("${url}")`;
     el.style.backgroundRepeat = 'no-repeat';
     // The border box, because that is the box the agent measured against.
@@ -1385,6 +1390,42 @@ export class MirrorHost {
       // No placement given: the photograph is of the whole element.
       el.style.backgroundPosition = '0 0';
       el.style.backgroundSize = '100% 100%';
+    }
+  }
+
+  /**
+   * Puts back what a page's `style` write threw away.
+   *
+   * The mirror paints two things into an element's inline style that the page
+   * knows nothing about: the photograph of a canvas, and an image's blur
+   * placeholder and reserved box. A `style` attribute op replaces the whole
+   * declaration — the landside element it was copied from carries none of
+   * this — so both vanish on a write the page made for some unrelated reason,
+   * a border colour or a transform.
+   *
+   * For an image that is a flicker: the bytes are known and the src is an
+   * attribute, so only the placeholder is lost. For a canvas it is permanent.
+   * Shots are taken in answer to input (see shot.go), so nothing will paint
+   * that element again until the reader touches something — a map or a game
+   * goes blank and stays blank.
+   */
+  private restyled(el: HTMLElement): void {
+    const shot = el.dataset.skyhookShot;
+    if (shot) {
+      const url = this.blobs.get(shot);
+      if (url) {
+        this.showShot(el, url, this.shotBox.get(el) ?? [], shot);
+        return;
+      }
+    }
+    const img = el.dataset.skyhookImg;
+    if (img && el.tagName === 'IMG') {
+      // The blur went with the style, so the mark for it has to go too: kept,
+      // it would claim a placeholder this element no longer draws — and for an
+      // asset already announced as missing, that claim is what stands between
+      // the reader and the alt text.
+      if (!this.blobs.has(img)) delete el.dataset.skyhookBlur;
+      this.applyImage(el as HTMLImageElement, this.patcher?.images.get(img), img);
     }
   }
 

@@ -1194,6 +1194,70 @@ func newHarnessTweaked(t *testing.T, listenAddr string, tweak func(*session.Mana
 			  src="`+cdn.URL+`/widget.html"></iframe>
 			</body></html>`)
 	})
+	// Live control state the page changes on its own: a tick, a chosen option,
+	// two fields filled from script. None of it is a mutation, none of it fires
+	// an event, and the reader is looking straight at all of it. The paragraph
+	// at the end is the one thing here a MutationObserver does report, so a test
+	// can tell "the batch has landed" from "the batch never came".
+	mux.HandleFunc("/live-state", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Live state</title></head>
+			<body><h1>the page that changes its own mind</h1>
+			<label><input id="box" type="checkbox"> tick</label>
+			<input id="field" type="text" value="">
+			<textarea id="note"></textarea>
+			<select id="pick"><option value="a" selected>alpha</option><option value="b">beta</option></select>
+			<div id="host">light dom</div>
+			<p id="stage">before</p>
+			<script>
+			  addEventListener('load', () => setTimeout(() => {
+			    document.getElementById('box').checked = true;
+			    document.getElementById('field').value = 'restored draft';
+			    document.getElementById('note').value = 'a note the page put back';
+			    document.getElementById('pick').value = 'b';
+			    document.getElementById('host')
+			      .attachShadow({ mode: 'open' }).innerHTML = '<p>out of the shadow</p>';
+			    document.getElementById('stage').textContent = 'after';
+			  }, 800));
+			</script>
+			</body></html>`)
+	})
+	// A page whose only change is its own name. Nothing else moves, so nothing
+	// carries a mutation frame, so nothing carried the title either.
+	mux.HandleFunc("/quiet-title", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Before</title></head>
+			<body><h1>the page that renames itself</h1>
+			<script>
+			  addEventListener('load', () => setTimeout(() => {
+			    document.title = 'Inbox (5) - After';
+			  }, 800));
+			</script>
+			</body></html>`)
+	})
+	// A canvas the page restyles for a reason of its own, well after the
+	// photograph of it arrived plane-side.
+	mux.HandleFunc("/canvas-restyled", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Restyled</title></head>
+			<body><h1>the page around the canvas</h1>
+			<button id="paint">paint it</button>
+			<canvas id="art" width="200" height="100" style="border:1px solid rgb(51,51,51)"></canvas>
+			<p id="stage">before</p>
+			<script>
+			  const cv = document.getElementById('art');
+			  const c = cv.getContext('2d');
+			  c.fillStyle = '#0a0'; c.fillRect(0, 0, 200, 100);
+			  document.getElementById('paint').addEventListener('click', () => {
+			    c.fillStyle = '#a00'; c.fillRect(20, 20, 160, 60);
+			    setTimeout(() => {
+			      cv.style.border = '1px solid rgb(153,153,153)';
+			      document.getElementById('stage').textContent = 'restyled';
+			    }, 2500);
+			  });
+			</script>
+			</body></html>`)
+	})
 	// A frame whose document lays out taller than the box the page gave it.
 	// Landside the frame clips it, as a frame does; plane-side the mirror has
 	// to leave it reachable, because the reader has no way to resize the box
