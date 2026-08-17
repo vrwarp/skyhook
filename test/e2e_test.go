@@ -276,10 +276,27 @@ wrong.
 */
 const layeredCSSPage = `<!DOCTYPE html><html><head><title>Layered</title>
 <style>
+  @layer theme, components, utilities;
   .prose { color: rgb(1,2,3); max-width: 65ch }
   @layer utilities {
     .prose :where(h2):not(:where([class~="not-prose"] *)) { font-size : 30px }
     .prose :where(p) { margin-top : 20px }
+    .no-such-utility { color : rgb(101,102,103) }
+    .late-utility { color : rgb(7,8,9) }
+  }
+  @layer components {
+    .no-such-component { color : rgb(104,105,106) }
+  }
+  @layer { .anon-layer-rule { color : rgb(10,11,12) } }
+  @container (min-width: 1px) {
+    .prose :where(blockquote) { border-color : rgb(13,14,15) }
+    .no-such-contained { color : rgb(107,108,109) }
+  }
+  @scope (.prose) to (.not-prose) {
+    :scope :where(figcaption) { color : rgb(16,17,18) }
+  }
+  @scope (.no-such-scope-root) {
+    :scope p { color : rgb(110,111,112) }
   }
   @media (min-width: 1px) {
     .prose :where(a) { color : rgb(4,5,6) }
@@ -289,7 +306,20 @@ const layeredCSSPage = `<!DOCTYPE html><html><head><title>Layered</title>
   <article class="prose">
     <h2>the layered heading</h2>
     <p>a paragraph under it, with <a href="/second">a link</a> in it</p>
+    <blockquote>a quotation</blockquote>
+    <figure><figcaption>a caption</figcaption></figure>
   </article>
+  <div class="anon-layer-rule">in an anonymous layer</div>
+  <button id="late">late</button>
+  <div id="slot"></div>
+<script>
+  document.getElementById('late').addEventListener('click', function () {
+    var d = document.createElement('div');
+    d.className = 'late-utility';
+    d.textContent = 'the late utility';
+    document.getElementById('slot').appendChild(d);
+  });
+</script>
 </body></html>`
 
 /*
@@ -1747,9 +1777,12 @@ func TestALayeredSheetKeepsItsDescendantCombinators(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 	}
 
-	// Inside @layer, inside @media, and — for the rule that was never nested —
-	// at the top of its own.
-	for _, want := range []string{".prose :where(h2)", ".prose :where(p)", ".prose :where(a)"} {
+	// Inside @layer, @container, @scope and @media, and — for the rule that was
+	// never nested — at the top of its own.
+	for _, want := range []string{
+		".prose :where(h2)", ".prose :where(p)", ".prose :where(a)",
+		".prose :where(blockquote)", ":scope :where(figcaption)",
+	} {
 		if !strings.Contains(css, want) {
 			t.Errorf("selector %q never arrived intact: %q", want, css)
 		}
@@ -1760,6 +1793,117 @@ func TestALayeredSheetKeepsItsDescendantCombinators(t *testing.T) {
 	// The declaration padding beside it is still worth dropping.
 	if !strings.Contains(css, "font-size:30px") {
 		t.Errorf("declarations went unminified: %q", css)
+	}
+}
+
+/*
+A group at-rule is a rule that holds rules, and the filter has to go in.
+
+`@media` and `@supports` were walked into and nothing else was, because nothing
+else has a number: the legacy `type` was frozen before `@layer`, `@container`,
+`@scope` and `@starting-style` were written, so all four arrive as 0 and took
+the branch that ships an at-rule's text exactly as it stands. Correct, and the
+most expensive thing in the pipeline — Tailwind v4 writes its entire output
+inside `@layer`, so on the capture that prompted this, 93% of a 142 kB bundle
+crossed with the filter never asked about any of it, and the tally the capture
+prints read "29 of 7 style rules" because seven was every rule it had seen.
+
+The wrapper has to survive the walk, though, and it carries meaning of its own:
+a named layer's place in the cascade is fixed by where its name first appears,
+so a layer whose every rule is filtered out still leaves its name behind. A
+`@scope` block is the one that cannot be walked into at all — the rules inside
+are written against the scope root, and asking the document about them as they
+stand is asking the wrong question — so the honest saving there is the root
+itself: no `.no-such-scope-root` on the page means nothing in the block can
+match, whatever it says inside.
+*/
+func TestAGroupAtRuleIsFilteredLikeAnythingElse(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/layered-css"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the layered heading", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, "rgb(13,14,15)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// Nothing on this page is any of these, wherever the rule was written.
+	for _, gone := range []struct{ rgb, where string }{
+		{"rgb(101,102,103)", "@layer"},
+		{"rgb(104,105,106)", "a layer with nothing else in it"},
+		{"rgb(107,108,109)", "@container"},
+		{"rgb(110,111,112)", "@scope, on a root the page does not have"},
+	} {
+		if strings.Contains(css, gone.rgb) {
+			t.Errorf("a rule matching nothing inside %s was shipped: %q", gone.where, css)
+		}
+	}
+	// The wrappers are still there, and so is the cascade they carry: a layer
+	// whose rules all went keeps its name, because a name's first appearance is
+	// what fixes its place in the order.
+	for _, want := range []string{
+		"@layer theme,components,utilities;", // the order statement, minified
+		"@layer utilities{",
+		"@layer components;",
+		"@container (min-width:1px){",
+		"@scope (.prose)",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("the wrapper %q did not survive the walk: %q", want, css)
+		}
+	}
+	// An anonymous layer is a layer of its own and cannot be re-opened by name,
+	// so it crosses whole rather than being taken apart and put back.
+	if !strings.Contains(css, "rgb(10,11,12)") {
+		t.Errorf("an anonymous layer's rule was lost: %q", css)
+	}
+
+	// A rule that starts matching costs its own bytes and not the block's. The
+	// layer has already been sent; adding one utility to it must not send the
+	// two rules that were in it before.
+	before := css
+	btn, err := cl.FindNode(tab, "button", "id", "late")
+	if err != nil {
+		t.Fatalf("find button: %v", err)
+	}
+	if err := cl.Click(tab, btn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the late utility", budget(30*time.Second)); err != nil {
+		t.Fatalf("the late utility never arrived: %v", err)
+	}
+	deadline = time.Now().Add(budget(20 * time.Second))
+	for time.Now().Before(deadline) {
+		css = cl.Model(tab).Stylesheet()
+		if strings.Contains(css, "rgb(7,8,9)") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !strings.Contains(css, "rgb(7,8,9)") {
+		t.Fatalf("the rule for the late utility never arrived: %q", css)
+	}
+	if n := strings.Count(css, "font-size:30px"); n != 1 {
+		t.Errorf("the layer was re-sent whole to add one rule to it (%d copies of a rule that had already crossed):\nbefore: %q\nafter: %q",
+			n, before, css)
 	}
 }
 

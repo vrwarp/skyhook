@@ -1167,7 +1167,7 @@
     try { return doc.baseURI || null; } catch (e) { return null; }
   }
 
-  function collectRules(doc, list, out, depth, base) {
+  function collectRules(doc, list, out, depth, base, seen) {
     if (!list || depth > 8) return;
     for (var i = 0; i < list.length; i++) {
       var rule = list[i];
@@ -1183,13 +1183,8 @@
             break;
           case 4: // media
           case 12: // supports
-            var inner = [];
-            collectRules(doc, rule.cssRules, inner, depth + 1, base);
-            if (inner.length) {
-              var cond = rule.type === 4 ? '@media ' + rule.conditionText
-                : '@supports ' + rule.conditionText;
-              out.push(cond + '{' + inner.join('') + '}');
-            }
+            collectGroup(doc, rule, rule.type === 4 ? '@media ' + rule.conditionText
+              : '@supports ' + rule.conditionText, null, out, depth, base, seen);
             break;
           case 7: // keyframes: small, and cheap insurance for CSS animations
             out.push(absolutizeCSSURLs(rule.cssText, base));
@@ -1208,15 +1203,131 @@
             }
             break;
           case 3: // import
-            collectImport(doc, rule, out, depth, base);
+            collectImport(doc, rule, out, depth, base, seen);
             break;
           default:
-            if (rule.cssText && rule.cssText.charAt(0) === '@') {
+            // A grouping at-rule the legacy `type` has no number for. These are
+            // the ones the language grew after `type` was frozen, so they all
+            // arrive as 0 and are told apart by what they hold.
+            if (rule.cssRules && groupPrelude(rule)) {
+              collectGroup(doc, rule, groupPrelude(rule), layerPlaceholder(rule),
+                out, depth, base, seen);
+            } else if (rule.cssRules && isScopeRule(rule)) {
+              collectScope(doc, rule, out, base);
+            } else if (rule.cssText && rule.cssText.charAt(0) === '@') {
               out.push(absolutizeCSSURLs(rule.cssText, base));
             }
         }
       } catch (e) { /* cross-origin sheet, skip */ }
     }
+  }
+
+  /*
+   * A group at-rule crosses as a rule that holds rules, and until now it
+   * crossed whole.
+   *
+   * `@media` and `@supports` were walked into and the rest were not, because
+   * the rest have no number: `type` was frozen before `@layer`, `@container`,
+   * `@scope` and `@starting-style` existed, so every one of them arrives as 0
+   * and the only branch left was the one that ships the text as it stands. That
+   * was correct and it was expensive. Tailwind v4 writes its whole output
+   * inside `@layer`, so on a captured page 93% of a 142 kB bundle — 131,799
+   * bytes — crossed without the filter ever being asked about it, and the tally
+   * the capture reports read "29 of 7 style rules", because seven was every
+   * rule the filter had seen.
+   *
+   * So a grouping rule this can name the prelude of is walked into like any
+   * other, and written back inside what it came in. The ones it cannot are
+   * still shipped whole, which is the answer that cannot be wrong.
+   */
+  function groupPrelude(rule) {
+    var kind = ruleKind(rule);
+    if (kind === 'CSSLayerBlockRule') {
+      // An anonymous layer is its own layer, and a second `@layer{}` is a
+      // second one: re-emitted it would not merge with the first the way a
+      // named layer does, and where it landed in the order would depend on
+      // which pass a rule in it first matched on.
+      return rule.name ? '@layer ' + rule.name : null;
+    }
+    if (kind === 'CSSContainerRule') {
+      // conditionText carries the container name with the query when there is
+      // one: `sidebar (min-width: 40rem)`.
+      return '@container ' + rule.conditionText;
+    }
+    return null;
+  }
+
+  // layerPlaceholder is what to write when a named layer's every rule was
+  // filtered out. A layer's place in the cascade is fixed by where its name
+  // first appears, so a layer that turns up empty now and full later would
+  // otherwise be ordered by the moment its first rule started matching.
+  function layerPlaceholder(rule) {
+    if (ruleKind(rule) !== 'CSSLayerBlockRule' || !rule.name) return null;
+    return '@layer ' + rule.name + ';';
+  }
+
+  function isScopeRule(rule) {
+    return ruleKind(rule) === 'CSSScopeRule';
+  }
+
+  function ruleKind(rule) {
+    try {
+      return (rule.constructor && rule.constructor.name) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /*
+   * collectGroup filters a group at-rule's contents and writes back what
+   * survived, inside the prelude it came in.
+   *
+   * The dedupe is the part worth explaining. A bundle is a delta: what has been
+   * sent once is not sent again, and that was decided per top-level rule — for
+   * a group, per *block*. One rule inside a 12,000-rule utility layer starting
+   * to match therefore made the block's text different from the block already
+   * sent, and the whole thing went again. On the link this exists for, a page
+   * that mutates would have paid for its stylesheet over and over. So the
+   * contents are deduped one rule at a time and the wrapper is written around
+   * whatever is left, which is what a group at-rule allows: two `@media
+   * (hover)` blocks are the one condition asked twice, and two `@layer
+   * utilities` blocks are the one layer.
+   */
+  function collectGroup(doc, rule, prelude, placeholder, out, depth, base, seen) {
+    var inner = [];
+    collectRules(doc, rule.cssRules, inner, depth + 1, base, seen);
+    var fresh = [];
+    for (var i = 0; i < inner.length; i++) {
+      if (!seen || !seen.has(inner[i])) fresh.push(inner[i]);
+    }
+    if (!fresh.length) {
+      if (placeholder) out.push(placeholder);
+      return;
+    }
+    if (seen) {
+      for (var j = 0; j < fresh.length; j++) seen.set(fresh[j], 1);
+    }
+    out.push(prelude + '{' + fresh.join('') + '}');
+  }
+
+  /*
+   * collectScope keeps or drops a `@scope` block whole.
+   *
+   * The rules inside one are written against the scope root — `:scope .row`,
+   * and an implicit `:scope ` in front of everything else — so asking the
+   * document about them as they stand is asking the wrong question, and it can
+   * be wrong in the direction that drops a rule the page wants. What can be
+   * asked honestly is whether the root itself is here: no `.card` on the page
+   * means nothing in `@scope (.card)` can match, whatever it says inside.
+   */
+  function collectScope(doc, rule, out, base) {
+    var start = null;
+    try { start = rule.start; } catch (e) { start = null; }
+    if (start && !selectorMatches(doc, String(start))) {
+      noteRejected('@scope ' + start);
+      return;
+    }
+    out.push(absolutizeCSSURLs(rule.cssText, base));
   }
 
   /*
@@ -1242,7 +1353,7 @@
    * in had it been written inline, so that is what they become, innermost
    * first.
    */
-  function collectImport(doc, rule, out, depth, base) {
+  function collectImport(doc, rule, out, depth, base, seen) {
     var href = null;
     try { href = rule.href; } catch (e) { href = null; }
     var abs = href;
@@ -1268,7 +1379,7 @@
     var inner = [];
     var sheetHref = null;
     try { sheetHref = sheet && sheet.href; } catch (e) { sheetHref = null; }
-    collectRules(doc, rules, inner, depth + 1, sheetHref || abs || base);
+    collectRules(doc, rules, inner, depth + 1, sheetHref || abs || base, seen);
     if (!inner.length) return;
     var text = inner.join('');
     var media = '';
@@ -1288,7 +1399,7 @@
     out.push(text);
   }
 
-  function collectSheets(doc, sheets, out) {
+  function collectSheets(doc, sheets, out, seen) {
     if (!sheets) return;
     for (var i = 0; i < sheets.length; i++) {
       var sheet = sheets[i];
@@ -1313,18 +1424,18 @@
         }
       }
       if (!rules) continue;
-      collectRules(doc, rules, out, 0, sheetBase(doc, sheet));
+      collectRules(doc, rules, out, 0, sheetBase(doc, sheet), seen);
     }
   }
 
-  function collectUsedCSS(doc) {
+  function collectUsedCSS(doc, seen) {
     var out = [];
-    try { collectSheets(doc, doc.styleSheets, out); } catch (e) { /* detached */ }
+    try { collectSheets(doc, doc.styleSheets, out, seen); } catch (e) { /* detached */ }
     // Constructed stylesheets are invisible to document.styleSheets, and they
     // are how every Lit-based web component ships its CSS. Without these a
     // component-heavy page arrives with its structure intact and no styling at
     // all, which looks far more broken than a missing rule.
-    try { collectSheets(doc, doc.adoptedStyleSheets, out); } catch (e) { /* unsupported */ }
+    try { collectSheets(doc, doc.adoptedStyleSheets, out, seen); } catch (e) { /* unsupported */ }
     return out;
   }
 
@@ -1425,12 +1536,16 @@
     for (var d = 0; d < docs.length; d++) {
       var doc = docs[d];
       var root = docRoot.get(doc) || 0;
-      var rules = collectUsedCSS(doc);
       // A scoped sheet is deduped against itself, not against the document's:
       // the same rule text may be needed in two places and mean two different
       // things, which is the point of scoping it.
       var seen = root ? scopedEmitted.get(root) : emittedCSS;
       if (root && !seen) { seen = new Map(); scopedEmitted.set(root, seen); }
+      // The walk is handed the same record, because a rule inside a group
+      // at-rule is deduped where it is found: only the walk knows which block a
+      // rule came in, and re-sending a whole layer to add one rule to it is
+      // what this costs otherwise. See collectGroup.
+      var rules = collectUsedCSS(doc, seen);
       var mine = [];
       for (var i = 0; i < rules.length; i++) {
         var text = rules[i];
