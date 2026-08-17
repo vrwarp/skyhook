@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -95,12 +94,12 @@ func newPWAHarnessAt(t *testing.T, dist string) *pwaHarness {
 	cfg.DataDir = t.TempDir()
 
 	ws := transport.NewWSServer(transport.WSConfig{
-		Path: cfg.Path, Logger: slog.Default(),
+		Path: cfg.Path, Logger: h.log,
 	}, h.mgr.Serve)
 
 	mux := http.NewServeMux()
 	mux.Handle(cfg.Path, ws)
-	mux.Handle("/", server.NewWebApp(cfg, dist, slog.Default()))
+	mux.Handle("/", server.NewWebApp(cfg, dist, h.log))
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -127,7 +126,7 @@ func (h *pwaHarness) openClientWith(ctx context.Context, t *testing.T, fallback 
 	br, err := cdp.Launch(ctx, cdp.BrowserOptions{
 		UserDataDir: t.TempDir(),
 		Headless:    true,
-		Logger:      slog.Default(),
+		Logger:      h.log,
 	})
 	if err != nil {
 		t.Fatalf("launch client browser: %v", err)
