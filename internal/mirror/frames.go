@@ -147,7 +147,14 @@ type subFrame struct {
 	pending     *agentSnapshot
 	retryIn     time.Duration
 	retriesLeft int
-	gone        bool
+	// quietUntil is when a frame that has run out of retries may be asked
+	// again. A frame whose element the page above it never serialises is a
+	// frame in a subtree nobody is mirroring, and asking it every two seconds
+	// for the life of the page spends a bad link's whole budget on a document
+	// that has nowhere to go. Asking it rarely still converges if the subtree
+	// ever appears.
+	quietUntil time.Time
+	gone       bool
 }
 
 // frameSlot returns which agent's id space a node belongs to. Slot 0 is the
@@ -675,6 +682,7 @@ func (t *Tab) invalidateInside(frameID string) {
 		f.spliced = false
 		f.pending = nil
 		f.retryIn = 0
+		f.quietUntil = time.Time{}
 		f.mu.Unlock()
 	}
 	t.resnapshotFrames()
@@ -857,6 +865,8 @@ func (t *Tab) spliceFrame(f *subFrame, s *agentSnapshot) {
 		}
 	}
 	t.emitFrameOps(f.slot, ops, s.Strings, s.Images, s.URL)
+	t.log.Debug("a frame's document is on its way to the client",
+		"tab", t.ID, "slot", f.slot, "owner", owner, "root", root.ID, "nodes", len(nodes))
 
 	// Whatever was mirrored inside this document went with the subtree the
 	// client just replaced.
@@ -893,12 +903,21 @@ func (t *Tab) holdSplice(f *subFrame, s *agentSnapshot, err error) {
 		f.retryIn = next
 	}
 	f.mu.Unlock()
-	if err != nil {
-		t.log.Debug("frame owner not resolvable yet", "tab", t.ID, "err", err)
-	}
+	t.log.Debug("a frame is waiting for the box it goes in",
+		"tab", t.ID, "slot", f.slot, "left", left, "in", delay, "err", err)
 	if left <= 0 {
+		// Out of retries, and the snapshot being held is by now a description of
+		// a document that has moved on. Letting it go hands the frame back to
+		// the reconciler — which skips a frame with a snapshot in hand, so
+		// keeping it here is what leaves the frame stuck for the life of the
+		// page with nothing anywhere retrying it. It is asked again, rarely.
+		f.mu.Lock()
+		f.pending = nil
+		f.retryIn = 0
+		f.quietUntil = time.Now().Add(spliceGiveUpFor)
+		f.mu.Unlock()
 		t.log.Debug("a frame never found its place in the document above it; "+
-			"it stays a labelled box", "tab", t.ID)
+			"it stays a labelled box for now", "tab", t.ID, "slot", f.slot)
 		return
 	}
 	time.AfterFunc(delay, func() {
@@ -915,6 +934,10 @@ func (t *Tab) holdSplice(f *subFrame, s *agentSnapshot, err error) {
 // spliceRetries bounds the wait for a frame's element to be serialised: about
 // half a minute, backing off, which outlasts any page still building itself.
 const spliceRetries = 16
+
+// spliceGiveUpFor is how long a frame that ran out of retries is left alone
+// before the reconciler tries it again.
+const spliceGiveUpFor = 30 * time.Second
 
 // reconcileEvery is how often a tab checks that every frame it is mirroring is
 // actually in the client's document.
@@ -987,6 +1010,7 @@ func (t *Tab) resplice() {
 		f.spliced = false
 		f.pending = nil
 		f.retryIn = 0
+		f.quietUntil = time.Time{}
 		f.mu.Unlock()
 	}
 	t.resnapshotFrames()
@@ -994,34 +1018,29 @@ func (t *Tab) resplice() {
 
 /*
 resnapshotFrames asks the frames the client no longer has to say themselves
-again — unless the link is already behind, in which case it waits.
+again, one at a time while the link is behind.
 
-This is where a slow link nearly lost the whole feature. A frame's document is
-re-sent whole every time the page above it is, because the client dropped it
-with the rest of the old document; and a page is re-snapshotted on every resync.
-On a fast link that is a few kilobytes nobody notices. On 250 kbps with 2% loss
-it is the difference between the client catching up and not: the resync sends
-the page, every frame piles its document on behind it, the client falls further
-behind, the integrity check calls that a stall, and the stall resyncs. The tests
-that failed had been waiting three minutes for a frame that was re-sent, in
-full, over and over.
+A frame's document is re-sent whole every time the page above it is, because the
+client dropped it with the rest of the old document; and a page is
+re-snapshotted on every resync. On a fast link that is a few kilobytes nobody
+notices. On 250 kbps a page with several frames in it can put the whole of every
+frame's document on a queue the reader is already waiting on, and the client
+falls further behind for having been repaired.
 
-The reconciler is already asking the same question every two seconds, so there
-is no need to force it now. This is exactly the trade shotSoon makes with the
-same signal: work that will still be right in two seconds does not go onto a
-queue the reader is already waiting on.
+What it must not do is stop. A frame the client does not have is a hole in the
+document, and this is the only thing that closes it: skipping the repair while
+the link is behind leaves the reader looking at a page with a piece missing, and
+the missing piece is itself a reason the integrity check keeps resyncing — the
+backlog suppresses the repair, and the absent repair sustains the backlog. So
+the answer to a bad link is pacing, not silence: every frame at once when there
+is room, and one per two-second tick when there is not, which converges on any
+link and floods none.
 */
 func (t *Tab) resnapshotFrames() {
-	if t.out.Backlogged() {
-		return
-	}
-	for _, f := range t.framesInOrder() {
-		f.mu.Lock()
-		skip := f.spliced || f.gone || f.pending != nil
-		f.mu.Unlock()
-		if skip {
-			continue
-		}
+	backlogged := t.out.Backlogged()
+	for _, f := range framesDue(t.framesInOrder(), backlogged, time.Now()) {
+		t.log.Debug("asking a frame to say itself again",
+			"tab", t.ID, "slot", f.slot, "behind", backlogged)
 		go func(f *subFrame) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
@@ -1030,6 +1049,33 @@ func (t *Tab) resnapshotFrames() {
 			}
 		}(f)
 	}
+}
+
+/*
+framesDue picks the frames worth asking now.
+
+A frame is due when the client does not have it and nothing else is already
+about to put it there: one that is spliced is where it belongs, one that is gone
+has no document, one holding a snapshot is waiting on the parent rather than on
+being asked again, and one that ran out of retries is left alone for a while.
+When the link is behind, the first of them goes and the rest wait for the next
+tick — the whole point being that something goes.
+*/
+func framesDue(all []*subFrame, backlogged bool, now time.Time) []*subFrame {
+	var due []*subFrame
+	for _, f := range all {
+		f.mu.Lock()
+		skip := f.spliced || f.gone || f.pending != nil || now.Before(f.quietUntil)
+		f.mu.Unlock()
+		if skip {
+			continue
+		}
+		due = append(due, f)
+		if backlogged {
+			break
+		}
+	}
+	return due
 }
 
 // frameOrigin is where a frame's viewport sits in the top-level one, walking up
