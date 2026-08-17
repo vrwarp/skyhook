@@ -495,6 +495,9 @@ func (t *Tab) dropFrame(key string) {
 	f.gone = true
 	f.rootID = 0
 	f.mu.Unlock()
+	// One fewer document in the client's, which a measurement spanning this
+	// moment would otherwise still be counting.
+	t.spliceGen.Add(1)
 
 	if root != 0 {
 		t.emitOps([]protocol.Op{{Op: protocol.OpRemove, Node: root}})
@@ -560,6 +563,35 @@ func (t *Tab) framesInOrder() []*subFrame {
 	t.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].slot < out[j].slot })
 	return out
+}
+
+/*
+splicedFrames lists the frames whose documents are in the client's, in slot
+order, with the generation that says whether that set held still.
+
+The integrity check hashes exactly what the client should have. A frame that has
+been adopted and not yet spliced is a document the client has never been sent,
+so hashing it reports a divergence against nodes nobody sent; and a frame that
+is spliced *during* the walk has put its document on the wire behind the walk's
+back, so the sequence number the check anchors to counts nodes that nobody
+hashed. Both say the mirror is wrong when what happened is that a frame arrived,
+and both cost a whole document to repair nothing.
+
+So the check reads this before and after, and a generation that moved means the
+answer describes no document that ever existed. See Checkpoint.
+*/
+func (t *Tab) splicedFrames() (frames []*subFrame, gen uint64) {
+	all := t.framesInOrder()
+	out := make([]*subFrame, 0, len(all))
+	for _, f := range all {
+		f.mu.Lock()
+		spliced := f.spliced && !f.gone
+		f.mu.Unlock()
+		if spliced {
+			out = append(out, f)
+		}
+	}
+	return out, t.spliceGen.Load()
 }
 
 // evalInSlot runs an expression in the world of whichever agent owns a slot.
@@ -684,6 +716,9 @@ func (t *Tab) invalidateInside(frameID string) {
 		f.retryIn = 0
 		f.quietUntil = time.Time{}
 		f.mu.Unlock()
+	}
+	if len(inside) > 0 {
+		t.spliceGen.Add(1)
 	}
 	// Only the frames inside this one. Asking every frame in the tab here is
 	// what turns a page of eight nested frames into forty snapshot requests:
@@ -872,6 +907,8 @@ func (t *Tab) spliceFrame(f *subFrame, s *agentSnapshot) {
 	t.log.Debug("a frame's document is on its way to the client",
 		"tab", t.ID, "slot", f.slot, "owner", owner, "root", root.ID, "nodes", len(nodes))
 
+	t.spliceGen.Add(1)
+
 	// Whatever was mirrored inside this document went with the subtree the
 	// client just replaced.
 	t.invalidateInside(f.frameID)
@@ -1017,6 +1054,7 @@ func (t *Tab) resplice() {
 		f.quietUntil = time.Time{}
 		f.mu.Unlock()
 	}
+	t.spliceGen.Add(1)
 	t.resnapshotFrames()
 }
 

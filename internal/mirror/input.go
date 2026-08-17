@@ -772,7 +772,8 @@ func (t *Tab) Checkpoint(ctx context.Context) (Checkpoint, error) {
 		return cp, err
 	}
 	hash := cp.Hash
-	for _, f := range t.framesInOrder() {
+	frames, gen := t.splicedFrames()
+	for _, f := range frames {
 		raw, err := t.evalInSlot(ctx, f.slot, fmt.Sprintf("__skyhook.checkpoint(%d)", hash))
 		if err != nil {
 			// A frame that cannot answer is a frame whose nodes are in the
@@ -792,6 +793,16 @@ func (t *Tab) Checkpoint(ctx context.Context) (Checkpoint, error) {
 	t.mu.Lock()
 	seq := t.seq
 	t.mu.Unlock()
+	// A frame that was spliced while this walk was in progress put its document
+	// on the wire behind the walk: it is in the sequence number just read and in
+	// none of the hashes above, so the answer describes a document that never
+	// existed anywhere. Reported as no measurement rather than as a divergence —
+	// which is what it looked like, at the cost of a whole document, whenever a
+	// frame arrived while the check happened to be running.
+	if now := t.spliceGen.Load(); now != gen {
+		return Checkpoint{}, fmt.Errorf(
+			"mirror: a frame arrived while the page was being measured (%d -> %d)", gen, now)
+	}
 	return Checkpoint{Seq: seq, Hash: hash}, nil
 }
 

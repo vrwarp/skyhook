@@ -1308,6 +1308,11 @@ func (s *Session) checkTab(id uint32, ts *tabState) {
 	cp, err := ts.tab.Checkpoint(ctx)
 	cancel()
 	if err != nil {
+		// Said out loud. A check that cannot take its own measurement does
+		// nothing, and doing nothing quietly is indistinguishable from finding
+		// nothing wrong — which is the difference between a mirror that is
+		// watched and one that only looks like it is.
+		s.log.Debug("integrity check could not measure the page", "tab", id, "err", err)
 		return
 	}
 	if cp.Hash == mirror.EmptyDocHash {

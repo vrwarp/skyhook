@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vrwarp/skyhook/internal/cdp"
@@ -193,6 +194,11 @@ type Tab struct {
 	// frame itself — which is what survives a navigation. ctxFrames says which
 	// frame a world belongs to, and is the only way back from an agent's message
 	// to the document it describes. See frames.go.
+	// spliceGen counts changes to what the client holds of this tab's frames.
+	// The integrity check reads it either side of its walk: a walk that spans a
+	// splice describes a document that never existed. See splicedFrames.
+	spliceGen atomic.Uint64
+
 	frames     map[string]*subFrame
 	framesByID map[string]*subFrame
 	ctxFrames  map[string]string
