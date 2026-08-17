@@ -769,6 +769,8 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 	}
 	send, claimed := s.mayShipImage(data.Hash)
 	if !send {
+		s.log.Debug("not sending a picture the client already has",
+			"tab", tab, "key", data.Hash, "bytes", len(data.Data))
 		return
 	}
 	f, err := protocol.NewFrame(protocol.TypeImageData, tab, data)
@@ -788,8 +790,13 @@ func (s *Session) ImageBytes(tab uint32, data protocol.ImageData) {
 	hash := data.Hash
 	if !s.enqueue(outbound{
 		ch: protocol.ChMedia, tab: tab, msg: msg, object: true,
-		onSent: func(ok bool) { s.noteImageAnswered(hash, ok, claimed) },
+		onSent: func(ok bool) {
+			s.log.Debug("a picture reached the link", "tab", tab, "key", hash, "written", ok)
+			s.noteImageAnswered(hash, ok, claimed)
+		},
 	}, true) {
+		s.log.Debug("a picture the queue would not take", "tab", tab, "key", hash,
+			"bytes", len(data.Data), "claimed", claimed)
 		s.noteImageAnswered(hash, false, claimed)
 	}
 }
