@@ -40,3 +40,8 @@ export function isPhone(): boolean {
 export function isTouch(): boolean {
   return matches(TOUCH);
 }
+
+/** Whether this device is set to dark. See main.ts's deviceScheme. */
+export function prefersDark(): boolean {
+  return matches('(prefers-color-scheme: dark)');
+}

@@ -2962,3 +2962,377 @@ The e2e test that found it passed afterwards, on the fast link and on the slow
 one, and the fault came back a day later with the same two hashes in the log —
 because the epoch was being compared against the wrong thing at the wrong end.
 A measurement is only as good as the answer's claim to be about it.
+
+### 45. Half a theme is not a theme
+
+A capture of a GitHub file page came in reported as "the navigation on the left
+seems broken (some css is missing?)", and the file tree in the plane-side
+screenshot is exactly that: filenames a shade off white, on white, beside a
+branch picker and a search box painted in dark greys, under a pane header that
+is still light. Everything the capture measures said nothing was wrong. The two
+halves agreed on the document hash, node for node across 9,261 nodes. The
+used-CSS filter reported 19,311 rules rejected out of 20,867, and every one of
+the 4,000 it listed genuinely matched nothing — checked by replaying the
+document and asking it about each of them.
+
+Nothing had been dropped. The palette had been decided twice.
+
+GitHub serves `<html data-color-mode="auto" data-light-theme="light"
+data-dark-theme="dark">` and hangs its entire set of colour properties off a
+media query:
+
+```css
+@media (prefers-color-scheme: dark) {
+  [data-color-mode][data-color-mode="auto"][data-dark-theme="dark"] {
+    --bgColor-default: #0d1117; --fgColor-default: #f0f6fc; …
+  }
+}
+```
+
+The landside browser is light, so that block does not apply and the light one
+does; the rules crossed the link as written, wrapper and all, and the reader's
+browser is the one that answered on the other side. Resolving `--bgColor-default`
+against the delivered bundle gives `#fff` under a light reader and `#0d1117`
+under a dark one — from the same bytes.
+
+What the reader got was not the dark theme. It was the parts of the page that
+read a colour property in the dark theme, over the parts that do not. The
+mirror's own chrome is `html, body { background: #fff; color: #111 }`, a flat
+white behind every page it draws, and the page's own `body` is a node *inside*
+that document rather than the thing that paints the canvas — so the theme's
+background never reaches the surface it was written for. `--fgColor-muted` did
+reach the filenames. Near-white text, white ground.
+
+That would be a bug even if the theme had arrived whole, because a stylesheet is
+the only part of a mirror that can change its mind on the other side. The images
+were fetched, chosen and transcoded from the landside render; the canvases were
+rasterised there; the capture's landside screenshot is in that palette; the
+chrome around the document is a constant. A page repainted plane-side is a page
+repainted alone.
+
+So the agent now answers that question itself, before the rules are sent, and
+sends what is left of the query ([agent.js](../internal/mirror/agent.js),
+`resolveMediaList`). A block that cannot match here is not sent — it is noted as
+rejected, so the next capture *says* the theme was decided rather than leaving
+it to be worked out. A block that always matches is sent without its wrapper,
+its rules unchanged and in the same place in the cascade, since a media query
+carries no specificity. A block that is partly this side's keeps exactly the
+part that is not:
+
+| written | crosses as |
+|---|---|
+| `@media (prefers-color-scheme: dark)` | nothing |
+| `@media (prefers-color-scheme: light)` | the rules, unwrapped |
+| `@media screen and (prefers-color-scheme: light)` | `@media screen` |
+| `@media (min-width: 40em) and (prefers-color-scheme: light)` | `@media (min-width: 40em)` |
+| `@media not all and (prefers-color-scheme: dark)` | the rules, unwrapped |
+| `@media (min-width: 40em)` | unchanged |
+
+The condition is parsed rather than pattern-matched, because the feature can sit
+anywhere in one: inside `not (…)`, inside a nested `((…) and (…))`, in the
+middle of an `and` chain, in one arm of a comma-separated list. The parse folds
+the constants out and writes back what is left, and any shape it cannot read is
+shipped as written — the failure that costs a wrapper, never a rule.
+
+**`prefers-color-scheme` is the only feature answered this way, and the
+restraint is the design.** The neighbouring features look like the same problem
+and are not:
+
+- **The viewport is already shared.** The client reports its window and
+  `Tab.SetViewport` puts the landside tab in exactly that box, device pixel
+  ratio included, so `width`, `orientation` and `resolution` are one question
+  with one answer. They also have to stay live: the reader can turn a phone
+  sideways, and the mirror should reflow at the turn rather than at the next
+  round trip.
+- **The reader is the reader's.** `prefers-reduced-motion`, `prefers-contrast`,
+  `forced-colors`, `hover` and `pointer` are facts about a person, and the
+  person is plane-side. The landside browser is headless with nobody at it: it
+  answers `no-preference` and `pointer: none` because nothing was ever asked of
+  it, and freezing that would hand a reader who *did* ask a page that ignores
+  them — animation to somebody who turned animation off. This is the same answer
+  `:hover` and `:focus` have always got from the used-CSS filter, for the same
+  reason.
+
+The one that had to change is the one that is not really a preference at all: it
+does not say how the reader would like to be shown the page, it says which of
+two pages the server rendered.
+
+`TestTheLandsideBrowserDecidesTheColorScheme` pairs every rule in its fixture
+with its opposite, so the bundle names which browser answered — the light values
+are this side's and the 100-series values are the reader's — and holds the line
+on the other three: a viewport query, a `hover` query and a
+`prefers-reduced-motion` query all have to arrive still wrapped, still asking.
+
+#### The other three ways the palette crossed unanswered
+
+The `@media` block turned out to be the least of it. Asking, of every other
+route a colour scheme has into a mirror, "who answers this, and when?" found
+three more — two of them worse, because they were not being answered at all.
+
+**A sheet's own `media` was read by nobody.** `document.styleSheets` lists every
+`<link>` and `<style>` whatever their media attribute says, and a browser parses
+a sheet it is not currently applying, so a walk that goes straight to `cssRules`
+collects the rules of a sheet the page is not using and hands them over with
+nothing left to say they were conditional. This is how a site has split its
+themes since long before `@media` blocks were the fashion, and still the common
+way:
+
+```html
+<link rel="stylesheet" media="(prefers-color-scheme: dark)" href="dark.css">
+<link rel="stylesheet" media="(prefers-color-scheme: light)" href="light.css">
+```
+
+Both sheets crossed, unwrapped, one after the other. Which theme the reader got
+was decided by which `<link>` the page happened to write second — worse than the
+`@media` bug, which at least let one browser decide. `media="print"` is the same
+fault with a plainer symptom and no connection to themes at all: a page's print
+rules, applied to the screen, for every page that ships them that way. The sheet
+is now walked under its own media, resolved exactly as a block's condition is
+(`collectSheet`), which is a four-line change to `collectSheets` and one shared
+`collectInto` under it and under `collectGroup`.
+
+**`color-scheme` was crossing as written.** A page that says
+
+```css
+:root { color-scheme: light dark }
+```
+
+has not chosen anything. It has said it can be either and left the choice to the
+browser, and what the browser then paints in the chosen scheme is everything the
+page does not paint itself: form controls, scrollbars, the canvas behind the
+document, the default text colour — and every `light-dark()` value in the sheet.
+No media query is involved, so nothing in the previous fix touched it, and a
+light page arrived with dark checkboxes, dark dropdowns and a dark scrollbar.
+
+A value naming one scheme is already an answer and is left exactly as written: a
+page that asked for dark asked for dark. A value naming both is collapsed to the
+one this browser picked (`pinColorSchemes`), which is the same answer the media
+query gets, arrived at the same way. `only` is a separate instruction — it turns
+off the browser's own darkening — and survives the collapse. The rewrite is
+scanned rather than pattern-matched for the reason `replaceCSSURLs` is:
+`content: "color-scheme: light dark"` is text a page means to display, and a
+pattern cannot tell it from a declaration. It runs over inline `style`
+attributes too, which travel with the DOM rather than with the sheet.
+
+**The canvas was the mirror's, not the page's.** A page's background does not
+paint its root box; it paints the *canvas*, the whole surface behind the
+document however short the document is, and the value is taken from `<html>` or
+— where that has none — from `<body>`. That propagation is a property of being a
+document's root, and plane-side neither element is one: both are ordinary
+elements inside the mirror's own document ([§30](#30-the-mirrors-own-wrapper-was-breaking-every-full-height-layout)),
+and the surface behind them is painted by the mirror's chrome, which is a flat
+`#fff`.
+
+A page that paints its `<html>` has always come out right, and by accident:
+`html` is a type selector, so the page's own rule matches the mirror's root as
+well as the page's copy of one. A page that paints only its `<body>` — the
+ordinary way to write it — does not, and a dark site arrives as a dark document
+on a white field: white below the fold, white in the margins, white wherever the
+document does not reach. Measured on a rebuilt mirror, `body { background: … }`
+leaves the canvas at `rgb(255,255,255)` where landside it was `rgb(13,17,23)`.
+
+So the landside canvas is read for what it is and sent as one rule about the
+mirror's own root. `:root` is the one selector that cannot be confused about
+which document it means — plane-side it is the frame's `html` and never the
+page's — and the rule is `!important` because it is not part of the page's
+cascade at all: it is this side reporting a fact the other side cannot work out,
+and a page rule landing in a later delta must not overturn it. Only the
+top-level agent says anything; a frame repainting the reader's whole page would
+be a worse bug than the one it fixes.
+
+**And a browser can repaint a mirror without reading a single rule.** Chrome
+for Android's "Dark theme" inverts a page that has not said which scheme it is
+in — algorithmically, at paint time, below anything a stylesheet can see. Over a
+mirror it repaints the DOM half of a document whose other half cannot follow:
+the images were fetched, chosen and transcoded from a light landside render, and
+the canvases were rasterised there. Measured on a rebuilt mirror with Chromium's
+auto-dark override on, a mirrored light page comes out `rgb(18,18,18)`; with the
+one declaration that turns it off, `rgb(255,255,255)`.
+
+So the same rule that carries the canvas carries the scheme the document was
+painted in, written with `only` — the keyword that means "and do not
+second-guess it". A page that never mentioned a scheme was painted light,
+because that is what the landside browser does with `normal`: it is headless,
+with nothing forcing its hand. `color-scheme` is inherited rather than imposed,
+so an element inside the page that declares its own still wins for itself, which
+is what a dark card on a light page needs.
+
+The end state is a mirror that renders the same whatever the reader's browser
+prefers and whatever it would rather do about it — verified by screenshot in all
+four combinations of reader scheme and force-dark.
+
+That last one had a bug of its own, and it is the ordinary shape of this
+codebase's mistakes. The rule is only re-sent when the colour changes, and
+"already sent" was remembered across a snapshot — which throws the sheet away
+and rebuilds it. A CSS pass that happened to run before the first snapshot
+therefore recorded the rule as sent and then the snapshot dropped it, so the
+fixture passed or failed on the order of two timers. `snapshot()` resets it with
+everything else it resets.
+
+#### The chrome was describing four elements and meant two
+
+Sending the canvas exposed the thing standing in front of it. The stylesheet the
+client injects into every mirror frame opened with
+
+```css
+html, body { margin: 0; padding: 0; background: #fff; color: #111 }
+```
+
+and in that document `html, body` names four elements, not two: the frame's own
+root and body, and the page's, which arrive as ordinary elements inside them.
+That is the arrangement [§30](#30-the-mirrors-own-wrapper-was-breaking-every-full-height-layout)
+went to some trouble to get — nothing between the frame's body and the page's
+root, so a `height: 100%` chain reaches the viewport — and a type selector
+reaches straight through it. §30 stopped putting a box in the middle; this was
+putting a stylesheet there instead.
+
+Two consequences, the same fault from either side. Every page that never touched
+its margins lost the eight pixels the UA gives a `<body>`, so a plain page
+started hard against the corner where landside it sat inset — measured:
+`p@(0,0)` mirrored against `p@(8,8)` landside, for markup with no CSS at all —
+and every measurement the server took of that page described a layout the reader
+was not looking at. And the page's own root was painted white, which is invisible
+while the margin is zero and becomes a white frame around a dark page the moment
+it is not.
+
+`:root` and `:root > body` can only be the frame's own two. What the page's html
+and body should look like is a question for the page and for the UA, and both of
+them know the answer: with the chrome scoped, the same markup mirrors at
+`p@(8,8)` with the page's root transparent, which is where the canvas rule then
+puts the landside colour.
+
+`TestPWALeavesThePagesOwnMarginsAlone` drives the real client at the real page
+and asserts all three: the mirrored body carries the UA's 8px, the paragraph
+starts where the landside one did, and the page's own root is nobody else's to
+paint.
+
+One thing came out of the plumbing rather than the diagnosis. Unwrapping a block
+means pushing its rules where the wrapper used to go, and the group walker marks
+what it emits as sent — which for a wrapper is the *contents*, so that one rule
+inside starting to match does not resend the whole block ([§35](#35-the-used-css-filter-was-asking-the-document-about-every-rule-forever)).
+With no wrapper the contents *are* what is emitted, so marking them first made
+the caller drop every one of them as already sent, and the three unwrapped rules
+in the fixture arrived as nothing at all. An unwrapped rule is deduped by
+whoever receives it, exactly like a rule that was never in a group.
+
+### 46. The other question the plane side answers wrong
+
+`:target` names the element the document's own URL points at. A reference work
+says which of two hundred footnotes you asked for by styling exactly that, and
+so does a source viewer highlighting the line a permalink names — which is what
+the URL in [§45](#45-half-a-theme-is-not-a-theme)'s capture was:
+`…/UIKitUtils.m#L299-L328`.
+
+The mirror is a frame with no fragment in its address and never gets one. The
+client jumps to a fragment by *scrolling* — that is `jumpToFragment`, and it is
+the whole reason an in-page link on this link costs nothing — so `location.hash`
+inside the frame stays empty for the life of the tab. `:target` therefore
+matched nothing plane-side, and the pair failed together: no highlight on the
+note the reader came for, and the `:not(:target)` styling worn by every note
+including that one.
+
+This is [§45](#45-half-a-theme-is-not-a-theme)'s shape with a different subject,
+and it is `:defined`'s shape exactly, so it gets `:defined`'s answer. The agent
+marks the element landside (`data-sky-target`), and `rewriteLandsideState` —
+which was `rewriteDefined`, and is renamed because the name had stopped being
+true — re-points the selector at the mark. Specificity is unchanged: an
+attribute selector and a pseudo-class both count the same.
+
+The mark then has to keep up, and it moves for two reasons that have nothing to
+do with each other.
+
+**Landside, the URL changes.** A fragment changing reaches no mutation observer,
+so it is watched two ways: `hashchange` for promptness, and the sweep, which is
+what covers a `pushState` that `hashchange` never fires for.
+
+**Plane-side, the reader follows a link.** `jumpToFragment` handles an in-page
+link without telling anybody, which is the point of it — so the landside URL
+does not change, the landside mark does not move, and every link the reader
+follows inside the page would appear to do nothing but scroll. The client moves
+the mark with the jump that moved the reader. That leaves the two sides
+disagreeing about which element is the target until the next snapshot, which is
+the same bargain the adopted scroll position already makes and for the same
+reason: what the reader did is the more recent fact.
+
+There is one place the mark cannot be in the snapshot, and it is worth writing
+down because it looked like a flaky test for half an hour. **`:target` is not
+settled at `DOMContentLoaded`, which is when the snapshot is taken.** Chromium
+scrolls to the indicated part of a document once it has *loaded* and sets
+`:target` at that moment — measured on the fixture, every run:
+
+```
+at-script-start:    null      readyState=loading      hash=#note-2
+at-DOMContentLoaded: null     readyState=interactive  hash=#note-2
+at-load:            note-2    readyState=complete     hash=#note-2
+```
+
+So a deep link's snapshot reads null however deep the link was, and the mark
+arrives as the attribute op the load handler queues one batch later. Delaying
+the snapshot to make it arrive together would cost every page the load event to
+save one attribute on some of them. The test waits for the mark rather than
+assuming it rode with the document, and says why.
+
+### 47. Three gaps, closed
+
+[§45](#45-half-a-theme-is-not-a-theme) and [§46](#46-the-other-question-the-plane-side-answers-wrong)
+each left something written down rather than built. All three were the same
+shape of admission — *this is where the answer stops being complete* — and all
+three turned out to be a day's work rather than a project.
+
+**A media query inside a block that crosses as text.** Almost everything is
+walked: `collectRules` goes into a `@media` and asks this browser about its
+condition. Two things are not, and cannot be — a `@scope` body, whose rules are
+written against a root the document cannot be asked about, and a grouping
+at-rule this build has no name for, which ships whole because guessing at its
+prelude is worse than keeping it. Both hand over `cssText`, so a
+`prefers-color-scheme` query inside one reached the reader with its question
+intact: §45's fault, in the two places §45's fix could not see.
+
+The text is now scanned for them (`resolveMediaInText`). It is a small parser
+and deliberately a nervous one: it steps over strings and comments for the
+reason everything here does — `content: "@media print"` is text a page means to
+display — and anything it cannot read is left exactly as written, which costs a
+wrapper and never a rule. The condition itself goes to the same
+`resolveMediaList` a walked block's does, so the two paths cannot drift.
+
+**The canvas as a background rather than a colour.** §45 sent the landside
+canvas *colour*, which is what a light/dark disagreement turns on and is most of
+the real cases. It is not all of them: a page whose ground is a gradient or a
+tiled texture had that flattened to the mirror's own white. The whole set now
+travels — image, position, size, repeat, attachment, origin, clip — taken from
+whichever element the propagation itself takes it from, and sent as a set
+because a `background-image` landing on top of the mirror's plain
+`background: #fff` would otherwise be sized and repeated by *that* rule's
+defaults. The url() inside it is left absolute, so the server rewrites it into
+an image key through `rewriteCSSImages` exactly as it does for any other
+background on the page: the picture crosses the link the same way and at the
+same cost. A page with only a colour still sends one declaration.
+
+**The reader's say in the answer.** Settling `prefers-color-scheme` landside is
+what makes a themed page arrive whole, and it is also what leaves the reader
+with whatever the landside browser happens to be. The say could not be a
+plane-side toggle — that a mirror cannot repaint itself is §45's whole finding —
+so it is a preference that travels *to* the server: `Viewport.scheme`, riding
+with the width and the pixel ratio because it is the same kind of fact about the
+reader's window, and applied at the same place (`Tab.setColorScheme`, via
+`Emulation.setEmulatedMedia`). The question is still answered once, by the
+browser that paints the page. The reader now gets to tell that browser what to
+answer.
+
+Two details are worth the words. The client's default is not "leave it blank" —
+it sends whichever scheme *this device* is set to, so the landside browser is
+put in the reader's own scheme and paints the page there. That is the one
+arrangement where the reader gets the theme they prefer *and* the two sides
+agree about it, because the server rendered the theme it sent. And changing it
+costs a document per open tab: a stylesheet is a delta the client only appends
+to, so rules written under the old answer cannot be taken back a rule at a time
+and the tab is re-snapshotted. That is why it is a preference rather than a
+switch, why the menu entry carries `resends open pages` as its hint, and why the
+client reads it from the store *before* the first Hello — a scheme that arrived
+after a tab was built would cost that tab a page to apply.
+
+`TestTheReaderCanAskForTheOtherColorScheme` drives the whole loop: a light
+bundle arrives, the reader asks for dark, and what comes back has the dark rules
+from all three routes §45 found — the `@media` block, the `<style media>` and
+the `<link media>` — with the light ones gone and `color-scheme` pinned the
+other way.

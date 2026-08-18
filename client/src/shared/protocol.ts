@@ -230,6 +230,15 @@ export interface Viewport {
   h: number;
   dpr: number;
   mobile: boolean;
+  /**
+   * The colour scheme to render pages in: 'light', 'dark', or absent for
+   * whatever the landside browser is. It rides with the viewport because it is
+   * the same kind of fact — something about the reader's window that the
+   * landside tab is put into — and because the mirror cannot honour it on this
+   * side: the palette is settled before the stylesheet is written, along with
+   * every image the server transcoded from that render.
+   */
+  scheme?: string;
 }
 
 export interface ImageMeta {
@@ -359,7 +368,7 @@ export const F = {
   },
   tabRef: { tab: 1, url: 2, title: 3, seq: 4, active: 5, loading: 6 },
   tabAck: { tab: 1, seq: 2, hash: 3, epoch: 4 },
-  viewport: { w: 1, h: 2, dpr: 3, mobile: 4 },
+  viewport: { w: 1, h: 2, dpr: 3, mobile: 4, scheme: 5 },
   resync: { tab: 1, haveTo: 2, reason: 3 },
   navigate: { url: 1, action: 2, ref: 3, background: 4 },
   tabState: {

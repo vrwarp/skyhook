@@ -595,6 +595,12 @@ func (c *Client) Key(tab uint32, node int64, key string) error {
 }
 
 // Scroll reports viewport telemetry.
+// SetViewport tells the server the window has changed — its size, or the
+// colour scheme the reader wants the pages rendered in.
+func (c *Client) SetViewport(vp protocol.Viewport) error {
+	return c.send(protocol.ChCtrl, protocol.TypeViewport, 0, vp)
+}
+
 func (c *Client) Scroll(tab uint32, x, y, h, docH int) error {
 	return c.send(protocol.ChTelemetry, protocol.TypeScroll, tab, protocol.ScrollEvent{
 		Tab: tab, X: x, Y: y, H: h, DocH: docH,

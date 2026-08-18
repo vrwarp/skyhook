@@ -386,6 +386,7 @@ export function viewportBody(v: Viewport): Map<number, unknown> {
   m.set(F.viewport.h, safeInt(v.h));
   m.set(F.viewport.dpr, v.dpr);
   if (v.mobile) m.set(F.viewport.mobile, true);
+  if (v.scheme) m.set(F.viewport.scheme, v.scheme);
   return m;
 }
 

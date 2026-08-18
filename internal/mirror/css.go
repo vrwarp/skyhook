@@ -254,7 +254,7 @@ func dropMalformed(rules []string) []string {
 func minifyCSS(rules []string) []string {
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {
-		r = rewriteDefined(minifyRule(r))
+		r = rewriteLandsideState(minifyRule(r))
 		if r == "" || strings.HasSuffix(r, "{}") {
 			continue
 		}
@@ -263,16 +263,23 @@ func minifyCSS(rules []string) []string {
 	return out
 }
 
-// Selector text and the attribute that stands in for the landside answer.
+// Selector text and the attributes that stand in for the landside answers.
 const (
 	definedNot    = ":not(:defined)"
 	definedPseudo = ":defined"
 	undefinedAttr = "[data-sky-undefined]"
 	definedAttr   = ":not([data-sky-undefined])"
+	targetPseudo  = ":target"
+	targetAttr    = "[data-sky-target]"
 )
 
 /*
-rewriteDefined re-points `:defined` at what the mirror actually knows.
+rewriteLandsideState re-points the pseudo-classes whose answer is a fact about
+the landside document at what the mirror was told about it.
+
+Both of them are questions the plane side will happily answer and answer wrong,
+because plane-side they are not live questions at all — they are settled, and
+settled the same way for every page.
 
 `:defined` asks whether a custom element's definition has been registered and
 run. Landside that is a live question and the answer changes as bundles load;
@@ -286,11 +293,20 @@ upgraded. The styling that dresses the upgraded component, gated on `:defined`,
 matches nothing at all. Reddit uses both, which is how one mirrored page came
 to show four dropdown menus open at once over a collapsed search bar.
 
-The agent marks the elements that had not upgraded landside (see
-serializeAttrs), and these rules ask for that mark instead. Specificity is
-unchanged: an attribute selector and a pseudo-class both count the same.
+`:target` asks whether an element is the one the document's own URL points at.
+Landside that is the footnote, the reference, the heading or the line of source
+the reader followed a link to, and a site says so by highlighting it. Plane-side
+the mirror is an iframe with no fragment in its address and never gets one — the
+client jumps to a fragment by scrolling rather than by navigating — so the rule
+matches nothing, on first load and afterwards. What the reader loses is the one
+thing that says which of two hundred footnotes they asked for.
+
+The agent marks both landside — the elements that had not upgraded, and the one
+the URL names (see serializeAttrs and syncTarget) — and these rules ask for the
+mark instead. Specificity is unchanged: an attribute selector and a pseudo-class
+both count the same.
 */
-func rewriteDefined(rule string) string {
+func rewriteLandsideState(rule string) string {
 	if !strings.Contains(rule, ":") {
 		return rule
 	}
@@ -320,6 +336,13 @@ func rewriteDefined(rule string) string {
 		case matchFold(rule, i, definedPseudo) && !isSelectorIdent(rule, i+len(definedPseudo)):
 			b.WriteString(definedAttr)
 			i += len(definedPseudo) - 1
+			changed = true
+			continue
+		case matchFold(rule, i, targetPseudo) && !isSelectorIdent(rule, i+len(targetPseudo)):
+			// The guard is what keeps `:target-within` and `:target-current`
+			// out of it: they are other questions with other answers.
+			b.WriteString(targetAttr)
+			i += len(targetPseudo) - 1
 			changed = true
 			continue
 		}

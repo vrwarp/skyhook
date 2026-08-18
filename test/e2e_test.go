@@ -389,6 +389,60 @@ const pseudoCSSPage = `<!DOCTYPE html><html><head><title>Pseudo</title>
 </body></html>`
 
 /*
+colorSchemePage is a page that is two pages, and only one of them was rendered.
+
+`prefers-color-scheme` is the one media feature whose answer decides what the
+page *is* rather than how the reader would like to be shown it, and it is
+answered by two different browsers: the landside one that painted the page, and
+the reader's, which did not. A site with an automatic theme hangs its whole
+palette off it. Shipped as written, the query is asked again plane-side and a
+reader on a dark phone gets the dark palette over images, canvases and mirror
+chrome that were all made in the light one.
+
+Every rule below is paired with its opposite so that the bundle says which
+browser answered: the light values are this browser's, the 100-series values are
+the reader's and must never cross. The last three are the control — a viewport
+query and two reader preferences, none of which this side may decide.
+*/
+const colorSchemePage = `<!DOCTYPE html><html><head><title>Color scheme</title>
+<style>
+  .themed { color: rgb(1, 2, 3) }
+  @media (prefers-color-scheme: light) { .themed { background-color: rgb(4, 5, 6) } }
+  @media (prefers-color-scheme: dark) { .themed { background-color: rgb(104, 105, 106) } }
+  @media screen and (prefers-color-scheme: light) { .themed { border-top-color: rgb(7, 8, 9) } }
+  @media screen and (prefers-color-scheme: dark) { .themed { border-top-color: rgb(107, 108, 109) } }
+  @media (min-width: 1px) and (prefers-color-scheme: light) { .themed { outline-color: rgb(10, 11, 12) } }
+  @media (min-width: 1px) and (prefers-color-scheme: dark) { .themed { outline-color: rgb(110, 111, 112) } }
+  @media not all and (prefers-color-scheme: dark) { .themed { column-rule-color: rgb(13, 14, 15) } }
+  @media not all and (prefers-color-scheme: light) { .themed { column-rule-color: rgb(113, 114, 115) } }
+  @media (prefers-color-scheme: light), (min-width: 100000px) { .themed { caret-color: rgb(16, 17, 18) } }
+  @media (min-width: 100000px) { .too-wide { color: rgb(19, 20, 21) } }
+  @media (hover: hover) { .themed { text-decoration-color: rgb(22, 23, 24) } }
+  @media (prefers-reduced-motion: reduce) { .themed { letter-spacing: 25px } }
+  :root { color-scheme: light dark }
+  .scheme-only { color-scheme: only light dark }
+  .scheme-chosen { color-scheme: dark }
+  @scope (.themed) {
+    @media (prefers-color-scheme: light) { :scope { accent-color: rgb(36, 37, 38) } }
+    @media (prefers-color-scheme: dark) { :scope { accent-color: rgb(136, 137, 138) } }
+    @media (min-width: 1px) { :scope { list-style-position: inside } }
+  }
+</style>
+<style media="(prefers-color-scheme: light)">.themed { border-left-color: rgb(26, 27, 28) }</style>
+<style media="(prefers-color-scheme: dark)">.themed { border-right-color: rgb(126, 127, 128) }</style>
+<style media="print">.themed { border-bottom-color: rgb(29, 30, 31) }</style>
+<link rel="stylesheet" media="(prefers-color-scheme: light)" href="/color-scheme-light.css">
+<link rel="stylesheet" media="(prefers-color-scheme: dark)" href="/color-scheme-dark.css">
+</head>
+<body>
+  <p class="themed">the themed page</p>
+  <p class="too-wide">and a rule for a window nobody has</p>
+  <p class="scheme-only">a scheme that refuses the browser's own darkening</p>
+  <p class="scheme-chosen">a page that did choose</p>
+  <p class="scheme-inline" style="color-scheme: light dark">and one that chose in an attribute</p>
+</body></html>`
+
+/*
 themedComponentPage is a component themed from outside itself.
 
 Custom properties are the one thing that crosses a shadow boundary, and a
@@ -1141,6 +1195,70 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	mux.HandleFunc("/themed-component", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, themedComponentPage)
+	})
+	// A page whose palette is decided by a media feature, and a set of rules
+	// that says which browser decided it.
+	mux.HandleFunc("/color-scheme", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, colorSchemePage)
+	})
+	// A page that says which of its footnotes the reader asked for, the way a
+	// reference work does: with :target and nothing else.
+	mux.HandleFunc("/targeted", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Targeted</title>
+			<style>
+			  .note { color: rgb(1, 2, 3) }
+			  .note:target { background-color: rgb(4, 5, 6) }
+			  .note:not(:target) { border-left-color: rgb(7, 8, 9) }
+			</style></head>
+			<body>
+			  <p>the targeted page</p>
+			  <a href="#note-2">to the second note</a>
+			  <p class="note" id="note-1">the first note</p>
+			  <p class="note" id="note-2">the second note</p>
+			</body></html>`)
+	})
+	// A surface that is not a colour: the gradient-and-tile case the canvas
+	// rule used to flatten to the mirror's own white.
+	mux.HandleFunc("/tiled-canvas", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Tiled</title>
+			<style>body {
+			  background-image: url(/tile.png);
+			  background-repeat: repeat-x;
+			  background-position: 4px 6px;
+			  background-size: 12px 14px;
+			  background-color: rgb(21, 22, 23);
+			  color: rgb(240, 246, 252);
+			}</style></head>
+			<body><p>a page on a tiled ground</p></body></html>`)
+	})
+	// A page that never touched its margins, which is most of the plain web.
+	// Landside its body has the eight pixels the UA gives one; the question is
+	// whether the mirror still has them.
+	mux.HandleFunc("/bare-margins", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Bare</title></head>
+			<body><p id="bare">a page that never touched its margins</p></body></html>`)
+	})
+	// A page that paints its background where almost every page paints it: on
+	// the body, which is not the element that paints the surface behind it.
+	mux.HandleFunc("/dark-canvas", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Dark canvas</title>
+			<style>body { background-color: rgb(13, 17, 23); color: rgb(240, 246, 252) }</style>
+			</head><body><p>a short page on a dark ground</p></body></html>`)
+	})
+	// The same question asked by the tag that owns a sheet rather than by a
+	// block inside one.
+	mux.HandleFunc("/color-scheme-light.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w, `.themed { text-emphasis-color: rgb(32, 33, 34) }`)
+	})
+	mux.HandleFunc("/color-scheme-dark.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w, `.themed { text-emphasis-color: rgb(132, 133, 134) }`)
 	})
 	// A property whose only reader is a rule that has not matched anything yet.
 	mux.HandleFunc("/late-theme", func(w http.ResponseWriter, _ *http.Request) {

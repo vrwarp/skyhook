@@ -137,6 +137,11 @@ func TestClientControlFramesDecode(t *testing.T) {
 	if vp.W != 1280 || vp.H != 800 {
 		t.Fatalf("viewport = %+v", vp)
 	}
+	// The scheme rides with the window because it is the same kind of fact: the
+	// landside tab is put into it, and the page is painted there. See §45.
+	if vp.Scheme != "dark" {
+		t.Fatalf("viewport scheme = %q, want %q", vp.Scheme, "dark")
+	}
 
 	var want protocol.ImageWant
 	if err := decodeClientFrame(t, frames, "imageWant").DecodeBody(&want); err != nil {

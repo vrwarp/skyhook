@@ -21,7 +21,23 @@ import { Patcher } from './patcher.js';
 
 /** Base styles for a mirrored document, injected into each frame. */
 const MIRROR_CSS = `
-html, body { margin: 0; padding: 0; background: #fff; color: #111; }
+/* The mirror's own container, and nothing else.
+   This rule used to say "html, body", which in this document names four
+   elements rather than two: the frame's own root and body, and the page's,
+   which arrive as ordinary elements inside them (see IMPLEMENTATION.md #30 —
+   the mirror deliberately puts nothing between its body and the page's root,
+   and this was putting a stylesheet there instead of a box).
+   It cost every page that never touched its margins the eight pixels the UA
+   gives a body: mirrored, such a page started hard against the corner while
+   landside it sat inset, which is a difference in every measurement taken of
+   it. And it painted the page's own root white, so a page whose ground is dark
+   got a white frame in the margin the moment that margin came back.
+   ":root" is the frame's root and can be nothing else, and ":root > body" is
+   the frame's body for the same reason. What the page's own html and body
+   should look like is a question for the page and the UA, both of which know
+   the answer. */
+:root { margin: 0; padding: 0; background: #fff; color: #111; }
+:root > body { margin: 0; padding: 0; }
 .skyhook-ghost { opacity: .55; font-style: italic; }
 img { background-repeat: no-repeat; background-size: cover; }
 /* An iframe's inlined document, rendered into the box that stands in for it.
@@ -1028,6 +1044,17 @@ export class MirrorHost {
     // inside a scroller of its own, and every ancestor of it has to move for the
     // reader to end up looking at the thing they asked for.
     target.scrollIntoView({ block: 'start' });
+    // `:target` crossed the link as a mark rather than as a pseudo-class,
+    // because this frame has no fragment in its address to answer one with
+    // (rewriteLandsideState, css.go). This jump is the event that would have
+    // moved it landside, so it moves here: without this the page's own
+    // highlight goes on naming whichever note the reader arrived by, and every
+    // link they follow inside the page appears to do nothing but scroll.
+    const marked = doc.querySelector('[data-sky-target]');
+    if (marked !== target) {
+      marked?.removeAttribute('data-sky-target');
+      target.setAttribute('data-sky-target', '');
+    }
     // Where the reader asked to be, which is not where landside is sitting.
     // Without this the next scroll the server reports would pull them off it.
     this.adoptedDoc = { x: win.scrollX, y: win.scrollY };

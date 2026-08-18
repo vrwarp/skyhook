@@ -120,6 +120,10 @@
   var SENSITIVE_ATTRS = { value: 1, 'data-sky-value': 1 };
   // Marks a custom element that had not upgraded landside. See serializeAttrs.
   var UNDEFINED_ATTR = 'data-sky-undefined';
+  // The element the landside URL points at, which plane-side is nothing at all:
+  // the mirror is a frame with no fragment in its address, and the client jumps
+  // to one by scrolling rather than by navigating. See rewriteLandsideState.
+  var TARGET_ATTR = 'data-sky-target';
   // Names the origin of a frame whose document could not be read. See
   // watchBox: the client draws the box as an empty panel that says so, because
   // an unexplained hole is the one thing worse than missing content.
@@ -173,6 +177,7 @@
   var lastText = new Map();     // id -> last text we reported
   var lastScroll = new Map();
   var awaitingUpgrade = new Set(); // ids of custom elements not yet defined
+  var markedTarget = null;         // the element currently wearing TARGET_ATTR
   var sweepTimer = null;
   var sweepEvery = SWEEP_MS;
   // Controls whose live properties the mirror carries: element -> the value,
@@ -371,6 +376,10 @@
           value = shot.text;
           for (var s = 0; s < shot.images.length; s++) pendingImages.push(shot.images[s]);
         }
+        // A style attribute travels with the DOM rather than with the sheet,
+        // so it needs the same answer the sheet's rules get. See
+        // pinColorSchemes.
+        value = pinColorSchemes(value);
       }
       pairs.push(intern(name), intern(value));
     }
@@ -400,6 +409,10 @@
     // match nothing. So the landside answer is recorded here, and the used-CSS
     // rules are rewritten against it (see rewriteDefined in css.go).
     if (isCustom(el) && !isDefined(el)) pairs.push(intern(UNDEFINED_ATTR), intern(''));
+    // And which element the document's own URL names, for the same reason: a
+    // page that highlights the footnote the reader followed a link to is
+    // answering a question the mirror's address cannot. See syncTarget.
+    if (el === markedTarget) pairs.push(intern(TARGET_ATTR), intern(''));
     flags |= flagsOf(el);
     if (tag === 'IFRAME') {
       // The client cannot materialise an iframe — it would be a browsing
@@ -837,6 +850,7 @@
       var changed = roots;
       if (syncLive()) changed = true;
       if (syncDocInfo()) changed = true;
+      if (syncTarget()) changed = true;
       if (changed) scheduleFlush(false);
       // A root that arrived — by upgrade or by hand — brings its own sheet.
       if (roots) scheduleCSS();
@@ -886,6 +900,45 @@
       }
     }
     return found;
+  }
+
+  // readTarget is whichever element the document's own URL points at, by the
+  // browser's own reckoning rather than by parsing the fragment: an id, a named
+  // anchor, `#top`, and percent-encoding, all settled by the one that knows.
+  function readTarget() {
+    try { return document.querySelector(':target'); } catch (e) { return null; }
+  }
+
+  /*
+   * syncTarget moves the mark when the landside URL starts pointing somewhere
+   * else.
+   *
+   * A fragment changes for two reasons and neither reaches a mutation observer:
+   * the reader follows an in-page link, and the page pushes a new address as
+   * they scroll. `hashchange` catches the first promptly; the sweep catches
+   * both, which is what covers a `pushState` that a `hashchange` never fires
+   * for.
+   *
+   * The mark moves even where the elements are not mirrored, so that a target
+   * that arrives later is marked by the walk that serialises it rather than
+   * left behind by a sync that thought it had already done the work.
+   */
+  function syncTarget() {
+    var now = readTarget();
+    if (now === markedTarget) return false;
+    var changed = false;
+    var was = markedTarget ? idOf.get(markedTarget) : undefined;
+    markedTarget = now;
+    if (was !== undefined) {
+      pendingOps.push([3, was, intern(TARGET_ATTR), -1]);
+      changed = true;
+    }
+    var id = now ? idOf.get(now) : undefined;
+    if (id !== undefined) {
+      pendingOps.push([3, id, intern(TARGET_ATTR), intern('')]);
+      changed = true;
+    }
+    return changed;
   }
 
   // checkUpgrades re-reads every watched element that has since upgraded, and
@@ -1239,6 +1292,495 @@
     }
   }
 
+  // ------------------------------------------------------------ media queries
+
+  /*
+   * A media query asks about the page's box, about the reader, or about the
+   * palette the page was painted in, and the three do not cross the link alike.
+   *
+   * The box is the same question on both sides by construction. The client
+   * reports its window and `Tab.SetViewport` puts the landside tab in exactly
+   * that box, device pixel ratio included, so a rule that applies at 1628px
+   * landside applies at 1628px plane-side. `width`, `height`, `orientation`
+   * and `resolution` therefore stay live, and have to: the reader can turn a
+   * phone sideways, and the mirror should reflow at the turn rather than at the
+   * next round trip.
+   *
+   * The reader stays live too, and deliberately. `prefers-reduced-motion`,
+   * `prefers-contrast`, `forced-colors`, `hover`, `pointer` — every one of them
+   * is a fact about a person, and the person is plane-side. This browser is
+   * headless with nobody at it: it answers `no-preference` and `pointer: none`
+   * because nothing was ever asked of it, and freezing that would hand a reader
+   * who did ask a page that ignores them. It is the same answer `:hover` and
+   * `:focus` already get a few hundred lines up — the reader's own state is the
+   * reader's.
+   *
+   * `prefers-color-scheme` is the one that cannot be either. It does not
+   * describe the reader so much as decide what the page *is*, and by the time
+   * the mirror is asked, the page has already been painted: the images were
+   * fetched, chosen and transcoded from the landside render, the canvases were
+   * rasterised there, the capture's landside screenshot is in that palette, and
+   * the mirror's own chrome around the document is a flat `#fff`. The
+   * stylesheet is the only part of that able to change its mind plane-side, and
+   * a stylesheet that changes its mind alone does not produce the other theme.
+   * It produces half of each.
+   *
+   * Which is exactly what a capture of GitHub showed. The document is
+   * `data-color-mode="auto"`, so its whole palette hangs off
+   * `@media (prefers-color-scheme: dark)`; this browser was light and the
+   * reader's was dark. The file tree came out with the dark theme's controls
+   * and the dark theme's near-white filenames, on the white the mirror paints
+   * behind every page — folder names invisible against the background, over a
+   * sidebar whose chrome was still light. Read as "the navigation on the left
+   * is missing its CSS", which is how it was reported. Nothing in the capture
+   * accused anything: the DOM agreed node for node, the filter reported no rule
+   * dropped, and both halves were doing exactly as they were told.
+   *
+   * So that one question is answered here, once, by the browser that actually
+   * painted the page, and what crosses is what is left of the query: one that
+   * cannot match is not sent at all, one that always matches is sent without
+   * its wrapper, and one that still turns on something plane-side keeps
+   * precisely the part that does.
+   */
+  var MEDIA_ENV_FEATURE = { 'prefers-color-scheme': 1 };
+
+  // What this browser says, one pass long — for the same reason presenceFor's
+  // index is: the answer is a fact about now, and a bundle asks for it a
+  // thousand times in a row. A landside browser whose reader changes the system
+  // theme gets the new answer on the next pass.
+  var mediaAnswers = null;
+  var mediaResolved = null;
+
+  /*
+   * mediaAnswer asks this browser one feature query, or reports null where
+   * there is nothing to ask: a document with no `matchMedia` is one whose
+   * answers stay where they were written.
+   */
+  function mediaAnswer(query) {
+    if (!mediaAnswers) mediaAnswers = new Map();
+    var got = mediaAnswers.get(query);
+    if (got !== undefined) return got;
+    var v = null;
+    try {
+      var mq = globalThis.matchMedia(query);
+      v = mq ? !!mq.matches : null;
+    } catch (e) { v = null; }
+    mediaAnswers.set(query, v);
+    return v;
+  }
+
+  /*
+   * mediaEnvFeature reports whether a `(...)` names one of the features above.
+   *
+   * The name is whichever identifier in it names a feature this knows, rather
+   * than the first identifier in it, and that is the reading that cannot go
+   * wrong in the direction that matters: an unrecognised feature costs a
+   * wrapper, a misread one costs the rules under it. A feature's name comes
+   * first in every form the syntax has — `(hover)`, `(prefers-color-scheme:
+   * dark)`, `(width > 40em)` — so a *value* that happens to spell a feature
+   * name is only ever reached after the name itself has been.
+   *
+   * The prefixes come off because a feature may arrive wearing them:
+   * `-webkit-min-device-pixel-ratio` is `device-pixel-ratio` under two.
+   */
+  function mediaEnvFeature(inner) {
+    var ids = inner.match(/[-a-zA-Z][-\w]*/g);
+    if (!ids) return '';
+    for (var i = 0; i < ids.length; i++) {
+      var name = ids[i].toLowerCase()
+        .replace(/^-(?:webkit|moz|ms|o)-/, '')
+        .replace(/^(?:min|max)-/, '');
+      if (MEDIA_ENV_FEATURE[name]) return name;
+    }
+    return '';
+  }
+
+  function mediaSpace(c) {
+    return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+  }
+
+  function mediaSkipSpace(s, i) {
+    while (i < s.length && mediaSpace(s.charAt(i))) i++;
+    return i;
+  }
+
+  // mediaKeyword returns the index just past `word` at i, or -1. The word has
+  // to end where it says it does: `and` is an operator, `android` is not.
+  function mediaKeyword(s, i, word) {
+    if (s.substr(i, word.length).toLowerCase() !== word) return -1;
+    var j = i + word.length;
+    var c = s.charAt(j);
+    if (c && (c === '-' || c === '_' || /[0-9a-zA-Z]/.test(c))) return -1;
+    return j;
+  }
+
+  // A parsed condition: a settled answer, an opaque `(...)` this side must not
+  // settle, or a combination of them.
+  function mediaConst(v) { return { k: 'const', v: v }; }
+
+  function mediaNot(a) {
+    if (a.k === 'const') return mediaConst(!a.v);
+    return { k: 'not', a: a };
+  }
+
+  // mediaCombine folds the constants out of an `and`/`or` chain: an `and` with
+  // a false in it is false whatever else it says, and a true in it carries no
+  // information at all.
+  function mediaCombine(op, list) {
+    var kept = [];
+    for (var i = 0; i < list.length; i++) {
+      var n = list[i];
+      if (n.k !== 'const') { kept.push(n); continue; }
+      if (n.v === (op === 'or')) return mediaConst(op === 'or');
+    }
+    if (!kept.length) return mediaConst(op === 'and');
+    if (kept.length === 1) return kept[0];
+    return { k: op, list: kept };
+  }
+
+  // mediaAtom reads what one pair of brackets holds: another condition, a
+  // feature this browser can answer, or something to leave exactly as written.
+  function mediaAtom(inner) {
+    var t = inner.trim();
+    if (t.charAt(0) === '(' || mediaKeyword(t, 0, 'not') >= 0) {
+      var r = parseMediaCondition(t, 0);
+      if (r && mediaSkipSpace(t, r.next) >= t.length) return r.node;
+      return { k: 'opaque', t: '(' + inner + ')' };
+    }
+    if (!mediaEnvFeature(t)) return { k: 'opaque', t: '(' + inner + ')' };
+    var v = mediaAnswer('(' + t + ')');
+    if (v === null) return { k: 'opaque', t: '(' + inner + ')' };
+    return mediaConst(v);
+  }
+
+  function parseMediaInParens(s, i) {
+    i = mediaSkipSpace(s, i);
+    if (s.charAt(i) !== '(') return null;
+    var end = skipBalanced(s, i);
+    if (end > s.length || s.charAt(end - 1) !== ')') return null;
+    return { node: mediaAtom(s.slice(i + 1, end - 1)), next: end };
+  }
+
+  // parseMediaCondition reads `not (a)`, `(a)`, `(a) and (b)`, `(a) or (b)` and
+  // anything nested inside those. A shape it cannot read returns null, and the
+  // query it came from is then shipped as written.
+  function parseMediaCondition(s, i) {
+    i = mediaSkipSpace(s, i);
+    var k = mediaKeyword(s, i, 'not');
+    if (k >= 0) {
+      var inner = parseMediaInParens(s, k);
+      if (!inner) return null;
+      return { node: mediaNot(inner.node), next: inner.next };
+    }
+    var first = parseMediaInParens(s, i);
+    if (!first) return null;
+    var list = [first.node], op = '', j = first.next;
+    for (;;) {
+      j = mediaSkipSpace(s, j);
+      var a = mediaKeyword(s, j, 'and'), o = mediaKeyword(s, j, 'or');
+      var kind = a >= 0 ? 'and' : (o >= 0 ? 'or' : '');
+      if (!kind) break;
+      // `(a) and (b) or (c)` has no meaning without brackets and is not a query
+      // this may guess at.
+      if (op && op !== kind) return null;
+      op = kind;
+      var more = parseMediaInParens(s, a >= 0 ? a : o);
+      if (!more) return null;
+      list.push(more.node);
+      j = more.next;
+    }
+    return { node: list.length === 1 ? list[0] : mediaCombine(op, list), next: j };
+  }
+
+  // mediaText writes a folded condition back out. `wrap` is for a position that
+  // needs one term: `and` and `not` bind loosely enough to need the brackets.
+  function mediaText(node, wrap) {
+    if (node.k === 'opaque') return node.t;
+    if (node.k === 'not') {
+      var n = 'not ' + mediaText(node.a, true);
+      return wrap ? '(' + n + ')' : n;
+    }
+    var parts = [];
+    for (var i = 0; i < node.list.length; i++) parts.push(mediaText(node.list[i], true));
+    var s = parts.join(node.k === 'and' ? ' and ' : ' or ');
+    return wrap ? '(' + s + ')' : s;
+  }
+
+  /*
+   * resolveMediaQuery answers one query of a list and says what is left of it:
+   * null for "cannot match here", '' for "applies always, so drop the wrapper",
+   * or the text that still has a question in it.
+   *
+   * The `not` in front of a media type negates the whole query rather than the
+   * condition — `not screen and (prefers-color-scheme: dark)` is
+   * `not (screen and dark)` — which is why the two are folded separately.
+   */
+  function resolveMediaQuery(text) {
+    var s = text.trim();
+    if (!s) return null;
+    var head = /^(?:(not|only)\s+)?([-a-zA-Z][-\w]*)(?![-\w(])/.exec(s);
+    // A bare `not (...)` is a condition, and its `not` is not a type prefix.
+    if (head && !head[1] && head[2].toLowerCase() === 'not') head = null;
+    var type = '', prefix = '', neg = false, i = 0;
+    if (head) {
+      neg = !!head[1] && head[1].toLowerCase() === 'not';
+      prefix = head[1] ? head[1] + ' ' : '';
+      type = head[2];
+      i = head[0].length;
+    }
+    var rest = mediaSkipSpace(s, i);
+    if (rest >= s.length) return s; // a media type on its own: nothing to fold
+    var at = rest;
+    if (type) {
+      at = mediaKeyword(s, rest, 'and');
+      if (at < 0) return s;
+    }
+    var parsed = parseMediaCondition(s, at);
+    if (!parsed || mediaSkipSpace(s, parsed.next) < s.length) return s;
+    var cond = parsed.node;
+    if (cond.k !== 'const') {
+      var left = mediaText(cond, false);
+      return type ? prefix + type + ' and ' + left : left;
+    }
+    if (neg) {
+      // Negated, so a condition that cannot hold makes the query match instead.
+      if (!cond.v) return '';
+      return type.toLowerCase() === 'all' ? null : 'not ' + type;
+    }
+    if (!cond.v) return null;
+    if (!type || type.toLowerCase() === 'all') return '';
+    return prefix + type;
+  }
+
+  /*
+   * resolveMediaInText answers the media queries inside a block that crosses as
+   * text rather than as rules.
+   *
+   * Almost everything is walked: collectRules goes into a `@media` and asks
+   * this browser about its condition. Two things are not, and cannot be — a
+   * `@scope` body, whose rules are written against a root the document cannot
+   * be asked about, and a grouping at-rule this build has no name for, which
+   * has to be shipped whole because guessing at its prelude is worse than
+   * keeping it. Both hand over `cssText`, and a `@media (prefers-color-scheme:
+   * dark)` inside one reached the reader with its question intact — the whole
+   * fault of §45, in the two places §45's fix could not see.
+   *
+   * So the text is scanned for them. It is a small parser and it is deliberately
+   * a nervous one: a shape it cannot read is left exactly as written, which
+   * costs a wrapper and never a rule. Strings and comments are stepped over for
+   * the reason they always are — `content: "@media print"` is text a page means
+   * to display.
+   */
+  function resolveMediaInText(text) {
+    if (!text || text.toLowerCase().indexOf('@media') < 0) return text;
+    var out = '', i = 0;
+    while (i < text.length) {
+      var c = text.charAt(i);
+      if (c === '"' || c === "'") {
+        var q = scanSelString(text, i);
+        out += text.slice(i, q);
+        i = q;
+        continue;
+      }
+      if (c === '\\' && i + 1 < text.length) {
+        out += text.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (c === '/' && text.charAt(i + 1) === '*') {
+        var end = text.indexOf('*/', i + 2);
+        if (end < 0) { out += text.slice(i); break; }
+        out += text.slice(i, end + 2);
+        i = end + 2;
+        continue;
+      }
+      if (c === '@' && matchesAtRule(text, i, 'media')) {
+        var open = findBlockStart(text, i);
+        var close = open < 0 ? -1 : matchBlockEnd(text, open);
+        if (close < 0) { out += c; i++; continue; }
+        var cond = text.slice(i + 6, open).trim();
+        var left = resolveMediaList(cond);
+        if (left !== null) {
+          // Recurse first: a block may hold another, and the inner question is
+          // this browser's whether or not the outer one survives.
+          var body = resolveMediaInText(text.slice(open + 1, close));
+          out += left ? '@media ' + left + '{' + body + '}' : body;
+        } else {
+          noteRejected('@media ' + cond);
+        }
+        i = close + 1;
+        continue;
+      }
+      out += c;
+      i++;
+    }
+    return out;
+  }
+
+  // matchesAtRule reports whether `@name` stands at i and stops there: `@media`
+  // is one at-rule and `@media-something` would be another.
+  function matchesAtRule(text, i, name) {
+    if (text.charAt(i) !== '@') return false;
+    if (text.substr(i + 1, name.length).toLowerCase() !== name) return false;
+    var c = text.charAt(i + 1 + name.length);
+    return c !== '' && c !== '-' && c !== '_' && !/[0-9a-zA-Z]/.test(c);
+  }
+
+  // findBlockStart returns the index of the `{` that opens the block an at-rule
+  // at i introduces, or -1 for one that ends at a semicolon and has no block.
+  function findBlockStart(text, i) {
+    for (var j = i; j < text.length; j++) {
+      var c = text.charAt(j);
+      if (c === '\\') { j++; continue; }
+      if (c === '"' || c === "'") { j = scanSelString(text, j) - 1; continue; }
+      if (c === '{') return j;
+      if (c === ';') return -1;
+    }
+    return -1;
+  }
+
+  // matchBlockEnd returns the index of the `}` closing the block opened at i.
+  function matchBlockEnd(text, i) {
+    var depth = 0;
+    for (var j = i; j < text.length; j++) {
+      var c = text.charAt(j);
+      if (c === '\\') { j++; continue; }
+      if (c === '"' || c === "'") { j = scanSelString(text, j) - 1; continue; }
+      if (c === '/' && text.charAt(j + 1) === '*') {
+        var end = text.indexOf('*/', j + 2);
+        if (end < 0) return -1;
+        j = end + 1;
+        continue;
+      }
+      if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) return j;
+    }
+    return -1;
+  }
+
+  /*
+   * ------------------------------------------------------------ color-scheme
+   *
+   * `color-scheme` is the other half of the same disagreement, and the half a
+   * media query cannot reach.
+   *
+   * A page that writes `color-scheme: light dark` is not choosing; it is saying
+   * it can be either and letting the browser choose, and what the browser then
+   * paints in the chosen scheme is everything the page does not paint itself:
+   * form controls, scrollbars, the canvas behind the document, the default
+   * text colour. `light-dark()` resolves against the same choice. So a mirror
+   * that ships the declaration as written hands the choice to the reader's
+   * browser — and gets a light page with dark checkboxes, dark dropdowns and a
+   * dark scrollbar, or the reverse. Nothing in the stylesheet is wrong; the
+   * page simply never chose, and the two browsers chose differently.
+   *
+   * A value that names one scheme is already an answer and is left alone.
+   * A value that names both is collapsed to the one this browser picked, which
+   * is the same answer `@media (prefers-color-scheme)` now gets, arrived at the
+   * same way and for the same reason.
+   */
+  function pinnedSchemeValue(value) {
+    var words = value.trim().split(/\s+/);
+    var light = false, dark = false, only = false;
+    for (var i = 0; i < words.length; i++) {
+      switch (words[i].toLowerCase()) {
+        case 'light': light = true; break;
+        case 'dark': dark = true; break;
+        case 'only': only = true; break;
+        case '': break;
+        default:
+          // `normal`, or a scheme named for a browser that may not be this one.
+          // Either way there is no ambiguity here this can honestly settle.
+          return '';
+      }
+    }
+    if (!light || !dark) return ''; // already an answer, or says nothing
+    var wantDark = mediaAnswer('(prefers-color-scheme: dark)');
+    if (wantDark === null) return '';
+    return (only ? 'only ' : '') + (wantDark ? 'dark' : 'light');
+  }
+
+  /*
+   * pinColorSchemes rewrites every `color-scheme` declaration in a piece of CSS
+   * — a rule, a block of them, an inline style attribute.
+   *
+   * Scanned rather than matched, for the reason replaceCSSURLs is: `content:
+   * "color-scheme: light dark"` is text a page means to display, and a pattern
+   * cannot tell it from a declaration. A declaration starts a run — at the
+   * beginning, after a `{`, or after a `;` — and that is what is looked for.
+   */
+  function pinColorSchemes(text) {
+    if (text.indexOf('color-scheme') < 0) return text;
+    var out = '', i = 0, start = true;
+    while (i < text.length) {
+      var c = text.charAt(i);
+      if (c === '"' || c === "'") {
+        var j = scanSelString(text, i);
+        out += text.slice(i, j);
+        i = j;
+        continue;
+      }
+      if (c === '\\' && i + 1 < text.length) {
+        out += text.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (start && matchesProperty(text, i, 'color-scheme')) {
+        var colon = text.indexOf(':', i);
+        var end = i;
+        while (end < text.length && text.charAt(end) !== ';' && text.charAt(end) !== '}') end++;
+        var pinned = colon >= 0 && colon < end
+          ? pinnedSchemeValue(text.slice(colon + 1, end)) : '';
+        if (pinned) {
+          out += 'color-scheme:' + pinned;
+          i = end;
+          continue;
+        }
+      }
+      // A run ends where the next one begins. Whitespace between them is not
+      // the start of anything, so the flag survives it.
+      if (c === '{' || c === ';' || c === '}') start = true;
+      else if (!mediaSpace(c)) start = false;
+      out += c;
+      i++;
+    }
+    return out;
+  }
+
+  // matchesProperty reports whether `name` stands at i as a property, which
+  // means the next thing that is not whitespace is the colon of a declaration.
+  function matchesProperty(text, i, name) {
+    if (text.substr(i, name.length).toLowerCase() !== name) return false;
+    var j = mediaSkipSpace(text, i + name.length);
+    return text.charAt(j) === ':';
+  }
+
+  /*
+   * resolveMediaList does the same for a whole comma-separated list. A list is
+   * a disjunction: one query that always matches makes the wrapper pointless,
+   * and a list with nothing left in it is a block that cannot apply here.
+   */
+  function resolveMediaList(text) {
+    var cond = (text || '').trim();
+    if (!cond || cond.toLowerCase() === 'all') return '';
+    if (!mediaResolved) mediaResolved = new Map();
+    var got = mediaResolved.get(cond);
+    if (got !== undefined) return got;
+    // Media queries are separated by the same commas selectors are, under the
+    // same rules about brackets and strings.
+    var queries = splitSelectorList(cond);
+    var out = [], all = false;
+    for (var i = 0; i < queries.length; i++) {
+      var q = resolveMediaQuery(queries[i]);
+      if (q === null) continue;
+      if (q === '') { all = true; break; }
+      out.push(q);
+    }
+    var res = all ? '' : (out.length ? out.join(',') : null);
+    mediaResolved.set(cond, res);
+    return res;
+  }
+
   /*
    * Every url() a rule carries, resolved against the sheet that wrote it.
    *
@@ -1478,15 +2020,17 @@
           case 1: // style rule
             cssSeen++;
             if (selectorMatches(doc, rule.selectorText)) {
-              out.push(absolutizeCSSURLs(rule.cssText, base));
+              out.push(pinColorSchemes(absolutizeCSSURLs(rule.cssText, base)));
             } else {
               noteRejected(rule.selectorText);
             }
             break;
           case 4: // media
+            collectMedia(doc, rule, out, depth, base, seen);
+            break;
           case 12: // supports
-            collectGroup(doc, rule, rule.type === 4 ? '@media ' + rule.conditionText
-              : '@supports ' + rule.conditionText, null, out, depth, base, seen);
+            collectGroup(doc, rule, '@supports ' + rule.conditionText,
+              null, out, depth, base, seen);
             break;
           case 7: // keyframes: small, and cheap insurance for CSS animations
             out.push(absolutizeCSSURLs(rule.cssText, base));
@@ -1517,7 +2061,7 @@
             } else if (rule.cssRules && isScopeRule(rule)) {
               collectScope(doc, rule, out, base);
             } else if (rule.cssText && rule.cssText.charAt(0) === '@') {
-              out.push(absolutizeCSSURLs(rule.cssText, base));
+              out.push(shippedWhole(rule.cssText, base));
             }
         }
       } catch (e) { /* cross-origin sheet, skip */ }
@@ -1596,8 +2140,15 @@
    * utilities` blocks are the one layer.
    */
   function collectGroup(doc, rule, prelude, placeholder, out, depth, base, seen) {
+    collectInto(doc, rule.cssRules, prelude, placeholder, out, depth + 1, base, seen);
+  }
+
+  // collectInto is the body of that, taken out so a whole sheet can be walked
+  // the same way: a `<link media>` is a wrapper around a sheet exactly as
+  // `@media` is a wrapper around a block. See collectSheet.
+  function collectInto(doc, rules, prelude, placeholder, out, depth, base, seen) {
     var inner = [];
-    collectRules(doc, rule.cssRules, inner, depth + 1, base, seen);
+    collectRules(doc, rules, inner, depth, base, seen);
     var fresh = [];
     for (var i = 0; i < inner.length; i++) {
       if (!seen || !seen.has(inner[i])) fresh.push(inner[i]);
@@ -1606,10 +2157,38 @@
       if (placeholder) out.push(placeholder);
       return;
     }
+    // No prelude left to write: the condition was one this side settled and it
+    // held, so the rules apply unconditionally and go out on their own — and
+    // are deduped by whoever receives them, exactly as a rule that was never in
+    // a group at all is. Marking them here instead would mark the very text
+    // about to be emitted, and the caller would then drop every one of them as
+    // already sent. See resolveMediaList.
+    if (!prelude) {
+      for (var k = 0; k < fresh.length; k++) out.push(fresh[k]);
+      return;
+    }
+    // The wrapper is what goes out, so the contents are what is remembered: it
+    // is one rule inside starting to match that must not resend the block.
     if (seen) {
       for (var j = 0; j < fresh.length; j++) seen.set(fresh[j], 1);
     }
     out.push(prelude + '{' + fresh.join('') + '}');
+  }
+
+  /*
+   * collectMedia walks a `@media` block under whatever is left of its condition
+   * once this browser has answered the half that is about this browser.
+   */
+  function collectMedia(doc, rule, out, depth, base, seen) {
+    var cond = '';
+    try { cond = rule.conditionText || ''; } catch (e) { cond = ''; }
+    var left = resolveMediaList(cond);
+    if (left === null) {
+      noteRejected('@media ' + cond);
+      return;
+    }
+    collectGroup(doc, rule, left ? '@media ' + left : '',
+      null, out, depth, base, seen);
   }
 
   /*
@@ -1629,7 +2208,13 @@
       noteRejected('@scope ' + start);
       return;
     }
-    out.push(absolutizeCSSURLs(rule.cssText, base));
+    out.push(shippedWhole(rule.cssText, base));
+  }
+
+  // shippedWhole is what a block that crosses as text still has to have done to
+  // it: the same three passes a walked rule gets, in the same order.
+  function shippedWhole(text, base) {
+    return resolveMediaInText(pinColorSchemes(absolutizeCSSURLs(text, base)));
   }
 
   /*
@@ -1686,7 +2271,18 @@
     var text = inner.join('');
     var media = '';
     try { media = (rule.media && rule.media.mediaText) || ''; } catch (e) { media = ''; }
-    if (media && media !== 'all') text = '@media ' + media + '{' + text + '}';
+    if (media) {
+      // The same question a `@media` block asks, asked about the import that
+      // stands in for one: a sheet imported only for a browser this is not
+      // never applies here, and one imported for the browser this is applies
+      // without saying so.
+      var left = resolveMediaList(media);
+      if (left === null) {
+        noteRejected('@import ' + (abs || href || '?') + ' ' + media);
+        return;
+      }
+      if (left) text = '@media ' + left + '{' + text + '}';
+    }
     var supports = null;
     try { supports = rule.supportsText; } catch (e) { supports = null; }
     if (supports) text = '@supports ' + supports + '{' + text + '}';
@@ -1726,8 +2322,42 @@
         }
       }
       if (!rules) continue;
-      collectRules(doc, rules, out, 0, sheetBase(doc, sheet), seen);
+      collectSheet(doc, sheet, rules, out, seen);
     }
+  }
+
+  /*
+   * collectSheet walks one sheet under the `media` its own tag carries.
+   *
+   * That attribute had been read by nobody. `document.styleSheets` lists every
+   * <link> and <style> whatever their media says, and a browser parses a sheet
+   * it is not currently applying — so a walk that goes straight to `cssRules`
+   * collects the rules of a sheet the page is not using and hands them over
+   * with nothing left to say they are conditional. The sheet stops being
+   * conditional at all.
+   *
+   * It is the oldest way to split a site's themes and still the common one:
+   *
+   *     <link rel="stylesheet" media="(prefers-color-scheme: dark)" href="dark.css">
+   *
+   * Both sheets crossed, unwrapped, one after the other, and which theme the
+   * reader got was decided by which <link> the page happened to write second.
+   * `media="print"` is the same bug with a plainer symptom — a page's print
+   * rules, applied to the screen.
+   *
+   * So the sheet's media is resolved exactly as a `@media` block's condition
+   * is, and its rules are written back inside whatever is left of it.
+   */
+  function collectSheet(doc, sheet, rules, out, seen) {
+    var media = '';
+    try { media = (sheet.media && sheet.media.mediaText) || ''; } catch (e) { media = ''; }
+    var left = resolveMediaList(media);
+    if (left === null) {
+      noteRejected('<sheet media> ' + media);
+      return;
+    }
+    collectInto(doc, rules, left ? '@media ' + left : '', null, out, 0,
+      sheetBase(doc, sheet), seen);
   }
 
   function collectUsedCSS(doc, seen) {
@@ -1811,6 +2441,172 @@
     return want;
   }
 
+  /*
+   * ------------------------------------------------- what the frame is told
+   *
+   * Two facts about the landside document that no rule in the page can carry,
+   * because both are about being a document's root — and plane-side the page's
+   * root is not one. It is an ordinary element inside the mirror's own document
+   * (see §30), and the surface behind it, and the scheme the browser paints its
+   * furniture in, belong to the frame.
+   *
+   * **The canvas.** A page's background does not paint its root box. It paints
+   * the canvas — the whole surface behind the document, however short the
+   * document is — and the value is taken from <html>, or from <body> where
+   * <html> has none. A page that paints its <html> gets the right answer
+   * plane-side by accident, because `html` is a type selector and matches the
+   * mirror's own root as well as the page's copy of one. A page that paints
+   * only its <body> — the ordinary way to write it — does not: a dark site
+   * arrives as a dark document on a white field, white below the fold, white in
+   * the margins, white wherever the document does not reach.
+   *
+   * **The colour scheme.** A browser that decides a page is light and its
+   * reader is not may repaint it: Chrome for Android's "Dark theme" inverts a
+   * page that has not said which scheme it is in, algorithmically, at paint
+   * time. Applied to a mirror it repaints half of one — the DOM half — over
+   * images the server fetched and transcoded from a light render, which is the
+   * same half-a-theme this whole section exists to stop, arriving through a
+   * door no stylesheet passes through. Measured: a mirrored light page comes
+   * out rgb(18,18,18) under it, and rgb(255,255,255) with the one declaration
+   * that turns it off. So the frame is told which scheme this document was
+   * actually painted in, and told with `only`, which is the keyword that means
+   * "and do not second-guess it".
+   *
+   * Both are sent as one rule about the mirror's own root. `:root` is the one
+   * selector that cannot be confused about which document it means: plane-side
+   * it is the frame's html element and never the page's. It is `!important`
+   * because it is not part of the page's cascade at all — it is this side
+   * reporting facts the other side cannot work out for itself, and a page rule
+   * that lands in a later delta must not overturn them. `color-scheme` is
+   * inherited rather than imposed: an element inside the page that declares its
+   * own still wins for itself, which is what a dark card on a light page needs.
+   *
+   * Only the top-level agent says anything. A frame's document paints its own
+   * box, and a frame repainting the reader's whole page would be a worse bug
+   * than the one this fixes.
+   */
+  var rootRuleSent = '';
+
+  function landsideRootRule() {
+    if (!isTop) return '';
+    var view, root;
+    try {
+      view = document.defaultView || globalThis;
+      root = document.documentElement;
+    } catch (e) { return ''; }
+    if (!root) return '';
+    var decls = [];
+    var scheme = usedColorScheme(view, root);
+    if (scheme) decls.push('color-scheme:' + scheme + ' !important');
+    canvasBackground(view, root, decls);
+    if (!decls.length) return '';
+    return ':root{' + decls.join(';') + ';}';
+  }
+
+  // The background properties that travel together. A background is a set, not
+  // a colour: sending half of one puts a tile at the wrong size or repeats a
+  // hero across the page.
+  var CANVAS_BG_PROPS = [
+    'background-image', 'background-position', 'background-size',
+    'background-repeat', 'background-attachment', 'background-origin',
+    'background-clip'
+  ];
+
+  /*
+   * canvasBackground reads what paints the landside surface behind the document
+   * and appends it to the rule the frame is given.
+   *
+   * Which element it comes from is the rule the propagation itself follows: the
+   * root's, unless the root has neither an image nor a colour, in which case
+   * the body's — and if neither has anything, nothing is said and the mirror's
+   * own ground stands.
+   *
+   * A colour on its own is sent on its own, which is the common case and one
+   * declaration. Anything with an image in it — a gradient, a tiled texture, a
+   * hero photograph — brings the whole set, because a `background-image`
+   * landing on top of the mirror's plain `background: #fff` would otherwise be
+   * sized, positioned and repeated by that rule's defaults rather than by the
+   * page's. The url() inside it is left absolute for the server to rewrite into
+   * an image key, exactly as it does for the url() in any other rule
+   * (rewriteCSSImages, css.go), so the picture crosses the link the same way
+   * and at the same cost as every other background on the page.
+   */
+  function canvasBackground(view, root, decls) {
+    var cs, src = root;
+    try {
+      cs = view.getComputedStyle(root);
+      if (isTransparentColor(cs.backgroundColor) && isNoImage(cs.backgroundImage) &&
+          document.body) {
+        src = document.body;
+        cs = view.getComputedStyle(src);
+      }
+    } catch (e) { return; }
+    var color = cs.backgroundColor;
+    var image = cs.backgroundImage;
+    if (isNoImage(image)) {
+      if (!isTransparentColor(color)) {
+        decls.push('background-color:' + color + ' !important');
+      }
+      return;
+    }
+    decls.push('background-color:' +
+      (isTransparentColor(color) ? 'transparent' : color) + ' !important');
+    for (var i = 0; i < CANVAS_BG_PROPS.length; i++) {
+      var prop = CANVAS_BG_PROPS[i];
+      var v = '';
+      try { v = cs.getPropertyValue(prop); } catch (e) { v = ''; }
+      if (v) decls.push(prop + ':' + v + ' !important');
+    }
+  }
+
+  function isNoImage(v) {
+    return !v || v === 'none';
+  }
+
+  /*
+   * usedColorScheme is which scheme this document was painted in, as a value
+   * the other side can be given.
+   *
+   * The computed value is what was *declared*, so a document that named both
+   * still has to be asked the same question the media query is asked. A
+   * document that named neither was painted light, because that is what a
+   * browser does with `normal` when nothing is forcing its hand — and this one
+   * is a headless browser with nothing forcing its hand. A document that named
+   * something else entirely says nothing: a scheme this build has no name for
+   * is not one it can claim to have painted.
+   */
+  function usedColorScheme(view, root) {
+    var declared = '';
+    try {
+      declared = String(view.getComputedStyle(root).colorScheme || '');
+    } catch (e) { return ''; }
+    var words = declared.toLowerCase().split(/\s+/);
+    var light = false, dark = false;
+    for (var i = 0; i < words.length; i++) {
+      switch (words[i]) {
+        case 'light': light = true; break;
+        case 'dark': dark = true; break;
+        case 'only': case 'normal': case '': break;
+        default: return '';
+      }
+    }
+    if (light && dark) {
+      var wantDark = mediaAnswer('(prefers-color-scheme: dark)');
+      if (wantDark === null) return '';
+      return wantDark ? 'only dark' : 'only light';
+    }
+    return dark ? 'only dark' : 'only light';
+  }
+
+  // A computed background of nothing at all. Chromium spells it one way, but
+  // the keyword is worth knowing too: a colour this cannot read is treated as
+  // absent, which leaves the mirror's own white where it was.
+  function isTransparentColor(c) {
+    if (!c) return true;
+    c = c.replace(/\s+/g, '');
+    return c === 'transparent' || c === 'rgba(0,0,0,0)';
+  }
+
   function cssDelta() {
     var docs = [document];
     // Shadow roots and same-origin iframe documents both carry their own
@@ -1823,6 +2619,10 @@
     // of the document, and the page the reader is looking at is the one that
     // just changed.
     presenceCache = new Map();
+    // And what this browser answers about itself, for the same reason and the
+    // same length of time. See mediaAnswer.
+    mediaAnswers = null;
+    mediaResolved = null;
     // Recomputed per pass, because a font arriving late is the ordinary case:
     // the icons are private-use codepoints from the first paint, but the sheet
     // that declares the family they need often lands after it.
@@ -1861,6 +2661,12 @@
         }
       }
       if (root && mine.length) scoped.push([root, mine]);
+    }
+    var rootRule = landsideRootRule();
+    if (rootRule && rootRule !== rootRuleSent) {
+      rootRuleSent = rootRule;
+      cssOrder.push(rootRule);
+      adds.push(rootRule);
     }
     return { adds: adds, scoped: scoped };
   }
@@ -2249,11 +3055,22 @@
     // handles for input replay), CSS set is rebuilt.
     strings = []; stringIndex = new Map(); pendingStrings = [];
     emittedCSS = new Map(); cssOrder = [];
+    // Which includes the one rule the agent writes rather than finds: what has
+    // been sent is a fact about a sheet that no longer exists. See
+    // landsideRootRule.
+    rootRuleSent = '';
     pendingOps = []; pendingImages = [];
     lastText = new Map();
     // The watch list is rebuilt by the walk below; its old ids may not even be
     // in the new document.
     awaitingUpgrade = new Set();
+    // Read before the walk rather than synced after it: serializeAttrs marks
+    // the element as it passes, and a mark applied afterwards would be an
+    // attribute op about a node the client is being sent in the same breath.
+    // On a first load this reads null however deep the link was — see the load
+    // handler at the foot of this file — and on every snapshot after one it is
+    // the answer.
+    markedTarget = readTarget();
     sweepEvery = SWEEP_MS;
     // Same for the frames and the controls: the walk re-measures and re-reads
     // every one of them and says so in the snapshot, so what the client had
@@ -2327,6 +3144,15 @@
     if (started) return;
     started = true;
     observeDocument(document);
+    // A fragment changing reaches no mutation observer, and the sweep is on a
+    // clock that backs off to eight seconds — which is a long time to look at
+    // an unhighlighted footnote. The sweep still covers the `pushState` this
+    // never fires for.
+    if (globalThis.addEventListener) {
+      globalThis.addEventListener('hashchange', function () {
+        if (syncTarget()) scheduleFlush(false);
+      }, { passive: true });
+    }
     snapshot();
     // Late-loading webfont/CSS work and lazily-attached shadow roots settle
     // within a second or two; a follow-up CSS pass is cheaper than a resnapshot.
@@ -2847,6 +3673,13 @@
   globalThis.addEventListener('load', function () {
     if (!adopted) return;
     scheduleCSS();
+    // `:target` is not settled at DOMContentLoaded, which is when the snapshot
+    // is taken. Chromium scrolls to the indicated part of a document once it
+    // has loaded, and sets `:target` at that moment — measured: null and
+    // readyState `interactive` at DOMContentLoaded, the element and `complete`
+    // at load, every time. So the one event that has the answer is this one,
+    // and without it a deep link's highlight waited on a sweep.
+    syncTarget();
     scheduleFlush(false);
   }, { once: true });
 })();
