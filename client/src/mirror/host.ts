@@ -255,6 +255,19 @@ const PENDING_PIXEL =
   'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
 /**
+ * One `@font-face` block, for the check that decides whether to write it.
+ *
+ * A declaration block holds no braces of its own — the sheet arrives
+ * CSSOM-serialised, so a `url()` here is a bare address or a base64 payload,
+ * and neither carries one. A face this cannot find is a face left as written,
+ * which is the same answer as before this existed.
+ */
+/** The keys a keyframe carries that describe the frame rather than the page. */
+const KEYFRAME_META = new Set(['offset', 'computedOffset', 'easing', 'composite']);
+
+const FONT_FACE_BLOCK = /@font-face\s*\{[^}]*\}/gi;
+
+/**
  * Gives an image its box before its bytes exist.
  *
  * Until the bitmap arrives the frame holds a 1x1 transparent placeholder, and
@@ -1052,6 +1065,77 @@ export class MirrorHost {
    * ordinary children — a flattened picture of a boundary that the artifact
    * formats cannot express.
    */
+  /*
+   * Pins whatever a running animation is showing at this instant.
+   *
+   * The picture is rendered by serialising the clone into an SVG and drawing
+   * that, and an SVG drawn as an image is a still: its clock never starts, so
+   * every CSS animation in it paints its first frame. A Google Chat capture
+   * came back with the message the reader had just sent in the colour its
+   * half-second send-fade *begins* at — a flat grey — while their screen had
+   * long since settled on the blue it ends at. Nothing in the bundle mentioned
+   * an animation, so the picture read as the mirror having lost the bubble's
+   * background, which is a report about the wrong half of the system.
+   *
+   * So the values the reader is actually looking at are copied onto the clone,
+   * read from the live element at the moment of the freeze, and the animation
+   * that would paint over them is stopped there. Only the properties the
+   * animation itself names, so nothing else in the cascade is overruled, and
+   * only for the elements that have one running — which on a page that is not
+   * animating is none, and costs the walk nothing.
+   */
+  private pinAnimationsInto(source: Element, clone: Element): number {
+    const view = source.ownerDocument.defaultView;
+    let running: Animation[];
+    try {
+      running = source.ownerDocument.getAnimations();
+    } catch { return 0; /* a document that will not enumerate them is one we do without */ }
+    if (!running.length || !view) return 0;
+
+    const wanted = new Map<Element, Set<string>>();
+    for (const animation of running) {
+      const effect = animation.effect as KeyframeEffect | null;
+      const target = effect?.target;
+      if (!target) continue;
+      let props = wanted.get(target);
+      if (!props) {
+        props = new Set<string>();
+        wanted.set(target, props);
+      }
+      try {
+        for (const frame of effect.getKeyframes()) {
+          for (const key of Object.keys(frame)) {
+            if (KEYFRAME_META.has(key)) continue;
+            props.add(key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`));
+          }
+        }
+      } catch { /* an effect that will not describe itself is one we do without */ }
+    }
+    if (!wanted.size) return 0;
+
+    let pinned = 0;
+    const src = [source, ...source.querySelectorAll('*')];
+    const dst = [clone, ...clone.querySelectorAll('*')];
+    for (let i = 0; i < src.length && i < dst.length; i++) {
+      const props = wanted.get(src[i]);
+      if (!props?.size) continue;
+      const now = view.getComputedStyle(src[i]);
+      const style = (dst[i] as HTMLElement).style;
+      if (!style) continue;
+      for (const prop of props) {
+        const value = now.getPropertyValue(prop);
+        if (value) style.setProperty(prop, value);
+      }
+      // And the animation itself is stopped, because pinning the value alone
+      // does not survive: an animation outranks even an inline style in the
+      // cascade, so the copy would start over from its first frame and paint
+      // straight over what was just written. A still is what this is.
+      style.setProperty('animation-name', 'none');
+      pinned += 1;
+    }
+    return pinned;
+  }
+
   private flattenRootsInto(source: Element, clone: Element): void {
     const src = [source, ...source.querySelectorAll('*')];
     const dst = [clone, ...clone.querySelectorAll('*')];
@@ -1369,6 +1453,20 @@ export class MirrorHost {
     // bytes is waiting for an element that will not be in the document when
     // they land. The server re-photographs against the new document.
     this.pendingShots.clear();
+    // A navigation drops every image the old document was showing. The bytes
+    // stay in Cache Storage, so re-minting a blob for one that comes back
+    // costs nothing over the link; holding them all until the tab closes is
+    // what an afternoon of reading would cost in memory.
+    //
+    // Before the new document is applied, not after. Applying it renders its
+    // stylesheet, and rendering a stylesheet is what puts the images it names
+    // on the asking list — so releasing afterwards threw away the requests the
+    // new page had just made, along with the record that it had made them. On
+    // a page whose CSS arrives whole in the snapshot and never changes again,
+    // nothing renders that sheet a second time and nothing ever asks: every
+    // background, every icon and every webfont it names would simply never
+    // come, with no pending list to show for it.
+    if (!resync) this.releaseBlobs();
     this.patcher.applySnapshot(snap);
 
     if (resync) {
@@ -1387,11 +1485,6 @@ export class MirrorHost {
       this.readerMoved = new WeakSet();
       this.adopted = new WeakMap();
       this.scrollDocTo(snap.scrollX, snap.scrollY);
-      // A navigation drops every image the old document was showing. The bytes
-      // stay in Cache Storage, so re-minting a blob for one that comes back
-      // costs nothing over the link; holding them all until the tab closes is
-      // what an afternoon of reading would cost in memory.
-      this.releaseBlobs();
     }
     this.requestPendingImages();
   }
@@ -1505,22 +1598,60 @@ export class MirrorHost {
    */
   private resolveCSSImages(rule: string): string {
     if (!rule.includes('skyhook://img/')) return rule;
-    return rule.replace(/skyhook:\/\/img\/([0-9a-f]+)/gi, (_m, hash: string) => {
+    const pruned = rule.replace(FONT_FACE_BLOCK, (block) => (this.faceHasItsFile(block) ? block : ''));
+    if (!pruned.includes('skyhook://img/')) return pruned;
+    return pruned.replace(/skyhook:\/\/img\/([0-9a-f]+)/gi, (_m, hash: string) => {
       const known = this.blobs.get(hash);
       if (known) return known;
-      // Not coming: the transparent pixel is the final answer, not a
-      // placeholder, and nothing should queue or ask for it again.
-      if (this.missing.has(hash)) return PENDING_PIXEL;
-      if (!this.pendingCSS.has(hash)) {
-        this.pendingCSS.add(hash);
-        this.requestImagesSoon();
-        if (!this.probed.has(hash)) {
-          this.probed.add(hash);
-          this.imageArrived(hash);
-        }
-      }
+      this.wantCSSImage(hash);
       return PENDING_PIXEL;
     });
+  }
+
+  /*
+   * Whether an `@font-face` has the file it names, and so may be written at all.
+   *
+   * Everywhere else a reference this side cannot resolve becomes the
+   * transparent pixel: an image still on its way leaves the box its own colour,
+   * and one that is never coming leaves it that way for good. An `@font-face`
+   * is the one place where that answer is worse than no answer. A face whose
+   * `src` loads is a face — and a 1x1 GIF loads — so the family gains a face
+   * that draws nothing, and font matching prefers it to the faces that work.
+   *
+   * The Google Chat capture is this exactly. Chat declares two faces for
+   * `Google Symbols`: a subset at weight 400, which arrived, and the 4.9 MB
+   * variable font at `font-weight: 100 700`, which the transcoder refuses at
+   * its 1 MB cap — "font is 4888276 bytes: source image too large". The pixel
+   * took the refused one's place, shadowed the subset for every weight it
+   * covers, and every icon drawn from the family rendered as nothing at all.
+   * The send button in the composer was empty on a page whose other icons were
+   * fine, which reads as one broken button rather than as a broken font.
+   *
+   * So the face is withheld instead. A face that does not exist is one that
+   * font matching skips, which leaves the page whichever of its faces did
+   * arrive; and the sheet is re-rendered whenever bytes land, so a font that
+   * was merely late is written on the pass after it.
+   */
+  private faceHasItsFile(block: string): boolean {
+    let ready = true;
+    for (const m of block.matchAll(/skyhook:\/\/img\/([0-9a-f]+)/gi)) {
+      if (this.blobs.has(m[1])) continue;
+      this.wantCSSImage(m[1]);
+      ready = false;
+    }
+    return ready;
+  }
+
+  /** Puts a stylesheet's image on the asking list, unless it is not coming. */
+  private wantCSSImage(hash: string): void {
+    // Not coming: nothing should queue or ask for it again.
+    if (this.missing.has(hash) || this.pendingCSS.has(hash)) return;
+    this.pendingCSS.add(hash);
+    this.requestImagesSoon();
+    if (!this.probed.has(hash)) {
+      this.probed.add(hash);
+      this.imageArrived(hash);
+    }
   }
 
   /** Re-renders the stylesheet once, however many images just landed. */
@@ -1842,8 +1973,12 @@ export class MirrorHost {
     // becomes ordinary children of the stand-in. That loses the scoping, which
     // for an artifact nobody interacts with costs nothing and is the difference
     // between a frame being in the picture and not.
+    let pinned = 0;
     try {
       const clone = doc.documentElement.cloneNode(true) as Element;
+      // Before flattening, which appends to the clone and so moves everything
+      // after it out of step with the live tree the walk pairs it against.
+      pinned = this.pinAnimationsInto(doc.documentElement, clone);
       this.flattenRootsInto(doc.documentElement, clone);
       base.doc = clone;
     } catch { /* the picture falls back to the markup, with its parse losses */ }
@@ -1899,6 +2034,12 @@ export class MirrorHost {
       imageHashes: base.images.length,
       ghosts: doc.querySelectorAll('[data-skyhook-ghost]').length,
       substituted: doc.querySelectorAll('[data-skyhook-tag]').length,
+      // Elements that were mid-animation, and whose current values were copied
+      // onto the copy the picture is drawn from. An SVG drawn as an image is a
+      // still and starts every animation over, so without this the picture
+      // shows a frame the reader never saw — and says nothing about it. See
+      // pinAnimationsInto.
+      pinnedAnimations: pinned,
     };
     return base;
   }

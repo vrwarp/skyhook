@@ -609,6 +609,86 @@ describe('MirrorHost', () => {
     expect(kinds).toEqual(['click']);
   });
 
+  /*
+   * A webfont the server cannot deliver must not leave a face behind.
+   *
+   * Everywhere else an unresolved reference becomes the transparent pixel, and
+   * for a background that is right. For an `@font-face` it is the worst answer
+   * available: a face whose src loads is a face, a 1x1 GIF loads, and font
+   * matching then prefers it to the faces that work. The Google Chat capture
+   * had two faces for `Google Symbols` — a subset that arrived and the 4.9 MB
+   * variable font the transcoder refuses at its 1 MB cap — and the pixel that
+   * replaced the second blanked every icon drawn from the family.
+   */
+  it('withholds a font face whose file is not coming, rather than pixelling it', async () => {
+    const { host } = await mount();
+    const snap = snapshot();
+    snap.css = [
+      '@font-face{font-family:"Icons";font-weight:400;src:url(skyhook://img/aaaa) format("woff2");}',
+      '@font-face{font-family:"Icons";font-weight:100 700;src:url(skyhook://img/bbbb) format("woff2");}',
+      '.hero{background-image:url(skyhook://img/cccc)}',
+    ];
+    host.applySnapshot(snap);
+    host.setImageMeta({
+      node: 0, hash: 'bbbb', w: 0, h: 0, blur: '', mime: '',
+      bytes: 0, priority: 0, alt: '', box: [], missing: true,
+    });
+
+    const css = host.frame.contentDocument!.querySelector('style[data-skyhook-css]')!.textContent!;
+    // The face that cannot be drawn is not written at all.
+    expect(css).not.toContain('100 700');
+    // A background is still pixelled: there the placeholder is the right
+    // answer, and the box keeps its own colour.
+    expect(css).toContain('.hero');
+    expect(css).toContain('data:image/gif;base64,');
+    // And no face anywhere is left pointing at one.
+    for (const face of css.match(/@font-face[^}]*\}/g) ?? []) {
+      expect(face).not.toContain('data:image/gif;base64,');
+    }
+  });
+
+  it('writes a font face on the pass after its bytes land', async () => {
+    // A font that is merely late is withheld, not pixelled, so the sheet is
+    // correct the moment the bytes arrive rather than poisoned until a resync.
+    stubCache({ [imageCacheKey('aaaa')]: new Uint8Array([1, 2, 3]) });
+    const { host } = await mount();
+    const snap = snapshot();
+    snap.css = ['@font-face{font-family:"Icons";src:url(skyhook://img/aaaa) format("woff2");}'];
+    host.applySnapshot(snap);
+    const styleOf = () =>
+      host.frame.contentDocument!.querySelector('style[data-skyhook-css]')!.textContent!;
+    expect(styleOf()).not.toContain('@font-face');
+
+    host.imageArrived('aaaa');
+    await vi.waitFor(() => expect(styleOf()).toContain('@font-face'));
+    expect(styleOf()).toContain('blob:');
+  });
+
+  /*
+   * The images a stylesheet names have to be asked for, and after a navigation
+   * they were not.
+   *
+   * Applying a snapshot renders its stylesheet, and rendering it is what puts
+   * the images it names on the asking list. `releaseBlobs` ran afterwards and
+   * cleared that list — along with the record that anything had been asked —
+   * so the requests the new page had just made were thrown away. Any later CSS
+   * delta re-rendered the sheet and quietly repaired it, which is why a page
+   * that streams its CSS never showed this; a page whose CSS arrives whole in
+   * the snapshot and never changes again has nothing to render it again, and
+   * every background, icon and webfont it names simply never came.
+   */
+  it('asks for the images a new page\'s stylesheet names', async () => {
+    const { host, ev } = await mount();
+    const snap = snapshot();
+    snap.url = 'https://example.test/somewhere-else';
+    snap.css = ['.hero{background-image:url(skyhook://img/facade)}'];
+    host.applySnapshot(snap);
+
+    await vi.waitFor(() =>
+      expect(ev.wantImages).toHaveBeenCalledWith(1, expect.arrayContaining(['facade'])));
+    expect(host.freeze().state.pendingCSSImages).toContain('facade');
+  });
+
   it('asks for images the frame references', async () => {
     const { host, ev } = await mount();
     const snap = snapshot();
