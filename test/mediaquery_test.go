@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -229,14 +230,78 @@ func TestTheMirrorPaintsTheCanvasTheLandsidePageHad(t *testing.T) {
 	deadline := time.Now().Add(budget(30 * time.Second))
 	for time.Now().Before(deadline) {
 		css = strings.Join(cl.Model(tab).CSS, "\n")
-		if strings.Contains(strings.ReplaceAll(css, " ", ""), ":root{background-color:") {
+		if strings.Contains(strings.ReplaceAll(css, " ", ""), "background-color:rgb(13,17,23)!important") {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	flat := strings.ReplaceAll(css, " ", "")
-	if !strings.Contains(flat, ":root{background-color:rgb(13,17,23)!important;}") {
+	if !strings.Contains(flat, "background-color:rgb(13,17,23)!important") {
 		t.Errorf("the mirror was left to paint its own ground behind a dark page:\n%s",
+			cssLines(css, ":root"))
+	}
+	// Said about the frame's own root, which is the only element `:root` can
+	// mean on that side, and said loudly enough that a later delta cannot
+	// quietly take it back.
+	if !strings.Contains(flat, ":root{") {
+		t.Errorf("the canvas was not addressed to the frame's own root:\n%s",
+			cssLines(css, "background-color:rgb(13, 17, 23)"))
+	}
+}
+
+/*
+A browser that decides the reader would rather have the page dark will repaint
+it, and a mirror is the one page it must not.
+
+Chrome for Android's "Dark theme" inverts a page that has not said which scheme
+it is in — algorithmically, at paint time, well below anything a stylesheet can
+see. Over a mirror it repaints the DOM half of a document whose other half — the
+images the server fetched, chose and transcoded from a light landside render,
+the canvases it rasterised there — cannot follow, which is the same half-a-theme
+this file is about, arriving through a door no rule passes through. Measured on
+a rebuilt mirror with Chromium's auto-dark override on: a light page comes out
+rgb(18,18,18) as it stands, and rgb(255,255,255) with the one declaration that
+turns it off.
+
+So the frame is told which scheme this document was painted in, and told with
+`only`, which is the keyword that means "and do not second-guess it". A page
+that never mentioned a scheme was painted light, because that is what the
+landside browser does with `normal` — it is headless, with nothing forcing its
+hand.
+*/
+func TestTheMirrorIsToldWhichSchemeThePageWasPaintedIn(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/bare-margins"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "never touched its margins", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	var css string
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) {
+		css = strings.Join(cl.Model(tab).CSS, "\n")
+		if strings.Contains(strings.ReplaceAll(css, " ", ""), "color-scheme:") {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	flat := strings.ReplaceAll(css, " ", "")
+	// A page with no stylesheet at all still gets this one rule: it is the
+	// only thing standing between the mirror and a reader's browser deciding
+	// the page would look better inverted.
+	if !strings.Contains(flat, ":root{color-scheme:onlylight!important;}") {
+		t.Errorf("nothing told the frame which scheme this page was painted in:\n%s",
 			cssLines(css, ":root"))
 	}
 }
@@ -288,4 +353,86 @@ func cssLines(css, needle string) string {
 		return "\t(nothing in the bundle mentions it)"
 	}
 	return strings.Join(out, "\n")
+}
+
+/*
+The mirror's own chrome describes the mirror, not the page inside it.
+
+The stylesheet the client injects into each mirror frame opened with
+
+	html, body { margin: 0; padding: 0; background: #fff; color: #111 }
+
+which in that document names four elements rather than two. The frame has a root
+and a body of its own, and the page's arrive as ordinary elements inside them —
+which is the arrangement §30 went to some trouble to get, so that a page's
+`height: 100%` chain reaches the frame's viewport with nothing in between. A
+type selector reaches straight through it.
+
+Two things followed, and they are the same fault seen from either side. Every
+page that never touched its margins lost the eight pixels the UA gives a body,
+so a plain page started hard against the corner where landside it sat inset, and
+every measurement the server took of that page described a layout the reader was
+not looking at. And the page's own root was painted white, so the moment the
+margin came back a dark page would have shown a white frame around itself.
+
+The chrome now says `:root` and `:root > body`, which in this document can only
+be the frame's own two. What the page's html and body should look like is a
+question for the page and for the UA, and both of them know the answer.
+*/
+func TestPWALeavesThePagesOwnMarginsAlone(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/bare-margins"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('never touched its margins')`,
+		budget(60*time.Second), "the mirrored page")
+
+	var got struct {
+		Left   int    `json:"left"`
+		Top    int    `json:"top"`
+		Margin string `json:"margin"`
+		RootBg string `json:"rootBg"`
+	}
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const p = doc.getElementById('bare');
+      const box = p.getBoundingClientRect();
+      // The page's own <html> and <body>, which are elements in here.
+      const pageBody = p.closest('body');
+      const pageRoot = pageBody.closest('html');
+      return { left: Math.round(box.left), top: Math.round(box.top),
+               margin: getComputedStyle(pageBody).marginTop,
+               rootBg: getComputedStyle(pageRoot).backgroundColor };
+    })()`, &got)
+
+	// 8px is the UA's, and it is what the landside browser gave the same markup.
+	if got.Margin != "8px" {
+		t.Errorf("the mirrored page's body has margin %s, not the 8px the UA gives one: "+
+			"the mirror's own chrome is reaching into the page", got.Margin)
+	}
+	// Horizontally that margin is the whole story, so the paragraph starts
+	// where the landside one did. Vertically it collapses with the paragraph's
+	// own margin, which is the browser's business and not this test's.
+	if got.Left != 8 {
+		t.Errorf("the mirrored paragraph starts %dpx from the edge, not the 8px "+
+			"the page's own body margin puts it at (top was %d)", got.Left, got.Top)
+	}
+	// And the page's root is the page's: a mirror that paints it has nowhere
+	// left to put the landside canvas colour without a white frame around it.
+	if got.RootBg != "rgba(0, 0, 0, 0)" {
+		t.Errorf("the mirror painted the page's own root %s; it is the page's to paint",
+			got.RootBg)
+	}
 }

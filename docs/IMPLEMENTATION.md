@@ -2129,6 +2129,16 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   page whose surface is a gradient or a tiled image still shows the mirror's
   flat ground behind the document, because carrying that means carrying a
   background shorthand and its assets rather than one resolved colour.
+- **`:target` is a landside fact the mirror does not carry.** The used-CSS
+  filter strips the pseudo-class to ask the document about the element, keeps
+  the rule and ships `:target` intact — and plane-side the mirror frame's URL
+  has no fragment, so the rule matches nothing. A page that highlights the
+  footnote, reference or line the reader followed a link to shows no highlight
+  at all. `:defined` had the same shape and was answered by marking the element
+  landside and rewriting the selector to ask for the mark
+  ([§45](#45-half-a-theme-is-not-a-theme)'s neighbour, `rewriteDefined`); the
+  same treatment would work here, with the mark kept current as the fragment
+  changes.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -3162,6 +3172,27 @@ and a page rule landing in a later delta must not overturn it. Only the
 top-level agent says anything; a frame repainting the reader's whole page would
 be a worse bug than the one it fixes.
 
+**And a browser can repaint a mirror without reading a single rule.** Chrome
+for Android's "Dark theme" inverts a page that has not said which scheme it is
+in — algorithmically, at paint time, below anything a stylesheet can see. Over a
+mirror it repaints the DOM half of a document whose other half cannot follow:
+the images were fetched, chosen and transcoded from a light landside render, and
+the canvases were rasterised there. Measured on a rebuilt mirror with Chromium's
+auto-dark override on, a mirrored light page comes out `rgb(18,18,18)`; with the
+one declaration that turns it off, `rgb(255,255,255)`.
+
+So the same rule that carries the canvas carries the scheme the document was
+painted in, written with `only` — the keyword that means "and do not
+second-guess it". A page that never mentioned a scheme was painted light,
+because that is what the landside browser does with `normal`: it is headless,
+with nothing forcing its hand. `color-scheme` is inherited rather than imposed,
+so an element inside the page that declares its own still wins for itself, which
+is what a dark card on a light page needs.
+
+The end state is a mirror that renders the same whatever the reader's browser
+prefers and whatever it would rather do about it — verified by screenshot in all
+four combinations of reader scheme and force-dark.
+
 That last one had a bug of its own, and it is the ordinary shape of this
 codebase's mistakes. The rule is only re-sent when the colour changes, and
 "already sent" was remembered across a snapshot — which throws the sheet away
@@ -3169,6 +3200,43 @@ and rebuilds it. A CSS pass that happened to run before the first snapshot
 therefore recorded the rule as sent and then the snapshot dropped it, so the
 fixture passed or failed on the order of two timers. `snapshot()` resets it with
 everything else it resets.
+
+#### The chrome was describing four elements and meant two
+
+Sending the canvas exposed the thing standing in front of it. The stylesheet the
+client injects into every mirror frame opened with
+
+```css
+html, body { margin: 0; padding: 0; background: #fff; color: #111 }
+```
+
+and in that document `html, body` names four elements, not two: the frame's own
+root and body, and the page's, which arrive as ordinary elements inside them.
+That is the arrangement [§30](#30-the-mirrors-own-wrapper-was-breaking-every-full-height-layout)
+went to some trouble to get — nothing between the frame's body and the page's
+root, so a `height: 100%` chain reaches the viewport — and a type selector
+reaches straight through it. §30 stopped putting a box in the middle; this was
+putting a stylesheet there instead.
+
+Two consequences, the same fault from either side. Every page that never touched
+its margins lost the eight pixels the UA gives a `<body>`, so a plain page
+started hard against the corner where landside it sat inset — measured:
+`p@(0,0)` mirrored against `p@(8,8)` landside, for markup with no CSS at all —
+and every measurement the server took of that page described a layout the reader
+was not looking at. And the page's own root was painted white, which is invisible
+while the margin is zero and becomes a white frame around a dark page the moment
+it is not.
+
+`:root` and `:root > body` can only be the frame's own two. What the page's html
+and body should look like is a question for the page and for the UA, and both of
+them know the answer: with the chrome scoped, the same markup mirrors at
+`p@(8,8)` with the page's root transparent, which is where the canvas rule then
+puts the landside colour.
+
+`TestPWALeavesThePagesOwnMarginsAlone` drives the real client at the real page
+and asserts all three: the mirrored body carries the UA's 8px, the paragraph
+starts where the landside one did, and the page's own root is nobody else's to
+paint.
 
 One thing came out of the plumbing rather than the diagnosis. Unwrapping a block
 means pushing its rules where the wrapper used to go, and the group walker marks

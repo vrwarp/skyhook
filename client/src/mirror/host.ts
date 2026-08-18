@@ -21,7 +21,23 @@ import { Patcher } from './patcher.js';
 
 /** Base styles for a mirrored document, injected into each frame. */
 const MIRROR_CSS = `
-html, body { margin: 0; padding: 0; background: #fff; color: #111; }
+/* The mirror's own container, and nothing else.
+   This rule used to say "html, body", which in this document names four
+   elements rather than two: the frame's own root and body, and the page's,
+   which arrive as ordinary elements inside them (see IMPLEMENTATION.md #30 —
+   the mirror deliberately puts nothing between its body and the page's root,
+   and this was putting a stylesheet there instead of a box).
+   It cost every page that never touched its margins the eight pixels the UA
+   gives a body: mirrored, such a page started hard against the corner while
+   landside it sat inset, which is a difference in every measurement taken of
+   it. And it painted the page's own root white, so a page whose ground is dark
+   got a white frame in the margin the moment that margin came back.
+   ":root" is the frame's root and can be nothing else, and ":root > body" is
+   the frame's body for the same reason. What the page's own html and body
+   should look like is a question for the page and the UA, both of which know
+   the answer. */
+:root { margin: 0; padding: 0; background: #fff; color: #111; }
+:root > body { margin: 0; padding: 0; }
 .skyhook-ghost { opacity: .55; font-style: italic; }
 img { background-repeat: no-repeat; background-size: cover; }
 /* An iframe's inlined document, rendered into the box that stands in for it.

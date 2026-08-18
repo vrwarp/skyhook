@@ -1197,6 +1197,14 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, colorSchemePage)
 	})
+	// A page that never touched its margins, which is most of the plain web.
+	// Landside its body has the eight pixels the UA gives one; the question is
+	// whether the mirror still has them.
+	mux.HandleFunc("/bare-margins", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Bare</title></head>
+			<body><p id="bare">a page that never touched its margins</p></body></html>`)
+	})
 	// A page that paints its background where almost every page paints it: on
 	// the body, which is not the element that paints the surface behind it.
 	mux.HandleFunc("/dark-canvas", func(w http.ResponseWriter, _ *http.Request) {

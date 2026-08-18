@@ -2281,51 +2281,114 @@
   }
 
   /*
-   * ---------------------------------------------------------------- the canvas
+   * ------------------------------------------------- what the frame is told
    *
-   * A page's background does not paint its root box. It paints the *canvas* —
-   * the whole surface behind the document, however short the document is — and
-   * the value is taken from <html>, or from <body> where <html> has none. That
-   * propagation is a property of being a document's root, and plane-side
-   * neither element is one: both are ordinary elements inside the mirror's own
-   * document (see §30), and the surface behind them is painted by the mirror's
-   * chrome, which is a flat white.
+   * Two facts about the landside document that no rule in the page can carry,
+   * because both are about being a document's root — and plane-side the page's
+   * root is not one. It is an ordinary element inside the mirror's own document
+   * (see §30), and the surface behind it, and the scheme the browser paints its
+   * furniture in, belong to the frame.
    *
-   * A page that paints its <html> gets the right answer by accident, because
-   * `html` is a type selector and matches the mirror's own root as well as the
-   * page's copy of one. A page that paints only its <body> — the ordinary way
-   * to write it — does not: a dark site arrives as a dark document on a white
-   * field, white below the fold, white in the margins, white wherever the
-   * document does not reach. Which is the same complaint as the theme that
-   * arrived half-applied, from a different direction.
+   * **The canvas.** A page's background does not paint its root box. It paints
+   * the canvas — the whole surface behind the document, however short the
+   * document is — and the value is taken from <html>, or from <body> where
+   * <html> has none. A page that paints its <html> gets the right answer
+   * plane-side by accident, because `html` is a type selector and matches the
+   * mirror's own root as well as the page's copy of one. A page that paints
+   * only its <body> — the ordinary way to write it — does not: a dark site
+   * arrives as a dark document on a white field, white below the fold, white in
+   * the margins, white wherever the document does not reach.
    *
-   * So the landside canvas is read for what it is and sent as a rule about the
-   * mirror's own root. `:root` is the one selector that cannot be confused
-   * about which document it means: plane-side it is the frame's html element
-   * and never the page's. It is `!important` because it is not part of the
-   * page's cascade at all — it is this side reporting a fact the other side
-   * cannot work out for itself, and a page rule that lands later must not
-   * overturn it.
+   * **The colour scheme.** A browser that decides a page is light and its
+   * reader is not may repaint it: Chrome for Android's "Dark theme" inverts a
+   * page that has not said which scheme it is in, algorithmically, at paint
+   * time. Applied to a mirror it repaints half of one — the DOM half — over
+   * images the server fetched and transcoded from a light render, which is the
+   * same half-a-theme this whole section exists to stop, arriving through a
+   * door no stylesheet passes through. Measured: a mirrored light page comes
+   * out rgb(18,18,18) under it, and rgb(255,255,255) with the one declaration
+   * that turns it off. So the frame is told which scheme this document was
+   * actually painted in, and told with `only`, which is the keyword that means
+   * "and do not second-guess it".
+   *
+   * Both are sent as one rule about the mirror's own root. `:root` is the one
+   * selector that cannot be confused about which document it means: plane-side
+   * it is the frame's html element and never the page's. It is `!important`
+   * because it is not part of the page's cascade at all — it is this side
+   * reporting facts the other side cannot work out for itself, and a page rule
+   * that lands in a later delta must not overturn them. `color-scheme` is
+   * inherited rather than imposed: an element inside the page that declares its
+   * own still wins for itself, which is what a dark card on a light page needs.
    *
    * Only the top-level agent says anything. A frame's document paints its own
    * box, and a frame repainting the reader's whole page would be a worse bug
    * than the one this fixes.
    */
-  var canvasSent = '';
+  var rootRuleSent = '';
 
-  function canvasBackgroundRule() {
+  function landsideRootRule() {
     if (!isTop) return '';
+    var view, root;
+    try {
+      view = document.defaultView || globalThis;
+      root = document.documentElement;
+    } catch (e) { return ''; }
+    if (!root) return '';
+    var decls = [];
+    var scheme = usedColorScheme(view, root);
+    if (scheme) decls.push('color-scheme:' + scheme + ' !important');
+    var bg = canvasColor(view, root);
+    if (bg) decls.push('background-color:' + bg + ' !important');
+    if (!decls.length) return '';
+    return ':root{' + decls.join(';') + ';}';
+  }
+
+  // canvasColor is what the landside surface behind the document is painted,
+  // or '' where nothing paints it and the mirror's own ground is as good.
+  function canvasColor(view, root) {
     var bg = '';
     try {
-      var view = document.defaultView || globalThis;
-      var root = document.documentElement;
-      bg = root ? view.getComputedStyle(root).backgroundColor : '';
+      bg = view.getComputedStyle(root).backgroundColor;
       if (isTransparentColor(bg) && document.body) {
         bg = view.getComputedStyle(document.body).backgroundColor;
       }
     } catch (e) { return ''; }
-    if (isTransparentColor(bg)) return '';
-    return ':root{background-color:' + bg + ' !important;}';
+    return isTransparentColor(bg) ? '' : bg;
+  }
+
+  /*
+   * usedColorScheme is which scheme this document was painted in, as a value
+   * the other side can be given.
+   *
+   * The computed value is what was *declared*, so a document that named both
+   * still has to be asked the same question the media query is asked. A
+   * document that named neither was painted light, because that is what a
+   * browser does with `normal` when nothing is forcing its hand — and this one
+   * is a headless browser with nothing forcing its hand. A document that named
+   * something else entirely says nothing: a scheme this build has no name for
+   * is not one it can claim to have painted.
+   */
+  function usedColorScheme(view, root) {
+    var declared = '';
+    try {
+      declared = String(view.getComputedStyle(root).colorScheme || '');
+    } catch (e) { return ''; }
+    var words = declared.toLowerCase().split(/\s+/);
+    var light = false, dark = false;
+    for (var i = 0; i < words.length; i++) {
+      switch (words[i]) {
+        case 'light': light = true; break;
+        case 'dark': dark = true; break;
+        case 'only': case 'normal': case '': break;
+        default: return '';
+      }
+    }
+    if (light && dark) {
+      var wantDark = mediaAnswer('(prefers-color-scheme: dark)');
+      if (wantDark === null) return '';
+      return wantDark ? 'only dark' : 'only light';
+    }
+    return dark ? 'only dark' : 'only light';
   }
 
   // A computed background of nothing at all. Chromium spells it one way, but
@@ -2392,11 +2455,11 @@
       }
       if (root && mine.length) scoped.push([root, mine]);
     }
-    var canvas = canvasBackgroundRule();
-    if (canvas && canvas !== canvasSent) {
-      canvasSent = canvas;
-      cssOrder.push(canvas);
-      adds.push(canvas);
+    var rootRule = landsideRootRule();
+    if (rootRule && rootRule !== rootRuleSent) {
+      rootRuleSent = rootRule;
+      cssOrder.push(rootRule);
+      adds.push(rootRule);
     }
     return { adds: adds, scoped: scoped };
   }
@@ -2787,8 +2850,8 @@
     emittedCSS = new Map(); cssOrder = [];
     // Which includes the one rule the agent writes rather than finds: what has
     // been sent is a fact about a sheet that no longer exists. See
-    // canvasBackgroundRule.
-    canvasSent = '';
+    // landsideRootRule.
+    rootRuleSent = '';
     pendingOps = []; pendingImages = [];
     lastText = new Map();
     // The watch list is rebuilt by the walk below; its old ids may not even be
