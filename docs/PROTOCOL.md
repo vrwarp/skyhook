@@ -267,7 +267,11 @@ exactly that:
   the word `mark_chat_unread`. Everything else takes the reader's own font.
   They reach the channel the ordinary way — an `@font-face` `src` is a `url()`
   in a stylesheet like any background image — and pass through the transcoder
-  untouched, since there is no smaller version of a font to make.
+  untouched, since there is no smaller version of a font to make. A font over
+  the 1 MB cap is refused, and the client withholds the `@font-face` rather
+  than pointing it at the placeholder every other unresolved reference gets: a
+  face whose `src` loads is a face, so a placeholder would shadow whichever
+  faces of that family did arrive.
 
 ### Adapters
 

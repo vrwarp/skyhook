@@ -678,6 +678,32 @@ const animatedCanvasPage = `<!DOCTYPE html><html><head><title>Animated</title></
 </script>
 </body></html>`
 
+/*
+midAnimationPage is a page caught in the middle of something.
+
+The plane-side picture is an SVG drawn as an image, and an SVG drawn as an
+image is a still: its clock never starts, so every CSS animation in it paints
+its first frame. The fade here runs for eight seconds from red to blue, which means
+the reader is looking at something that is not red long before a capture can be
+asked for — and a picture that comes back red is a picture of a frame nobody
+saw.
+
+The tile beside it is the other half of the same problem: a background the host
+writes onto a style attribute rather than into the sheet, which the screenshot
+used to leave as an unresolvable blob URL and paint as nothing.
+*/
+const midAnimationPage = `<!DOCTYPE html><html><head><title>Mid-animation</title>
+<style>
+  body { margin: 0; background: #fff; }
+  #fade { width: 300px; height: 200px; animation: warm 8s linear 0s 1 normal forwards; }
+  @keyframes warm { 0% { background-color: #ff0000; } 100% { background-color: #0000ff; } }
+</style></head>
+<body>
+  <h1>a page caught mid-animation</h1>
+  <div id="fade"></div>
+  <div id="tile" style="width:300px;height:120px;background-image:url(/tile.png)"></div>
+</body></html>`
+
 // draggableCanvasPage is a map in miniature: a canvas that pans with the
 // pointer and has nothing inside it to click. It reports the offset it has been
 // dragged to as text, so a test can read the gesture that arrived rather than
@@ -1152,6 +1178,10 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			<div style="height:150px;background:rgb(9,9,9)">a tall banner above the frame</div>
 			<iframe id="kid" src="/canvas" width="400" height="300" style="border:0"></iframe>
 			</body></html>`)
+	})
+	mux.HandleFunc("/mid-animation", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, midAnimationPage)
 	})
 	mux.HandleFunc("/draggable", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -3518,3 +3518,94 @@ emulated in the plane-side browser, real touch events dispatched at the glass,
 the client's own listeners deciding what the gesture was, the frame crossing the
 link, and the landside page reporting how far it was panned. Against the old
 client it reports `offset: 0,0`.
+
+### 50. A second Chat capture, and the instrument that was lying about it
+
+The reader tried [§48](#48-two-things-a-google-chat-capture-had-to-say) and
+[§49](#49-every-gesture-was-a-mouse-gesture-on-a-client-written-for-a-phone),
+and sent a second bundle: *"bunch of rendering problems on chat"*. The icons
+were fixed. Most of what the new bundle *showed* was wrong anyway — because
+three of the four things wrong with it were wrong with the picture rather than
+with the page.
+
+`hashesAgree: true` again, so the DOM was never in question. Rendering the
+bundle's own `mirror.html` and `expected.css` in a browser — the two artifacts
+the readme calls reliable — settles each difference in turn.
+
+**The message bubble had no colour.** In the picture the message the reader had
+just sent was a soft grey blob; on their screen it is a blue pill. The delivered
+CSS computes `rgb(211,227,253)` for it, which is the blue. The grey is
+`--gm3-color-surface-container`, and the rule that names it is
+`animation: 0.5s ease bgFade`, whose `0%` is that grey and whose `100%` is the
+blue. The picture is an SVG drawn as an image, and an SVG drawn as an image is a
+still: its clock never starts, so every CSS animation in it paints its first
+frame. The bundle showed the reader a frame that existed for half a second,
+minutes earlier, and said nothing about it.
+
+`pinAnimationsInto` now copies the values a running animation is showing onto
+the copy the picture is drawn from, taken from the live element at the instant
+of the freeze, and stops the animation there — pinning alone does not survive,
+because an animation outranks even an inline style in the cascade and the copy
+would paint straight over it. Only the properties the animation itself names,
+and only for elements that have one running, so a page that is not animating
+pays a `getAnimations()` call and nothing else. The count goes in the bundle as
+`pinnedAnimations`: a reader looking at a still of an animating page is owed the
+fact that it was animating.
+
+**The side panel had no icons.** Four blank strips where Calendar, Keep, Tasks
+and Contacts are. Each is a `<div>` with `style="background-image: url(blob:…)"`
+— a background the host writes onto the element rather than into the sheet, the
+way `styleAttrImages` sends it. `inlineImages` traded blob URLs for data URIs in
+every `<style>` and nowhere else, so those four resolved to nothing inside the
+SVG and painted as absence. It now reads and rewrites style attributes too.
+
+**The chat column was wider than landside.** Not a fault: `pointer` and `hover`
+are answered plane-side by the reader's own device (§35's reasoning), so the
+mirror lays the page out for a finger while the landside browser laid it out for
+the mouse it thinks it has. Reproduced exactly by re-rendering the same document
+with touch emulation on. It is the known gap §49 records — the landside browser
+is a phone with a mouse — showing up as a visible difference between the two
+halves of a bundle, and it is worth knowing before reading a capture as a bug.
+
+And then the one that was real.
+
+**The send button was empty.** Not in the picture only: in a faithful re-render
+too. The glyph is `<span class="google-symbols">send</span>`, a ligature icon
+from a family §48 taught the agent to keep — and the family has two faces. The
+subset at `font-weight: 400` arrived. The other is the whole Google Symbols
+variable font at `font-weight: 100 700`, 4,888,276 bytes, which the transcoder
+refuses at its 1 MB cap: *"font is 4888276 bytes: source image too large"*.
+Correctly refused; 4.9 MB is two and a half minutes of this link.
+
+What happened next is the bug. Everywhere else a reference the client cannot
+resolve becomes the transparent pixel — an image on its way leaves the box its
+own colour, one that is never coming leaves it that way for good — and
+`resolveCSSImages` applied that to every `url()` in the sheet, including an
+`@font-face` `src`. A face whose `src` loads is a face, and a 1×1 GIF loads. So
+the family gained a face that draws nothing, font matching preferred it to the
+subset that worked for every weight it covers, and every icon drawn from
+`Google Symbols` rendered as nothing at all. One empty button on a page whose
+other icons were fine, which reads as one broken button rather than as a broken
+font.
+
+A face whose file is not here is now withheld instead. Font matching skips a
+face that does not exist, which leaves the page whichever of its faces did
+arrive, and the sheet is re-rendered whenever bytes land, so a font that was
+merely late is written on the pass after it.
+
+**And the pass after it never came.** Writing that test found the second half.
+`applySnapshot` released the old document's blobs *after* applying the new one —
+and applying it renders its stylesheet, which is what puts the images that
+stylesheet names on the asking list. `releaseBlobs` then cleared that list, and
+the record that anything had been asked, so the requests the new page had just
+made were thrown away. Any later CSS delta re-rendered the sheet and quietly
+repaired it, which is why a page that streams its CSS — Chat does — never showed
+this. A page whose CSS arrives whole in the snapshot and never changes again has
+nothing to render it a second time: every background, every icon and every
+webfont it names simply never came, with no pending list to show for it. The
+release now happens before the document it is releasing is replaced.
+
+`TestPWACapturePicturesWhatTheReaderIsLookingAt` drives a page that is
+mid-animation and carries a background on a style attribute, and checks the
+picture for both. Against the old client the fade comes back `rgb(239,15,14)` —
+the red it starts at — and the tile comes back the page's own grey.

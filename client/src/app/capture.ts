@@ -365,12 +365,20 @@ async function inlineImages(
   doc: Document, frame: MirrorFreeze,
 ): Promise<{ missing: number; skipped: number }> {
   const styles = Array.from(doc.querySelectorAll('style'));
+  // A `url(blob:…)` the host wrote onto one element rather than into the
+  // sheet. The agent rewrites a `style="background-image:url(…)"` the same way
+  // it rewrites a stylesheet's, so these are ordinary mirrored images that
+  // happen to live on the attribute — and reading only the sheets left them
+  // out. On the Google Chat capture that was every icon in the side panel:
+  // four blank strips in the picture, and nothing anywhere to say why.
+  const styled = Array.from(doc.querySelectorAll('[style*="blob:"]')) as HTMLElement[];
   const byBlob = new Map(frame.cssImages ?? []);
   // Content first, decoration second: both draw on one byte budget, and a
   // screenshot missing its pictures is worse than one missing its icons.
   const hashes = [...frame.images];
-  for (const style of styles) {
-    for (const [, url] of matchBlobURLs(style.textContent ?? '')) {
+  for (const text of [...styles.map((s) => s.textContent ?? ''),
+    ...styled.map((el) => el.getAttribute('style') ?? '')]) {
+    for (const [, url] of matchBlobURLs(text)) {
       const hash = byBlob.get(url);
       if (hash && !hashes.includes(hash)) hashes.push(hash);
     }
@@ -425,23 +433,28 @@ async function inlineImages(
     // Background blurhashes are inline styles and survive on their own.
   }
 
-  // The stylesheet's own references. A url() left pointing at a blob resolves
-  // to nothing inside an SVG image and paints as absence, which reads in a
-  // bundle as "the mirror never had this" — so an unresolved one is counted,
-  // the same as a missing <img>.
+  // The references CSS carries rather than an element: the sheets, and the
+  // style attributes the host writes a background onto. A url() left pointing
+  // at a blob resolves to nothing inside an SVG image and paints as absence,
+  // which reads in a bundle as "the mirror never had this" — so an unresolved
+  // one is counted, the same as a missing <img>.
+  const swap = (css: string): string => css.replace(BLOB_URL_RE, (whole, url: string) => {
+    const hash = byBlob.get(url);
+    const data = hash ? urls.get(hash) : undefined;
+    if (!data) {
+      missing += 1;
+      return whole;
+    }
+    // Quoted: a data URI is full of characters url() would otherwise end on.
+    return `url("${data}")`;
+  });
   for (const style of styles) {
     const css = style.textContent ?? '';
-    if (!css.includes('blob:')) continue;
-    style.textContent = css.replace(BLOB_URL_RE, (whole, url: string) => {
-      const hash = byBlob.get(url);
-      const data = hash ? urls.get(hash) : undefined;
-      if (!data) {
-        missing += 1;
-        return whole;
-      }
-      // Quoted: a data URI is full of characters url() would otherwise end on.
-      return `url("${data}")`;
-    });
+    if (css.includes('blob:')) style.textContent = swap(css);
+  }
+  for (const el of styled) {
+    const css = el.getAttribute('style') ?? '';
+    if (css.includes('blob:')) el.setAttribute('style', swap(css));
   }
   return { missing, skipped };
 }
