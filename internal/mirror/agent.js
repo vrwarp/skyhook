@@ -1239,6 +1239,292 @@
     }
   }
 
+  // ------------------------------------------------------------ media queries
+
+  /*
+   * A media query asks about the page's box, about the reader, or about the
+   * palette the page was painted in, and the three do not cross the link alike.
+   *
+   * The box is the same question on both sides by construction. The client
+   * reports its window and `Tab.SetViewport` puts the landside tab in exactly
+   * that box, device pixel ratio included, so a rule that applies at 1628px
+   * landside applies at 1628px plane-side. `width`, `height`, `orientation`
+   * and `resolution` therefore stay live, and have to: the reader can turn a
+   * phone sideways, and the mirror should reflow at the turn rather than at the
+   * next round trip.
+   *
+   * The reader stays live too, and deliberately. `prefers-reduced-motion`,
+   * `prefers-contrast`, `forced-colors`, `hover`, `pointer` — every one of them
+   * is a fact about a person, and the person is plane-side. This browser is
+   * headless with nobody at it: it answers `no-preference` and `pointer: none`
+   * because nothing was ever asked of it, and freezing that would hand a reader
+   * who did ask a page that ignores them. It is the same answer `:hover` and
+   * `:focus` already get a few hundred lines up — the reader's own state is the
+   * reader's.
+   *
+   * `prefers-color-scheme` is the one that cannot be either. It does not
+   * describe the reader so much as decide what the page *is*, and by the time
+   * the mirror is asked, the page has already been painted: the images were
+   * fetched, chosen and transcoded from the landside render, the canvases were
+   * rasterised there, the capture's landside screenshot is in that palette, and
+   * the mirror's own chrome around the document is a flat `#fff`. The
+   * stylesheet is the only part of that able to change its mind plane-side, and
+   * a stylesheet that changes its mind alone does not produce the other theme.
+   * It produces half of each.
+   *
+   * Which is exactly what a capture of GitHub showed. The document is
+   * `data-color-mode="auto"`, so its whole palette hangs off
+   * `@media (prefers-color-scheme: dark)`; this browser was light and the
+   * reader's was dark. The file tree came out with the dark theme's controls
+   * and the dark theme's near-white filenames, on the white the mirror paints
+   * behind every page — folder names invisible against the background, over a
+   * sidebar whose chrome was still light. Read as "the navigation on the left
+   * is missing its CSS", which is how it was reported. Nothing in the capture
+   * accused anything: the DOM agreed node for node, the filter reported no rule
+   * dropped, and both halves were doing exactly as they were told.
+   *
+   * So that one question is answered here, once, by the browser that actually
+   * painted the page, and what crosses is what is left of the query: one that
+   * cannot match is not sent at all, one that always matches is sent without
+   * its wrapper, and one that still turns on something plane-side keeps
+   * precisely the part that does.
+   */
+  var MEDIA_ENV_FEATURE = { 'prefers-color-scheme': 1 };
+
+  // What this browser says, one pass long — for the same reason presenceFor's
+  // index is: the answer is a fact about now, and a bundle asks for it a
+  // thousand times in a row. A landside browser whose reader changes the system
+  // theme gets the new answer on the next pass.
+  var mediaAnswers = null;
+  var mediaResolved = null;
+
+  /*
+   * mediaAnswer asks this browser one feature query, or reports null where
+   * there is nothing to ask: a document with no `matchMedia` is one whose
+   * answers stay where they were written.
+   */
+  function mediaAnswer(query) {
+    if (!mediaAnswers) mediaAnswers = new Map();
+    var got = mediaAnswers.get(query);
+    if (got !== undefined) return got;
+    var v = null;
+    try {
+      var mq = globalThis.matchMedia(query);
+      v = mq ? !!mq.matches : null;
+    } catch (e) { v = null; }
+    mediaAnswers.set(query, v);
+    return v;
+  }
+
+  /*
+   * mediaEnvFeature reports whether a `(...)` names one of the features above.
+   *
+   * The name is whichever identifier in it names a feature this knows, rather
+   * than the first identifier in it, and that is the reading that cannot go
+   * wrong in the direction that matters: an unrecognised feature costs a
+   * wrapper, a misread one costs the rules under it. A feature's name comes
+   * first in every form the syntax has — `(hover)`, `(prefers-color-scheme:
+   * dark)`, `(width > 40em)` — so a *value* that happens to spell a feature
+   * name is only ever reached after the name itself has been.
+   *
+   * The prefixes come off because a feature may arrive wearing them:
+   * `-webkit-min-device-pixel-ratio` is `device-pixel-ratio` under two.
+   */
+  function mediaEnvFeature(inner) {
+    var ids = inner.match(/[-a-zA-Z][-\w]*/g);
+    if (!ids) return '';
+    for (var i = 0; i < ids.length; i++) {
+      var name = ids[i].toLowerCase()
+        .replace(/^-(?:webkit|moz|ms|o)-/, '')
+        .replace(/^(?:min|max)-/, '');
+      if (MEDIA_ENV_FEATURE[name]) return name;
+    }
+    return '';
+  }
+
+  function mediaSpace(c) {
+    return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+  }
+
+  function mediaSkipSpace(s, i) {
+    while (i < s.length && mediaSpace(s.charAt(i))) i++;
+    return i;
+  }
+
+  // mediaKeyword returns the index just past `word` at i, or -1. The word has
+  // to end where it says it does: `and` is an operator, `android` is not.
+  function mediaKeyword(s, i, word) {
+    if (s.substr(i, word.length).toLowerCase() !== word) return -1;
+    var j = i + word.length;
+    var c = s.charAt(j);
+    if (c && (c === '-' || c === '_' || /[0-9a-zA-Z]/.test(c))) return -1;
+    return j;
+  }
+
+  // A parsed condition: a settled answer, an opaque `(...)` this side must not
+  // settle, or a combination of them.
+  function mediaConst(v) { return { k: 'const', v: v }; }
+
+  function mediaNot(a) {
+    if (a.k === 'const') return mediaConst(!a.v);
+    return { k: 'not', a: a };
+  }
+
+  // mediaCombine folds the constants out of an `and`/`or` chain: an `and` with
+  // a false in it is false whatever else it says, and a true in it carries no
+  // information at all.
+  function mediaCombine(op, list) {
+    var kept = [];
+    for (var i = 0; i < list.length; i++) {
+      var n = list[i];
+      if (n.k !== 'const') { kept.push(n); continue; }
+      if (n.v === (op === 'or')) return mediaConst(op === 'or');
+    }
+    if (!kept.length) return mediaConst(op === 'and');
+    if (kept.length === 1) return kept[0];
+    return { k: op, list: kept };
+  }
+
+  // mediaAtom reads what one pair of brackets holds: another condition, a
+  // feature this browser can answer, or something to leave exactly as written.
+  function mediaAtom(inner) {
+    var t = inner.trim();
+    if (t.charAt(0) === '(' || mediaKeyword(t, 0, 'not') >= 0) {
+      var r = parseMediaCondition(t, 0);
+      if (r && mediaSkipSpace(t, r.next) >= t.length) return r.node;
+      return { k: 'opaque', t: '(' + inner + ')' };
+    }
+    if (!mediaEnvFeature(t)) return { k: 'opaque', t: '(' + inner + ')' };
+    var v = mediaAnswer('(' + t + ')');
+    if (v === null) return { k: 'opaque', t: '(' + inner + ')' };
+    return mediaConst(v);
+  }
+
+  function parseMediaInParens(s, i) {
+    i = mediaSkipSpace(s, i);
+    if (s.charAt(i) !== '(') return null;
+    var end = skipBalanced(s, i);
+    if (end > s.length || s.charAt(end - 1) !== ')') return null;
+    return { node: mediaAtom(s.slice(i + 1, end - 1)), next: end };
+  }
+
+  // parseMediaCondition reads `not (a)`, `(a)`, `(a) and (b)`, `(a) or (b)` and
+  // anything nested inside those. A shape it cannot read returns null, and the
+  // query it came from is then shipped as written.
+  function parseMediaCondition(s, i) {
+    i = mediaSkipSpace(s, i);
+    var k = mediaKeyword(s, i, 'not');
+    if (k >= 0) {
+      var inner = parseMediaInParens(s, k);
+      if (!inner) return null;
+      return { node: mediaNot(inner.node), next: inner.next };
+    }
+    var first = parseMediaInParens(s, i);
+    if (!first) return null;
+    var list = [first.node], op = '', j = first.next;
+    for (;;) {
+      j = mediaSkipSpace(s, j);
+      var a = mediaKeyword(s, j, 'and'), o = mediaKeyword(s, j, 'or');
+      var kind = a >= 0 ? 'and' : (o >= 0 ? 'or' : '');
+      if (!kind) break;
+      // `(a) and (b) or (c)` has no meaning without brackets and is not a query
+      // this may guess at.
+      if (op && op !== kind) return null;
+      op = kind;
+      var more = parseMediaInParens(s, a >= 0 ? a : o);
+      if (!more) return null;
+      list.push(more.node);
+      j = more.next;
+    }
+    return { node: list.length === 1 ? list[0] : mediaCombine(op, list), next: j };
+  }
+
+  // mediaText writes a folded condition back out. `wrap` is for a position that
+  // needs one term: `and` and `not` bind loosely enough to need the brackets.
+  function mediaText(node, wrap) {
+    if (node.k === 'opaque') return node.t;
+    if (node.k === 'not') {
+      var n = 'not ' + mediaText(node.a, true);
+      return wrap ? '(' + n + ')' : n;
+    }
+    var parts = [];
+    for (var i = 0; i < node.list.length; i++) parts.push(mediaText(node.list[i], true));
+    var s = parts.join(node.k === 'and' ? ' and ' : ' or ');
+    return wrap ? '(' + s + ')' : s;
+  }
+
+  /*
+   * resolveMediaQuery answers one query of a list and says what is left of it:
+   * null for "cannot match here", '' for "applies always, so drop the wrapper",
+   * or the text that still has a question in it.
+   *
+   * The `not` in front of a media type negates the whole query rather than the
+   * condition — `not screen and (prefers-color-scheme: dark)` is
+   * `not (screen and dark)` — which is why the two are folded separately.
+   */
+  function resolveMediaQuery(text) {
+    var s = text.trim();
+    if (!s) return null;
+    var head = /^(?:(not|only)\s+)?([-a-zA-Z][-\w]*)(?![-\w(])/.exec(s);
+    // A bare `not (...)` is a condition, and its `not` is not a type prefix.
+    if (head && !head[1] && head[2].toLowerCase() === 'not') head = null;
+    var type = '', prefix = '', neg = false, i = 0;
+    if (head) {
+      neg = !!head[1] && head[1].toLowerCase() === 'not';
+      prefix = head[1] ? head[1] + ' ' : '';
+      type = head[2];
+      i = head[0].length;
+    }
+    var rest = mediaSkipSpace(s, i);
+    if (rest >= s.length) return s; // a media type on its own: nothing to fold
+    var at = rest;
+    if (type) {
+      at = mediaKeyword(s, rest, 'and');
+      if (at < 0) return s;
+    }
+    var parsed = parseMediaCondition(s, at);
+    if (!parsed || mediaSkipSpace(s, parsed.next) < s.length) return s;
+    var cond = parsed.node;
+    if (cond.k !== 'const') {
+      var left = mediaText(cond, false);
+      return type ? prefix + type + ' and ' + left : left;
+    }
+    if (neg) {
+      // Negated, so a condition that cannot hold makes the query match instead.
+      if (!cond.v) return '';
+      return type.toLowerCase() === 'all' ? null : 'not ' + type;
+    }
+    if (!cond.v) return null;
+    if (!type || type.toLowerCase() === 'all') return '';
+    return prefix + type;
+  }
+
+  /*
+   * resolveMediaList does the same for a whole comma-separated list. A list is
+   * a disjunction: one query that always matches makes the wrapper pointless,
+   * and a list with nothing left in it is a block that cannot apply here.
+   */
+  function resolveMediaList(text) {
+    var cond = (text || '').trim();
+    if (!cond || cond.toLowerCase() === 'all') return '';
+    if (!mediaResolved) mediaResolved = new Map();
+    var got = mediaResolved.get(cond);
+    if (got !== undefined) return got;
+    // Media queries are separated by the same commas selectors are, under the
+    // same rules about brackets and strings.
+    var queries = splitSelectorList(cond);
+    var out = [], all = false;
+    for (var i = 0; i < queries.length; i++) {
+      var q = resolveMediaQuery(queries[i]);
+      if (q === null) continue;
+      if (q === '') { all = true; break; }
+      out.push(q);
+    }
+    var res = all ? '' : (out.length ? out.join(',') : null);
+    mediaResolved.set(cond, res);
+    return res;
+  }
+
   /*
    * Every url() a rule carries, resolved against the sheet that wrote it.
    *
@@ -1484,9 +1770,11 @@
             }
             break;
           case 4: // media
+            collectMedia(doc, rule, out, depth, base, seen);
+            break;
           case 12: // supports
-            collectGroup(doc, rule, rule.type === 4 ? '@media ' + rule.conditionText
-              : '@supports ' + rule.conditionText, null, out, depth, base, seen);
+            collectGroup(doc, rule, '@supports ' + rule.conditionText,
+              null, out, depth, base, seen);
             break;
           case 7: // keyframes: small, and cheap insurance for CSS animations
             out.push(absolutizeCSSURLs(rule.cssText, base));
@@ -1606,10 +1894,38 @@
       if (placeholder) out.push(placeholder);
       return;
     }
+    // No prelude left to write: the condition was one this side settled and it
+    // held, so the rules apply unconditionally and go out on their own — and
+    // are deduped by whoever receives them, exactly as a rule that was never in
+    // a group at all is. Marking them here instead would mark the very text
+    // about to be emitted, and the caller would then drop every one of them as
+    // already sent. See resolveMediaList.
+    if (!prelude) {
+      for (var k = 0; k < fresh.length; k++) out.push(fresh[k]);
+      return;
+    }
+    // The wrapper is what goes out, so the contents are what is remembered: it
+    // is one rule inside starting to match that must not resend the block.
     if (seen) {
       for (var j = 0; j < fresh.length; j++) seen.set(fresh[j], 1);
     }
     out.push(prelude + '{' + fresh.join('') + '}');
+  }
+
+  /*
+   * collectMedia walks a `@media` block under whatever is left of its condition
+   * once this browser has answered the half that is about this browser.
+   */
+  function collectMedia(doc, rule, out, depth, base, seen) {
+    var cond = '';
+    try { cond = rule.conditionText || ''; } catch (e) { cond = ''; }
+    var left = resolveMediaList(cond);
+    if (left === null) {
+      noteRejected('@media ' + cond);
+      return;
+    }
+    collectGroup(doc, rule, left ? '@media ' + left : '',
+      null, out, depth, base, seen);
   }
 
   /*
@@ -1686,7 +2002,18 @@
     var text = inner.join('');
     var media = '';
     try { media = (rule.media && rule.media.mediaText) || ''; } catch (e) { media = ''; }
-    if (media && media !== 'all') text = '@media ' + media + '{' + text + '}';
+    if (media) {
+      // The same question a `@media` block asks, asked about the import that
+      // stands in for one: a sheet imported only for a browser this is not
+      // never applies here, and one imported for the browser this is applies
+      // without saying so.
+      var left = resolveMediaList(media);
+      if (left === null) {
+        noteRejected('@import ' + (abs || href || '?') + ' ' + media);
+        return;
+      }
+      if (left) text = '@media ' + left + '{' + text + '}';
+    }
     var supports = null;
     try { supports = rule.supportsText; } catch (e) { supports = null; }
     if (supports) text = '@supports ' + supports + '{' + text + '}';
@@ -1823,6 +2150,10 @@
     // of the document, and the page the reader is looking at is the one that
     // just changed.
     presenceCache = new Map();
+    // And what this browser answers about itself, for the same reason and the
+    // same length of time. See mediaAnswer.
+    mediaAnswers = null;
+    mediaResolved = null;
     // Recomputed per pass, because a font arriving late is the ordinary case:
     // the icons are private-use codepoints from the first paint, but the sheet
     // that declares the family they need often lands after it.

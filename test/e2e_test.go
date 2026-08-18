@@ -389,6 +389,43 @@ const pseudoCSSPage = `<!DOCTYPE html><html><head><title>Pseudo</title>
 </body></html>`
 
 /*
+colorSchemePage is a page that is two pages, and only one of them was rendered.
+
+`prefers-color-scheme` is the one media feature whose answer decides what the
+page *is* rather than how the reader would like to be shown it, and it is
+answered by two different browsers: the landside one that painted the page, and
+the reader's, which did not. A site with an automatic theme hangs its whole
+palette off it. Shipped as written, the query is asked again plane-side and a
+reader on a dark phone gets the dark palette over images, canvases and mirror
+chrome that were all made in the light one.
+
+Every rule below is paired with its opposite so that the bundle says which
+browser answered: the light values are this browser's, the 100-series values are
+the reader's and must never cross. The last three are the control — a viewport
+query and two reader preferences, none of which this side may decide.
+*/
+const colorSchemePage = `<!DOCTYPE html><html><head><title>Color scheme</title>
+<style>
+  .themed { color: rgb(1, 2, 3) }
+  @media (prefers-color-scheme: light) { .themed { background-color: rgb(4, 5, 6) } }
+  @media (prefers-color-scheme: dark) { .themed { background-color: rgb(104, 105, 106) } }
+  @media screen and (prefers-color-scheme: light) { .themed { border-top-color: rgb(7, 8, 9) } }
+  @media screen and (prefers-color-scheme: dark) { .themed { border-top-color: rgb(107, 108, 109) } }
+  @media (min-width: 1px) and (prefers-color-scheme: light) { .themed { outline-color: rgb(10, 11, 12) } }
+  @media (min-width: 1px) and (prefers-color-scheme: dark) { .themed { outline-color: rgb(110, 111, 112) } }
+  @media not all and (prefers-color-scheme: dark) { .themed { column-rule-color: rgb(13, 14, 15) } }
+  @media not all and (prefers-color-scheme: light) { .themed { column-rule-color: rgb(113, 114, 115) } }
+  @media (prefers-color-scheme: light), (min-width: 100000px) { .themed { caret-color: rgb(16, 17, 18) } }
+  @media (min-width: 100000px) { .too-wide { color: rgb(19, 20, 21) } }
+  @media (hover: hover) { .themed { text-decoration-color: rgb(22, 23, 24) } }
+  @media (prefers-reduced-motion: reduce) { .themed { letter-spacing: 25px } }
+</style></head>
+<body>
+  <p class="themed">the themed page</p>
+  <p class="too-wide">and a rule for a window nobody has</p>
+</body></html>`
+
+/*
 themedComponentPage is a component themed from outside itself.
 
 Custom properties are the one thing that crosses a shadow boundary, and a
@@ -1141,6 +1178,12 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	mux.HandleFunc("/themed-component", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, themedComponentPage)
+	})
+	// A page whose palette is decided by a media feature, and a set of rules
+	// that says which browser decided it.
+	mux.HandleFunc("/color-scheme", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, colorSchemePage)
 	})
 	// A property whose only reader is a rule that has not matched anything yet.
 	mux.HandleFunc("/late-theme", func(w http.ResponseWriter, _ *http.Request) {

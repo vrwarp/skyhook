@@ -2107,6 +2107,15 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   page using six glyphs of a large family pays for all of them. `hb-subset`
   when present, degrading to this when not, is the obvious next step and would
   follow the pattern `avifenc`/`cwebp` already set.
+- **The reader cannot ask for the other colour scheme.** [§45](#45-half-a-theme-is-not-a-theme)
+  settles `prefers-color-scheme` landside, which is what makes a themed page
+  arrive whole — but it settles it at whatever the landside browser is, and
+  nothing plane-side can change that. A reader who wants the dark version of a
+  site that has one has no way to say so. The mechanism for it is not far off:
+  Chromium takes `Emulation.setEmulatedMedia` per tab, so a preference on the
+  client could ride to the server the way the viewport already does and be
+  applied at the same place, with the tab re-rendered once. Until then the
+  answer is the server's.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -2962,3 +2971,112 @@ The e2e test that found it passed afterwards, on the fast link and on the slow
 one, and the fault came back a day later with the same two hashes in the log —
 because the epoch was being compared against the wrong thing at the wrong end.
 A measurement is only as good as the answer's claim to be about it.
+
+### 45. Half a theme is not a theme
+
+A capture of a GitHub file page came in reported as "the navigation on the left
+seems broken (some css is missing?)", and the file tree in the plane-side
+screenshot is exactly that: filenames a shade off white, on white, beside a
+branch picker and a search box painted in dark greys, under a pane header that
+is still light. Everything the capture measures said nothing was wrong. The two
+halves agreed on the document hash, node for node across 9,261 nodes. The
+used-CSS filter reported 19,311 rules rejected out of 20,867, and every one of
+the 4,000 it listed genuinely matched nothing — checked by replaying the
+document and asking it about each of them.
+
+Nothing had been dropped. The palette had been decided twice.
+
+GitHub serves `<html data-color-mode="auto" data-light-theme="light"
+data-dark-theme="dark">` and hangs its entire set of colour properties off a
+media query:
+
+```css
+@media (prefers-color-scheme: dark) {
+  [data-color-mode][data-color-mode="auto"][data-dark-theme="dark"] {
+    --bgColor-default: #0d1117; --fgColor-default: #f0f6fc; …
+  }
+}
+```
+
+The landside browser is light, so that block does not apply and the light one
+does; the rules crossed the link as written, wrapper and all, and the reader's
+browser is the one that answered on the other side. Resolving `--bgColor-default`
+against the delivered bundle gives `#fff` under a light reader and `#0d1117`
+under a dark one — from the same bytes.
+
+What the reader got was not the dark theme. It was the parts of the page that
+read a colour property in the dark theme, over the parts that do not. The
+mirror's own chrome is `html, body { background: #fff; color: #111 }`, a flat
+white behind every page it draws, and the page's own `body` is a node *inside*
+that document rather than the thing that paints the canvas — so the theme's
+background never reaches the surface it was written for. `--fgColor-muted` did
+reach the filenames. Near-white text, white ground.
+
+That would be a bug even if the theme had arrived whole, because a stylesheet is
+the only part of a mirror that can change its mind on the other side. The images
+were fetched, chosen and transcoded from the landside render; the canvases were
+rasterised there; the capture's landside screenshot is in that palette; the
+chrome around the document is a constant. A page repainted plane-side is a page
+repainted alone.
+
+So the agent now answers that question itself, before the rules are sent, and
+sends what is left of the query ([agent.js](../internal/mirror/agent.js),
+`resolveMediaList`). A block that cannot match here is not sent — it is noted as
+rejected, so the next capture *says* the theme was decided rather than leaving
+it to be worked out. A block that always matches is sent without its wrapper,
+its rules unchanged and in the same place in the cascade, since a media query
+carries no specificity. A block that is partly this side's keeps exactly the
+part that is not:
+
+| written | crosses as |
+|---|---|
+| `@media (prefers-color-scheme: dark)` | nothing |
+| `@media (prefers-color-scheme: light)` | the rules, unwrapped |
+| `@media screen and (prefers-color-scheme: light)` | `@media screen` |
+| `@media (min-width: 40em) and (prefers-color-scheme: light)` | `@media (min-width: 40em)` |
+| `@media not all and (prefers-color-scheme: dark)` | the rules, unwrapped |
+| `@media (min-width: 40em)` | unchanged |
+
+The condition is parsed rather than pattern-matched, because the feature can sit
+anywhere in one: inside `not (…)`, inside a nested `((…) and (…))`, in the
+middle of an `and` chain, in one arm of a comma-separated list. The parse folds
+the constants out and writes back what is left, and any shape it cannot read is
+shipped as written — the failure that costs a wrapper, never a rule.
+
+**`prefers-color-scheme` is the only feature answered this way, and the
+restraint is the design.** The neighbouring features look like the same problem
+and are not:
+
+- **The viewport is already shared.** The client reports its window and
+  `Tab.SetViewport` puts the landside tab in exactly that box, device pixel
+  ratio included, so `width`, `orientation` and `resolution` are one question
+  with one answer. They also have to stay live: the reader can turn a phone
+  sideways, and the mirror should reflow at the turn rather than at the next
+  round trip.
+- **The reader is the reader's.** `prefers-reduced-motion`, `prefers-contrast`,
+  `forced-colors`, `hover` and `pointer` are facts about a person, and the
+  person is plane-side. The landside browser is headless with nobody at it: it
+  answers `no-preference` and `pointer: none` because nothing was ever asked of
+  it, and freezing that would hand a reader who *did* ask a page that ignores
+  them — animation to somebody who turned animation off. This is the same answer
+  `:hover` and `:focus` have always got from the used-CSS filter, for the same
+  reason.
+
+The one that had to change is the one that is not really a preference at all: it
+does not say how the reader would like to be shown the page, it says which of
+two pages the server rendered.
+
+`TestTheLandsideBrowserDecidesTheColorScheme` pairs every rule in its fixture
+with its opposite, so the bundle names which browser answered — the light values
+are this side's and the 100-series values are the reader's — and holds the line
+on the other three: a viewport query, a `hover` query and a
+`prefers-reduced-motion` query all have to arrive still wrapped, still asking.
+
+One thing came out of the plumbing rather than the diagnosis. Unwrapping a block
+means pushing its rules where the wrapper used to go, and the group walker marks
+what it emits as sent — which for a wrapper is the *contents*, so that one rule
+inside starting to match does not resend the whole block ([§35](#35-the-used-css-filter-was-asking-the-document-about-every-rule-forever)).
+With no wrapper the contents *are* what is emitted, so marking them first made
+the caller drop every one of them as already sent, and the three unwrapped rules
+in the fixture arrived as nothing at all. An unwrapped rule is deduped by
+whoever receives it, exactly like a rule that was never in a group.
