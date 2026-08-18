@@ -224,6 +224,14 @@ plausible imitation. The whole set costs a few tens of bytes on a frame already
 being sent, and it is the difference between a click a page can measure as
 human and one it can measure as not.
 
+All three, and the drag, are measured from the reader's *pointer* events rather
+than their mouse events, because a phone has no mouse events to measure. A
+finger produces `pointerdown`, a stream of `pointermove`s and a `pointerup`
+while it is on the glass, and produces `mousedown`, `mouseup` and `click` only
+afterwards, only for a gesture the browser decided was a tap, and all stamped
+with the same millisecond — so a press measured between two of those reads as
+1 ms, and a swipe has no mouse event at all to start a drag from.
+
 ### Media
 
 `ImageMeta` (blurhash, dimensions, content hash) always ships first and is

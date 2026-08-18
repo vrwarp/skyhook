@@ -2112,6 +2112,18 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   stylesheet, and `FontFace` exposes no `src`, so there is no url() to rewrite
   and nothing to fetch. Google Chat builds one of its four icon families this
   way and its glyphs arrive as their ligature names.
+- **`wheel` and `hover` are protocol surface nothing sends.** Both are replayed
+  landside (`Tab.wheel`, `Tab.hover`) and no client has ever emitted one: the
+  mirror scrolls plane-side and reports where it got to, and hover is the
+  reader's own (§35's media-feature reasoning). They are kept because the
+  protocol is versioned, not because they work.
+- **The landside browser is a phone with a mouse.** `SetViewport` passes
+  `mobile` to `Emulation.setDeviceMetricsOverride` and never enables touch
+  emulation, so landside `navigator.maxTouchPoints` is 0 and a page branching
+  on touch in *script* builds its mouse interaction model. That is currently
+  self-consistent — §49's gestures are replayed as real mouse events, which is
+  what such a page is listening for — and it is why enabling touch landside is
+  not a one-line change: it would have to arrive with touch input to feed it.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -3426,3 +3438,83 @@ has five exits and four of them send nothing landside, so the caller flushes
 whatever the click did not take. Four tests in `host.dom.test.ts` cover the
 four outcomes, and against the old code the first of them reproduces the
 capture's two frames exactly — `['blur', 'click']` where `['click']` belongs.
+
+### 49. Every gesture was a mouse gesture, on a client written for a phone
+
+[§48](#48-two-things-a-google-chat-capture-had-to-say) fixed a blur that a press
+should never have sent, and the reader who reported it added that the swipe
+gesture did not work either. It did not, and neither did two other things, and
+all three were one mistake: everything that *measures* a gesture rather than
+naming its target listened on mouse events, and a phone does not produce mouse
+events while a finger is moving.
+
+Measured, in Chromium with touch emulated. A 94 ms tap:
+
+```
+pointerdown@1513  pointerup@1608  mousemove@1608  mousedown@1608
+mouseup@1608      click@1608
+```
+
+and a swipe across a box the page has claimed with `touch-action: none`:
+
+```
+pointerdown@2224  pointermove ×4  pointerup@2477
+```
+
+with no mouse event of any kind. A swipe across a box that has *not* claimed it
+is shorter still — `pointerdown`, one `pointermove`, `pointercancel` — because
+the browser decides after the first move that the gesture is a scroll and takes
+it.
+
+Three things follow from the first listing and one from the second.
+
+**The press this side reported was the gap between two events fired in the same
+millisecond.** `pointerDownAt` was set on `mousedown` and read on `click`, and
+on a phone those are the same instant: every tap in the Google Chat capture
+reports a hold of 1 to 5 ms, against the 40–100 ms the server's own comment
+gives for a human. And the server prefers a reported hold to its own plausible
+one — `holdFor` only invents a duration when none was sent — so the measurement
+that exists to make a replayed click look human was making every click from a
+phone look like a machine. Worse than sending nothing, which is what the code
+was written to beat.
+
+**The approach was always absent.** `approachPath` needs two `mousemove`
+samples inside 500 ms and a phone sends one, after the fact.
+
+**The pan could not be made at all.** `beginDrag` hung off `mousedown` and its
+samples off `mousemove`, so on a touchscreen the gesture never started. A map
+was unpannable from the one device this project exists to serve, and nothing
+said so: the drag was tested from the protocol inwards — `TestADragPansACanvas`
+sends the frame the client is supposed to produce — and never once from the
+reader's finger outwards, which is the half that was broken.
+
+So the pointer path moved onto pointer events, which are the same stream for a
+mouse, a finger and a pen, carry the press the reader actually made, and arrive
+while it is happening. `pointerdown` starts the drag and stamps the press,
+`pointermove` samples it, `pointerup` ends it, and `pointercancel` — the browser
+saying it has claimed the gesture for a scroll or a fling — drops it without
+sending, because what the reader did with that gesture happened plane-side and
+sending the part that arrived would pan the page by however far the finger got
+first.
+
+One thing deliberately stayed on the mouse events: `pressing`, the flag §48's
+held blur reads. What that brackets is the focus change, and the focus change is
+a default action of the compat `mousedown` — it lands between `mousedown` and
+`mouseup` on a finger exactly as it does under a mouse, which is why a tap into
+a search result still holds its blur.
+
+**And the canvas had to claim the gesture.** Pointer events alone are not
+enough: without `touch-action: none` the browser takes the swipe after one move
+and sends `pointercancel`, which is the second listing above. The declaration
+goes on `[data-skyhook-static]` — canvases, and nothing else — where it is what
+Leaflet and every embedded map set on themselves, for the same reason. The cost
+is that a page cannot be scrolled by dragging from inside a canvas, so a canvas
+taller than the screen has to be scrolled past from somewhere else; a decorative
+full-bleed canvas is usually `pointer-events: none` and never a hit target at
+all, and an interactive one is the case the whole feature exists for.
+
+`TestPWAAFingerPansACanvas` is the test that was missing. A real touchscreen
+emulated in the plane-side browser, real touch events dispatched at the glass,
+the client's own listeners deciding what the gesture was, the frame crossing the
+link, and the landside page reporting how far it was panned. Against the old
+client it reports `offset: 0,0`.

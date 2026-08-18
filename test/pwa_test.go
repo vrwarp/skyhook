@@ -945,3 +945,165 @@ func deploy(t *testing.T, dist, was, now string) {
 		t.Fatal(err)
 	}
 }
+
+/*
+A finger pans a canvas, from the reader's end of the link.
+
+The pan was tested from the protocol inwards — `TestADragPansACanvas` sends the
+drag frame the client is supposed to produce and checks the server replays it —
+and never from the reader outwards, which is where it was broken. A phone sends
+no mouse event while a finger is moving: measured under touch emulation, a swipe
+is `pointerdown`, four `pointermove`s and a `pointerup`, and nothing else at
+all. The client's drag hung off `mousedown` and `mousemove`, so on the one
+device this exists for there was no gesture to send and the map could not be
+moved.
+
+Everything here is real: a real touchscreen emulated in the plane-side browser,
+real touch events dispatched at the glass, the client's own listeners deciding
+what that gesture was, the frame crossing the link, and the landside page
+reporting how far it was panned.
+*/
+func TestPWAAFingerPansACanvas(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	// A touchscreen, before anything is opened: the shell reads it once to
+	// decide what kind of device is asking, and so does the mirror's CSS.
+	if err := page.Do(ctx, "Emulation.setTouchEmulationEnabled", map[string]any{
+		"enabled": true, "maxTouchPoints": 5,
+	}, nil); err != nil {
+		t.Fatalf("emulate a touchscreen: %v", err)
+	}
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	navigate := fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/draggable")
+	evalJSON(ctx, t, page, navigate, nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('a page you can pan')`,
+		budget(60*time.Second), "the mirrored page")
+	waitFor(ctx, t, page, mirrorText+`.includes('offset: 0,0')`,
+		budget(30*time.Second), "the page to report where it has been panned to")
+
+	// Where the canvas is on the glass: its box inside the frame, plus where
+	// the frame sits in the window. A canvas is aimed at and nothing else.
+	var box struct{ X, Y, W, H float64 }
+	evalJSON(ctx, t, page, `(() => {
+      const f = document.querySelector('iframe.mirror');
+      const fr = f.getBoundingClientRect();
+      const c = f.contentDocument.querySelector('canvas');
+      const r = c.getBoundingClientRect();
+      return { X: fr.left + r.left, Y: fr.top + r.top, W: r.width, H: r.height };
+    })()`, &box)
+	if box.W < 40 || box.H < 40 {
+		t.Fatalf("the canvas is %vx%v on screen; nothing can be aimed at it", box.W, box.H)
+	}
+
+	// What the frame is actually handed. Two different things can go wrong
+	// here and only one of them is the client's: a whole pointer stream that
+	// produces no pan is the client failing to make a gesture of it, and a
+	// stream that stops after the press is the browser never having delivered
+	// one.
+	watch := `(() => {
+      const d = document.querySelector('iframe.mirror').contentDocument;
+      window.__seen = [];
+      for (const k of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+        d.addEventListener(k, (e) => window.__seen.push(k + '@' + Math.round(e.clientX)), true);
+      }
+      return true;
+    })()`
+	evalJSON(ctx, t, page, watch, nil)
+
+	// A swipe to the right across the middle of it, in the steps a finger
+	// actually travels in.
+	const travel = 80.0
+	y := box.Y + box.H/2
+	from := box.X + box.W*0.2
+	swipe := func() string {
+		evalJSON(ctx, t, page, `(window.__seen = [], true)`, nil)
+		touchAt(ctx, t, page, "touchStart", from, y)
+		for i := 1; i <= 4; i++ {
+			time.Sleep(30 * time.Millisecond)
+			touchAt(ctx, t, page, "touchMove", from+travel*float64(i)/4, y)
+		}
+		time.Sleep(30 * time.Millisecond)
+		touchAt(ctx, t, page, "touchEnd", from+travel, y)
+		var seen string
+		evalJSON(ctx, t, page, `JSON.stringify(window.__seen)`, &seen)
+		return seen
+	}
+
+	/*
+	 * Injected input is not a finger.
+	 *
+	 * `Input.dispatchTouchEvent` hands the browser a gesture and the browser
+	 * delivers it when it gets to it. On a machine running eight of these at
+	 * once it sometimes delivers the press and nothing after it — measured,
+	 * the frame saw `["pointerdown@160"]` and no move, no release and no
+	 * cancel — and a gesture that never reached the frame is not a gesture the
+	 * client failed to send. So the swipe is repeated until the frame confirms
+	 * it saw a whole one, which is also what a reader whose swipe did nothing
+	 * does. What is being retried is the injection; the assertion below is
+	 * unchanged and is made against a gesture that demonstrably arrived.
+	 */
+	var seen string
+	arrived := false
+	for deadline := time.Now().Add(budget(60 * time.Second)); time.Now().Before(deadline); {
+		seen = swipe()
+		if strings.Contains(seen, "pointerup") && !strings.Contains(seen, "pointercancel") {
+			arrived = true
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if !arrived {
+		t.Fatalf("the browser never delivered a whole swipe to the frame; it saw %s", seen)
+	}
+
+	// The landside page says how far it was panned. Not to the pixel: the
+	// press lands where the reader put it in a box laid out by another
+	// browser, and the point of permille is that it survives that rather than
+	// that it is exact.
+	deadline := time.Now().Add(budget(60 * time.Second))
+	var text string
+	for time.Now().Before(deadline) {
+		evalJSON(ctx, t, page, mirrorText, &text)
+		if x, _, ok := parseOffset(offsetText(text)); ok && x > travel/2 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	var touchAction string
+	evalJSON(ctx, t, page, `(() => {
+      const d = document.querySelector('iframe.mirror').contentDocument;
+      const c = d.querySelector('canvas');
+      return c ? d.defaultView.getComputedStyle(c).touchAction : 'no canvas';
+    })()`, &touchAction)
+	t.Fatalf("the page reports %q; the swipe should have panned it about %v px right\n"+
+		"canvas at %+v, touch-action %q, the frame saw %s",
+		offsetText(text), travel, box, touchAction, seen)
+}
+
+// touchAt puts one finger on the glass, moves it, or lifts it.
+func touchAt(ctx context.Context, t *testing.T, page *cdp.Session, kind string, x, y float64) {
+	t.Helper()
+	points := []map[string]any{{"x": x, "y": y, "radiusX": 12, "radiusY": 12, "force": 1, "id": 1}}
+	if kind == "touchEnd" {
+		// The finger has left the glass, so there is no point to report.
+		points = []map[string]any{}
+	}
+	if err := page.Do(ctx, "Input.dispatchTouchEvent", map[string]any{
+		"type": kind, "touchPoints": points,
+	}, nil); err != nil {
+		t.Fatalf("%s: %v", kind, err)
+	}
+}

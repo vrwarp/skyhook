@@ -71,8 +71,25 @@ img { background-repeat: no-repeat; background-size: cover; }
 /* The frame's own html/body are inside the root now, where a document rule
    cannot reach them: this is delivered through Patcher.baseRootCSS instead, and
    kept here only so the two are read together. */
+/* A canvas: shipped as a photograph because its content is reachable no other
+   way, and panned rather than clicked for the same reason.
+   The touch-action declaration is what decides whether a finger on this box
+   belongs to the browser or to the page. Left at its default it belongs to the
+   browser: one pointermove arrives, the browser decides the gesture is a
+   scroll, and the rest of the pan is delivered as a pointercancel. Measured,
+   with touch emulated: pointerdown, pointermove, pointercancel and nothing
+   after it — against pointerdown, four pointermoves and a pointerup with this
+   declaration, which is the difference between a map that pans from a phone
+   and one that does not. It is what Leaflet and every embedded map set on
+   themselves, for the same reason.
+   The cost is that a page cannot be scrolled by dragging from inside a canvas,
+   so a canvas taller than the screen has to be scrolled past from somewhere
+   else. A decorative full-bleed canvas is usually pointer-events: none and so
+   never a hit target at all; an interactive one is the case this feature
+   exists for. */
 [data-skyhook-static] {
   background: repeating-linear-gradient(45deg, #eee, #eee 8px, #e5e5e5 8px, #e5e5e5 16px);
+  touch-action: none;
 }
 /* A page on its way. The cursor is the one affordance that appears where the
    reader is already looking — on the link they just clicked — and it is the
@@ -824,8 +841,43 @@ export class MirrorHost {
     this.maybeSubmit(target);
   }
 
+  /*
+   * ------------------------------------------------------ the reader's pointer
+   *
+   * Everything that measures the gesture rather than naming its target listens
+   * on pointer events, and has to. A phone is the device this client was
+   * written for, and a phone does not produce mouse events while a finger is
+   * moving — it produces them, all at once and all stamped with the same
+   * millisecond, after the finger has come up, and only for a gesture the
+   * browser decided was a tap. Measured under touch emulation, a 94 ms tap
+   * arrives as:
+   *
+   *     pointerdown@1513  pointerup@1608  mousemove@1608  mousedown@1608
+   *     mouseup@1608      click@1608
+   *
+   * and a swipe arrives as:
+   *
+   *     pointerdown@2224  pointermove ×4  pointerup@2477
+   *
+   * with no mouse event of any kind. Three things follow, and all three were
+   * wrong. The press this side reported was `mousedown` to `click`, which on a
+   * phone is the gap between two events fired in the same millisecond — every
+   * tap in the Google Chat capture reports a 1–5 ms hold, and the server
+   * prefers a reported hold to its own plausible one, so it replays a press no
+   * hand could make. The approach needs two `mousemove` samples and a phone
+   * sends one. And the pan — `beginDrag` on `mousedown`, sampled on
+   * `mousemove` — was never started at all, which is why a map could not be
+   * moved from the device this exists to serve.
+   *
+   * Pointer events are the same stream for a mouse, a finger and a pen, they
+   * carry the press the reader actually made, and they arrive while it is
+   * happening. What stays on the mouse events is `pressing`, and only that:
+   * see heldBlur, where what is being bracketed is the focus change, and the
+   * focus change is a default action of the compat `mousedown` on both kinds
+   * of pointer.
+   */
   private wireInput(doc: Document): void {
-    doc.addEventListener('mousemove', (ev) => this.recordPointer(ev as MouseEvent), true);
+    doc.addEventListener('pointermove', (ev) => this.recordPointer(ev as PointerEvent), true);
 
     // A canvas is reached through its pixels or not at all: there is no node
     // inside a map to click and no element inside a game board to focus, so a
@@ -833,16 +885,22 @@ export class MirrorHost {
     // there". Everywhere else that gesture is the reader selecting text, which
     // the mirror does natively and this must not take away — hence beginDrag
     // starting nothing unless the press landed on a region.
-    doc.addEventListener('mouseup', (ev) => {
-      this.pressing = false;
-      this.endDrag(ev as MouseEvent);
-    }, true);
+    doc.addEventListener('pointerup', (ev) => this.endDrag(ev as PointerEvent), true);
+    // The browser has taken the gesture for itself — a scroll, a fling, the
+    // system's own back swipe. It is not a pan and it never becomes one: what
+    // the reader did with it happened here, not landside, and sending the part
+    // that arrived would pan the page by however far the finger got before the
+    // browser claimed it.
+    doc.addEventListener('pointercancel', () => { this.dragging = null; }, true);
     // A pointer that left the frame mid-drag is not coming back to release the
     // button, and a drag left open would swallow the next click.
-    doc.addEventListener('mouseleave', (ev) => {
-      this.pressing = false;
-      this.endDrag(ev as MouseEvent);
-    }, true);
+    doc.addEventListener('pointerleave', (ev) => this.endDrag(ev as PointerEvent), true);
+
+    // `pressing` brackets the focus change, which is a default action of the
+    // compat mousedown and lands between these two on a phone exactly as it
+    // does under a mouse. Nothing else is measured here.
+    doc.addEventListener('mouseup', () => { this.pressing = false; }, true);
+    doc.addEventListener('mouseleave', () => { this.pressing = false; }, true);
 
     doc.addEventListener('click', (ev) => {
       this.clickInFrame(ev);
@@ -851,15 +909,12 @@ export class MirrorHost {
       this.flushHeldBlur();
     }, true);
 
-    // Middle click means "open in a new tab" in every browser, and a mirrored
-    // page is not exempt. The frame withholds allow-popups, so left to itself
-    // the gesture does nothing at all; claiming mousedown as well suppresses
-    // Chrome's autoscroll, which would otherwise scroll a document the server
-    // knows nothing about.
-    doc.addEventListener('mousedown', (ev) => {
-      const mouse = ev as MouseEvent;
+    doc.addEventListener('pointerdown', (ev) => {
+      const pointer = ev as PointerEvent;
+      // A second finger is not a second gesture: the pan belongs to the pointer
+      // that started it, and a pinch is not something this can carry anyway.
+      if (!pointer.isPrimary) return;
       this.pointerDownAt = performance.now();
-      this.pressing = true;
       // A gesture that reached neither the page nor a click — the pointer left
       // the frame, the page swallowed it — leaves its blur held. Nothing later
       // is going to resolve it, and the landside page is still sitting in a
@@ -867,12 +922,25 @@ export class MirrorHost {
       // moves the focus it is about.
       this.flushHeldBlur();
       // A drag whose click never came — the pointer left the frame, the page
-      // swallowed it — must not leave the flag armed for the next gesture,
-      // which would arrive as a press that does nothing.
+      // swallowed it, or a finger produced no compat click at all — must not
+      // leave the flag armed for the next gesture, which would arrive as a
+      // press that does nothing.
       this.dragConsumedClick = false;
-      this.recordPointer(mouse);
-      this.beginDrag(mouse);
+      this.recordPointer(pointer);
+      this.beginDrag(pointer);
       this.events.dismiss(this.tab);
+    }, true);
+
+    // Middle click means "open in a new tab" in every browser, and a mirrored
+    // page is not exempt. The frame withholds allow-popups, so left to itself
+    // the gesture does nothing at all; claiming mousedown as well suppresses
+    // Chrome's autoscroll, which would otherwise scroll a document the server
+    // knows nothing about. It stays on `mousedown` because autoscroll is that
+    // event's default action, and preventing the pointer event does not
+    // reliably prevent it.
+    doc.addEventListener('mousedown', (ev) => {
+      const mouse = ev as MouseEvent;
+      this.pressing = true;
       // Inside a text field the gesture is X11's primary-selection paste, which
       // the browser performs natively and the echo engine picks up as an input
       // event. Leave it alone.

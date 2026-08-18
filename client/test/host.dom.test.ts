@@ -107,6 +107,22 @@ async function mount(): Promise<{ host: MirrorHost; ev: ReturnType<typeof events
   return { host, ev };
 }
 
+/** The fixture with a canvas in it: the one element the mirror pans instead of
+ *  clicking, and the only one a gesture is ever claimed on. */
+async function mountWithCanvas(): Promise<{
+  host: MirrorHost; ev: ReturnType<typeof events>;
+}> {
+  const { host, ev } = await mount();
+  const snap = snapshot();
+  snap.strings.push('canvas');
+  snap.nodes.push({
+    id: 10, parent: 2, kind: NodeKind.Element,
+    ref: snap.strings.indexOf('canvas'), attrs: [], flags: NodeFlags.Canvas,
+  });
+  host.applySnapshot(snap);
+  return { host, ev };
+}
+
 describe('MirrorHost', () => {
   // A tab is drawn, frame and all, a round trip before the server names it.
   // Everything that goes looking for one tab's document goes by the frame's
@@ -235,7 +251,8 @@ describe('MirrorHost', () => {
   });
 
   /**
-   * Drags the pointer across an element and returns what the host sent.
+   * Drags a mouse across an element, exactly as a browser reports one: the
+   * pointer stream, and the mouse events that shadow it.
    *
    * jsdom lays nothing out, so every clientX here is a number the frame's
    * innerWidth turns into permille and nothing else depends on.
@@ -244,13 +261,44 @@ describe('MirrorHost', () => {
     const doc = host.frame.contentDocument!;
     const win = doc.defaultView!;
     const at = (type: string, x: number) => el.dispatchEvent(
-      new win.MouseEvent(type, { bubbles: true, clientX: x, clientY: 40, button: 0 }),
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: x, clientY: 40, button: 0, isPrimary: true,
+        pointerType: 'mouse',
+      }),
     );
+    at('pointerdown', from);
     at('mousedown', from);
-    at('mousemove', Math.round((from + to) / 2));
-    at('mousemove', to);
+    at('pointermove', Math.round((from + to) / 2));
+    at('pointermove', to);
+    at('pointerup', to);
     at('mouseup', to);
     el.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: to, clientY: 40 }));
+  }
+
+  /**
+   * The same gesture from a finger, as a phone actually reports it.
+   *
+   * Nothing here is a mouse event, because a browser sends none for a swipe:
+   * measured under touch emulation, a finger dragged across a `touch-action:
+   * none` box produces `pointerdown`, four `pointermove`s and a `pointerup`,
+   * and not one `mousedown`, `mouseup` or `click`. A pan that needs any of
+   * those cannot be made from the device this client is for.
+   */
+  function swipeAcross(host: MirrorHost, el: Element, from: number, to: number): void {
+    const win = host.frame.contentDocument!.defaultView!;
+    const at = (type: string, x: number) => el.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: x, clientY: 40, button: 0, isPrimary: true,
+        pointerType: 'touch',
+      }),
+    );
+    at('pointerdown', from);
+    for (let i = 1; i <= 4; i++) at('pointermove', Math.round(from + ((to - from) * i) / 4));
+    at('pointerup', to);
+    // A touch pointer ceases to exist when the finger lifts, so the browser
+    // sends these straight after the release. The drag must already be over.
+    at('pointerout', to);
+    at('pointerleave', to);
   }
 
   it('turns a drag across a canvas into a pan', async () => {
@@ -443,6 +491,122 @@ describe('MirrorHost', () => {
     expect(kinds).not.toContain('blur');
     expect(kinds).toContain('focus');
     expect(kinds).toContain('click');
+  });
+
+  /*
+   * The gesture from a finger, which is the device this client is for.
+   *
+   * It used to send nothing at all. beginDrag hung off `mousedown` and the
+   * samples off `mousemove`, and a browser sends neither while a finger is
+   * moving — a swipe is a pointer stream and nothing else, so a map could not
+   * be panned from a phone.
+   */
+  it('turns a swipe across a canvas into a pan, with no mouse event anywhere', async () => {
+    const { host, ev } = await mountWithCanvas();
+
+    swipeAcross(host, host.frame.contentDocument!.querySelector('canvas')!, 100, 400);
+
+    const drags = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'drag');
+    // Exactly one: the pointerleave that trails a finger's release must not
+    // send the gesture a second time.
+    expect(drags).toHaveLength(1);
+    const drag = drags[0];
+    expect(drag!.node).toBe(10);
+    const path = drag!.path as number[];
+    expect(path.length % 3).toBe(0);
+    expect(path.length / 3).toBeGreaterThanOrEqual(2);
+    expect(path[0]).toBeLessThan(path[path.length - 3]);
+  });
+
+  it('does not pan for a swipe the browser took for itself', async () => {
+    // pointercancel is the browser saying it has claimed the gesture as a
+    // scroll or a fling. What the reader did with it happened here; sending
+    // the part that arrived would pan the page by however far the finger got.
+    const { host, ev } = await mountWithCanvas();
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const canvas = doc.querySelector('canvas')!;
+    const at = (type: string, x: number) => canvas.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: x, clientY: 40, button: 0, isPrimary: true,
+        pointerType: 'touch',
+      }),
+    );
+
+    at('pointerdown', 100);
+    at('pointermove', 200);
+    at('pointercancel', 200);
+    at('pointerup', 400);
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).not.toContain('drag');
+  });
+
+  it('reports the press a finger actually made, not the gap between two compat events', async () => {
+    /*
+     * A phone fires mousemove, mousedown, mouseup and click after the finger
+     * has come up, all stamped with the same millisecond. Measuring the press
+     * between two of those reports 1 ms however long the reader held — every
+     * click in the Google Chat capture does — and the server prefers a
+     * reported hold to its own plausible one, so it replays a press no hand
+     * could make. The press is pointerdown to click.
+     */
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const li = doc.querySelector('li')!;
+    const now = vi.spyOn(performance, 'now');
+
+    now.mockReturnValue(1000);
+    li.dispatchEvent(new win.PointerEvent('pointerdown', {
+      bubbles: true, isPrimary: true, button: 0, pointerType: 'touch',
+    }));
+    // The whole compat burst, ninety-five milliseconds later and all at once.
+    now.mockReturnValue(1095);
+    li.dispatchEvent(new win.PointerEvent('pointerup', {
+      bubbles: true, isPrimary: true, button: 0, pointerType: 'touch',
+    }));
+    li.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true }));
+    li.dispatchEvent(new win.MouseEvent('mouseup', { bubbles: true }));
+    li.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    now.mockRestore();
+
+    const click = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .find((p) => p.kind === 'click');
+    expect(click).toBeDefined();
+    expect(click!.hold).toBe(95);
+  });
+
+  it('still holds a blur behind a tap, which a phone brackets in mouse events', async () => {
+    // The focus change is a default action of the compat mousedown, so the
+    // window in which a focusout belongs to a press is that event and its
+    // mouseup — on a finger exactly as under a mouse. See heldBlur.
+    const { host, ev } = await mount();
+    host.applySnapshot(withSearchPopover(snapshot()));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const field = doc.querySelectorAll('input')[0]!;
+    const result = doc.querySelector('button')!;
+
+    field.focus();
+    ev.input.mockClear();
+    result.dispatchEvent(new win.PointerEvent('pointerdown', {
+      bubbles: true, isPrimary: true, button: 0, pointerType: 'touch',
+    }));
+    result.dispatchEvent(new win.PointerEvent('pointerup', {
+      bubbles: true, isPrimary: true, button: 0, pointerType: 'touch',
+    }));
+    result.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true }));
+    field.blur();
+    result.dispatchEvent(new win.MouseEvent('mouseup', { bubbles: true }));
+    result.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).toEqual(['click']);
   });
 
   it('asks for images the frame references', async () => {
@@ -1075,11 +1239,16 @@ describe('MirrorHost', () => {
   it('tells the shell to dismiss when the user acts inside the frame', async () => {
     // Events inside the frame never reach the shell's document, so a menu
     // floating over the mirror would otherwise survive a click on the page.
+    // On the pointer event rather than the mouse one, because a finger that
+    // swipes the page produces no mouse event at all and a menu left over a
+    // page the reader has just scrolled is the same stale menu.
     const { host, ev } = await mount();
     host.applySnapshot(snapshot());
     const doc = host.frame.contentDocument!;
     const view = doc.defaultView!;
-    doc.querySelector('li')!.dispatchEvent(new view.MouseEvent('mousedown', { bubbles: true }));
+    doc.querySelector('li')!.dispatchEvent(
+      new view.PointerEvent('pointerdown', { bubbles: true, isPrimary: true, button: 0 }),
+    );
     expect(ev.dismiss).toHaveBeenCalledWith(1);
 
     // Escape stops at the menu when there is one, and reaches the page when
