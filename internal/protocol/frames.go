@@ -222,6 +222,16 @@ type Viewport struct {
 	DPR float64 `cbor:"3,keyasint,omitempty"`
 	// Mobile toggles Chromium's mobile emulation.
 	Mobile bool `cbor:"4,keyasint,omitempty"`
+	// Scheme is the colour scheme the reader wants the pages rendered in:
+	// "light", "dark", or empty for whatever the landside browser is.
+	//
+	// It rides with the viewport because it is the same kind of fact and wants
+	// the same treatment — something about the reader's window that the landside
+	// tab is put into, so that both sides are laying out the same page. A mirror
+	// cannot honour it plane-side: the palette is settled landside before the
+	// bundle is written, along with every image the server fetched and
+	// transcoded from that render. See IMPLEMENTATION.md §45.
+	Scheme string `cbor:"5,keyasint,omitempty"`
 }
 
 // Resync asks the server to close a gap.

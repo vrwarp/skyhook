@@ -52,7 +52,7 @@ func buildFixtures(t *testing.T) map[string]string {
 		CSS:      []string{"body{margin:0}", "p{color:#111}"},
 		URL:      "https://example.test/",
 		Title:    "Conformance",
-		Viewport: protocol.Viewport{W: 1280, H: 800, DPR: 1},
+		Viewport: protocol.Viewport{W: 1280, H: 800, DPR: 1, Scheme: "dark"},
 		Images: []protocol.ImageMeta{{
 			Node: 3, Hash: "deadbeef", W: 40, H: 30,
 			Blur: "LEHV6nWB2yk8pyo0adR*.7kCMdnj", Mime: "image/avif", Bytes: 812,

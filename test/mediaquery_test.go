@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vrwarp/skyhook/internal/client"
+	"github.com/vrwarp/skyhook/internal/protocol"
 )
 
 /*
@@ -96,6 +99,25 @@ func TestTheLandsideBrowserDecidesTheColorScheme(t *testing.T) {
 	}
 	if !strings.Contains(flat, "rgb(19,20,21)") {
 		t.Error("the rule inside the viewport query was dropped with its wrapper")
+	}
+
+	// A `@scope` body crosses as text rather than as rules — its selectors are
+	// written against a root the document cannot be asked about — so the walk
+	// that answers a `@media` never goes into one. The text is answered
+	// instead, which is the only place left that could still ask the reader.
+	if !strings.Contains(flat, "rgb(36,37,38)") {
+		t.Errorf("the landside answer inside a @scope body was dropped:\n%s",
+			cssLines(css, "@scope"))
+	}
+	if strings.Contains(flat, "rgb(136,137,138)") {
+		t.Errorf("a @scope body shipped the other theme's rules:\n%s",
+			cssLines(css, "@scope"))
+	}
+	// And the viewport query inside one is still the reader's, wrapper and all.
+	if !strings.Contains(flat, "list-style-position:inside") ||
+		!strings.Contains(flat, "@media(min-width:1px)") {
+		t.Errorf("a viewport query inside a @scope body was answered here:\n%s",
+			cssLines(css, "@scope"))
 	}
 }
 
@@ -246,6 +268,60 @@ func TestTheMirrorPaintsTheCanvasTheLandsidePageHad(t *testing.T) {
 	if !strings.Contains(flat, ":root{") {
 		t.Errorf("the canvas was not addressed to the frame's own root:\n%s",
 			cssLines(css, "background-color:rgb(13, 17, 23)"))
+	}
+}
+
+/*
+A surface is not always a colour.
+
+The canvas is whatever paints behind the document, and on a real page that is as
+often a gradient or a tiled texture as a flat fill. Sending only the colour of
+one leaves a page's ground half-described: a tile at the mirror's own default
+size, positioned by the mirror's own defaults, or nothing at all where the page
+painted only an image. So the whole set travels — the image with its position,
+size, repeat, attachment, origin and clip — and the url() inside it is left
+absolute for the server to rewrite into an image key, which is how it crosses
+the link at the same cost as any other background on the page.
+*/
+func TestTheCanvasCrossesAsABackgroundAndNotAColour(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/tiled-canvas"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "a page on a tiled ground", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+	if err := waitForCSS(ctx, cl, tab, ":root{"); err != nil {
+		t.Fatalf("the frame was never told what its ground is: %v", err)
+	}
+	css := strings.Join(cl.Model(tab).CSS, "\n")
+	flat := strings.ReplaceAll(css, " ", "")
+
+	for _, want := range []struct{ decl, why string }{
+		{"background-color:rgb(21,22,23)!important", "the colour under the tile"},
+		{"background-position:4px6px!important", "where the page put it"},
+		{"background-size:12px14px!important", "how big the page drew it"},
+		{"background-repeat:repeat-x!important", "which way it tiles"},
+	} {
+		if !strings.Contains(flat, want.decl) {
+			t.Errorf("the canvas crossed without %s (%s):\n%s",
+				want.decl, want.why, cssLines(css, ":root"))
+		}
+	}
+	// The picture itself, as an image key rather than as an address: the server
+	// fetched and transcoded it exactly as it does a background named by any
+	// other rule.
+	if !strings.Contains(flat, "background-image:url(skyhook://img/") {
+		t.Errorf("the canvas image did not cross as a picture:\n%s", cssLines(css, ":root"))
 	}
 }
 
@@ -588,4 +664,101 @@ func TestPWAMovesTheTargetMarkWithTheReader(t *testing.T) {
 		t.Errorf("after the reader followed the link to note-2 the mark is on %q; "+
 			"the page's own highlight is still naming where they came from", got.Marked)
 	}
+}
+
+/*
+The reader gets a say in the answer, and it is still answered once.
+
+Settling `prefers-color-scheme` landside is what makes a themed page arrive
+whole, and it is also what leaves the reader with no say in it: whatever the
+landside browser is, that is what they get. The say is not a plane-side toggle —
+a mirror cannot repaint itself, which is §45's whole finding — it is telling the
+server which scheme to render in. The question stays answered once, by the
+browser that paints the page, and the reader gets to tell that browser what to
+answer.
+
+The price is a document. A stylesheet is a delta the client only appends to, so
+the rules already sent under the old answer cannot be taken back a rule at a
+time; the tab is re-snapshotted. That is why it is a preference and not a
+switch, and why the menu entry says what it costs.
+*/
+func TestTheReaderCanAskForTheOtherColorScheme(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/color-scheme"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the themed page", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+	if err := waitForCSS(ctx, cl, tab, "rgb(4,5,6)"); err != nil {
+		t.Fatalf("the light bundle never arrived: %v", err)
+	}
+
+	// The landside browser under test is light, so that is what a client with
+	// no opinion is given.
+	if flat := flatCSS(cl, tab); strings.Contains(flat, "rgb(104,105,106)") {
+		t.Fatalf("the dark theme arrived before anybody asked for it:\n%s",
+			strings.Join(cl.Model(tab).CSS, "\n"))
+	}
+
+	// The reader asks for the other one.
+	if err := cl.SetViewport(protocol.Viewport{
+		W: 1024, H: 768, DPR: 1, Scheme: "dark",
+	}); err != nil {
+		t.Fatalf("set viewport: %v", err)
+	}
+
+	// The tab comes back as a new document in the scheme that was asked for.
+	if err := waitForCSS(ctx, cl, tab, "rgb(104,105,106)"); err != nil {
+		t.Fatalf("the scheme the reader asked for never arrived: %v\n%s",
+			err, strings.Join(cl.Model(tab).CSS, "\n"))
+	}
+	flat := flatCSS(cl, tab)
+	for _, unwanted := range []struct{ value, why string }{
+		{"rgb(4,5,6)", "a (prefers-color-scheme: light) block"},
+		{"rgb(26,27,28)", `a <style media="(prefers-color-scheme: light)">`},
+		{"rgb(32,33,34)", `a <link media="(prefers-color-scheme: light)">`},
+	} {
+		if strings.Contains(flat, unwanted.value) {
+			t.Errorf("the old answer survived the change: %s (%s)", unwanted.value, unwanted.why)
+		}
+	}
+	// Including the two the page never wrote a query for.
+	if !strings.Contains(flat, ":root{color-scheme:onlydark!important;}") {
+		t.Errorf("the frame was still being told the page is light:\n%s",
+			cssLines(strings.Join(cl.Model(tab).CSS, "\n"), ":root"))
+	}
+	if !strings.Contains(flat, ".scheme-only{color-scheme:onlydark;}") {
+		t.Errorf("`color-scheme: only light dark` was settled the old way:\n%s",
+			cssLines(strings.Join(cl.Model(tab).CSS, "\n"), "color-scheme"))
+	}
+}
+
+func flatCSS(cl *client.Client, tab uint32) string {
+	return strings.ReplaceAll(strings.Join(cl.Model(tab).CSS, "\n"), " ", "")
+}
+
+// waitForCSS waits for a bundle that holds want, compared without spaces.
+func waitForCSS(ctx context.Context, cl *client.Client, tab uint32, want string) error {
+	deadline := time.Now().Add(budget(45 * time.Second))
+	for time.Now().Before(deadline) {
+		if strings.Contains(flatCSS(cl, tab), want) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("no rule matching %q arrived", want)
 }

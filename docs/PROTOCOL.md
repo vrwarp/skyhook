@@ -304,6 +304,27 @@ Three details carry the weight:
 The server enforces its own ceiling regardless: a bundle is written on the
 server's disk, and the server does not let a peer decide how much of it to use.
 
+### Viewport
+
+```
+client → Viewport{w, h, dpr?, mobile?, scheme?}
+```
+
+What the reader's window is, which the server puts the landside tab into so that
+both sides are laying out the same page. It rides on the control channel and is
+also carried inside the Hello, because the first tab should be built into the
+right box rather than resized into it.
+
+`scheme` is `light`, `dark`, or absent for whatever the landside browser is. The
+mirror settles `prefers-color-scheme` landside — it must, because the palette is
+fixed before the stylesheet is written, along with every image the server
+fetched and transcoded from that render — so this is where the reader's
+preference goes: the question stays answered once, by the browser that paints
+the page, and this tells that browser what to answer. Changing it re-snapshots
+every open tab, because a stylesheet is a delta the client only appends to and
+the rules already sent were written under the other answer. See
+[IMPLEMENTATION.md §45](IMPLEMENTATION.md#45-half-a-theme-is-not-a-theme).
+
 ## Handshake
 
 ```

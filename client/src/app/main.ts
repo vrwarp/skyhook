@@ -7,7 +7,7 @@
  */
 import { MirrorHost, type MenuTarget, type MirrorFreeze } from '../mirror/host.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
-import { closeMenu, menuIsOpen, showMenu, type MenuGroups } from './menu.js';
+import { closeMenu, menuIsOpen, showMenu, type MenuGroups, type MenuItem } from './menu.js';
 import { pairingFromFragment, transportUrls } from './pairing.js';
 import { gather } from './capture.js';
 import * as clientlog from './clientlog.js';
@@ -19,7 +19,7 @@ import {
 import { BookmarkPanel, StartPage } from './bookmarkview.js';
 import { completions, History, type Completion, type HistoryEntry } from './history.js';
 import { TabList } from './tabsview.js';
-import { isPhone, isTouch } from './layout.js';
+import { isPhone, isTouch, prefersDark } from './layout.js';
 import { Suggest } from './suggest.js';
 import { Store, type Pairing } from '../store/store.js';
 import { BUILD, VERSION } from '../shared/build.js';
@@ -29,7 +29,7 @@ import {
 } from './upgrade.js';
 import type {
   AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Refusal, Snapshot, Stats,
-  TabState, Welcome,
+  TabState, Viewport, Welcome,
 } from '../shared/protocol.js';
 import { PROTOCOL_VERSION } from '../shared/protocol.js';
 
@@ -46,6 +46,17 @@ let currentSpace = '';
  * load. Tabs are landside and outlive the page that was showing them.
  */
 let resumeSession = '';
+/**
+ * Which colour scheme the reader wants pages rendered in: 'light', 'dark', or
+ * '' for whatever this device is set to.
+ *
+ * Answered landside, which is the whole of §45 — the palette is settled before
+ * the stylesheet is written, along with every image the server transcoded from
+ * that render, so a mirror that repainted itself over here would produce half of
+ * each theme. This is the reader's say in what the answer is, and it travels
+ * with the viewport for the same reason the width does.
+ */
+let schemePref = '';
 /** Whether the link is up. Controls which chrome is usable, not what is shown. */
 let connected = false;
 /** The link's last round trip, which is what an ask's patience is measured in. */
@@ -186,6 +197,9 @@ async function main(): Promise<void> {
   // Read before the dialog below can send us down the pairing path, so both
   // ways into configure() carry the session this app left behind.
   resumeSession = await store.readSessionId();
+  // Before the first Hello, because a scheme that arrived after a tab was built
+  // costs that tab a re-snapshot to apply. See Tab.setColorScheme.
+  schemePref = await store.readScheme();
   if (!pairing) {
     el.pairing.showModal();
     return;
@@ -265,14 +279,28 @@ function send(name: string, args: Record<string, unknown>): void {
  * a good layout for a narrow one; a desktop window dragged narrow is still
  * being read by somebody who asked for the desktop web.
  */
-function viewport(): { w: number; h: number; dpr: number; mobile: boolean } {
+function viewport(): Viewport {
   const rect = el.frames.getBoundingClientRect();
   return {
     w: Math.max(320, Math.round(rect.width)),
     h: Math.max(320, Math.round(rect.height)),
     dpr: window.devicePixelRatio || 1,
     mobile: isPhone() && isTouch(),
+    scheme: schemePref || deviceScheme(),
   };
+}
+
+/**
+ * What this device is set to, which is what "match this device" means.
+ *
+ * Sent rather than left blank so that the landside browser is put in the
+ * reader's own scheme and paints the page there — the one arrangement in which
+ * the reader gets the theme they prefer *and* the two sides agree about it,
+ * because the server rendered the theme it sent. Left blank the server would
+ * paint in its own scheme, which is nobody's.
+ */
+function deviceScheme(): string {
+  return prefersDark() ? 'dark' : 'light';
 }
 
 // --------------------------------------------------------- worker -> app shell
@@ -1471,6 +1499,36 @@ function tabMenu(id: number): MenuGroups {
   ];
 }
 
+/**
+ * Which scheme the server renders in.
+ *
+ * The hint is not decoration. Changing this re-renders every open tab landside
+ * and re-sends its document, because a stylesheet is a delta that this side only
+ * appends to and the rules already sent were written under the other answer —
+ * so this costs a page each, over the link that is the whole problem. A reader
+ * is owed that before they tap it, not after.
+ */
+function schemeGroup(): MenuItem[] {
+  const choices: Array<[string, string]> = [
+    ['', 'Match this device'],
+    ['light', 'Light'],
+    ['dark', 'Dark'],
+  ];
+  return choices.map(([value, label]) => ({
+    label: schemePref === value ? `\u2713 ${label}` : `\u2007\u2007${label}`,
+    hint: schemePref === value ? undefined : 'resends open pages',
+    disabled: !connected && schemePref !== value,
+    run: () => setScheme(value),
+  }));
+}
+
+function setScheme(value: string): void {
+  if (value === schemePref) return;
+  schemePref = value;
+  void store.writeScheme(value);
+  send('viewport', { viewport: viewport() });
+}
+
 /** The menu for a right click on the chrome itself. */
 function shellMenu(): MenuGroups {
   const groups: MenuGroups = [
@@ -1481,6 +1539,7 @@ function shellMenu(): MenuGroups {
   // than in the dropdown because a list you are typing at is the wrong place to
   // put a gesture that empties it, and because the reader who wants it wants it
   // when they are not mid-address.
+  groups.push(schemeGroup());
   groups.push([{
     label: 'Clear history',
     disabled: !visits.count(),

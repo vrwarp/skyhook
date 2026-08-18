@@ -422,6 +422,11 @@ const colorSchemePage = `<!DOCTYPE html><html><head><title>Color scheme</title>
   :root { color-scheme: light dark }
   .scheme-only { color-scheme: only light dark }
   .scheme-chosen { color-scheme: dark }
+  @scope (.themed) {
+    @media (prefers-color-scheme: light) { :scope { accent-color: rgb(36, 37, 38) } }
+    @media (prefers-color-scheme: dark) { :scope { accent-color: rgb(136, 137, 138) } }
+    @media (min-width: 1px) { :scope { list-style-position: inside } }
+  }
 </style>
 <style media="(prefers-color-scheme: light)">.themed { border-left-color: rgb(26, 27, 28) }</style>
 <style media="(prefers-color-scheme: dark)">.themed { border-right-color: rgb(126, 127, 128) }</style>
@@ -1213,6 +1218,21 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			  <p class="note" id="note-1">the first note</p>
 			  <p class="note" id="note-2">the second note</p>
 			</body></html>`)
+	})
+	// A surface that is not a colour: the gradient-and-tile case the canvas
+	// rule used to flatten to the mirror's own white.
+	mux.HandleFunc("/tiled-canvas", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Tiled</title>
+			<style>body {
+			  background-image: url(/tile.png);
+			  background-repeat: repeat-x;
+			  background-position: 4px 6px;
+			  background-size: 12px 14px;
+			  background-color: rgb(21, 22, 23);
+			  color: rgb(240, 246, 252);
+			}</style></head>
+			<body><p>a page on a tiled ground</p></body></html>`)
 	})
 	// A page that never touched its margins, which is most of the plain web.
 	// Landside its body has the eight pixels the UA gives one; the question is

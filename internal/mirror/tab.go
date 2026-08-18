@@ -353,14 +353,59 @@ func (t *Tab) SetViewport(ctx context.Context, vp protocol.Viewport) error {
 		vp.DPR = 1
 	}
 	t.mu.Lock()
+	was := t.opts.Viewport.Scheme
 	t.opts.Viewport = vp
 	t.mu.Unlock()
-	return t.sess.Do(ctx, "Emulation.setDeviceMetricsOverride", map[string]any{
+	if err := t.sess.Do(ctx, "Emulation.setDeviceMetricsOverride", map[string]any{
 		"width":             vp.W,
 		"height":            vp.H,
 		"deviceScaleFactor": vp.DPR,
 		"mobile":            vp.Mobile,
-	}, nil)
+	}, nil); err != nil {
+		return err
+	}
+	return t.setColorScheme(ctx, vp.Scheme, was != vp.Scheme)
+}
+
+/*
+setColorScheme puts the landside tab in the scheme the reader asked for.
+
+This is the other half of §45. The mirror settles `prefers-color-scheme`
+landside because it has to — the palette is fixed before the bundle is written,
+along with every image the server fetched and transcoded from that render — and
+settling it landside is exactly what leaves the reader with no say in it. This
+is the say: the question is still answered once, by the browser that paints the
+page, and the reader gets to tell that browser what to answer.
+
+Changing it costs a document. The stylesheet a tab has already sent is a delta
+and the client only ever appends to it, so the rules written under the old
+answer cannot be taken back a rule at a time — the tab is re-snapshotted, which
+is the honest price and is why this is a preference and not a live toggle.
+*/
+func (t *Tab) setColorScheme(ctx context.Context, scheme string, changed bool) error {
+	var features []map[string]any
+	switch scheme {
+	case "light", "dark":
+		features = []map[string]any{{"name": "prefers-color-scheme", "value": scheme}}
+	case "":
+		// Nothing emulated, which is the landside browser's own answer and what
+		// a client too old to have an opinion gets.
+	default:
+		t.log.Debug("unknown colour scheme requested", "tab", t.ID, "scheme", scheme)
+		return nil
+	}
+	if err := t.sess.Do(ctx, "Emulation.setEmulatedMedia", map[string]any{
+		"features": features,
+	}, nil); err != nil {
+		return fmt.Errorf("mirror: setEmulatedMedia: %w", err)
+	}
+	// Nothing has been sent yet, so nothing has to be taken back: a tab still
+	// being built gets the scheme before its first document rather than a
+	// re-snapshot of one it has not sent.
+	if !changed || t.docEpoch.Load() == 0 {
+		return nil
+	}
+	return t.Snapshot(ctx)
 }
 
 /*

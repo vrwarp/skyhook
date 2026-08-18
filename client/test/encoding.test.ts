@@ -146,7 +146,7 @@ describe('client frames encode integers as CBOR integers', () => {
     resync: encodeFrame(FrameType.Resync, 1, resyncBody(1, 12, 'gap')),
     navigate: encodeFrame(FrameType.Navigate, 1, navigateBody('https://example.test/', '')),
     viewport: encodeFrame(FrameType.Viewport, 0, viewportBody({
-      w: 1280, h: 800, dpr: 1, mobile: false,
+      w: 1280, h: 800, dpr: 1, mobile: false, scheme: 'dark',
     })),
     imageWant: encodeFrame(FrameType.ImageWant, 1, imageWantBody(['deadbeef'], ['cafebabe'])),
     adapter: encodeFrame(FrameType.AdapterCmd, 0, adapterCommandBody({

@@ -2107,28 +2107,6 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   page using six glyphs of a large family pays for all of them. `hb-subset`
   when present, degrading to this when not, is the obvious next step and would
   follow the pattern `avifenc`/`cwebp` already set.
-- **The reader cannot ask for the other colour scheme.** [§45](#45-half-a-theme-is-not-a-theme)
-  settles `prefers-color-scheme`, `color-scheme` and the canvas landside, which
-  is what makes a themed page arrive whole — but it settles them at whatever the
-  landside browser is, and nothing plane-side can change that. A reader who wants the dark version of a
-  site that has one has no way to say so. The mechanism for it is not far off:
-  Chromium takes `Emulation.setEmulatedMedia` per tab, so a preference on the
-  client could ride to the server the way the viewport already does and be
-  applied at the same place, with the tab re-rendered once. Until then the
-  answer is the server's.
-- **A media query inside a block that ships whole is still asked twice.**
-  [§45](#45-half-a-theme-is-not-a-theme) resolves `@media` where the walk goes
-  into it, which is everywhere except the two places a block crosses as text: a
-  `@scope` body, and a grouping at-rule this build has no name for. A
-  `prefers-color-scheme` query written inside one of those reaches the reader
-  unanswered. Resolving it there means rewriting conditions inside arbitrary CSS
-  text rather than reading them off the CSSOM, which is a parser this does not
-  have; the honest bound is that the filter never sees them.
-- **The canvas crosses as a colour and not as a background.** §45 sends the
-  landside canvas colour, which is what a light/dark disagreement turns on. A
-  page whose surface is a gradient or a tiled image still shows the mirror's
-  flat ground behind the document, because carrying that means carrying a
-  background shorthand and its assets rather than one resolved colour.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -3293,3 +3271,68 @@ arrives as the attribute op the load handler queues one batch later. Delaying
 the snapshot to make it arrive together would cost every page the load event to
 save one attribute on some of them. The test waits for the mark rather than
 assuming it rode with the document, and says why.
+
+### 47. Three gaps, closed
+
+[§45](#45-half-a-theme-is-not-a-theme) and [§46](#46-the-other-question-the-plane-side-answers-wrong)
+each left something written down rather than built. All three were the same
+shape of admission — *this is where the answer stops being complete* — and all
+three turned out to be a day's work rather than a project.
+
+**A media query inside a block that crosses as text.** Almost everything is
+walked: `collectRules` goes into a `@media` and asks this browser about its
+condition. Two things are not, and cannot be — a `@scope` body, whose rules are
+written against a root the document cannot be asked about, and a grouping
+at-rule this build has no name for, which ships whole because guessing at its
+prelude is worse than keeping it. Both hand over `cssText`, so a
+`prefers-color-scheme` query inside one reached the reader with its question
+intact: §45's fault, in the two places §45's fix could not see.
+
+The text is now scanned for them (`resolveMediaInText`). It is a small parser
+and deliberately a nervous one: it steps over strings and comments for the
+reason everything here does — `content: "@media print"` is text a page means to
+display — and anything it cannot read is left exactly as written, which costs a
+wrapper and never a rule. The condition itself goes to the same
+`resolveMediaList` a walked block's does, so the two paths cannot drift.
+
+**The canvas as a background rather than a colour.** §45 sent the landside
+canvas *colour*, which is what a light/dark disagreement turns on and is most of
+the real cases. It is not all of them: a page whose ground is a gradient or a
+tiled texture had that flattened to the mirror's own white. The whole set now
+travels — image, position, size, repeat, attachment, origin, clip — taken from
+whichever element the propagation itself takes it from, and sent as a set
+because a `background-image` landing on top of the mirror's plain
+`background: #fff` would otherwise be sized and repeated by *that* rule's
+defaults. The url() inside it is left absolute, so the server rewrites it into
+an image key through `rewriteCSSImages` exactly as it does for any other
+background on the page: the picture crosses the link the same way and at the
+same cost. A page with only a colour still sends one declaration.
+
+**The reader's say in the answer.** Settling `prefers-color-scheme` landside is
+what makes a themed page arrive whole, and it is also what leaves the reader
+with whatever the landside browser happens to be. The say could not be a
+plane-side toggle — that a mirror cannot repaint itself is §45's whole finding —
+so it is a preference that travels *to* the server: `Viewport.scheme`, riding
+with the width and the pixel ratio because it is the same kind of fact about the
+reader's window, and applied at the same place (`Tab.setColorScheme`, via
+`Emulation.setEmulatedMedia`). The question is still answered once, by the
+browser that paints the page. The reader now gets to tell that browser what to
+answer.
+
+Two details are worth the words. The client's default is not "leave it blank" —
+it sends whichever scheme *this device* is set to, so the landside browser is
+put in the reader's own scheme and paints the page there. That is the one
+arrangement where the reader gets the theme they prefer *and* the two sides
+agree about it, because the server rendered the theme it sent. And changing it
+costs a document per open tab: a stylesheet is a delta the client only appends
+to, so rules written under the old answer cannot be taken back a rule at a time
+and the tab is re-snapshotted. That is why it is a preference rather than a
+switch, why the menu entry carries `resends open pages` as its hint, and why the
+client reads it from the store *before* the first Hello — a scheme that arrived
+after a tab was built would cost that tab a page to apply.
+
+`TestTheReaderCanAskForTheOtherColorScheme` drives the whole loop: a light
+bundle arrives, the reader asks for dark, and what comes back has the dark rules
+from all three routes §45 found — the `@media` block, the `<style media>` and
+the `<link media>` — with the light ones gone and `color-scheme` pinned the
+other way.

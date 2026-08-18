@@ -1553,6 +1553,112 @@
   }
 
   /*
+   * resolveMediaInText answers the media queries inside a block that crosses as
+   * text rather than as rules.
+   *
+   * Almost everything is walked: collectRules goes into a `@media` and asks
+   * this browser about its condition. Two things are not, and cannot be — a
+   * `@scope` body, whose rules are written against a root the document cannot
+   * be asked about, and a grouping at-rule this build has no name for, which
+   * has to be shipped whole because guessing at its prelude is worse than
+   * keeping it. Both hand over `cssText`, and a `@media (prefers-color-scheme:
+   * dark)` inside one reached the reader with its question intact — the whole
+   * fault of §45, in the two places §45's fix could not see.
+   *
+   * So the text is scanned for them. It is a small parser and it is deliberately
+   * a nervous one: a shape it cannot read is left exactly as written, which
+   * costs a wrapper and never a rule. Strings and comments are stepped over for
+   * the reason they always are — `content: "@media print"` is text a page means
+   * to display.
+   */
+  function resolveMediaInText(text) {
+    if (!text || text.toLowerCase().indexOf('@media') < 0) return text;
+    var out = '', i = 0;
+    while (i < text.length) {
+      var c = text.charAt(i);
+      if (c === '"' || c === "'") {
+        var q = scanSelString(text, i);
+        out += text.slice(i, q);
+        i = q;
+        continue;
+      }
+      if (c === '\\' && i + 1 < text.length) {
+        out += text.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (c === '/' && text.charAt(i + 1) === '*') {
+        var end = text.indexOf('*/', i + 2);
+        if (end < 0) { out += text.slice(i); break; }
+        out += text.slice(i, end + 2);
+        i = end + 2;
+        continue;
+      }
+      if (c === '@' && matchesAtRule(text, i, 'media')) {
+        var open = findBlockStart(text, i);
+        var close = open < 0 ? -1 : matchBlockEnd(text, open);
+        if (close < 0) { out += c; i++; continue; }
+        var cond = text.slice(i + 6, open).trim();
+        var left = resolveMediaList(cond);
+        if (left !== null) {
+          // Recurse first: a block may hold another, and the inner question is
+          // this browser's whether or not the outer one survives.
+          var body = resolveMediaInText(text.slice(open + 1, close));
+          out += left ? '@media ' + left + '{' + body + '}' : body;
+        } else {
+          noteRejected('@media ' + cond);
+        }
+        i = close + 1;
+        continue;
+      }
+      out += c;
+      i++;
+    }
+    return out;
+  }
+
+  // matchesAtRule reports whether `@name` stands at i and stops there: `@media`
+  // is one at-rule and `@media-something` would be another.
+  function matchesAtRule(text, i, name) {
+    if (text.charAt(i) !== '@') return false;
+    if (text.substr(i + 1, name.length).toLowerCase() !== name) return false;
+    var c = text.charAt(i + 1 + name.length);
+    return c !== '' && c !== '-' && c !== '_' && !/[0-9a-zA-Z]/.test(c);
+  }
+
+  // findBlockStart returns the index of the `{` that opens the block an at-rule
+  // at i introduces, or -1 for one that ends at a semicolon and has no block.
+  function findBlockStart(text, i) {
+    for (var j = i; j < text.length; j++) {
+      var c = text.charAt(j);
+      if (c === '\\') { j++; continue; }
+      if (c === '"' || c === "'") { j = scanSelString(text, j) - 1; continue; }
+      if (c === '{') return j;
+      if (c === ';') return -1;
+    }
+    return -1;
+  }
+
+  // matchBlockEnd returns the index of the `}` closing the block opened at i.
+  function matchBlockEnd(text, i) {
+    var depth = 0;
+    for (var j = i; j < text.length; j++) {
+      var c = text.charAt(j);
+      if (c === '\\') { j++; continue; }
+      if (c === '"' || c === "'") { j = scanSelString(text, j) - 1; continue; }
+      if (c === '/' && text.charAt(j + 1) === '*') {
+        var end = text.indexOf('*/', j + 2);
+        if (end < 0) return -1;
+        j = end + 1;
+        continue;
+      }
+      if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) return j;
+    }
+    return -1;
+  }
+
+  /*
    * ------------------------------------------------------------ color-scheme
    *
    * `color-scheme` is the other half of the same disagreement, and the half a
@@ -1955,7 +2061,7 @@
             } else if (rule.cssRules && isScopeRule(rule)) {
               collectScope(doc, rule, out, base);
             } else if (rule.cssText && rule.cssText.charAt(0) === '@') {
-              out.push(pinColorSchemes(absolutizeCSSURLs(rule.cssText, base)));
+              out.push(shippedWhole(rule.cssText, base));
             }
         }
       } catch (e) { /* cross-origin sheet, skip */ }
@@ -2102,7 +2208,13 @@
       noteRejected('@scope ' + start);
       return;
     }
-    out.push(pinColorSchemes(absolutizeCSSURLs(rule.cssText, base)));
+    out.push(shippedWhole(rule.cssText, base));
+  }
+
+  // shippedWhole is what a block that crosses as text still has to have done to
+  // it: the same three passes a walked rule gets, in the same order.
+  function shippedWhole(text, base) {
+    return resolveMediaInText(pinColorSchemes(absolutizeCSSURLs(text, base)));
   }
 
   /*
@@ -2386,23 +2498,69 @@
     var decls = [];
     var scheme = usedColorScheme(view, root);
     if (scheme) decls.push('color-scheme:' + scheme + ' !important');
-    var bg = canvasColor(view, root);
-    if (bg) decls.push('background-color:' + bg + ' !important');
+    canvasBackground(view, root, decls);
     if (!decls.length) return '';
     return ':root{' + decls.join(';') + ';}';
   }
 
-  // canvasColor is what the landside surface behind the document is painted,
-  // or '' where nothing paints it and the mirror's own ground is as good.
-  function canvasColor(view, root) {
-    var bg = '';
+  // The background properties that travel together. A background is a set, not
+  // a colour: sending half of one puts a tile at the wrong size or repeats a
+  // hero across the page.
+  var CANVAS_BG_PROPS = [
+    'background-image', 'background-position', 'background-size',
+    'background-repeat', 'background-attachment', 'background-origin',
+    'background-clip'
+  ];
+
+  /*
+   * canvasBackground reads what paints the landside surface behind the document
+   * and appends it to the rule the frame is given.
+   *
+   * Which element it comes from is the rule the propagation itself follows: the
+   * root's, unless the root has neither an image nor a colour, in which case
+   * the body's — and if neither has anything, nothing is said and the mirror's
+   * own ground stands.
+   *
+   * A colour on its own is sent on its own, which is the common case and one
+   * declaration. Anything with an image in it — a gradient, a tiled texture, a
+   * hero photograph — brings the whole set, because a `background-image`
+   * landing on top of the mirror's plain `background: #fff` would otherwise be
+   * sized, positioned and repeated by that rule's defaults rather than by the
+   * page's. The url() inside it is left absolute for the server to rewrite into
+   * an image key, exactly as it does for the url() in any other rule
+   * (rewriteCSSImages, css.go), so the picture crosses the link the same way
+   * and at the same cost as every other background on the page.
+   */
+  function canvasBackground(view, root, decls) {
+    var cs, src = root;
     try {
-      bg = view.getComputedStyle(root).backgroundColor;
-      if (isTransparentColor(bg) && document.body) {
-        bg = view.getComputedStyle(document.body).backgroundColor;
+      cs = view.getComputedStyle(root);
+      if (isTransparentColor(cs.backgroundColor) && isNoImage(cs.backgroundImage) &&
+          document.body) {
+        src = document.body;
+        cs = view.getComputedStyle(src);
       }
-    } catch (e) { return ''; }
-    return isTransparentColor(bg) ? '' : bg;
+    } catch (e) { return; }
+    var color = cs.backgroundColor;
+    var image = cs.backgroundImage;
+    if (isNoImage(image)) {
+      if (!isTransparentColor(color)) {
+        decls.push('background-color:' + color + ' !important');
+      }
+      return;
+    }
+    decls.push('background-color:' +
+      (isTransparentColor(color) ? 'transparent' : color) + ' !important');
+    for (var i = 0; i < CANVAS_BG_PROPS.length; i++) {
+      var prop = CANVAS_BG_PROPS[i];
+      var v = '';
+      try { v = cs.getPropertyValue(prop); } catch (e) { v = ''; }
+      if (v) decls.push(prop + ':' + v + ' !important');
+    }
+  }
+
+  function isNoImage(v) {
+    return !v || v === 'none';
   }
 
   /*
