@@ -2297,31 +2297,44 @@
     out.push(text);
   }
 
+  /*
+   * readableRules is a sheet's rules as this side can see them.
+   *
+   * A stylesheet served from another origin — which is where a CDN-backed site
+   * keeps all of them — cannot be read through the CSSOM at all. The host
+   * fetches the text over the protocol and hands it back through addSheet, and
+   * the copy stands in for the original wherever the original is asked for: in
+   * the sheet's own place in the cascade, which is what keeps a later rule
+   * later. Both walks over the sheets go through here, so both see the same
+   * document — a rule recovered for one and invisible to the other would have
+   * the two disagreeing about a page neither can read twice.
+   */
+  function readableRules(sheet) {
+    if (!sheet) return null;
+    try { if (sheet.cssRules) return sheet.cssRules; } catch (e) { /* cross-origin */ }
+    var href = null;
+    try { href = sheet.href; } catch (e) { href = null; }
+    var sub = href ? recoveredSheets.get(href) : null;
+    if (!sub) return null;
+    try { return sub.cssRules || null; } catch (e) { return null; }
+  }
+
   function collectSheets(doc, sheets, out, seen) {
     if (!sheets) return;
     for (var i = 0; i < sheets.length; i++) {
       var sheet = sheets[i];
-      var rules = null;
-      try { rules = sheet.cssRules; } catch (e) { rules = null; } // cross-origin
+      var rules = readableRules(sheet);
       if (!rules) {
-        // A stylesheet served from another origin — which is where a CDN-backed
-        // site keeps all of them — cannot be read through the CSSOM at all. The
-        // host fetches the text over the protocol and hands it back through
-        // addSheet; substituting it here, in the sheet's own place in the
-        // cascade, is what keeps a later rule later.
-        var href = null;
-        try { href = sheet.href; } catch (e) { href = null; }
-        if (href) {
-          var sub = recoveredSheets.get(href);
-          if (sub) {
-            try { rules = sub.cssRules; } catch (e) { rules = null; }
-          } else if (!blockedSheets[href]) {
-            blockedSheets[href] = 1;
-            blockedNew = true;
-          }
+        // Nothing to read and nothing recovered yet: tell the host, which can
+        // fetch what this side cannot.
+        var missing = null;
+        try { missing = sheet.href; } catch (e) { missing = null; }
+        if (missing && !blockedSheets[missing]) {
+          blockedSheets[missing] = 1;
+          blockedNew = true;
         }
+        continue;
       }
-      if (!rules) continue;
       collectSheet(doc, sheet, rules, out, seen);
     }
   }
@@ -2388,6 +2401,26 @@
   stand in. Nothing else is kept, which is what holds the cost to the pages
   that have no alternative — a page whose body font is a webfont still gets
   the reader's own, and still pays nothing for it.
+
+  It is not the only signal, because it is not the only way to write an icon
+  font. Material — so Google's own properties, and a large fraction of every
+  other site built this decade — puts its glyphs at the ligature instead: the
+  markup says `<i class="google-material-icons">mark_chat_unread</i>` and the
+  font substitutes that whole run for one picture. Nothing in that text is
+  private use, so the scan above sees nothing to keep, the family is dropped,
+  and the substitute draws exactly what the markup says. The Google Chat
+  capture is a nav with the word `star` where the star was and `spool` growing
+  out of the side of a chip — worse than the empty boxes, because empty boxes
+  read as absence and a word reads as the page.
+
+  The signal for that kind is the declaration that makes it work.
+  `font-feature-settings: "liga"` asks for a ligature substitution that would
+  not otherwise happen, which is a thing to ask for only when the substitution
+  is the content. Prose does not ask: ligatures are already on, so the one
+  thing a text stylesheet ever writes here is the negation, `"liga" 0`, and on
+  the Chat capture that is precisely how the two sorts divide — four rules
+  asking for ligatures, all four naming an icon family, and every rule turning
+  them off naming Google Sans.
   */
 
   // The private use areas: the BMP block, and the two supplementary planes as
@@ -2437,8 +2470,83 @@
         try { fam = firstFamily(view.getComputedStyle(el).fontFamily); } catch (e) { fam = ''; }
         if (fam) want[fam] = 1;
       }
+      ligatureFamilies(doc, want);
     }
     return want;
+  }
+
+  /*
+   * One entry of a font-feature-settings list: a tag, optionally followed by
+   * how much of it is wanted. `"liga"`, `"liga" 1` and `"liga" on` all ask for
+   * ligatures; `"liga" 0` and `"liga" off` are a prose sheet turning them off,
+   * which is the opposite of what is being looked for here.
+   */
+  var LIGA_ENTRY_RE = /^["']?(?:liga|clig|dlig)["']?(?:\s+(\S+))?$/;
+
+  function asksForLigatures(style) {
+    var value = '';
+    try {
+      // Blink aliases the prefixed property onto the standard one, so the
+      // first read answers for both; the second is for a browser that does not,
+      // since Material's own stylesheet still writes the prefix.
+      value = style.fontFeatureSettings ||
+        style.getPropertyValue('-webkit-font-feature-settings') || '';
+    } catch (e) { return false; }
+    if (!value || value === 'normal') return false;
+    var parts = String(value).split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var m = LIGA_ENTRY_RE.exec(parts[i].trim());
+      if (!m) continue;
+      if (m[1] === undefined || (m[1] !== '0' && m[1] !== 'off')) return true;
+    }
+    return false;
+  }
+
+  /*
+   * ligatureFamilies reads the icon families out of a document's stylesheets.
+   *
+   * This walks the sheets rather than the DOM because the declaration is where
+   * the evidence is, and reading it costs one property access per style rule
+   * against the style resolution a computed read would force. `selectorMatches`
+   * is asked only about the handful of rules that got that far — eleven of
+   * twenty thousand on the Chat capture — so a family is kept only when the
+   * page is actually wearing it, which is what stops a stylesheet that declares
+   * `.material-icons` and never uses it from buying a font nothing draws.
+   *
+   * It runs before the collecting walk rather than inside it because the two
+   * halves of the evidence are in different sheets: Google ships the icon
+   * classes with the app and the `@font-face` from fonts.googleapis.com, and
+   * which of those the walk reaches first is not something to depend on.
+   */
+  function ligatureFamilies(doc, want) {
+    scanSheetsForLigatures(doc, doc.styleSheets, want);
+    scanSheetsForLigatures(doc, doc.adoptedStyleSheets, want);
+  }
+
+  function scanSheetsForLigatures(doc, sheets, want) {
+    if (!sheets) return;
+    for (var i = 0; i < sheets.length; i++) {
+      scanForLigatures(doc, readableRules(sheets[i]), want, 0);
+    }
+  }
+
+  function scanForLigatures(doc, list, want, depth) {
+    if (!list || depth > 8) return;
+    for (var i = 0; i < list.length; i++) {
+      var rule = list[i];
+      try {
+        if (rule.type === 1 && rule.style && asksForLigatures(rule.style)) {
+          var fam = firstFamily(rule.style.fontFamily);
+          if (fam && !want[fam] && selectorMatches(doc, rule.selectorText)) want[fam] = 1;
+        }
+        // A group at-rule holds rules, an `@import` holds a whole sheet, and a
+        // nested rule holds both its own declarations and more rules.
+        if (rule.cssRules) scanForLigatures(doc, rule.cssRules, want, depth + 1);
+        else if (rule.styleSheet) {
+          scanForLigatures(doc, readableRules(rule.styleSheet), want, depth + 1);
+        }
+      } catch (e) { /* cross-origin sheet, skip */ }
+    }
   }
 
   /*

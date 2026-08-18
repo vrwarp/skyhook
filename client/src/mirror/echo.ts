@@ -71,11 +71,20 @@ export class EchoEngine {
     this.hooks.sendFocus(id, true);
   }
 
-  /** Called on focusout: ownership ends and buffered server truth is applied. */
-  blur(apply: (op: MutationOp) => void): void {
+  /**
+   * Called on focusout: ownership ends and buffered server truth is applied.
+   *
+   * `hold` says the caller will tell the page about the focus change itself.
+   * Ownership ends here regardless — that is this side's bookkeeping about a
+   * field the reader has left, and it is true the moment they leave it — but
+   * the page hears about it from whatever the caller is holding the blur for.
+   * See MirrorHost.heldBlur, which exists because a page that closes a popover
+   * on blur must not be told before the click it closed over has been sent.
+   */
+  blur(apply: (op: MutationOp) => void, hold = false): void {
     const owned = this.owned;
     if (!owned) return;
-    this.hooks.sendFocus(owned.id, false);
+    if (!hold) this.hooks.sendFocus(owned.id, false);
     this.owned = null;
     for (const op of owned.deferred) apply(op);
   }

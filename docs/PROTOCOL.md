@@ -252,11 +252,14 @@ exactly that:
   exists rather than stretched over the whole element. The hash is of the
   pixels, so a canvas the reader did not change costs one small metadata frame
   and no bytes at all.
-- **Webfonts.** Kept only for a family the page draws private-use codepoints
-  in, which is an icon font and has no substitute on any device. They reach the
-  channel the ordinary way — an `@font-face` `src` is a `url()` in a stylesheet
-  like any background image — and pass through the transcoder untouched, since
-  there is no smaller version of a font to make.
+- **Webfonts.** Kept only for an icon font, which has no substitute on any
+  device, and recognised two ways: a family the page draws private-use
+  codepoints in, and a family a matching rule asks for ligatures in
+  (`font-feature-settings: "liga"`), which is how Material puts a glyph behind
+  the word `mark_chat_unread`. Everything else takes the reader's own font.
+  They reach the channel the ordinary way — an `@font-face` `src` is a `url()`
+  in a stylesheet like any background image — and pass through the transcoder
+  untouched, since there is no smaller version of a font to make.
 
 ### Adapters
 

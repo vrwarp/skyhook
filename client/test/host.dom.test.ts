@@ -82,6 +82,23 @@ function events() {
   };
 }
 
+/**
+ * A popover with a search field, a second field and a result to click: the
+ * shape every "new chat" dialog and every command palette has, and the one
+ * where a blur sent on its own closes the thing the reader was aiming at.
+ */
+function withSearchPopover(snap: Snapshot): Snapshot {
+  const base = snap.strings.length;
+  snap.strings.push('input', 'button', 'Ada Lovelace');
+  snap.nodes.push(
+    { id: 50, parent: 2, kind: NodeKind.Element, ref: base, attrs: [], flags: NodeFlags.Editable },
+    { id: 51, parent: 2, kind: NodeKind.Element, ref: base, attrs: [], flags: NodeFlags.Editable },
+    { id: 52, parent: 2, kind: NodeKind.Element, ref: base + 1, attrs: [], flags: 0 },
+    { id: 53, parent: 52, kind: NodeKind.Text, ref: base + 2, attrs: [], flags: 0 },
+  );
+  return snap;
+}
+
 async function mount(): Promise<{ host: MirrorHost; ev: ReturnType<typeof events> }> {
   const ev = events();
   const host = new MirrorHost(1, ev);
@@ -330,6 +347,101 @@ describe('MirrorHost', () => {
     // A map told it was dragged nowhere has been asked to do nothing, and the
     // click it really was would never arrive.
     expect(kinds).not.toContain('drag');
+    expect(kinds).toContain('click');
+  });
+
+  /*
+   * The reader taps a result inside a popover whose search field they were
+   * typing in. Landside the press does the blur itself, in the page's order;
+   * a blur of our own arrives a round trip earlier, and Google Chat answers it
+   * by closing the dialog — so the click that follows names a node the page
+   * has already destroyed, which is the "node 2219 not found landside" in the
+   * capture this comes from.
+   */
+  it('does not blur a field ahead of the click that left it', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withSearchPopover(snapshot()));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const field = doc.querySelectorAll('input')[0]!;
+    const result = doc.querySelector('button')!;
+
+    field.focus();
+    ev.input.mockClear();
+
+    // jsdom moves focus on focus()/blur() rather than as the press's default
+    // action, so the order a browser produces is spelled out here.
+    result.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    field.blur();
+    result.dispatchEvent(new win.MouseEvent('mouseup', { bubbles: true, button: 0 }));
+    result.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).toEqual(['click']);
+  });
+
+  it('blurs a field the reader left without pressing anything', async () => {
+    // Focus going to the shell — the URL bar, a menu, a tab strip — produces
+    // no gesture this side is going to send, so nothing else would ever tell
+    // the page the reader has gone.
+    const { host, ev } = await mount();
+    host.applySnapshot(withSearchPopover(snapshot()));
+    const field = host.frame.contentDocument!.querySelectorAll('input')[0]!;
+
+    field.focus();
+    ev.input.mockClear();
+    field.blur();
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.map((p) => p.kind)).toEqual(['blur']);
+    expect(sent[0].node).toBe(50);
+  });
+
+  it('sends a held blur when its gesture never reaches the page', async () => {
+    // A press that ends on something the patcher cannot place sends nothing
+    // landside, so the blur it was holding has nothing to ride on.
+    const { host, ev } = await mount();
+    host.applySnapshot(withSearchPopover(snapshot()));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const field = doc.querySelectorAll('input')[0]!;
+    const stray = doc.body.appendChild(doc.createElement('div'));
+
+    field.focus();
+    ev.input.mockClear();
+    stray.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    field.blur();
+    stray.dispatchEvent(new win.MouseEvent('mouseup', { bubbles: true, button: 0 }));
+    stray.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.map((p) => p.kind)).toEqual(['blur']);
+    expect(sent[0].node).toBe(50);
+  });
+
+  it('does not blur the field the reader pressed into', async () => {
+    // Focus landing on the second field says everything the held blur was
+    // waiting to say. Flushed after it, it would name the field the reader is
+    // now typing in.
+    const { host, ev } = await mount();
+    host.applySnapshot(withSearchPopover(snapshot()));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const [first, second] = Array.from(doc.querySelectorAll('input'));
+
+    first.focus();
+    ev.input.mockClear();
+    second.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    first.blur();
+    second.focus();
+    second.dispatchEvent(new win.MouseEvent('mouseup', { bubbles: true, button: 0 }));
+    second.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    // And a gesture later, which is when a blur nothing resolved would surface.
+    second.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, button: 0 }));
+
+    const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+    expect(kinds).not.toContain('blur');
+    expect(kinds).toContain('focus');
     expect(kinds).toContain('click');
   });
 

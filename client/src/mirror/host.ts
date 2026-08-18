@@ -409,6 +409,30 @@ export class MirrorHost {
   private pointerPath: Array<{ x: number; y: number; t: number }> = [];
   /** When the button went down, so a click can report how long it was held. */
   private pointerDownAt = 0;
+  /** Whether a button is down over the mirror right now. A press that started
+   *  in the shell — the URL bar, a menu — never sets this, which is the
+   *  difference heldBlur turns on. */
+  private pressing = false;
+  /**
+   * The field a press blurred, held back from the server until the gesture it
+   * belongs to either reaches the page or turns out not to be going.
+   *
+   * Landside, a press moves focus by itself: the click about to be sent arrives
+   * as a real mousePressed on the control, and the field the reader was in
+   * blurs exactly when and because it would have if they were sitting in front
+   * of the page. Sending a blur of our own does that same thing early, alone,
+   * and a round trip before the click exists — and to any page that closes a
+   * popover when its search field loses focus, which is most of them, that is
+   * the popover closing over the result the reader was aiming at. The Google
+   * Chat capture is this and nothing else: blur, then a click on a node the
+   * blur had already destroyed, and the server answering "node 2219 not found
+   * landside" while the reader watches the dialog vanish.
+   *
+   * So it waits. The gesture that follows clears it by doing the same job
+   * better; a gesture that never reaches the page flushes it, because then
+   * nothing else is going to tell the page the reader left.
+   */
+  private heldBlur = 0;
 
   constructor(tab: number, events: HostEvents) {
     this.tab = tab;
@@ -505,8 +529,13 @@ export class MirrorHost {
         this.send({ kind: InputKind.Key, node, key, modifiers, repeat }),
       sendValue: (node, value, start, end) =>
         this.send({ kind: InputKind.SetValue, node, text: value, start, end }),
-      sendFocus: (node, focused) =>
-        this.send({ kind: focused ? InputKind.Focus : InputKind.Blur, node }),
+      sendFocus: (node, focused) => {
+        // Focus landing somewhere else says everything a held blur was waiting
+        // to say, and says it about the right element: flushed after this, it
+        // would blur the field the reader has just moved into.
+        if (focused) this.heldBlur = 0;
+        this.send({ kind: focused ? InputKind.Focus : InputKind.Blur, node });
+      },
       onChatSend: (node, text) => this.placeGhost(node, text),
     });
 
@@ -650,6 +679,17 @@ export class MirrorHost {
       point: drag.point,
       path,
     });
+    // A pan is a press and a release like any other, so it carries the blur
+    // landside the same way a click does. See heldBlur.
+    this.heldBlur = 0;
+  }
+
+  /** Sends a blur the gesture that caused it turned out not to be carrying. */
+  private flushHeldBlur(): void {
+    const node = this.heldBlur;
+    if (!node) return;
+    this.heldBlur = 0;
+    this.send({ kind: InputKind.Blur, node });
   }
 
   /** Where the pointer is, in viewport permille, or null if the frame has no
@@ -711,6 +751,79 @@ export class MirrorHost {
     return held;
   }
 
+  /*
+   * A click inside the mirror, as the semantic event the server replays.
+   *
+   * Its own method because of how many ways it ends without one: a link
+   * opened in a new tab, a fragment scrolled to here, a gesture already spent
+   * on a pan, a node the patcher cannot place. Each of those leaves the
+   * landside page untouched, and the caller has a blur waiting on the answer.
+   */
+  private clickInFrame(ev: MouseEvent): void {
+    const target = this.eventTarget(ev) as HTMLElement | null;
+    if (!target) return;
+    const anchor = target.closest?.('a[href], area[href]') as HTMLAnchorElement | null;
+    // The mirror never navigates itself: a click is a semantic event the
+    // server replays into the real page. This has to happen before anything
+    // that can bail out. A link the patcher cannot place — one under local
+    // echo, one left over from a batch that did not apply — would otherwise
+    // follow itself, and the consequences are not cosmetic: the frame fetches
+    // the URL from the plane side, which is the one thing this client must
+    // never do, and lands on a cross-origin document that the patcher can no
+    // longer touch, which kills the tab for the rest of the session.
+    if (anchor) ev.preventDefault();
+    // Ctrl/⌘-click is the keyboard half of "open in a new tab", and it means
+    // the same thing here. Sending it landside instead would open a tab on
+    // the VPS that this side has no handle on. It goes before the bail below
+    // because opening a tab needs the URL and not the node: a link the
+    // patcher cannot place is still a link the reader can follow.
+    const newTab = this.linkAt(anchor);
+    if (newTab && (ev.ctrlKey || ev.metaKey)) {
+      this.events.openLink(this.tab, newTab.url);
+      return;
+    }
+    // A gesture that panned a map is not also a click on it: landside the
+    // two would be a pan followed by a press wherever it ended. First,
+    // because a gesture already spent is not a click of any kind.
+    if (this.dragConsumedClick) {
+      this.dragConsumedClick = false;
+      return;
+    }
+    // A link into the document already on screen — Hacker News' parent, prev
+    // and next, a footnote, a table of contents — is a scroll and not a
+    // navigation, and every line it could land on is already here. So this
+    // side does it, at no round trip. Sending it landside instead spends one
+    // to scroll a document laid out with different fonts, and all that comes
+    // back is a pixel offset from that other layout, which is both wrong here
+    // and refused outright once the reader has scrolled for themselves.
+    if (anchor && plainClick(ev) && this.jumpToFragment(anchor)) return;
+    const node = this.patcher?.idOf(anchor ?? target) ?? 0;
+    if (!node) return;
+    this.send({
+      kind: InputKind.Click,
+      node,
+      modifiers: modifierMask(ev),
+      button: ev.button,
+      hold: this.holdMs(),
+      point: this.pointInBox(ev, (anchor ?? target) as Element),
+      path: this.approachPath(),
+    });
+    // The press this click becomes landside blurs the field the reader left,
+    // in the page's own order and at the page's own moment. Nothing more to
+    // hold. See heldBlur.
+    this.heldBlur = 0;
+    // Following a link is the gesture this whole client is slowest at
+    // answering, so the shell is told the moment it goes out rather than when
+    // the page comes back. Everything narrower — a click on a button, a
+    // checkbox — is left alone: those usually change the page in place, and a
+    // page arriving is not what the reader is waiting for.
+    const link = plainClick(ev) ? this.linkAt(anchor) : undefined;
+    if (link) this.events.navigating(this.tab, link.url);
+    // The frame has no allow-forms, so a submit control never produces a
+    // native submit event; recognise it here instead.
+    this.maybeSubmit(target);
+  }
+
   private wireInput(doc: Document): void {
     doc.addEventListener('mousemove', (ev) => this.recordPointer(ev as MouseEvent), true);
 
@@ -720,71 +833,22 @@ export class MirrorHost {
     // there". Everywhere else that gesture is the reader selecting text, which
     // the mirror does natively and this must not take away — hence beginDrag
     // starting nothing unless the press landed on a region.
-    doc.addEventListener('mouseup', (ev) => this.endDrag(ev as MouseEvent), true);
+    doc.addEventListener('mouseup', (ev) => {
+      this.pressing = false;
+      this.endDrag(ev as MouseEvent);
+    }, true);
     // A pointer that left the frame mid-drag is not coming back to release the
     // button, and a drag left open would swallow the next click.
-    doc.addEventListener('mouseleave', (ev) => this.endDrag(ev as MouseEvent), true);
+    doc.addEventListener('mouseleave', (ev) => {
+      this.pressing = false;
+      this.endDrag(ev as MouseEvent);
+    }, true);
 
     doc.addEventListener('click', (ev) => {
-      const target = this.eventTarget(ev) as HTMLElement | null;
-      if (!target) return;
-      const anchor = target.closest?.('a[href], area[href]') as HTMLAnchorElement | null;
-      // The mirror never navigates itself: a click is a semantic event the
-      // server replays into the real page. This has to happen before anything
-      // that can bail out. A link the patcher cannot place — one under local
-      // echo, one left over from a batch that did not apply — would otherwise
-      // follow itself, and the consequences are not cosmetic: the frame fetches
-      // the URL from the plane side, which is the one thing this client must
-      // never do, and lands on a cross-origin document that the patcher can no
-      // longer touch, which kills the tab for the rest of the session.
-      if (anchor) ev.preventDefault();
-      // Ctrl/⌘-click is the keyboard half of "open in a new tab", and it means
-      // the same thing here. Sending it landside instead would open a tab on
-      // the VPS that this side has no handle on. It goes before the bail below
-      // because opening a tab needs the URL and not the node: a link the
-      // patcher cannot place is still a link the reader can follow.
-      const newTab = this.linkAt(anchor);
-      if (newTab && (ev.ctrlKey || ev.metaKey)) {
-        this.events.openLink(this.tab, newTab.url);
-        return;
-      }
-      // A gesture that panned a map is not also a click on it: landside the
-      // two would be a pan followed by a press wherever it ended. First,
-      // because a gesture already spent is not a click of any kind.
-      if (this.dragConsumedClick) {
-        this.dragConsumedClick = false;
-        return;
-      }
-      const mouse = ev as MouseEvent;
-      // A link into the document already on screen — Hacker News' parent, prev
-      // and next, a footnote, a table of contents — is a scroll and not a
-      // navigation, and every line it could land on is already here. So this
-      // side does it, at no round trip. Sending it landside instead spends one
-      // to scroll a document laid out with different fonts, and all that comes
-      // back is a pixel offset from that other layout, which is both wrong here
-      // and refused outright once the reader has scrolled for themselves.
-      if (anchor && plainClick(mouse) && this.jumpToFragment(anchor)) return;
-      const node = this.patcher?.idOf(anchor ?? target) ?? 0;
-      if (!node) return;
-      this.send({
-        kind: InputKind.Click,
-        node,
-        modifiers: modifierMask(ev),
-        button: mouse.button,
-        hold: this.holdMs(),
-        point: this.pointInBox(mouse, (anchor ?? target) as Element),
-        path: this.approachPath(),
-      });
-      // Following a link is the gesture this whole client is slowest at
-      // answering, so the shell is told the moment it goes out rather than when
-      // the page comes back. Everything narrower — a click on a button, a
-      // checkbox — is left alone: those usually change the page in place, and a
-      // page arriving is not what the reader is waiting for.
-      const link = plainClick(mouse) ? this.linkAt(anchor) : undefined;
-      if (link) this.events.navigating(this.tab, link.url);
-      // The frame has no allow-forms, so a submit control never produces a
-      // native submit event; recognise it here instead.
-      this.maybeSubmit(target);
+      this.clickInFrame(ev);
+      // A click that never reached the page did not carry the reader out of
+      // the field they were in either, and nothing else is coming that will.
+      this.flushHeldBlur();
     }, true);
 
     // Middle click means "open in a new tab" in every browser, and a mirrored
@@ -795,6 +859,13 @@ export class MirrorHost {
     doc.addEventListener('mousedown', (ev) => {
       const mouse = ev as MouseEvent;
       this.pointerDownAt = performance.now();
+      this.pressing = true;
+      // A gesture that reached neither the page nor a click — the pointer left
+      // the frame, the page swallowed it — leaves its blur held. Nothing later
+      // is going to resolve it, and the landside page is still sitting in a
+      // field the reader left a gesture ago, so it goes now, before this press
+      // moves the focus it is about.
+      this.flushHeldBlur();
       // A drag whose click never came — the pointer left the frame, the page
       // swallowed it — must not leave the flag armed for the next gesture,
       // which would arrive as a press that does nothing.
@@ -828,6 +899,7 @@ export class MirrorHost {
         point: this.pointInBox(mouse, mouse.target as Element),
         path: this.approachPath(),
       });
+      this.heldBlur = 0;
     }, true);
 
     doc.addEventListener('contextmenu', (ev) => {
@@ -842,7 +914,12 @@ export class MirrorHost {
 
     doc.addEventListener('focusin', (ev) => this.echo?.focus(this.eventTarget(ev)), true);
     doc.addEventListener('focusout', () => {
-      this.echo?.blur((op) => this.applyOne(op));
+      const held = this.pressing ? this.echo?.ownedId ?? 0 : 0;
+      // Ownership always ends here — that half is local, and the buffered
+      // server truth for the field has waited long enough. Only telling the
+      // page about it waits, and only for a press. See heldBlur.
+      this.echo?.blur((op) => this.applyOne(op), this.pressing);
+      if (held) this.heldBlur = held;
     }, true);
     doc.addEventListener('input', (ev) => this.echo?.input(ev as InputEvent), true);
     doc.addEventListener('keydown', (ev) => {
@@ -1207,6 +1284,10 @@ export class MirrorHost {
     if (!this.patcher) return;
     this.setPageUrl(snap.url);
     this.echo?.release();
+    // A held blur names a node in the document being replaced. Sent after this
+    // it would name whatever the server has since given that id to, and the
+    // gesture it belonged to is over either way.
+    this.heldBlur = 0;
     // A snapshot for the document already on screen is a resync — the server
     // closing a gap it could not close with diffs — and the reader should not
     // be able to tell it happened. Only a genuine navigation adopts the
