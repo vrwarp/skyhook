@@ -224,6 +224,14 @@ plausible imitation. The whole set costs a few tens of bytes on a frame already
 being sent, and it is the difference between a click a page can measure as
 human and one it can measure as not.
 
+All three, and the drag, are measured from the reader's *pointer* events rather
+than their mouse events, because a phone has no mouse events to measure. A
+finger produces `pointerdown`, a stream of `pointermove`s and a `pointerup`
+while it is on the glass, and produces `mousedown`, `mouseup` and `click` only
+afterwards, only for a gesture the browser decided was a tap, and all stamped
+with the same millisecond — so a press measured between two of those reads as
+1 ms, and a swipe has no mouse event at all to start a drag from.
+
 ### Media
 
 `ImageMeta` (blurhash, dimensions, content hash) always ships first and is
@@ -252,11 +260,14 @@ exactly that:
   exists rather than stretched over the whole element. The hash is of the
   pixels, so a canvas the reader did not change costs one small metadata frame
   and no bytes at all.
-- **Webfonts.** Kept only for a family the page draws private-use codepoints
-  in, which is an icon font and has no substitute on any device. They reach the
-  channel the ordinary way — an `@font-face` `src` is a `url()` in a stylesheet
-  like any background image — and pass through the transcoder untouched, since
-  there is no smaller version of a font to make.
+- **Webfonts.** Kept only for an icon font, which has no substitute on any
+  device, and recognised two ways: a family the page draws private-use
+  codepoints in, and a family a matching rule asks for ligatures in
+  (`font-feature-settings: "liga"`), which is how Material puts a glyph behind
+  the word `mark_chat_unread`. Everything else takes the reader's own font.
+  They reach the channel the ordinary way — an `@font-face` `src` is a `url()`
+  in a stylesheet like any background image — and pass through the transcoder
+  untouched, since there is no smaller version of a font to make.
 
 ### Adapters
 

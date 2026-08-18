@@ -38,7 +38,9 @@ func TestIconFontsCrossAndProseFontsDoNot(t *testing.T) {
 	deadline := time.Now().Add(budget(30 * time.Second))
 	for time.Now().Before(deadline) {
 		faces = fontFaces(cl.Model(tab).CSSRules())
-		if len(faces) > 0 {
+		// Both icon families, because the two are kept for different reasons
+		// and one arriving says nothing about the other.
+		if len(faces) >= 2 {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -51,6 +53,15 @@ func TestIconFontsCrossAndProseFontsDoNot(t *testing.T) {
 	if !strings.Contains(joined, "test icons") {
 		t.Errorf("the icon font was dropped, so its glyphs are empty boxes: %q", faces)
 	}
+	// The other way to write an icon font, and the one Google's own properties
+	// use: the glyph is at the ligature and the markup carries its name. Drop
+	// this family and the page does not lose its icons, it grows the words
+	// `mark_chat_unread` and `star` where they were.
+	if !strings.Contains(joined, "test ligatures") {
+		t.Errorf("a ligature icon font was dropped, so its names render as text: %q", faces)
+	}
+	// The near neighbour: a prose family whose sheet turns ligatures off. That
+	// is the same property naming the same feature, meaning the opposite.
 	if strings.Contains(joined, "test prose") {
 		t.Errorf("a prose webfont was shipped; the reader's own font would have done: %q", faces)
 	}

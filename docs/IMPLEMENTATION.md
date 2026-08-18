@@ -2101,12 +2101,29 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   idle game loop needs `canvasStreamEvery` turned on, and that spends the link
   on a page nobody is touching.
 - **Icon fonts are shipped whole, not subsetted.** §23: a family the page draws
-  private-use codepoints in crosses the link entire, capped at 1 MB, because
-  subsetting it to the codepoints actually used needs a font subsetter and
-  there is none here. The cost is paid once and cached across flights, but a
-  page using six glyphs of a large family pays for all of them. `hb-subset`
-  when present, degrading to this when not, is the obvious next step and would
-  follow the pattern `avifenc`/`cwebp` already set.
+  private-use codepoints in, or asks for ligatures in (§48), crosses the link
+  entire, capped at 1 MB, because subsetting it to the codepoints actually used
+  needs a font subsetter and there is none here. The cost is paid once and
+  cached across flights, but a page using six glyphs of a large family pays for
+  all of them. `hb-subset` when present, degrading to this when not, is the
+  obvious next step and would follow the pattern `avifenc`/`cwebp` already set.
+- **An icon font registered through the FontFace API cannot be shipped at all.**
+  §48: a family added with `document.fonts.add(new FontFace(…))` appears in no
+  stylesheet, and `FontFace` exposes no `src`, so there is no url() to rewrite
+  and nothing to fetch. Google Chat builds one of its four icon families this
+  way and its glyphs arrive as their ligature names.
+- **`wheel` and `hover` are protocol surface nothing sends.** Both are replayed
+  landside (`Tab.wheel`, `Tab.hover`) and no client has ever emitted one: the
+  mirror scrolls plane-side and reports where it got to, and hover is the
+  reader's own (§35's media-feature reasoning). They are kept because the
+  protocol is versioned, not because they work.
+- **The landside browser is a phone with a mouse.** `SetViewport` passes
+  `mobile` to `Emulation.setDeviceMetricsOverride` and never enables touch
+  emulation, so landside `navigator.maxTouchPoints` is 0 and a page branching
+  on touch in *script* builds its mouse interaction model. That is currently
+  self-consistent — §49's gestures are replayed as real mouse events, which is
+  what such a page is listening for — and it is why enabling touch landside is
+  not a one-line change: it would have to arrive with touch input to feed it.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -3336,3 +3353,168 @@ bundle arrives, the reader asks for dark, and what comes back has the dark rules
 from all three routes §45 found — the `@media` block, the `<style media>` and
 the `<link media>` — with the light ones gone and `color-scheme` pinned the
 other way.
+
+### 48. Two things a Google Chat capture had to say
+
+A reader sent a diagnostic bundle of `chat.google.com` with the note *"this page
+rendering is still pretty broken. creating a chat also doesn't work correctly
+because the pop-up closes immediately when clicking anywhere."* The two halves
+of that sentence turned out to be two unrelated bugs, and the bundle names both
+precisely enough that neither needed reproducing.
+
+**The nav had the word `star` in it where the star was.** The mirror was not
+wrong about the document: `clientHash` and `expectedHash` agree, all 21 frames
+applied, 1,896 nodes on both sides. It was wrong about one stylesheet rule.
+`fontsWithoutSubstitute` keeps a webfont only for a family the page draws
+private-use codepoints in — the [§23](#23-the-plane-side-picture-was-a-picture-of-something-else)
+reasoning, and correct as far as it goes, since a substitute has nothing at a
+codepoint that means nothing. Material does not write an icon font that way. The
+glyph is at the *ligature*: the markup says
+`<i class="google-material-icons">mark_chat_unread</i>` and the font substitutes
+that whole run for one picture. Nothing in it is private use, so the scan found
+nothing to keep, the family was dropped, and the reader's own font rendered
+exactly what the markup said. That is worse than the empty boxes the private-use
+case gives — an empty box reads as absence, and `spool` growing out of the side
+of a chip reads as the page.
+
+The signal is the declaration that makes the ligature work.
+`font-feature-settings: "liga"` asks for a substitution that would not otherwise
+happen, which is a thing to ask for only when the substitution *is* the content;
+prose never asks, because ligatures are already on, so the one thing a text
+stylesheet writes into that property is the negation `"liga" 0`. On the capture
+the split is exact: eleven of twenty thousand rules mention the property, the
+four asking for ligatures name `Google Symbols`, `Google Material Icons`,
+`Material Icons Extended` and `Google Symbols Subset`, and every rule turning
+them off names Google Sans.
+
+So `ligatureFamilies` walks the sheets — not the DOM, because the evidence is a
+declaration and reading it costs one property access against the style
+resolution a computed read forces — and asks `selectorMatches` only about the
+handful that got that far, which is what keeps a stylesheet declaring
+`.material-icons` and never using it from buying a font nothing draws. It runs
+before the collecting walk rather than inside it because the two halves of the
+evidence are in different sheets: Google ships the icon classes with the app and
+the `@font-face` from `fonts.googleapis.com`, and which the walk reaches first
+is not something to depend on. Both walks now read a sheet through one
+`readableRules`, so a cross-origin sheet the host recovered is visible to the
+scan and the collector alike — a rule recovered for one and invisible to the
+other would have the two disagreeing about a page neither can read twice.
+
+Three of the capture's four icon families are recovered by this. The fourth,
+`Google Symbols Subset`, is a subset Chat builds at runtime and registers
+through `document.fonts.add(new FontFace(…))`; it appears in no stylesheet, and
+`FontFace` exposes no `src`, so there is nothing to ship. Its glyphs still
+arrive as their names. That is a gap, not a fix waiting to be written.
+
+**The dialog closed over the result being tapped.** The session log has the
+whole thing twice, five minutes apart: `blur` on the search field, then a click
+four milliseconds later, then `mirror: node 2219 not found landside`. The client
+sends a blur of its own on `focusout`, and landside that is
+`document.activeElement.blur()` on its own round trip. Google Chat answers a
+search field losing focus by closing the dialog, which destroys the result row —
+so the click that arrived next named a node the page no longer had. From the
+reader's side the popup closes whenever they touch it.
+
+The blur was redundant before it was harmful. Landside a press moves focus by
+itself: the click the client is about to send arrives as a real `mousePressed`
+on the control, and the field blurs exactly when and because it would have if
+the reader were sitting in front of the page. Sending one separately does the
+same job early, alone, and out of order.
+
+So a blur a press caused is now *held* (`MirrorHost.heldBlur`) rather than sent.
+The gesture that follows clears it by doing the job better — a click, a
+double-click, a pan, all of which land as real presses — and a gesture that
+never reaches the page flushes it, because then nothing else is going to tell
+the page the reader left. Focus arriving somewhere else clears it too, since a
+held blur flushed after a focus would name the field the reader has just moved
+*into*. The local half is unchanged: ownership of the field ends on `focusout`
+as it always did, and the buffered server ops for it are applied there. Only the
+telling waits. A blur with no press behind it — focus going to the URL bar, to a
+menu, to a tab strip — still goes immediately, because there is no gesture
+coming that would carry it.
+
+`clickInFrame` came out of the listener to make this checkable: the click path
+has five exits and four of them send nothing landside, so the caller flushes
+whatever the click did not take. Four tests in `host.dom.test.ts` cover the
+four outcomes, and against the old code the first of them reproduces the
+capture's two frames exactly — `['blur', 'click']` where `['click']` belongs.
+
+### 49. Every gesture was a mouse gesture, on a client written for a phone
+
+[§48](#48-two-things-a-google-chat-capture-had-to-say) fixed a blur that a press
+should never have sent, and the reader who reported it added that the swipe
+gesture did not work either. It did not, and neither did two other things, and
+all three were one mistake: everything that *measures* a gesture rather than
+naming its target listened on mouse events, and a phone does not produce mouse
+events while a finger is moving.
+
+Measured, in Chromium with touch emulated. A 94 ms tap:
+
+```
+pointerdown@1513  pointerup@1608  mousemove@1608  mousedown@1608
+mouseup@1608      click@1608
+```
+
+and a swipe across a box the page has claimed with `touch-action: none`:
+
+```
+pointerdown@2224  pointermove ×4  pointerup@2477
+```
+
+with no mouse event of any kind. A swipe across a box that has *not* claimed it
+is shorter still — `pointerdown`, one `pointermove`, `pointercancel` — because
+the browser decides after the first move that the gesture is a scroll and takes
+it.
+
+Three things follow from the first listing and one from the second.
+
+**The press this side reported was the gap between two events fired in the same
+millisecond.** `pointerDownAt` was set on `mousedown` and read on `click`, and
+on a phone those are the same instant: every tap in the Google Chat capture
+reports a hold of 1 to 5 ms, against the 40–100 ms the server's own comment
+gives for a human. And the server prefers a reported hold to its own plausible
+one — `holdFor` only invents a duration when none was sent — so the measurement
+that exists to make a replayed click look human was making every click from a
+phone look like a machine. Worse than sending nothing, which is what the code
+was written to beat.
+
+**The approach was always absent.** `approachPath` needs two `mousemove`
+samples inside 500 ms and a phone sends one, after the fact.
+
+**The pan could not be made at all.** `beginDrag` hung off `mousedown` and its
+samples off `mousemove`, so on a touchscreen the gesture never started. A map
+was unpannable from the one device this project exists to serve, and nothing
+said so: the drag was tested from the protocol inwards — `TestADragPansACanvas`
+sends the frame the client is supposed to produce — and never once from the
+reader's finger outwards, which is the half that was broken.
+
+So the pointer path moved onto pointer events, which are the same stream for a
+mouse, a finger and a pen, carry the press the reader actually made, and arrive
+while it is happening. `pointerdown` starts the drag and stamps the press,
+`pointermove` samples it, `pointerup` ends it, and `pointercancel` — the browser
+saying it has claimed the gesture for a scroll or a fling — drops it without
+sending, because what the reader did with that gesture happened plane-side and
+sending the part that arrived would pan the page by however far the finger got
+first.
+
+One thing deliberately stayed on the mouse events: `pressing`, the flag §48's
+held blur reads. What that brackets is the focus change, and the focus change is
+a default action of the compat `mousedown` — it lands between `mousedown` and
+`mouseup` on a finger exactly as it does under a mouse, which is why a tap into
+a search result still holds its blur.
+
+**And the canvas had to claim the gesture.** Pointer events alone are not
+enough: without `touch-action: none` the browser takes the swipe after one move
+and sends `pointercancel`, which is the second listing above. The declaration
+goes on `[data-skyhook-static]` — canvases, and nothing else — where it is what
+Leaflet and every embedded map set on themselves, for the same reason. The cost
+is that a page cannot be scrolled by dragging from inside a canvas, so a canvas
+taller than the screen has to be scrolled past from somewhere else; a decorative
+full-bleed canvas is usually `pointer-events: none` and never a hit target at
+all, and an interactive one is the case the whole feature exists for.
+
+`TestPWAAFingerPansACanvas` is the test that was missing. A real touchscreen
+emulated in the plane-side browser, real touch events dispatched at the glass,
+the client's own listeners deciding what the gesture was, the frame crossing the
+link, and the landside page reporting how far it was panned. Against the old
+client it reports `offset: 0,0`.

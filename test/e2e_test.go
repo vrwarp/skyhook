@@ -276,20 +276,33 @@ const canvasPage = `<!DOCTYPE html><html><head><title>Canvas</title></head>
 </script>
 </body></html>`
 
-// fontPage carries both kinds of webfont at once: one drawing prose, which the
-// reader's own font stands in for perfectly well, and one drawing icons out of
-// the private use area, where no font on the reader's device has anything at
-// all and the substitute renders empty boxes.
+// fontPage carries all three kinds of webfont at once.
+//
+// One draws prose, which the reader's own font stands in for perfectly well.
+// One draws icons out of the private use area, where no font on the reader's
+// device has anything at all and the substitute renders empty boxes. The third
+// is how Material writes an icon font, and so how Google's own properties and
+// a large share of everything else do: the glyph is at the ligature, the markup
+// says the icon's name in plain ASCII, and dropping the font does not leave a
+// gap — it leaves the word `mark_chat_unread` sitting in the toolbar.
+//
+// The prose family here asks for ligatures to be turned off, which is the one
+// thing a text stylesheet ever writes into font-feature-settings and the near
+// neighbour the filter has to tell apart from the icon families asking for them
+// to be turned on.
 const fontPage = `<!DOCTYPE html><html><head><title>Fonts</title>
 <style>
   @font-face { font-family: 'Test Icons'; src: url(/icons.woff2) format('woff2'); }
   @font-face { font-family: 'Test Prose'; src: url(/prose.woff2) format('woff2'); }
+  @font-face { font-family: 'Test Ligatures'; src: url(/ligatures.woff2) format('woff2'); }
   .icon { font-family: 'Test Icons', sans-serif; }
-  .prose { font-family: 'Test Prose', serif; }
+  .prose { font-family: 'Test Prose', serif; font-feature-settings: "liga" 0; }
+  .ligature { font-family: 'Test Ligatures'; font-feature-settings: "liga"; }
 </style></head>
 <body>
   <h1 class="prose">a heading set in a webfont</h1>
   <nav><span class="icon">&#xE8B6;</span><span class="icon">&#xE52E;</span></nav>
+  <nav><i class="ligature">mark_chat_unread</i><i class="ligature">star</i></nav>
 </body></html>`
 
 /*
@@ -1269,7 +1282,7 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, utilityCSSPage())
 	})
-	for _, name := range []string{"/icons.woff2", "/prose.woff2"} {
+	for _, name := range []string{"/icons.woff2", "/prose.woff2", "/ligatures.woff2"} {
 		mux.HandleFunc(name, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "font/woff2")
 			_, _ = w.Write(fakeFont)
