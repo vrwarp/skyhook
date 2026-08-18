@@ -120,6 +120,10 @@
   var SENSITIVE_ATTRS = { value: 1, 'data-sky-value': 1 };
   // Marks a custom element that had not upgraded landside. See serializeAttrs.
   var UNDEFINED_ATTR = 'data-sky-undefined';
+  // The element the landside URL points at, which plane-side is nothing at all:
+  // the mirror is a frame with no fragment in its address, and the client jumps
+  // to one by scrolling rather than by navigating. See rewriteLandsideState.
+  var TARGET_ATTR = 'data-sky-target';
   // Names the origin of a frame whose document could not be read. See
   // watchBox: the client draws the box as an empty panel that says so, because
   // an unexplained hole is the one thing worse than missing content.
@@ -173,6 +177,7 @@
   var lastText = new Map();     // id -> last text we reported
   var lastScroll = new Map();
   var awaitingUpgrade = new Set(); // ids of custom elements not yet defined
+  var markedTarget = null;         // the element currently wearing TARGET_ATTR
   var sweepTimer = null;
   var sweepEvery = SWEEP_MS;
   // Controls whose live properties the mirror carries: element -> the value,
@@ -404,6 +409,10 @@
     // match nothing. So the landside answer is recorded here, and the used-CSS
     // rules are rewritten against it (see rewriteDefined in css.go).
     if (isCustom(el) && !isDefined(el)) pairs.push(intern(UNDEFINED_ATTR), intern(''));
+    // And which element the document's own URL names, for the same reason: a
+    // page that highlights the footnote the reader followed a link to is
+    // answering a question the mirror's address cannot. See syncTarget.
+    if (el === markedTarget) pairs.push(intern(TARGET_ATTR), intern(''));
     flags |= flagsOf(el);
     if (tag === 'IFRAME') {
       // The client cannot materialise an iframe — it would be a browsing
@@ -841,6 +850,7 @@
       var changed = roots;
       if (syncLive()) changed = true;
       if (syncDocInfo()) changed = true;
+      if (syncTarget()) changed = true;
       if (changed) scheduleFlush(false);
       // A root that arrived — by upgrade or by hand — brings its own sheet.
       if (roots) scheduleCSS();
@@ -890,6 +900,45 @@
       }
     }
     return found;
+  }
+
+  // readTarget is whichever element the document's own URL points at, by the
+  // browser's own reckoning rather than by parsing the fragment: an id, a named
+  // anchor, `#top`, and percent-encoding, all settled by the one that knows.
+  function readTarget() {
+    try { return document.querySelector(':target'); } catch (e) { return null; }
+  }
+
+  /*
+   * syncTarget moves the mark when the landside URL starts pointing somewhere
+   * else.
+   *
+   * A fragment changes for two reasons and neither reaches a mutation observer:
+   * the reader follows an in-page link, and the page pushes a new address as
+   * they scroll. `hashchange` catches the first promptly; the sweep catches
+   * both, which is what covers a `pushState` that a `hashchange` never fires
+   * for.
+   *
+   * The mark moves even where the elements are not mirrored, so that a target
+   * that arrives later is marked by the walk that serialises it rather than
+   * left behind by a sync that thought it had already done the work.
+   */
+  function syncTarget() {
+    var now = readTarget();
+    if (now === markedTarget) return false;
+    var changed = false;
+    var was = markedTarget ? idOf.get(markedTarget) : undefined;
+    markedTarget = now;
+    if (was !== undefined) {
+      pendingOps.push([3, was, intern(TARGET_ATTR), -1]);
+      changed = true;
+    }
+    var id = now ? idOf.get(now) : undefined;
+    if (id !== undefined) {
+      pendingOps.push([3, id, intern(TARGET_ATTR), intern('')]);
+      changed = true;
+    }
+    return changed;
   }
 
   // checkUpgrades re-reads every watched element that has since upgraded, and
@@ -2857,6 +2906,13 @@
     // The watch list is rebuilt by the walk below; its old ids may not even be
     // in the new document.
     awaitingUpgrade = new Set();
+    // Read before the walk rather than synced after it: serializeAttrs marks
+    // the element as it passes, and a mark applied afterwards would be an
+    // attribute op about a node the client is being sent in the same breath.
+    // On a first load this reads null however deep the link was — see the load
+    // handler at the foot of this file — and on every snapshot after one it is
+    // the answer.
+    markedTarget = readTarget();
     sweepEvery = SWEEP_MS;
     // Same for the frames and the controls: the walk re-measures and re-reads
     // every one of them and says so in the snapshot, so what the client had
@@ -2930,6 +2986,15 @@
     if (started) return;
     started = true;
     observeDocument(document);
+    // A fragment changing reaches no mutation observer, and the sweep is on a
+    // clock that backs off to eight seconds — which is a long time to look at
+    // an unhighlighted footnote. The sweep still covers the `pushState` this
+    // never fires for.
+    if (globalThis.addEventListener) {
+      globalThis.addEventListener('hashchange', function () {
+        if (syncTarget()) scheduleFlush(false);
+      }, { passive: true });
+    }
     snapshot();
     // Late-loading webfont/CSS work and lazily-attached shadow roots settle
     // within a second or two; a follow-up CSS pass is cheaper than a resnapshot.
@@ -3450,6 +3515,13 @@
   globalThis.addEventListener('load', function () {
     if (!adopted) return;
     scheduleCSS();
+    // `:target` is not settled at DOMContentLoaded, which is when the snapshot
+    // is taken. Chromium scrolls to the indicated part of a document once it
+    // has loaded, and sets `:target` at that moment — measured: null and
+    // readyState `interactive` at DOMContentLoaded, the element and `complete`
+    // at load, every time. So the one event that has the answer is this one,
+    // and without it a deep link's highlight waited on a sweep.
+    syncTarget();
     scheduleFlush(false);
   }, { once: true });
 })();

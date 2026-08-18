@@ -2129,16 +2129,6 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   page whose surface is a gradient or a tiled image still shows the mirror's
   flat ground behind the document, because carrying that means carrying a
   background shorthand and its assets rather than one resolved colour.
-- **`:target` is a landside fact the mirror does not carry.** The used-CSS
-  filter strips the pseudo-class to ask the document about the element, keeps
-  the rule and ships `:target` intact — and plane-side the mirror frame's URL
-  has no fragment, so the rule matches nothing. A page that highlights the
-  footnote, reference or line the reader followed a link to shows no highlight
-  at all. `:defined` had the same shape and was answered by marking the element
-  landside and rewriting the selector to ask for the mark
-  ([§45](#45-half-a-theme-is-not-a-theme)'s neighbour, `rewriteDefined`); the
-  same treatment would work here, with the mark kept current as the fragment
-  changes.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -3246,3 +3236,60 @@ With no wrapper the contents *are* what is emitted, so marking them first made
 the caller drop every one of them as already sent, and the three unwrapped rules
 in the fixture arrived as nothing at all. An unwrapped rule is deduped by
 whoever receives it, exactly like a rule that was never in a group.
+
+### 46. The other question the plane side answers wrong
+
+`:target` names the element the document's own URL points at. A reference work
+says which of two hundred footnotes you asked for by styling exactly that, and
+so does a source viewer highlighting the line a permalink names — which is what
+the URL in [§45](#45-half-a-theme-is-not-a-theme)'s capture was:
+`…/UIKitUtils.m#L299-L328`.
+
+The mirror is a frame with no fragment in its address and never gets one. The
+client jumps to a fragment by *scrolling* — that is `jumpToFragment`, and it is
+the whole reason an in-page link on this link costs nothing — so `location.hash`
+inside the frame stays empty for the life of the tab. `:target` therefore
+matched nothing plane-side, and the pair failed together: no highlight on the
+note the reader came for, and the `:not(:target)` styling worn by every note
+including that one.
+
+This is [§45](#45-half-a-theme-is-not-a-theme)'s shape with a different subject,
+and it is `:defined`'s shape exactly, so it gets `:defined`'s answer. The agent
+marks the element landside (`data-sky-target`), and `rewriteLandsideState` —
+which was `rewriteDefined`, and is renamed because the name had stopped being
+true — re-points the selector at the mark. Specificity is unchanged: an
+attribute selector and a pseudo-class both count the same.
+
+The mark then has to keep up, and it moves for two reasons that have nothing to
+do with each other.
+
+**Landside, the URL changes.** A fragment changing reaches no mutation observer,
+so it is watched two ways: `hashchange` for promptness, and the sweep, which is
+what covers a `pushState` that `hashchange` never fires for.
+
+**Plane-side, the reader follows a link.** `jumpToFragment` handles an in-page
+link without telling anybody, which is the point of it — so the landside URL
+does not change, the landside mark does not move, and every link the reader
+follows inside the page would appear to do nothing but scroll. The client moves
+the mark with the jump that moved the reader. That leaves the two sides
+disagreeing about which element is the target until the next snapshot, which is
+the same bargain the adopted scroll position already makes and for the same
+reason: what the reader did is the more recent fact.
+
+There is one place the mark cannot be in the snapshot, and it is worth writing
+down because it looked like a flaky test for half an hour. **`:target` is not
+settled at `DOMContentLoaded`, which is when the snapshot is taken.** Chromium
+scrolls to the indicated part of a document once it has *loaded* and sets
+`:target` at that moment — measured on the fixture, every run:
+
+```
+at-script-start:    null      readyState=loading      hash=#note-2
+at-DOMContentLoaded: null     readyState=interactive  hash=#note-2
+at-load:            note-2    readyState=complete     hash=#note-2
+```
+
+So a deep link's snapshot reads null however deep the link was, and the mark
+arrives as the attribute op the load handler queues one batch later. Delaying
+the snapshot to make it arrive together would cost every page the load event to
+save one attribute on some of them. The test waits for the mark rather than
+assuming it rode with the document, and says why.

@@ -1044,6 +1044,17 @@ export class MirrorHost {
     // inside a scroller of its own, and every ancestor of it has to move for the
     // reader to end up looking at the thing they asked for.
     target.scrollIntoView({ block: 'start' });
+    // `:target` crossed the link as a mark rather than as a pseudo-class,
+    // because this frame has no fragment in its address to answer one with
+    // (rewriteLandsideState, css.go). This jump is the event that would have
+    // moved it landside, so it moves here: without this the page's own
+    // highlight goes on naming whichever note the reader arrived by, and every
+    // link they follow inside the page appears to do nothing but scroll.
+    const marked = doc.querySelector('[data-sky-target]');
+    if (marked !== target) {
+      marked?.removeAttribute('data-sky-target');
+      target.setAttribute('data-sky-target', '');
+    }
     // Where the reader asked to be, which is not where landside is sitting.
     // Without this the next scroll the server reports would pull them off it.
     this.adoptedDoc = { x: win.scrollX, y: win.scrollY };

@@ -371,8 +371,42 @@ func TestRewriteDefinedAsksTheLandsideQuestion(t *testing.T) {
 		{"@media (min-width:10px){x-y:not(:defined){color:red}}",
 			"@media (min-width:10px){x-y[data-sky-undefined]{color:red}}"},
 	} {
-		if got := rewriteDefined(tc.in); got != tc.want {
-			t.Errorf("rewriteDefined(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := rewriteLandsideState(tc.in); got != tc.want {
+			t.Errorf("rewriteLandsideState(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+/*
+`:target` is the other question the plane side cannot be asked.
+
+It names the element the document's own URL points at, which landside is the
+footnote, reference or line of source the reader followed a link to. The mirror
+is a frame with no fragment in its address and never gets one — the client jumps
+to a fragment by scrolling rather than by navigating — so the rule matches
+nothing at either end of the pair: the highlight never appears, and the styling
+hung off `:not(:target)` is worn by everything including the one element that
+asked not to have it.
+*/
+func TestRewriteTargetAsksTheLandsideQuestion(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{".note:target{background:yellow}", ".note[data-sky-target]{background:yellow}"},
+		{".note:not(:target){opacity:.6}", ".note:not([data-sky-target]){opacity:.6}"},
+		{":target h2{color:red}", "[data-sky-target] h2{color:red}"},
+		{"li:target::before{content:\"\"}", "li[data-sky-target]::before{content:\"\"}"},
+		// The longer names are other questions, and are left to be asked
+		// wherever they are asked.
+		{"a:target-within{color:red}", "a:target-within{color:red}"},
+		{"a:target-current{color:red}", "a:target-current{color:red}"},
+		// A class that happens to be called `target`, and text that mentions it.
+		{".x\\:target{color:red}", ".x\\:target{color:red}"},
+		{`.a::before{content:":target"}`, `.a::before{content:":target"}`},
+		// Both marks in one rule.
+		{"x-y:defined:target{color:red}",
+			"x-y:not([data-sky-undefined])[data-sky-target]{color:red}"},
+	} {
+		if got := rewriteLandsideState(tc.in); got != tc.want {
+			t.Errorf("rewriteLandsideState(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

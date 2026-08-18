@@ -436,3 +436,156 @@ func TestPWALeavesThePagesOwnMarginsAlone(t *testing.T) {
 			got.RootBg)
 	}
 }
+
+/*
+`:target` is a landside fact with no plane-side answer at all.
+
+It names the element the document's own URL points at, and a reference work says
+which of two hundred footnotes you asked for by styling exactly that. The mirror
+is a frame with no fragment in its address and never gets one — the client jumps
+to a fragment by scrolling rather than by navigating — so the rule matched
+nothing on that side, and the pair failed together: no highlight on the note the
+reader followed a link to, and the `:not(:target)` styling worn by every note
+including that one.
+
+`:defined` had the same shape and the same answer, which is what this borrows:
+the agent marks the element landside and the selector is rewritten to ask for
+the mark (`rewriteLandsideState`). The mark then has to keep up, and it moves
+for two different reasons — the landside URL changing, and the reader following
+a link inside the mirrored page, which by design never reaches landside at all.
+*/
+func TestTheMirrorKnowsWhichElementTheURLNames(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/targeted#note-2"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "the targeted page", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	// The mark is one batch behind the document, and deliberately: `:target` is
+	// not settled at DOMContentLoaded, which is when the snapshot is taken.
+	// Chromium scrolls to the indicated part of a document once it has loaded
+	// and sets `:target` at that moment — measured as null and readyState
+	// `interactive` at DOMContentLoaded, the element and `complete` at load —
+	// so a deep link's mark arrives as the attribute op the load event queues.
+	var html string
+	deadline := time.Now().Add(budget(30 * time.Second))
+	for time.Now().Before(deadline) {
+		html = cl.Model(tab).HTML()
+		if strings.Contains(html, "data-sky-target") {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	css := strings.Join(cl.Model(tab).CSS, "\n")
+	flat := strings.ReplaceAll(css, " ", "")
+
+	// Both halves of the pair, asked of the mark instead of the frame's address.
+	if !strings.Contains(flat, ".note[data-sky-target]{background-color:rgb(4,5,6)") {
+		t.Errorf("`:target` reached the client as a question it cannot answer:\n%s",
+			cssLines(css, "rgb(4, 5, 6)"))
+	}
+	if !strings.Contains(flat, ".note:not([data-sky-target]){") {
+		t.Errorf("`:not(:target)` reached the client as a question it always answers yes:\n%s",
+			cssLines(css, "rgb(7, 8, 9)"))
+	}
+
+	// And the answer itself: the note the URL named wears the mark, and the
+	// one it did not does not.
+	if !strings.Contains(html, `id="note-2"`) {
+		t.Fatalf("the mirrored document is missing the notes:\n%s", html)
+	}
+	if !targetedNote(html, "note-2") {
+		t.Errorf("the note the URL names is not marked as the target:\n%s", html)
+	}
+	if targetedNote(html, "note-1") {
+		t.Errorf("a note the URL does not name is marked as the target:\n%s", html)
+	}
+}
+
+// targetedNote reports whether the mirrored element with this id carries the
+// mark. The serialiser sorts attributes, so the two may be either way round.
+func targetedNote(html, id string) bool {
+	for _, line := range strings.Split(html, "<p ") {
+		if !strings.Contains(line, `id="`+id+`"`) {
+			continue
+		}
+		tag := line
+		if i := strings.Index(line, ">"); i >= 0 {
+			tag = line[:i]
+		}
+		return strings.Contains(tag, "data-sky-target")
+	}
+	return false
+}
+
+/*
+The reader following a link inside the mirrored page is the same event, and it
+never reaches landside.
+
+`jumpToFragment` is the whole reason an in-page link costs nothing on this link:
+the client finds the element the fragment names and scrolls to it, and the click
+is never sent. Which means the landside URL does not change, so the landside
+mark does not move, so the page's own highlight goes on naming whichever note
+the reader arrived by — every link they follow inside the page appearing to do
+nothing but scroll. The mark moves plane-side with the jump that moved them.
+*/
+func TestPWAMovesTheTargetMarkWithTheReader(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/targeted#note-1"), nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('the second note')`,
+		budget(60*time.Second), "the mirrored page")
+	waitFor(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      return doc.getElementById('note-1')?.hasAttribute('data-sky-target') === true;
+    })()`, budget(30*time.Second), "the landside target to arrive marked")
+
+	// The reader follows the page's own link to the other note.
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      doc.querySelector('a[href*="#note-2"]').click();
+      return true;
+    })()`, nil)
+
+	var got struct {
+		Marked string `json:"marked"`
+	}
+	waitFor(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      return doc.querySelectorAll('[data-sky-target]').length === 1;
+    })()`, budget(20*time.Second), "exactly one element to wear the mark")
+	evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const el = doc.querySelector('[data-sky-target]');
+      return { marked: el ? el.id : '' };
+    })()`, &got)
+
+	if got.Marked != "note-2" {
+		t.Errorf("after the reader followed the link to note-2 the mark is on %q; "+
+			"the page's own highlight is still naming where they came from", got.Marked)
+	}
+}

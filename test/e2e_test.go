@@ -1197,6 +1197,23 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, colorSchemePage)
 	})
+	// A page that says which of its footnotes the reader asked for, the way a
+	// reference work does: with :target and nothing else.
+	mux.HandleFunc("/targeted", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Targeted</title>
+			<style>
+			  .note { color: rgb(1, 2, 3) }
+			  .note:target { background-color: rgb(4, 5, 6) }
+			  .note:not(:target) { border-left-color: rgb(7, 8, 9) }
+			</style></head>
+			<body>
+			  <p>the targeted page</p>
+			  <a href="#note-2">to the second note</a>
+			  <p class="note" id="note-1">the first note</p>
+			  <p class="note" id="note-2">the second note</p>
+			</body></html>`)
+	})
 	// A page that never touched its margins, which is most of the plain web.
 	// Landside its body has the eight pixels the UA gives one; the question is
 	// whether the mirror still has them.
