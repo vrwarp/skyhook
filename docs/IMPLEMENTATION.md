@@ -2108,14 +2108,27 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   when present, degrading to this when not, is the obvious next step and would
   follow the pattern `avifenc`/`cwebp` already set.
 - **The reader cannot ask for the other colour scheme.** [§45](#45-half-a-theme-is-not-a-theme)
-  settles `prefers-color-scheme` landside, which is what makes a themed page
-  arrive whole — but it settles it at whatever the landside browser is, and
-  nothing plane-side can change that. A reader who wants the dark version of a
+  settles `prefers-color-scheme`, `color-scheme` and the canvas landside, which
+  is what makes a themed page arrive whole — but it settles them at whatever the
+  landside browser is, and nothing plane-side can change that. A reader who wants the dark version of a
   site that has one has no way to say so. The mechanism for it is not far off:
   Chromium takes `Emulation.setEmulatedMedia` per tab, so a preference on the
   client could ride to the server the way the viewport already does and be
   applied at the same place, with the tab re-rendered once. Until then the
   answer is the server's.
+- **A media query inside a block that ships whole is still asked twice.**
+  [§45](#45-half-a-theme-is-not-a-theme) resolves `@media` where the walk goes
+  into it, which is everywhere except the two places a block crosses as text: a
+  `@scope` body, and a grouping at-rule this build has no name for. A
+  `prefers-color-scheme` query written inside one of those reaches the reader
+  unanswered. Resolving it there means rewriting conditions inside arbitrary CSS
+  text rather than reading them off the CSSOM, which is a parser this does not
+  have; the honest bound is that the filter never sees them.
+- **The canvas crosses as a colour and not as a background.** §45 sends the
+  landside canvas colour, which is what a light/dark disagreement turns on. A
+  page whose surface is a gradient or a tiled image still shows the mirror's
+  flat ground behind the document, because carrying that means carrying a
+  background shorthand and its assets rather than one resolved colour.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -3071,6 +3084,91 @@ with its opposite, so the bundle names which browser answered — the light valu
 are this side's and the 100-series values are the reader's — and holds the line
 on the other three: a viewport query, a `hover` query and a
 `prefers-reduced-motion` query all have to arrive still wrapped, still asking.
+
+#### The other three ways the palette crossed unanswered
+
+The `@media` block turned out to be the least of it. Asking, of every other
+route a colour scheme has into a mirror, "who answers this, and when?" found
+three more — two of them worse, because they were not being answered at all.
+
+**A sheet's own `media` was read by nobody.** `document.styleSheets` lists every
+`<link>` and `<style>` whatever their media attribute says, and a browser parses
+a sheet it is not currently applying, so a walk that goes straight to `cssRules`
+collects the rules of a sheet the page is not using and hands them over with
+nothing left to say they were conditional. This is how a site has split its
+themes since long before `@media` blocks were the fashion, and still the common
+way:
+
+```html
+<link rel="stylesheet" media="(prefers-color-scheme: dark)" href="dark.css">
+<link rel="stylesheet" media="(prefers-color-scheme: light)" href="light.css">
+```
+
+Both sheets crossed, unwrapped, one after the other. Which theme the reader got
+was decided by which `<link>` the page happened to write second — worse than the
+`@media` bug, which at least let one browser decide. `media="print"` is the same
+fault with a plainer symptom and no connection to themes at all: a page's print
+rules, applied to the screen, for every page that ships them that way. The sheet
+is now walked under its own media, resolved exactly as a block's condition is
+(`collectSheet`), which is a four-line change to `collectSheets` and one shared
+`collectInto` under it and under `collectGroup`.
+
+**`color-scheme` was crossing as written.** A page that says
+
+```css
+:root { color-scheme: light dark }
+```
+
+has not chosen anything. It has said it can be either and left the choice to the
+browser, and what the browser then paints in the chosen scheme is everything the
+page does not paint itself: form controls, scrollbars, the canvas behind the
+document, the default text colour — and every `light-dark()` value in the sheet.
+No media query is involved, so nothing in the previous fix touched it, and a
+light page arrived with dark checkboxes, dark dropdowns and a dark scrollbar.
+
+A value naming one scheme is already an answer and is left exactly as written: a
+page that asked for dark asked for dark. A value naming both is collapsed to the
+one this browser picked (`pinColorSchemes`), which is the same answer the media
+query gets, arrived at the same way. `only` is a separate instruction — it turns
+off the browser's own darkening — and survives the collapse. The rewrite is
+scanned rather than pattern-matched for the reason `replaceCSSURLs` is:
+`content: "color-scheme: light dark"` is text a page means to display, and a
+pattern cannot tell it from a declaration. It runs over inline `style`
+attributes too, which travel with the DOM rather than with the sheet.
+
+**The canvas was the mirror's, not the page's.** A page's background does not
+paint its root box; it paints the *canvas*, the whole surface behind the
+document however short the document is, and the value is taken from `<html>` or
+— where that has none — from `<body>`. That propagation is a property of being a
+document's root, and plane-side neither element is one: both are ordinary
+elements inside the mirror's own document ([§30](#30-the-mirrors-own-wrapper-was-breaking-every-full-height-layout)),
+and the surface behind them is painted by the mirror's chrome, which is a flat
+`#fff`.
+
+A page that paints its `<html>` has always come out right, and by accident:
+`html` is a type selector, so the page's own rule matches the mirror's root as
+well as the page's copy of one. A page that paints only its `<body>` — the
+ordinary way to write it — does not, and a dark site arrives as a dark document
+on a white field: white below the fold, white in the margins, white wherever the
+document does not reach. Measured on a rebuilt mirror, `body { background: … }`
+leaves the canvas at `rgb(255,255,255)` where landside it was `rgb(13,17,23)`.
+
+So the landside canvas is read for what it is and sent as one rule about the
+mirror's own root. `:root` is the one selector that cannot be confused about
+which document it means — plane-side it is the frame's `html` and never the
+page's — and the rule is `!important` because it is not part of the page's
+cascade at all: it is this side reporting a fact the other side cannot work out,
+and a page rule landing in a later delta must not overturn it. Only the
+top-level agent says anything; a frame repainting the reader's whole page would
+be a worse bug than the one it fixes.
+
+That last one had a bug of its own, and it is the ordinary shape of this
+codebase's mistakes. The rule is only re-sent when the colour changes, and
+"already sent" was remembered across a snapshot — which throws the sheet away
+and rebuilds it. A CSS pass that happened to run before the first snapshot
+therefore recorded the rule as sent and then the snapshot dropped it, so the
+fixture passed or failed on the order of two timers. `snapshot()` resets it with
+everything else it resets.
 
 One thing came out of the plumbing rather than the diagnosis. Unwrapping a block
 means pushing its rules where the wrapper used to go, and the group walker marks

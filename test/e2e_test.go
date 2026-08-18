@@ -419,10 +419,22 @@ const colorSchemePage = `<!DOCTYPE html><html><head><title>Color scheme</title>
   @media (min-width: 100000px) { .too-wide { color: rgb(19, 20, 21) } }
   @media (hover: hover) { .themed { text-decoration-color: rgb(22, 23, 24) } }
   @media (prefers-reduced-motion: reduce) { .themed { letter-spacing: 25px } }
-</style></head>
+  :root { color-scheme: light dark }
+  .scheme-only { color-scheme: only light dark }
+  .scheme-chosen { color-scheme: dark }
+</style>
+<style media="(prefers-color-scheme: light)">.themed { border-left-color: rgb(26, 27, 28) }</style>
+<style media="(prefers-color-scheme: dark)">.themed { border-right-color: rgb(126, 127, 128) }</style>
+<style media="print">.themed { border-bottom-color: rgb(29, 30, 31) }</style>
+<link rel="stylesheet" media="(prefers-color-scheme: light)" href="/color-scheme-light.css">
+<link rel="stylesheet" media="(prefers-color-scheme: dark)" href="/color-scheme-dark.css">
+</head>
 <body>
   <p class="themed">the themed page</p>
   <p class="too-wide">and a rule for a window nobody has</p>
+  <p class="scheme-only">a scheme that refuses the browser's own darkening</p>
+  <p class="scheme-chosen">a page that did choose</p>
+  <p class="scheme-inline" style="color-scheme: light dark">and one that chose in an attribute</p>
 </body></html>`
 
 /*
@@ -1184,6 +1196,24 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	mux.HandleFunc("/color-scheme", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, colorSchemePage)
+	})
+	// A page that paints its background where almost every page paints it: on
+	// the body, which is not the element that paints the surface behind it.
+	mux.HandleFunc("/dark-canvas", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Dark canvas</title>
+			<style>body { background-color: rgb(13, 17, 23); color: rgb(240, 246, 252) }</style>
+			</head><body><p>a short page on a dark ground</p></body></html>`)
+	})
+	// The same question asked by the tag that owns a sheet rather than by a
+	// block inside one.
+	mux.HandleFunc("/color-scheme-light.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w, `.themed { text-emphasis-color: rgb(32, 33, 34) }`)
+	})
+	mux.HandleFunc("/color-scheme-dark.css", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = io.WriteString(w, `.themed { text-emphasis-color: rgb(132, 133, 134) }`)
 	})
 	// A property whose only reader is a rule that has not matched anything yet.
 	mux.HandleFunc("/late-theme", func(w http.ResponseWriter, _ *http.Request) {

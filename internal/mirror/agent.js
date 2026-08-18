@@ -371,6 +371,10 @@
           value = shot.text;
           for (var s = 0; s < shot.images.length; s++) pendingImages.push(shot.images[s]);
         }
+        // A style attribute travels with the DOM rather than with the sheet,
+        // so it needs the same answer the sheet's rules get. See
+        // pinColorSchemes.
+        value = pinColorSchemes(value);
       }
       pairs.push(intern(name), intern(value));
     }
@@ -1500,6 +1504,103 @@
   }
 
   /*
+   * ------------------------------------------------------------ color-scheme
+   *
+   * `color-scheme` is the other half of the same disagreement, and the half a
+   * media query cannot reach.
+   *
+   * A page that writes `color-scheme: light dark` is not choosing; it is saying
+   * it can be either and letting the browser choose, and what the browser then
+   * paints in the chosen scheme is everything the page does not paint itself:
+   * form controls, scrollbars, the canvas behind the document, the default
+   * text colour. `light-dark()` resolves against the same choice. So a mirror
+   * that ships the declaration as written hands the choice to the reader's
+   * browser — and gets a light page with dark checkboxes, dark dropdowns and a
+   * dark scrollbar, or the reverse. Nothing in the stylesheet is wrong; the
+   * page simply never chose, and the two browsers chose differently.
+   *
+   * A value that names one scheme is already an answer and is left alone.
+   * A value that names both is collapsed to the one this browser picked, which
+   * is the same answer `@media (prefers-color-scheme)` now gets, arrived at the
+   * same way and for the same reason.
+   */
+  function pinnedSchemeValue(value) {
+    var words = value.trim().split(/\s+/);
+    var light = false, dark = false, only = false;
+    for (var i = 0; i < words.length; i++) {
+      switch (words[i].toLowerCase()) {
+        case 'light': light = true; break;
+        case 'dark': dark = true; break;
+        case 'only': only = true; break;
+        case '': break;
+        default:
+          // `normal`, or a scheme named for a browser that may not be this one.
+          // Either way there is no ambiguity here this can honestly settle.
+          return '';
+      }
+    }
+    if (!light || !dark) return ''; // already an answer, or says nothing
+    var wantDark = mediaAnswer('(prefers-color-scheme: dark)');
+    if (wantDark === null) return '';
+    return (only ? 'only ' : '') + (wantDark ? 'dark' : 'light');
+  }
+
+  /*
+   * pinColorSchemes rewrites every `color-scheme` declaration in a piece of CSS
+   * — a rule, a block of them, an inline style attribute.
+   *
+   * Scanned rather than matched, for the reason replaceCSSURLs is: `content:
+   * "color-scheme: light dark"` is text a page means to display, and a pattern
+   * cannot tell it from a declaration. A declaration starts a run — at the
+   * beginning, after a `{`, or after a `;` — and that is what is looked for.
+   */
+  function pinColorSchemes(text) {
+    if (text.indexOf('color-scheme') < 0) return text;
+    var out = '', i = 0, start = true;
+    while (i < text.length) {
+      var c = text.charAt(i);
+      if (c === '"' || c === "'") {
+        var j = scanSelString(text, i);
+        out += text.slice(i, j);
+        i = j;
+        continue;
+      }
+      if (c === '\\' && i + 1 < text.length) {
+        out += text.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (start && matchesProperty(text, i, 'color-scheme')) {
+        var colon = text.indexOf(':', i);
+        var end = i;
+        while (end < text.length && text.charAt(end) !== ';' && text.charAt(end) !== '}') end++;
+        var pinned = colon >= 0 && colon < end
+          ? pinnedSchemeValue(text.slice(colon + 1, end)) : '';
+        if (pinned) {
+          out += 'color-scheme:' + pinned;
+          i = end;
+          continue;
+        }
+      }
+      // A run ends where the next one begins. Whitespace between them is not
+      // the start of anything, so the flag survives it.
+      if (c === '{' || c === ';' || c === '}') start = true;
+      else if (!mediaSpace(c)) start = false;
+      out += c;
+      i++;
+    }
+    return out;
+  }
+
+  // matchesProperty reports whether `name` stands at i as a property, which
+  // means the next thing that is not whitespace is the colon of a declaration.
+  function matchesProperty(text, i, name) {
+    if (text.substr(i, name.length).toLowerCase() !== name) return false;
+    var j = mediaSkipSpace(text, i + name.length);
+    return text.charAt(j) === ':';
+  }
+
+  /*
    * resolveMediaList does the same for a whole comma-separated list. A list is
    * a disjunction: one query that always matches makes the wrapper pointless,
    * and a list with nothing left in it is a block that cannot apply here.
@@ -1764,7 +1865,7 @@
           case 1: // style rule
             cssSeen++;
             if (selectorMatches(doc, rule.selectorText)) {
-              out.push(absolutizeCSSURLs(rule.cssText, base));
+              out.push(pinColorSchemes(absolutizeCSSURLs(rule.cssText, base)));
             } else {
               noteRejected(rule.selectorText);
             }
@@ -1805,7 +1906,7 @@
             } else if (rule.cssRules && isScopeRule(rule)) {
               collectScope(doc, rule, out, base);
             } else if (rule.cssText && rule.cssText.charAt(0) === '@') {
-              out.push(absolutizeCSSURLs(rule.cssText, base));
+              out.push(pinColorSchemes(absolutizeCSSURLs(rule.cssText, base)));
             }
         }
       } catch (e) { /* cross-origin sheet, skip */ }
@@ -1884,8 +1985,15 @@
    * utilities` blocks are the one layer.
    */
   function collectGroup(doc, rule, prelude, placeholder, out, depth, base, seen) {
+    collectInto(doc, rule.cssRules, prelude, placeholder, out, depth + 1, base, seen);
+  }
+
+  // collectInto is the body of that, taken out so a whole sheet can be walked
+  // the same way: a `<link media>` is a wrapper around a sheet exactly as
+  // `@media` is a wrapper around a block. See collectSheet.
+  function collectInto(doc, rules, prelude, placeholder, out, depth, base, seen) {
     var inner = [];
-    collectRules(doc, rule.cssRules, inner, depth + 1, base, seen);
+    collectRules(doc, rules, inner, depth, base, seen);
     var fresh = [];
     for (var i = 0; i < inner.length; i++) {
       if (!seen || !seen.has(inner[i])) fresh.push(inner[i]);
@@ -1945,7 +2053,7 @@
       noteRejected('@scope ' + start);
       return;
     }
-    out.push(absolutizeCSSURLs(rule.cssText, base));
+    out.push(pinColorSchemes(absolutizeCSSURLs(rule.cssText, base)));
   }
 
   /*
@@ -2053,8 +2161,42 @@
         }
       }
       if (!rules) continue;
-      collectRules(doc, rules, out, 0, sheetBase(doc, sheet), seen);
+      collectSheet(doc, sheet, rules, out, seen);
     }
+  }
+
+  /*
+   * collectSheet walks one sheet under the `media` its own tag carries.
+   *
+   * That attribute had been read by nobody. `document.styleSheets` lists every
+   * <link> and <style> whatever their media says, and a browser parses a sheet
+   * it is not currently applying — so a walk that goes straight to `cssRules`
+   * collects the rules of a sheet the page is not using and hands them over
+   * with nothing left to say they are conditional. The sheet stops being
+   * conditional at all.
+   *
+   * It is the oldest way to split a site's themes and still the common one:
+   *
+   *     <link rel="stylesheet" media="(prefers-color-scheme: dark)" href="dark.css">
+   *
+   * Both sheets crossed, unwrapped, one after the other, and which theme the
+   * reader got was decided by which <link> the page happened to write second.
+   * `media="print"` is the same bug with a plainer symptom — a page's print
+   * rules, applied to the screen.
+   *
+   * So the sheet's media is resolved exactly as a `@media` block's condition
+   * is, and its rules are written back inside whatever is left of it.
+   */
+  function collectSheet(doc, sheet, rules, out, seen) {
+    var media = '';
+    try { media = (sheet.media && sheet.media.mediaText) || ''; } catch (e) { media = ''; }
+    var left = resolveMediaList(media);
+    if (left === null) {
+      noteRejected('<sheet media> ' + media);
+      return;
+    }
+    collectInto(doc, rules, left ? '@media ' + left : '', null, out, 0,
+      sheetBase(doc, sheet), seen);
   }
 
   function collectUsedCSS(doc, seen) {
@@ -2138,6 +2280,63 @@
     return want;
   }
 
+  /*
+   * ---------------------------------------------------------------- the canvas
+   *
+   * A page's background does not paint its root box. It paints the *canvas* —
+   * the whole surface behind the document, however short the document is — and
+   * the value is taken from <html>, or from <body> where <html> has none. That
+   * propagation is a property of being a document's root, and plane-side
+   * neither element is one: both are ordinary elements inside the mirror's own
+   * document (see §30), and the surface behind them is painted by the mirror's
+   * chrome, which is a flat white.
+   *
+   * A page that paints its <html> gets the right answer by accident, because
+   * `html` is a type selector and matches the mirror's own root as well as the
+   * page's copy of one. A page that paints only its <body> — the ordinary way
+   * to write it — does not: a dark site arrives as a dark document on a white
+   * field, white below the fold, white in the margins, white wherever the
+   * document does not reach. Which is the same complaint as the theme that
+   * arrived half-applied, from a different direction.
+   *
+   * So the landside canvas is read for what it is and sent as a rule about the
+   * mirror's own root. `:root` is the one selector that cannot be confused
+   * about which document it means: plane-side it is the frame's html element
+   * and never the page's. It is `!important` because it is not part of the
+   * page's cascade at all — it is this side reporting a fact the other side
+   * cannot work out for itself, and a page rule that lands later must not
+   * overturn it.
+   *
+   * Only the top-level agent says anything. A frame's document paints its own
+   * box, and a frame repainting the reader's whole page would be a worse bug
+   * than the one this fixes.
+   */
+  var canvasSent = '';
+
+  function canvasBackgroundRule() {
+    if (!isTop) return '';
+    var bg = '';
+    try {
+      var view = document.defaultView || globalThis;
+      var root = document.documentElement;
+      bg = root ? view.getComputedStyle(root).backgroundColor : '';
+      if (isTransparentColor(bg) && document.body) {
+        bg = view.getComputedStyle(document.body).backgroundColor;
+      }
+    } catch (e) { return ''; }
+    if (isTransparentColor(bg)) return '';
+    return ':root{background-color:' + bg + ' !important;}';
+  }
+
+  // A computed background of nothing at all. Chromium spells it one way, but
+  // the keyword is worth knowing too: a colour this cannot read is treated as
+  // absent, which leaves the mirror's own white where it was.
+  function isTransparentColor(c) {
+    if (!c) return true;
+    c = c.replace(/\s+/g, '');
+    return c === 'transparent' || c === 'rgba(0,0,0,0)';
+  }
+
   function cssDelta() {
     var docs = [document];
     // Shadow roots and same-origin iframe documents both carry their own
@@ -2192,6 +2391,12 @@
         }
       }
       if (root && mine.length) scoped.push([root, mine]);
+    }
+    var canvas = canvasBackgroundRule();
+    if (canvas && canvas !== canvasSent) {
+      canvasSent = canvas;
+      cssOrder.push(canvas);
+      adds.push(canvas);
     }
     return { adds: adds, scoped: scoped };
   }
@@ -2580,6 +2785,10 @@
     // handles for input replay), CSS set is rebuilt.
     strings = []; stringIndex = new Map(); pendingStrings = [];
     emittedCSS = new Map(); cssOrder = [];
+    // Which includes the one rule the agent writes rather than finds: what has
+    // been sent is a fact about a sheet that no longer exists. See
+    // canvasBackgroundRule.
+    canvasSent = '';
     pendingOps = []; pendingImages = [];
     lastText = new Map();
     // The watch list is rebuilt by the walk below; its old ids may not even be
