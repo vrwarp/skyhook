@@ -95,6 +95,7 @@ default; this is the whole surface:
   "compression": true,
   "maxTabs": 8,
   "imageQuality": 40,
+  "imageMaxBytes": 1048576,
   "imageCacheBytes": 536870912,
   "canvasStreamEvery": "0",
   "homeUrl": "",
@@ -131,6 +132,19 @@ Environment overrides: `SKYHOOK_LISTEN`, `SKYHOOK_FALLBACK_LISTEN`,
 
 The `capture*` and `journal*` settings are the diagnostic bundles — see
 [diagnosing the mirror](#diagnosing-the-mirror).
+
+`imageMaxBytes` is the most one picture may cost on the link, and it is a cap
+with a fallback rather than a refusal: a picture whose honest encode comes out
+larger is re-encoded to WebP at whatever quality — and then whatever size — gets
+it under the number. The default is 1 MB, which is thirty-two seconds at
+250 kbps, and it is deliberately generous: nearly every image on a page is
+already resized into the box the page lays it out in and never reaches this at
+all. Lower it on a link where one hero image is still too much; set it negative
+to turn it off and ship whatever the first encode produced. Installing `cwebp`
+(Debian/Ubuntu: `apt install webp`) is what makes the re-encode WebP; without it
+the server falls back to JPEG, or to PNG for a picture with transparency to
+keep, which converges more slowly and sometimes not at all — a picture that is
+still over the cap is shipped anyway rather than dropped.
 
 `publicUrl` and `behindProxy` are for deployments where the client does not
 reach the server where the server listens — see

@@ -27,6 +27,7 @@
   "compression": true,
   "imageCacheBytes": 536870912,
   "imageQuality": 40,
+  "imageMaxBytes": 1048576,
   "imageWorkers": 4,
   "maxTabs": 8,
   "homeUrl": "",

@@ -98,6 +98,13 @@ type Config struct {
 	ImageCacheBytes int64 `json:"imageCacheBytes"`
 	// ImageQuality is the lossy quality target (0-100).
 	ImageQuality int `json:"imageQuality"`
+	// ImageMaxBytes caps what one transcoded picture may cost on the link. A
+	// picture whose honest encode is larger is re-encoded to WebP at whatever
+	// quality and size fit, rather than shipped whole: a megabyte is
+	// thirty-two seconds at 250 kbps, which is a page's whole budget spent on
+	// one hero image. Zero takes the transcoder's default; negative turns the
+	// cap off.
+	ImageMaxBytes int `json:"imageMaxBytes"`
 	// ImageWorkers is the transcoder pool size.
 	ImageWorkers int `json:"imageWorkers"`
 	// MaxTabs caps concurrent mirrored tabs.
@@ -338,6 +345,7 @@ func Default() Config {
 		Compression:       true,
 		ImageCacheBytes:   512 << 20,
 		ImageQuality:      40,
+		ImageMaxBytes:     1 << 20,
 		ImageWorkers:      4,
 		MaxTabs:           8,
 		HomeURL:           "",

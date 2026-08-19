@@ -3784,3 +3784,77 @@ and `RefreshState` both re-read live state on every call, so a late run states
 the truth rather than yesterday's. The first was worth suspecting — it looked
 like page A's stylesheets could be injected into page B — and it is not what the
 code does.
+
+### 53. The one picture the layout box could not make small
+
+Everything the image pipeline does about size, it does by encoding into the box
+the page lays an image out in. That lever is the right one nearly every time: a
+1600px hero painted into a 320px column loses 96% of its bytes to `fit` alone,
+and nothing about the result looks worse, because those bytes were never
+reaching the reader's eyes.
+
+It leaves one case, and it is the case that hurts. A picture whose box really is
+that large — a full-width photograph, a screenshot at natural size, an
+illustration the page draws at 2400px — has no smaller box to encode into, and
+neither does one that arrives before the layout has a box for it at all
+(`w` and `h` are zero, and `fit` reads that as "keep natural size"). Those
+encode honestly to megabytes. There was no cap on the result at all: the only
+size limits in the transcoder are on the *source* (24 MB of bytes, 40 MP of
+pixels) and both of them drop the picture rather than shrink it. So the pipeline
+had exactly two behaviours for a large image, refuse it or ship all of it, and
+the second one is a megabyte — thirty-two seconds at 250 kbps, which is the
+whole page's budget spent on one hero.
+
+`MaxOutBytes` is the third behaviour, and it defaults to 1 MB. Over it, the
+picture goes down a ladder until it fits: quality first, in four coarse steps to
+a floor of 30, then size, at 0.7, 0.5, 0.35, 0.25 and 0.15 of the box. Quality
+first because the box is the size the reader is going to see the picture at and
+resampling below it is the one loss here that looking closer cannot undo — a
+photograph at q30 is a photograph, a photograph at a quarter of its box is a
+thumbnail. The floor is 30 rather than 10 because below about that WebP stops
+looking soft and starts looking broken, and a smaller picture at a decent
+quality reads better than a full-size one made of blocks.
+
+WebP is the target for three reasons, and the third is the one that decided it.
+It is lossy at every quality the ladder names, so the ladder is a ladder. It
+keeps an alpha channel while being lossy, which JPEG cannot, and transparency is
+most of what a large PNG on a page is carrying. And every browser the client
+runs in has decoded it for a decade. AVIF would be smaller again at every rung
+and is not used: its encoder is minutes of CPU at these dimensions, and this
+path runs while a reader waits.
+
+Three details cost more thought than the ladder did.
+
+**The handoff, not the codec, is the expensive half.** `cwebp` reads a file, so
+each rung meant writing the image out as PNG first — and PNG-encoding a 2400px
+source five times costs more than every `cwebp` run put together. The PNG is now
+written once and `cwebp -resize` does the resampling, so a full ladder is one
+handoff. On an adversarial input (2400×2400 of incompressible noise, which no
+real page carries) a transcode that costs 2.9 s uncapped costs 7.8 s down to
+1 MB; a real photograph of those dimensions fits on the first rung.
+
+**The top rung is skipped when the first encode was already lossy.** That encode
+was WebP at q70 or AVIF at q40, and asking for q75 spends a rung to come back
+*bigger* than the thing it is replacing. A lossless PNG is the opposite case,
+and the one where the top rung both fits and still looks untouched.
+
+**A rung that resampled changes what the metadata says.** `Result.W`/`H` are
+what the client reserves space with, so they are now the dimensions of the bytes
+that were actually chosen, not of the encode that was rejected. The blurhash is
+taken before the ladder runs and stays right through it: it describes the
+picture, and a rung only changes what that picture costs.
+
+Vectors are not on this path at all — `passThroughSVG` returns before any
+encoder is reached, which is correct twice over: an SVG has no quality to give
+up, and rasterising one to hit a byte target would spend more bytes than the
+markup does while losing the property that made it worth shipping. Neither are
+webfonts, which have their own 1 MB refusal (§50) for the same reason: nothing
+in a font can be made smaller here.
+
+Without `cwebp` the ladder falls back to what the standard library ships — JPEG
+for a picture with no transparency to lose, PNG for one that has some. PNG
+ignores the quality column, so there the ladder is the size column alone, which
+converges more slowly and occasionally not at all. The smallest encode found is
+then shipped even though it is still over the cap: a picture that costs too much
+is a better answer than an empty box, and it is the answer the reader had before
+any of this existed.

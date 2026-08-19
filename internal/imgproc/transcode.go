@@ -31,6 +31,12 @@ type Result struct {
 	Mime     string
 	W, H     int
 	Blurhash string
+	// Squeezed says the first encode came out over MaxOutBytes and this is
+	// what the ladder in squeeze made of it. Nothing on the wire depends on
+	// it; it is here so the log can name the pictures a page paid the extra
+	// encodes for, which is the number an operator needs before deciding the
+	// cap is in the wrong place.
+	Squeezed bool
 }
 
 // Encoder names the output codec.
@@ -59,6 +65,24 @@ type Options struct {
 	MaxPixels int
 	// MaxBytes rejects oversized sources.
 	MaxBytes int
+	/*
+		MaxOutBytes caps what one picture may cost on the link.
+
+		Everything else here works on the size the page lays an image out at,
+		which is the right lever nearly every time: a 1600px hero in a 320px
+		box loses most of its bytes to fit() alone and nothing about it looks
+		worse for it. What that leaves is the picture whose box really is that
+		large, or that arrives with no box at all — a full-width photograph, a
+		screenshot at natural size, a lossless PNG of one. Those encode
+		honestly to megabytes, and a megabyte is thirty-two seconds of a
+		250 kbps link: one such picture is the entire page's budget.
+
+		Over the cap the picture is re-encoded down to fit rather than shipped
+		whole or dropped — see squeeze. Zero takes the default; negative turns
+		the cap off and restores the old behaviour of shipping whatever the
+		first encode produced.
+	*/
+	MaxOutBytes int
 	// BlurComponents controls blurhash detail.
 	BlurX, BlurY int
 }
@@ -72,6 +96,7 @@ func DefaultOptions() Options {
 		PhotoQuality: 40,
 		MaxPixels:    40_000_000,
 		MaxBytes:     24 << 20,
+		MaxOutBytes:  1 << 20,
 		BlurX:        4,
 		BlurY:        3,
 	}
@@ -98,6 +123,9 @@ func New(opts Options) *Transcoder {
 	}
 	if opts.MaxBytes == 0 {
 		opts.MaxBytes = 24 << 20
+	}
+	if opts.MaxOutBytes == 0 {
+		opts.MaxOutBytes = 1 << 20
 	}
 	if opts.BlurX == 0 {
 		opts.BlurX, opts.BlurY = 4, 3
@@ -303,15 +331,23 @@ func (t *Transcoder) Transcode(ctx context.Context, src []byte, w, h int) (*Resu
 		dst = scaled
 	}
 
+	// The blurhash is taken before any squeeze, and stays right through one:
+	// it describes the picture, not the encode, and a rung of the ladder only
+	// changes how many bytes the same picture costs.
 	blur := Blurhash(smallFor(dst), t.opts.BlurX, t.opts.BlurY)
 	data, mime, err := t.encode(ctx, dst, isPhoto(dst))
 	if err != nil {
 		return nil, err
 	}
+	outW, outH := dst.Bounds().Dx(), dst.Bounds().Dy()
+	squeezed := false
+	if t.opts.MaxOutBytes > 0 && len(data) > t.opts.MaxOutBytes {
+		data, mime, outW, outH, squeezed = t.squeeze(ctx, dst, data, mime)
+	}
 	return &Result{
 		Data: data, Mime: mime,
-		W: dst.Bounds().Dx(), H: dst.Bounds().Dy(),
-		Blurhash: blur,
+		W: outW, H: outH,
+		Blurhash: blur, Squeezed: squeezed,
 	}, nil
 }
 
@@ -381,36 +417,88 @@ func (t *Transcoder) encode(ctx context.Context, img image.Image, photo bool) ([
 // encodeExternal runs avifenc/cwebp over a temporary PNG. The extra encode is
 // landside CPU, which is free compared to the bytes it saves on the link.
 func (t *Transcoder) encodeExternal(ctx context.Context, img image.Image, enc Encoder) ([]byte, error) {
+	q := t.opts.PhotoQuality
+	if enc == EncoderWebP {
+		// WebP at the AVIF number is visibly worse than AVIF at it; the two
+		// scales are not the same scale.
+		q += 30
+	}
+	src, err := newPNGTemp(img)
+	if err != nil {
+		return nil, err
+	}
+	defer src.close()
+	return t.runEncoder(ctx, src, enc, q, 0, 0)
+}
+
+/*
+pngTemp is one picture written once as PNG, for encoders that read a file.
+
+The ladder in squeeze can ask for the same image at half a dozen qualities, and
+PNG-encoding a 4000px source for each of those costs more than every cwebp run
+put together — the handoff, not the codec, would be the expensive part. Written
+once and handed to each run, it is back to being the cheap half.
+*/
+type pngTemp struct {
+	dir  string
+	path string
+}
+
+func newPNGTemp(img image.Image) (*pngTemp, error) {
 	dir, err := os.MkdirTemp("", "skyhook-img-")
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = os.RemoveAll(dir) }()
-	in := filepath.Join(dir, "in.png")
-	out := filepath.Join(dir, "out.bin")
-	f, err := os.Create(in) //nolint:gosec // path is inside a fresh temp dir
+	p := &pngTemp{dir: dir, path: filepath.Join(dir, "in.png")}
+	f, err := os.Create(p.path) //nolint:gosec // path is inside a fresh temp dir
 	if err != nil {
+		p.close()
 		return nil, err
 	}
 	if err := png.Encode(f, img); err != nil {
 		_ = f.Close()
+		p.close()
 		return nil, err
 	}
 	if err := f.Close(); err != nil {
+		p.close()
 		return nil, err
 	}
+	return p, nil
+}
+
+func (p *pngTemp) close() { _ = os.RemoveAll(p.dir) }
+
+// runEncoder runs one external encoder over an already-written PNG, resampling
+// to (w,h) on the way in when they are not the PNG's own size. Only cwebp is
+// asked to resize: it is the one the ladder walks, and letting it resample from
+// the handoff is what keeps that ladder to a single PNG encode.
+func (t *Transcoder) runEncoder(ctx context.Context, src *pngTemp, enc Encoder, quality, w, h int) ([]byte, error) {
+	if quality < 0 {
+		quality = 0
+	}
+	if quality > 100 {
+		quality = 100
+	}
+	out := filepath.Join(src.dir, "out.bin")
+	// A rung that failed leaves its predecessor's file behind, and reading
+	// that back would report the wrong size for this quality.
+	_ = os.Remove(out)
 	var cmd *exec.Cmd
 	switch enc {
 	case EncoderAVIF:
 		cmd = exec.CommandContext(ctx, t.avifPath,
 			"--speed", "8", "--jobs", "2",
 			"--min", "0", "--max", "63",
-			"-q", fmt.Sprint(t.opts.PhotoQuality),
-			in, out)
+			"-q", fmt.Sprint(quality),
+			src.path, out)
 	case EncoderWebP:
-		cmd = exec.CommandContext(ctx, t.cwebpPath,
-			"-quiet", "-q", fmt.Sprint(t.opts.PhotoQuality+30), "-m", "4",
-			in, "-o", out)
+		args := []string{"-quiet", "-q", fmt.Sprint(quality), "-m", "4"}
+		if w > 0 && h > 0 {
+			args = append(args, "-resize", fmt.Sprint(w), fmt.Sprint(h))
+		}
+		args = append(args, src.path, "-o", out)
+		cmd = exec.CommandContext(ctx, t.cwebpPath, args...)
 	default:
 		return nil, errors.New("imgproc: no external encoder")
 	}
@@ -418,6 +506,185 @@ func (t *Transcoder) encodeExternal(ctx context.Context, img image.Image, enc En
 		return nil, err
 	}
 	return os.ReadFile(out) //nolint:gosec // path is inside a fresh temp dir
+}
+
+/*
+The ladder squeeze walks to get a picture under MaxOutBytes.
+
+Quality first, size second, and both in coarse steps. Quality first because the
+box the page laid the image out in is the size the reader is going to see it
+at, and resampling below that is the one thing here that cannot be undone by
+looking closer — a photograph at q30 is a photograph, a photograph at a quarter
+of its box is a thumbnail. The floor is 30 rather than 10 because below about
+that WebP stops looking soft and starts looking broken, and a smaller picture
+at a decent quality reads better than a full-size one made of blocks.
+
+Coarse steps because each rung is an encode, and the point of a cap measured in
+megabytes is not to land on it exactly. The first rung that fits wins, which in
+practice is the first or second: a picture only reaches here at all because its
+honest encode was already over the cap, and a lossy re-encode of one is
+typically a fifth of it.
+*/
+var (
+	squeezeQualities = []int{75, 55, 40, 30}
+	squeezeScales    = []float64{1, 0.7, 0.5, 0.35, 0.25, 0.15}
+)
+
+/*
+squeeze re-encodes a picture that came out too big for the link.
+
+WebP is the target because of what it is being asked to do. It is lossy at any
+quality the ladder names, it keeps an alpha channel while being so — which JPEG
+cannot, and which is most of what a large PNG on a page is carrying — and every
+browser the client runs in has decoded it for a decade. AVIF would be smaller
+again and is not used here: its encoder is minutes of CPU at these dimensions,
+and this path runs while a reader waits.
+
+Without cwebp the ladder falls back to what the standard library ships, which
+is JPEG for a picture with no transparency to lose and PNG for one that has
+some. PNG ignores the quality column entirely, so there the ladder is the scale
+column alone — slower to converge and occasionally unable to, which is the
+honest outcome: the smallest encode found is returned even when it is still
+over the cap, because a picture that costs too much is a better answer than an
+empty box.
+
+The returned width and height are the ones the returned bytes are, not the ones
+asked for. A rung that resampled changes what the metadata should say, and a
+client told the old numbers reserves a space its picture does not fill.
+*/
+func (t *Transcoder) squeeze(ctx context.Context, img image.Image, have []byte, haveMime string) ([]byte, string, int, int, bool) {
+	t.probe()
+	limit := t.opts.MaxOutBytes
+	b := img.Bounds()
+	best, bestMime, bestW, bestH := have, haveMime, b.Dx(), b.Dy()
+
+	// A picture whose first encode was already lossy has nothing to gain from
+	// the top of the ladder: that encode was WebP at q70 or AVIF at q40, and
+	// asking for q75 spends a rung to come back bigger than what it is
+	// replacing. A lossless PNG is the opposite case, and the one where the
+	// top rung both fits and still looks untouched.
+	ladder := squeezeQualities
+	if haveMime != "image/png" {
+		ladder = squeezeQualities[1:]
+	}
+
+	// One PNG for the whole ladder. cwebp resamples from it, so a dozen rungs
+	// at four sizes cost one handoff rather than four — and on a source this
+	// large the handoff, not the codec, is the expensive half.
+	var src *pngTemp
+	if t.haveWebP {
+		if p, err := newPNGTemp(img); err == nil {
+			src = p
+			defer src.close()
+		}
+	}
+
+	for _, scale := range squeezeScales {
+		if ctx.Err() != nil {
+			break
+		}
+		w, h := int(float64(b.Dx())*scale+0.5), int(float64(b.Dy())*scale+0.5)
+		if w < 1 || h < 1 {
+			continue
+		}
+		// Only the fallback encoders need the pixels resampled in this
+		// process, and only if they are reached at all.
+		var cand image.Image
+		fits := false
+		for _, q := range ladder {
+			if ctx.Err() != nil {
+				break
+			}
+			data, mime, lossy := t.squeezeWebP(ctx, src, q, w, h, b)
+			if data == nil {
+				if cand == nil {
+					if cand = scaleBy(img, scale); cand == nil {
+						break
+					}
+				}
+				data, mime, lossy = squeezeFallback(cand, q)
+			}
+			if data == nil {
+				break
+			}
+			if len(data) < len(best) {
+				best, bestMime, bestW, bestH = data, mime, w, h
+			}
+			if len(best) <= limit {
+				fits = true
+				break
+			}
+			if !lossy {
+				// PNG: the rest of this size's qualities are the same encode.
+				break
+			}
+		}
+		if fits {
+			break
+		}
+	}
+	return best, bestMime, bestW, bestH, len(best) < len(have)
+}
+
+// squeezeWebP encodes one rung through cwebp, and returns nil bytes when there
+// is no cwebp to run or it would not run — which is the fallback's cue.
+func (t *Transcoder) squeezeWebP(ctx context.Context, src *pngTemp, quality, w, h int, full image.Rectangle) ([]byte, string, bool) {
+	if src == nil {
+		return nil, "", false
+	}
+	rw, rh := w, h
+	if rw == full.Dx() && rh == full.Dy() {
+		rw, rh = 0, 0 // the handoff is already this size
+	}
+	data, err := t.runEncoder(ctx, src, EncoderWebP, quality, rw, rh)
+	if err != nil {
+		return nil, "", false
+	}
+	return data, "image/webp", true
+}
+
+// squeezeFallback encodes one rung with what the standard library ships. It
+// reports whether quality was a lever on the format it chose: PNG ignores the
+// number, so walking the rest of a size's qualities would re-encode the same
+// bytes.
+func squeezeFallback(img image.Image, quality int) ([]byte, string, bool) {
+	var buf bytes.Buffer
+	if opaque(img) {
+		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+			return nil, "", false
+		}
+		return buf.Bytes(), "image/jpeg", true
+	}
+	e := png.Encoder{CompressionLevel: png.BestCompression}
+	if err := e.Encode(&buf, img); err != nil {
+		return nil, "", false
+	}
+	return buf.Bytes(), "image/png", false
+}
+
+// opaque says an image has no transparency to lose, and so may go to a codec
+// that has nowhere to put it. Unknown means "assume it has some": inventing a
+// background is worse than spending the bytes.
+func opaque(img image.Image) bool {
+	o, ok := img.(interface{ Opaque() bool })
+	return ok && o.Opaque()
+}
+
+// scaleBy resamples by a factor, returning the original at 1 and nil for a
+// factor that would leave nothing to look at.
+func scaleBy(img image.Image, f float64) image.Image {
+	b := img.Bounds()
+	w, h := int(float64(b.Dx())*f+0.5), int(float64(b.Dy())*f+0.5)
+	if w < 1 || h < 1 {
+		return nil
+	}
+	if w >= b.Dx() && h >= b.Dy() {
+		return img
+	}
+	r := image.Rect(0, 0, w, h)
+	dst := image.NewRGBA(r)
+	draw.CatmullRom.Scale(dst, r, img, b, draw.Over, nil)
+	return dst
 }
 
 // fit computes the target rectangle, never upscaling.
