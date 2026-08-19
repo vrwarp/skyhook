@@ -502,6 +502,14 @@ func (p *Pipeline) process(req Request) {
 		p.abandon(req, err)
 		return
 	}
+	if res.Squeezed {
+		// The one picture on a page that cost several encodes, and the reason
+		// it did. An operator seeing this on everything has the cap set below
+		// what the pages they read are made of.
+		p.log.Debug("image re-encoded to fit the per-picture cap",
+			"url", req.URL, "key", req.Key, "mime", res.Mime,
+			"bytes", len(res.Data), "w", res.W, "h", res.H)
+	}
 	meta := res.Meta(req.Key, req.Node, req.Priority)
 	meta.Alt = req.Alt
 	meta.Box = req.Box

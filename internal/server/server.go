@@ -202,6 +202,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 		Transcode: imgproc.Options{
 			Encoder:      imgproc.EncoderAuto,
 			PhotoQuality: cfg.ImageQuality,
+			MaxOutBytes:  cfg.ImageMaxBytes,
 			BlurX:        4,
 			BlurY:        3,
 		},

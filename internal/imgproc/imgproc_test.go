@@ -1345,3 +1345,121 @@ func TestUnstampedWorkIsNeverStale(t *testing.T) {
 		t.Fatal("an unstamped request was never answered")
 	}
 }
+
+// TestAPictureTooBigForTheLinkIsReEncodedRatherThanShipped is the cap doing its
+// one job. The source is a photograph laid out at its natural size, which is
+// the case fit() cannot help with: there is no smaller box to encode into, so
+// without the ladder the honest encode is what crosses the link.
+func TestAPictureTooBigForTheLinkIsReEncodedRatherThanShipped(t *testing.T) {
+	const limit = 12 << 10
+	src := encodePNG(t, photo(480, 480))
+	tc := New(Options{MaxOutBytes: limit})
+	res, err := tc.Transcode(context.Background(), src, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Squeezed {
+		t.Fatalf("a %d-byte encode was shipped whole under a %d-byte cap", len(res.Data), limit)
+	}
+	if len(res.Data) > limit {
+		t.Fatalf("result is %d bytes, over the %d-byte cap", len(res.Data), limit)
+	}
+	// Whatever rung it landed on, the metadata has to describe the bytes: a
+	// client told the wrong size reserves a space its picture does not fill.
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(res.Data))
+	if err != nil {
+		t.Fatalf("the squeezed bytes do not decode: %v", err)
+	}
+	if cfg.Width != res.W || cfg.Height != res.H {
+		t.Fatalf("meta says %dx%d, bytes are %dx%d", res.W, res.H, cfg.Width, cfg.Height)
+	}
+	if res.W > 480 || res.H > 480 {
+		t.Fatalf("size = %dx%d: the ladder upscaled", res.W, res.H)
+	}
+	if res.Blurhash == "" {
+		t.Fatal("the blurhash was lost; it describes the picture, not the encode")
+	}
+	if Sniff(res.Data) != res.Mime {
+		t.Fatalf("mime %q does not match the bytes (%q)", res.Mime, Sniff(res.Data))
+	}
+}
+
+// TestAPictureThatAlreadyFitsIsLeftAlone: the ladder costs several encodes, and
+// nothing that already fits should pay for them or lose quality to them.
+func TestAPictureThatAlreadyFitsIsLeftAlone(t *testing.T) {
+	tc := New(DefaultOptions())
+	res, err := tc.Transcode(context.Background(), encodePNG(t, sprite(64, 64)), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Squeezed {
+		t.Fatalf("a %d-byte picture was re-encoded under a 1 MB cap", len(res.Data))
+	}
+	if res.W != 64 || res.H != 64 {
+		t.Fatalf("size = %dx%d, want 64x64 untouched", res.W, res.H)
+	}
+}
+
+// TestTheCapCanBeTurnedOff keeps the old behaviour reachable: an operator on a
+// link that is not the one this project is named for may want the bytes.
+func TestTheCapCanBeTurnedOff(t *testing.T) {
+	src := encodePNG(t, photo(480, 480))
+	tc := New(Options{MaxOutBytes: -1})
+	res, err := tc.Transcode(context.Background(), src, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Squeezed {
+		t.Fatal("the ladder ran with the cap turned off")
+	}
+	if res.W != 480 || res.H != 480 {
+		t.Fatalf("size = %dx%d, want the natural size", res.W, res.H)
+	}
+}
+
+// TestAnOversizedVectorIsStillShippedAsItIs. The ladder is for bitmaps: an SVG
+// is markup, it has no quality to give up, and rasterising one to hit a byte
+// target would spend more bytes than the markup costs and lose the one property
+// that makes it worth shipping.
+func TestAnOversizedVectorIsStillShippedAsItIs(t *testing.T) {
+	var b bytes.Buffer
+	b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12">`)
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(&b, `<path d="M%d 0h24v12H0z"/>`, i)
+	}
+	b.WriteString(`</svg>`)
+	src := b.Bytes()
+	tc := New(Options{MaxOutBytes: 1 << 10})
+	res, err := tc.Transcode(context.Background(), src, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mime != "image/svg+xml" || !bytes.Equal(res.Data, src) {
+		t.Fatalf("a %d-byte vector was altered by the byte cap (mime %q)", len(src), res.Mime)
+	}
+}
+
+// TestTheLadderKeepsTransparency. JPEG has nowhere to put an alpha channel, so
+// the fallback path must not choose it for a picture that has one — a logo that
+// arrives with a black box behind it is worse than one that arrives late.
+func TestTheLadderKeepsTransparency(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 300, 300))
+	rng := rand.New(rand.NewSource(2)) //nolint:gosec // deterministic test fixture
+	for y := 0; y < 300; y++ {
+		for x := 0; x < 300; x++ {
+			a := uint8(255)
+			if x < 150 {
+				a = 0
+			}
+			img.Set(x, y, color.RGBA{R: uint8(rng.Intn(256)), G: uint8(x), B: uint8(y), A: a})
+		}
+	}
+	tc := New(Options{MaxOutBytes: 2 << 10})
+	res, err := tc.Transcode(context.Background(), encodePNG(t, img), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mime == "image/jpeg" {
+		t.Fatal("a picture with an alpha channel was squeezed into a format that has none")
+	}
+}
