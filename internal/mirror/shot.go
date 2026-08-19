@@ -218,7 +218,7 @@ func (t *Tab) shootRegion(ctx context.Context, b shotBox) bool {
 		return false
 	}
 
-	t.out.WantImage(t.ID, ImageRequest{
+	t.wantImage(ImageRequest{
 		Key: key, Node: b.N, Src: shot,
 		W: int(b.W + 0.5), H: int(b.H + 0.5),
 		Box: []int{int(b.OX + 0.5), int(b.OY + 0.5), int(b.W + 0.5), int(b.H + 0.5)},

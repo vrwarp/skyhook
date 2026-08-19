@@ -193,29 +193,33 @@ func (q *fairQueue) forget(tab uint32) {
 // going to spend on a tab that is gone.
 func (q *fairQueue) dropTab(tab uint32) (frames, bytes int) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	for _, m := range q.pending[tab] {
+	dropped := q.pending[tab]
+	for _, m := range dropped {
 		frames++
 		bytes += len(m.msg)
 	}
-	if frames == 0 {
-		return 0, 0
+	if frames > 0 {
+		delete(q.pending, tab)
+		q.forget(tab)
+		q.n -= frames
 	}
-	delete(q.pending, tab)
-	q.forget(tab)
-	q.n -= frames
+	q.mu.Unlock()
+	settle(dropped)
 	return frames, bytes
 }
 
 // dropIf discards every queued message the predicate accepts, keeping the rest
-// in the order they were queued.
-func (q *fairQueue) dropIf(pred func(outbound) bool) {
+// in the order they were queued. It reports what the drop took back.
+func (q *fairQueue) dropIf(pred func(outbound) bool) (frames, bytes int) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
+	var dropped []outbound
 	for tab, msgs := range q.pending {
 		keep := msgs[:0]
 		for _, m := range msgs {
 			if pred(m) {
+				dropped = append(dropped, m)
+				frames++
+				bytes += len(m.msg)
 				q.n--
 				continue
 			}
@@ -227,6 +231,32 @@ func (q *fairQueue) dropIf(pred func(outbound) bool) {
 			continue
 		}
 		q.pending[tab] = keep
+	}
+	q.mu.Unlock()
+	settle(dropped)
+	return frames, bytes
+}
+
+/*
+settle closes out messages the queue threw away instead of sending.
+
+`onSent` is how anything keeping a record of what the client has been given
+learns that a frame did not go, and both drops here take frames out from under
+it. The image ledger is the one that shows: a picture is claimed by the act of
+deciding to send it, precisely so that two overlapping submissions cannot both
+send it, and the claim is given back when the attempt fails. A frame dropped by
+a queue is an attempt that failed — but it failed without ever reaching the
+writer, so nothing gave the claim back, and the ledger was left saying the
+client holds a picture that never left the building. The next resync then
+skipped it, and the reader kept a blank box until they asked for it by hand.
+
+Called with no lock held: onSent reaches back into the session.
+*/
+func settle(dropped []outbound) {
+	for _, m := range dropped {
+		if m.onSent != nil {
+			m.onSent(false)
+		}
 	}
 }
 

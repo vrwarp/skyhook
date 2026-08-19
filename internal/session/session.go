@@ -612,8 +612,64 @@ func (s *Session) WantImage(tab uint32, req mirror.ImageRequest) {
 	s.mgr.images.Submit(imgproc.Request{
 		Tab: tab, Key: req.Key, URL: req.URL, W: req.W, H: req.H, Alt: req.Alt,
 		Priority: pri, Node: req.Node, Referer: req.Referer,
-		Src: req.Src, Box: req.Box,
+		Src: req.Src, Box: req.Box, Epoch: req.Epoch,
 	})
+}
+
+/*
+PageChanged implements mirror.Emitter: a navigation has committed.
+
+What is queued on the media channel for this tab is the page the reader has just
+left. Every one of those frames is a picture of a document neither half is
+looking at any anymore, and on this link each is seconds the page they are
+waiting for does not get. The queue is bounded in frames and not in bytes — a
+thousand slots of image is however many megabytes the last page happened to
+name — so "it will drain" is not an answer; a reader who navigates twice while
+the first page is still shipping is behind a queue nothing takes back.
+
+Only media. The dom queue holds the new document and the ctrl queue holds the
+announcement that says which page this is, and both are what the reader is
+waiting for.
+
+Each dropped frame is settled as unsent, which is what gives the image ledger
+back its claim: a picture thrown away here has not been delivered, and the next
+document that names it has to be able to send it again.
+*/
+func (s *Session) PageChanged(tab uint32, epoch uint64) {
+	q := s.sendQ[protocol.ChMedia.Priority()]
+	frames, bytes := q.dropIf(func(m outbound) bool {
+		return m.ch == protocol.ChMedia && m.tab == tab
+	})
+	if frames == 0 {
+		return
+	}
+	s.log.Debug("dropped the pictures of the page the reader left",
+		"session", s.ID, "tab", tab, "epoch", epoch, "frames", frames, "bytes", bytes)
+}
+
+/*
+Stale implements imgproc.Relevance: whether a request still has a page.
+
+The pipeline is shared by every session and knows nothing about documents, so
+this is the only place the question can be answered. A tab that has navigated
+past the epoch a request was stamped with is a tab whose reader is somewhere
+else; a tab this session no longer has is the same answer for a different
+reason, and either way the fetch, the transcode and the bytes are not owed.
+
+Unstamped work — a request from a build or a test that does not stamp — is never
+stale, because "epoch 0" means "nobody said", not "the first page".
+*/
+func (s *Session) Stale(tab uint32, epoch uint64) bool {
+	if epoch == 0 {
+		return false
+	}
+	s.mu.Lock()
+	ts := s.tabs[tab]
+	s.mu.Unlock()
+	if ts == nil || ts.tab == nil {
+		return true
+	}
+	return ts.tab.NavEpoch() != epoch
 }
 
 /*

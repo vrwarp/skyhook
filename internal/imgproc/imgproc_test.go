@@ -1193,3 +1193,155 @@ func TestAskingForAKeyNobodyIsMakingIsAnswered(t *testing.T) {
 			" it holds a transparent pixel for the life of the document")
 	}
 }
+
+// pageWatch answers the pipeline's staleness question from a settable epoch,
+// which is how a test navigates a tab.
+type pageWatch struct {
+	mu    sync.Mutex
+	epoch uint64
+}
+
+func (w *pageWatch) Stale(_ uint32, epoch uint64) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return epoch != w.epoch
+}
+
+func (w *pageWatch) navigate() {
+	w.mu.Lock()
+	w.epoch++
+	w.mu.Unlock()
+}
+
+/*
+Work queued for a page the reader has left is never started.
+
+The queues here are thousands deep and the link they feed is hundreds of kbps
+wide, so a request can sit for a minute between being made and being reached.
+Everything after that point costs something real — a round trip to the origin,
+a decode, an encode, and then the whole link for as long as the bytes take —
+and none of it is owed to a document that is already gone. The capture this
+came from spent seventy-eight seconds of it on an article the reader had
+pressed back out of.
+*/
+func TestWorkForAPageTheReaderLeftIsNeverStarted(t *testing.T) {
+	w := &pageWatch{epoch: 1}
+	f := &failingFetcher{body: encodePNG(t, sprite(16, 16))}
+	d := &recorder{ready: make(chan protocol.ImageMeta, 8), bytes: make(chan protocol.ImageData, 8)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher: f, Relevance: w,
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// The page that named it is gone by the time a worker reaches it.
+	w.navigate()
+	p.Submit(Request{
+		Tab: 1, Key: "5tale", Epoch: 1, Priority: 0,
+		URL: "https://example.test/left.png", W: 16, H: 16,
+	})
+
+	select {
+	case m := <-d.ready:
+		if !m.Missing {
+			t.Fatalf("a picture arrived for a page nobody is on: %+v", m)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("nothing was said about a request the pipeline dropped")
+	}
+	if n := f.asked(); n != 0 {
+		t.Fatalf("fetched %d times for a document that is gone; want 0", n)
+	}
+	select {
+	case data := <-d.bytes:
+		t.Fatalf("shipped %d bytes for a page nobody is on", len(data.Data))
+	default:
+	}
+}
+
+/*
+A fetch already running is called off when the page goes.
+
+The queue check above catches work that had not started. This is the other
+half, and the more expensive one: a slow origin holds a worker for as long as
+it likes — the direct path waits 45 s and the request itself 60 — while the
+reader, who navigated ten seconds ago, waits behind it for the page they
+actually asked for.
+*/
+func TestAFetchIsCalledOffWhenThePageGoes(t *testing.T) {
+	w := &pageWatch{epoch: 1}
+	f := &hangingFetcher{started: make(chan struct{}, 1)}
+	d := &recorder{ready: make(chan protocol.ImageMeta, 8), bytes: make(chan protocol.ImageData, 8)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Fetcher: f, Relevance: w,
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	p.Submit(Request{
+		Tab: 1, Key: "5low", Epoch: 1, Priority: 0,
+		URL: "https://example.test/slow.png", W: 16, H: 16,
+	})
+	select {
+	case <-f.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fetch never started")
+	}
+	w.navigate()
+
+	select {
+	case m := <-d.ready:
+		if !m.Missing {
+			t.Fatalf("a picture arrived for a page nobody is on: %+v", m)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the fetch outlived the page that asked for it")
+	}
+}
+
+// hangingFetcher never answers, and reports when it was asked. It returns only
+// when its caller's context ends, which is the thing under test.
+type hangingFetcher struct {
+	started chan struct{}
+}
+
+func (f *hangingFetcher) FetchImage(ctx context.Context, _ uint32, _ string, _ int) ([]byte, error) {
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// Work nobody stamped is work nothing can call stale. A build with no page to
+// ask about — every test above, and every caller that predates the stamp — must
+// go on being done.
+func TestUnstampedWorkIsNeverStale(t *testing.T) {
+	w := &pageWatch{epoch: 7}
+	d := &recorder{ready: make(chan protocol.ImageMeta, 8), bytes: make(chan protocol.ImageData, 8)}
+	p, err := NewPipeline(PipelineOptions{
+		Workers: 1, CacheDir: t.TempDir(), Transcode: Options{Encoder: EncoderPNG},
+		Relevance: w,
+	}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	p.Submit(Request{Tab: 1, Key: "n0stamp", Priority: 0, Src: encodePNG(t, sprite(16, 16)), W: 16, H: 16})
+	select {
+	case m := <-d.ready:
+		if m.Missing {
+			t.Fatal("an unstamped request was dropped as stale")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an unstamped request was never answered")
+	}
+}

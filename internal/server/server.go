@@ -197,6 +197,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 		Logger:     log,
 		Fetcher:    router,
 		Rasterizer: router,
+		Relevance:  router,
 		UserAgent:  userAgent,
 		Transcode: imgproc.Options{
 			Encoder:      imgproc.EncoderAuto,
@@ -311,6 +312,33 @@ func (d *deliveryRouter) ImageBytes(tab uint32, data protocol.ImageData) {
 			s.ImageBytes(tab, data)
 		}
 	}
+}
+
+/*
+Stale implements imgproc.Relevance: whether an image request still has a page.
+
+Tab ids are handed out per session and every session starts at 1, so a tab id
+names a tab in as many sessions as have opened one. The delivery methods above
+can live with that — an image is named by the hash of its content, so a picture
+delivered to a session that did not ask for it is a picture it already has under
+that name — but a *cancellation* cannot: one reader navigating would call off
+the work another reader is waiting for.
+
+So it takes every session that owns the id, and calls the work stale only if not
+one of them is still on the document it was stamped with. A key nobody owns at
+all is stale too: that is a tab that has closed, and nothing is ever going to
+ask for its pictures again.
+*/
+func (d *deliveryRouter) Stale(tab uint32, epoch uint64) bool {
+	if d.mgr == nil || epoch == 0 {
+		return false
+	}
+	for _, s := range d.mgr.Sessions() {
+		if s.HasTab(tab) && !s.Stale(tab, epoch) {
+			return false
+		}
+	}
+	return true
 }
 
 // FetchImage implements imgproc.Fetcher: the tab that wants the image is the
