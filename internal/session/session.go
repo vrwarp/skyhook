@@ -316,11 +316,12 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 	}
 	s.wake = make(chan struct{}, 1)
 	for i := range s.sendQ {
-		s.sendQ[i] = newFairQueue(1024)
+		s.sendQ[i] = newFairQueue(1024, classBudget[i])
 	}
 	// Ctrl is the exception: small frames whose order across tabs is the plane
 	// side's only way of knowing which tab it asked for first. See fairQueue.
-	s.sendQ[protocol.ChCtrl.Priority()] = newOrderedQueue(1024)
+	ctrl := protocol.ChCtrl.Priority()
+	s.sendQ[ctrl] = newOrderedQueue(1024, classBudget[ctrl])
 	go s.writer()
 	go s.integrityLoop()
 	return s, nil
@@ -811,13 +812,27 @@ func (s *Session) noteImageSent(hash string) {
 // longer for the thing they actually did.
 const backloggedFrames = 8
 
+/*
+backloggedBytes is the same question in the unit the link is measured in.
+
+Eight frames is eight of whatever this queue happens to hold. Eight mutations is
+a moment; eight pictures is a minute and a half at 250 kbps, and a count cannot
+tell them apart — so the one signal that stops optional work from piling onto a
+struggling link was blind to the traffic most able to bury it. 128 kB is about
+four seconds there, which is the same order as what eight ordinary dom frames
+cost and is the point at which anything queued behind it is late.
+*/
+const backloggedBytes = 128 << 10
+
 // Backlogged implements mirror.Emitter.
 func (s *Session) Backlogged() bool {
-	depth := 0
+	frames, bytes := 0, 0
 	for _, q := range s.sendQ {
-		depth += q.depth()
+		f, b := q.waiting()
+		frames += f
+		bytes += b
 	}
-	return depth >= backloggedFrames
+	return frames >= backloggedFrames || bytes >= backloggedBytes
 }
 
 // ImageReady implements imgproc.Delivery.

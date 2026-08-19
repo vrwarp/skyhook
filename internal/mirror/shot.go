@@ -109,6 +109,13 @@ func (t *Tab) shotSoon(d time.Duration) {
 }
 
 // shotAgain schedules one pass without starting a new run.
+//
+// The pass is tied to the page that scheduled it. A run is up to shotFollowMax
+// passes with a delay between each, so one started by a page the reader then
+// navigates away from goes on photographing across the navigation — at a
+// screenshot and a transcode per region per pass. Each pass reads the live
+// document, so it is waste rather than error, and the page that arrives starts
+// a run of its own from its snapshot; there is nothing here the new page needs.
 func (t *Tab) shotAgain(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -118,7 +125,11 @@ func (t *Tab) shotAgain(d time.Duration) {
 	if t.shotTimer != nil {
 		t.shotTimer.Stop()
 	}
+	epoch := t.navEpoch.Load()
 	t.shotTimer = time.AfterFunc(d, func() {
+		if !t.onPage(epoch) {
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), shotTimeout)
 		defer cancel()
 		t.refreshShots(ctx)

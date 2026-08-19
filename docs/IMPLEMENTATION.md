@@ -3710,3 +3710,77 @@ Three things the same capture shows that are not this, and are not changed:
 - **A 4.9 MB variable font and eight multi-megabyte JPEGs were refused** by the
   transcoder's 1 MB and dimension caps. Correctly, and §50 covers what has to
   happen to the references when they are.
+
+### 52. Three more of the same shape, and the one that had the reader's words
+
+[§51](#51-the-link-was-still-paying-for-the-page-the-reader-had-left) is one
+instance of a class: work that outlives the thing that asked for it, and that
+nothing ever calls off. Reading the rest of the code for that shape found three
+more. The first is the one whose symptom is the sentence the reader actually
+wrote.
+
+**A navigation that lost the race got to say where the reader was.**
+`onFrameNavigated` starts a goroutine per commit, and nothing sequences them
+against each other:
+
+```go
+go func() {
+    t.syncHistory(ctx)                                                // a round trip
+    t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})   // this commit's URL
+    t.applyBlocklist(ctx, p.Frame.URL)
+    ...
+}()
+```
+
+That URL is read from the event, not from the browser, and
+`Page.getNavigationHistory` is a round trip whose latency this side does not
+control — CDP calls are multiplexed by id (`Client.Call`), so two of them are
+genuinely concurrent. The capture has two back presses 1.8 s apart, on a
+landside browser that was at that moment fetching thirty-three images through
+that same tab's session. The older run finishing second announces the page
+*before* the one the reader is on, with that page's cached `canBack`/`canForward`
+— which the comment right above it explains is how a back gesture gets dropped
+on the floor — and with `Loading` forced back on, which nothing fires a second
+time to clear. The tab sits on the wrong address under a spinner until the stale
+run finishes the rest of its own chain, which on this link is seconds. Then it
+applies that page's request blocklist to the page the reader is on, and asks for
+a re-snapshot: 403,073 bytes on the wire, for the page in this very capture.
+
+A run that has been overtaken now stops. `announceCommit` is the one step that
+must not be taken late — everything else in the tail reads live state and is
+merely redundant — so it is the step that carries the check, and it reports
+whether there is any point going on. `onLoad`'s tail gets the same guard before
+`recoverBlockedSheets`, which is a round trip per sheet for a page that has been
+navigated past.
+
+**The send queues were bounded in frames, not in bytes.** Four classes, 1024
+slots each. A ctrl frame is a hundred bytes and an image frame is hundreds of
+kilobytes, so one number meant "a hundred kilobytes" in one class and "several
+hundred megabytes" in another — and the second is not a queue, it is hours. Each
+class now has a byte budget as well, chosen by what being full costs rather than
+by what fits: media is expendable and self-heals through the ledger and the
+client's next ask, so 4 MB — the capture names thirty-three pictures in forty
+seconds adding up to 6,448,130 bytes, for one article; dom is repaired only by a
+resync, so 16 MB, which is around forty of the largest document this has ever
+been pointed at. A message
+larger than its whole budget still goes when nothing else is queued, because a
+frame no queue can accept is worse than a queue briefly over its mark.
+
+`Backlogged` had the same unit problem and it matters more, because it is the
+one signal that stops optional work — following an animation, photographing a
+canvas again — from piling onto a link that is not keeping up. Eight frames is
+eight of whatever the queue holds: eight mutations is a moment, eight pictures
+is a minute and a half at 250 kbps. It now answers on bytes too.
+
+**A region-shot run outlived the page that started it.** Up to `shotFollowMax`
+passes with a delay between each, a screenshot and a transcode per region per
+pass, carrying straight across a navigation. Every pass reads the live document
+so it was waste rather than error, and the page that arrives starts a run of its
+own from its snapshot — there was never anything in the old run the new page
+needed. The pass is now stamped with the page that scheduled it.
+
+Two things with this shape that were checked and left alone: `recoverBlockedSheets`
+and `RefreshState` both re-read live state on every call, so a late run states
+the truth rather than yesterday's. The first was worth suspecting — it looked
+like page A's stylesheets could be injected into page B — and it is not what the
+code does.

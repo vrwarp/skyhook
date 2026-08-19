@@ -13,6 +13,11 @@ func msg(tab uint32, n int) outbound {
 	return outbound{ch: protocol.ChDom, tab: tab, msg: make([]byte, n)}
 }
 
+// unbounded is the byte budget for a queue under test for something else. Zero
+// means "frames only", which is what every test written before there was a byte
+// budget is asking about. See classBudget.
+const unbounded = 0
+
 // drain pops everything the queue holds, reporting the tabs in the order they
 // were served.
 func drain(q *fairQueue, active uint32) []uint32 {
@@ -47,7 +52,7 @@ does — sixteen frames of tab 2 queued before tab 1 opens its mouth are sixteen
 frames tab 1 waits behind.
 */
 func TestABusyTabDoesNotStarveAnother(t *testing.T) {
-	q := newFairQueue(64)
+	q := newFairQueue(64, unbounded)
 	for i := 0; i < 16; i++ {
 		q.push(msg(2, 100))
 	}
@@ -87,7 +92,7 @@ itself it had reached when the reader looked away, because "it will finish when
 you switch to it" is not something a tab strip can say.
 */
 func TestTheActiveTabGoesFirstAndStillYields(t *testing.T) {
-	q := newFairQueue(64)
+	q := newFairQueue(64, unbounded)
 	for i := 0; i < 20; i++ {
 		q.push(msg(1, 100))
 		q.push(msg(2, 100))
@@ -119,7 +124,7 @@ them resolving to its neighbour — text lands shredded in the wrong nodes and
 nothing detects it. Order *between* tabs guarantees nothing and never did.
 */
 func TestATabsOwnFramesKeepTheirOrder(t *testing.T) {
-	q := newFairQueue(64)
+	q := newFairQueue(64, unbounded)
 	for tab := uint32(1); tab <= 3; tab++ {
 		for i := 0; i < 8; i++ {
 			m := msg(tab, 1)
@@ -149,7 +154,7 @@ func TestATabsOwnFramesKeepTheirOrder(t *testing.T) {
 // The session's own traffic — a pong, the stats behind it, a tab state — is
 // answering something the reader did this second and belongs to no tab.
 func TestSessionTrafficDoesNotWaitItsTurn(t *testing.T) {
-	q := newFairQueue(64)
+	q := newFairQueue(64, unbounded)
 	for i := 0; i < 10; i++ {
 		q.push(msg(1, 100))
 	}
@@ -174,7 +179,7 @@ active one and jumped the rotation, and the reader was left in an empty tab
 looking at the page they had asked to leave. The order is the message.
 */
 func TestTheControlChannelKeepsItsOrder(t *testing.T) {
-	q := newOrderedQueue(64)
+	q := newOrderedQueue(64, unbounded)
 	// Tab 2's announcement is queued first, and then tab 3's — while tab 3 is
 	// the tab the session considers active, which in a rotating class is enough
 	// to overtake.
@@ -191,7 +196,7 @@ func TestTheControlChannelKeepsItsOrder(t *testing.T) {
 
 // Ordered or not, a class must still be able to give up one tab's frames.
 func TestAnOrderedClassCanStillDropATab(t *testing.T) {
-	q := newOrderedQueue(64)
+	q := newOrderedQueue(64, unbounded)
 	q.push(msg(1, 10))
 	q.push(msg(2, 100))
 	q.push(msg(1, 10))
@@ -207,7 +212,7 @@ func TestAnOrderedClassCanStillDropATab(t *testing.T) {
 
 // Dropping a tab takes its frames and nobody else's.
 func TestDropTabLeavesTheOtherTabsAlone(t *testing.T) {
-	q := newFairQueue(64)
+	q := newFairQueue(64, unbounded)
 	for i := 0; i < 6; i++ {
 		q.push(msg(2, 1000))
 	}
@@ -237,7 +242,7 @@ func TestDropTabLeavesTheOtherTabsAlone(t *testing.T) {
 // A full class refuses rather than growing without bound; the caller decides
 // whether that means dropping the frame or waiting for room.
 func TestAFullClassRefuses(t *testing.T) {
-	q := newFairQueue(2)
+	q := newFairQueue(2, unbounded)
 	if !q.push(msg(1, 1)) || !q.push(msg(2, 1)) {
 		t.Fatal("a queue with room refused a frame")
 	}
@@ -422,5 +427,74 @@ func TestQueuedControlTrafficSurvivesAnOutage(t *testing.T) {
 		t.Errorf("%d ctrl frames left after an outage, want the one queued: "+
 			"only dom frames have a ring behind them, so a ctrl frame the "+
 			"writer drops is gone", got)
+	}
+}
+
+/*
+A class is full of bytes before it is full of frames.
+
+Counting frames says nothing about a link measured in bits. One limit of 1024
+means a hundred kilobytes in the ctrl class and several hundred megabytes in the
+media one, and the second of those is not a queue: at 250 kbps it is hours of
+pictures standing between the reader and the page they asked for.
+*/
+func TestAClassIsBoundedInBytesAsWellAsFrames(t *testing.T) {
+	q := newFairQueue(1024, 4096)
+	for i := 0; i < 4; i++ {
+		if !q.push(msg(1, 1024)) {
+			t.Fatalf("frame %d was refused inside the budget", i)
+		}
+	}
+	if q.push(msg(1, 1)) {
+		t.Fatal("a frame was taken past the budget, which is what the budget is")
+	}
+	if frames, bytes := q.waiting(); frames != 4 || bytes != 4096 {
+		t.Fatalf("the queue holds %d frames and %d bytes, want 4 and 4096", frames, bytes)
+	}
+
+	// Room comes back as the link takes them.
+	if _, ok := q.pop(0); !ok {
+		t.Fatal("nothing came off a queue holding four frames")
+	}
+	if _, bytes := q.waiting(); bytes != 3072 {
+		t.Fatalf("%d bytes are still counted after one left, want 3072", bytes)
+	}
+	if !q.push(msg(1, 1024)) {
+		t.Fatal("the room a sent frame gave back was not usable")
+	}
+}
+
+// A message bigger than the whole budget still goes, when nothing else is
+// waiting. A frame no queue can ever accept is worse than a queue briefly over
+// its mark: it is a picture, or a document, that can never be sent at all.
+func TestAFrameLargerThanTheBudgetIsStillSent(t *testing.T) {
+	q := newFairQueue(1024, 1024)
+	if !q.push(msg(1, 8192)) {
+		t.Fatal("an oversized frame was refused by an empty queue")
+	}
+	if q.push(msg(1, 1)) {
+		t.Fatal("the queue took more while already past its budget")
+	}
+}
+
+// And what a drop gives back is counted too, or the budget leaks until the
+// class refuses everything.
+func TestDroppingGivesTheBudgetBack(t *testing.T) {
+	q := newFairQueue(1024, 4096)
+	q.push(msg(1, 1024))
+	q.push(msg(2, 1024))
+	q.push(msg(1, 1024))
+
+	if frames, bytes := q.dropTab(1); frames != 2 || bytes != 2048 {
+		t.Fatalf("dropping tab 1 reported %d frames and %d bytes, want 2 and 2048", frames, bytes)
+	}
+	if frames, bytes := q.waiting(); frames != 1 || bytes != 1024 {
+		t.Fatalf("the queue holds %d frames and %d bytes, want 1 and 1024", frames, bytes)
+	}
+	if frames, bytes := q.dropIf(func(outbound) bool { return true }); frames != 1 || bytes != 1024 {
+		t.Fatalf("dropIf reported %d frames and %d bytes, want 1 and 1024", frames, bytes)
+	}
+	if frames, bytes := q.waiting(); frames != 0 || bytes != 0 {
+		t.Fatalf("an emptied queue still counts %d frames and %d bytes", frames, bytes)
 	}
 }

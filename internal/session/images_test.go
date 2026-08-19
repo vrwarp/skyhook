@@ -479,3 +479,39 @@ func TestAnOutageGivesBackThePicturesItThrewAway(t *testing.T) {
 		}
 	}
 }
+
+/*
+The link is behind on bytes before it is behind on frames.
+
+Backlogged is the one signal that stops optional work — following an animation,
+photographing a canvas again — from piling onto a link that is not keeping up.
+It counted frames, and eight frames is eight of whatever the queue happens to
+hold: eight mutations is a moment, eight pictures is a minute and a half at
+250 kbps. So the traffic most able to bury the reader's page was the traffic the
+signal could not see.
+*/
+func TestBacklogIsMeasuredInBytesAsWellAsFrames(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	armedTab(t, s, 1)
+	conn, release := newHeldConn()
+	s.Attach(conn)
+	t.Cleanup(release)
+
+	if s.Backlogged() {
+		t.Fatal("an idle session reports itself behind")
+	}
+	// Two pictures. Far short of the eight frames the old signal wanted, and
+	// most of a minute of this link.
+	for i := 0; i < 2; i++ {
+		s.ImageBytes(1, protocol.ImageData{
+			Hash: fmt.Sprintf("big%04x", i), Mime: "image/png",
+			Data: make([]byte, 256<<10),
+		})
+	}
+	waitForQueue(t, s, protocol.ChMedia, 1)
+	if !s.Backlogged() {
+		frames, bytes := s.sendQ[protocol.ChMedia.Priority()].waiting()
+		t.Fatalf("%d frames and %d bytes of pictures queued, and the link says it is keeping up",
+			frames, bytes)
+	}
+}

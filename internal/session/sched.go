@@ -69,6 +69,10 @@ type fairQueue struct {
 	mu    sync.Mutex
 	limit int
 	n     int
+	// budget bounds the class in bytes as well as in frames, and queued is what
+	// it holds now. See classBudget.
+	budget int
+	queued int
 	// pending is a FIFO per tab; order names the tabs that have work, oldest
 	// turn first. A tab is in exactly one of them at a time.
 	pending map[uint32][]outbound
@@ -90,26 +94,66 @@ type fairQueue struct {
 // rather than none of it.
 const activeBurst = 4
 
-func newFairQueue(limit int) *fairQueue {
+/*
+classBudget is what a class may hold, in bytes, on top of its frame count.
+
+A frame count is the wrong unit for a queue that feeds a link measured in bits.
+A ctrl frame is a hundred bytes and an image frame is hundreds of kilobytes, so
+one limit of 1024 means "a hundred kilobytes" in one class and "several hundred
+megabytes" in another — and the second of those is not a queue, it is hours. The
+capture §51 came from names thirty-three pictures in forty seconds adding up to
+6,448,130 bytes, for one article; a media class that accepted all of them would
+have had the reader waiting behind a page they had left even without §51's bug.
+
+The numbers are chosen by what being full costs, not by what fits:
+
+  - media is expendable. A refused picture gives its ledger claim straight back
+    and the client asks again from the next snapshot it applies, so the price of
+    too small is one re-ask. 4 MB is about two minutes at 250 kbps, which is
+    already longer than a reader will wait for a picture.
+  - dom is not. A refused frame blocks the producer and is then dropped, and the
+    document it was part of is repaired by a resync — the most expensive thing
+    this link does. The snapshot in that same capture is 403,073 bytes on the
+    wire for a 40,855-node page, so 16 MB is around forty of the largest
+    documents this has been pointed at: a backstop against memory rather than a
+    limit anything real should meet.
+  - ctrl and the rest carry frames of a hundred bytes or so. The budget is a
+    backstop against something unforeseen, not a working limit.
+
+A message larger than its whole budget is still sent, when it is the only thing
+queued: a frame nothing can ever accept is worse than a queue briefly over its
+mark.
+*/
+// Indexed by Channel.Priority(), which is a method and so cannot index a
+// literal: 0 is ctrl, input and telemetry, 1 dom, 2 media, 3 everything a later
+// protocol version adds.
+var classBudget = [4]int{2 << 20, 16 << 20, 4 << 20, 2 << 20}
+
+func newFairQueue(limit, budget int) *fairQueue {
 	if limit <= 0 {
 		limit = 1024
 	}
-	return &fairQueue{limit: limit, pending: map[uint32][]outbound{}}
+	return &fairQueue{limit: limit, budget: budget, pending: map[uint32][]outbound{}}
 }
 
 // newOrderedQueue is a class that keeps arrival order across tabs as well as
 // within a tab. See the note about ctrl above.
-func newOrderedQueue(limit int) *fairQueue {
-	q := newFairQueue(limit)
+func newOrderedQueue(limit, budget int) *fairQueue {
+	q := newFairQueue(limit, budget)
 	q.ordered = true
 	return q
 }
 
-// push adds a message, reporting false if the class is full.
+// push adds a message, reporting false if the class is full — of frames, or of
+// bytes.
 func (q *fairQueue) push(m outbound) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.n >= q.limit {
+		return false
+	}
+	// Over budget, unless there is nothing else here: see classBudget.
+	if q.budget > 0 && q.n > 0 && q.queued+len(m.msg) > q.budget {
 		return false
 	}
 	if _, ok := q.pending[m.tab]; !ok {
@@ -119,6 +163,7 @@ func (q *fairQueue) push(m outbound) bool {
 	m.at = q.pushes
 	q.pending[m.tab] = append(q.pending[m.tab], m)
 	q.n++
+	q.queued += len(m.msg)
 	return true
 }
 
@@ -175,6 +220,7 @@ func (q *fairQueue) take(tab uint32) outbound {
 		q.pending[tab] = msgs[1:]
 	}
 	q.n--
+	q.queued -= len(m.msg)
 	return m
 }
 
@@ -202,6 +248,7 @@ func (q *fairQueue) dropTab(tab uint32) (frames, bytes int) {
 		delete(q.pending, tab)
 		q.forget(tab)
 		q.n -= frames
+		q.queued -= bytes
 	}
 	q.mu.Unlock()
 	settle(dropped)
@@ -221,6 +268,7 @@ func (q *fairQueue) dropIf(pred func(outbound) bool) (frames, bytes int) {
 				frames++
 				bytes += len(m.msg)
 				q.n--
+				q.queued -= len(m.msg)
 				continue
 			}
 			keep = append(keep, m)
@@ -265,4 +313,11 @@ func (q *fairQueue) depth() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.n
+}
+
+// waiting reports what is queued, in frames and in bytes.
+func (q *fairQueue) waiting() (frames, bytes int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.n, q.queued
 }

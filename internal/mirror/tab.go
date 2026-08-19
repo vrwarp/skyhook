@@ -542,7 +542,7 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 	// Before anything else: the pictures of the page that has just been left
 	// are already queued and already being fetched, and on a link measured in
 	// hundreds of kbps they are minutes of it. See §51.
-	t.pageCommitted()
+	epoch := t.pageCommitted()
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -566,11 +566,20 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		// reader called off, this is not it.
 		t.wantsLoading()
 		t.syncHistory(ctx)
-		t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})
+		if !t.announceCommit(epoch, p.Frame.URL) {
+			return
+		}
 
 		t.applyBlocklist(ctx, p.Frame.URL)
 		if err := t.ensureWorld(ctx); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
+		}
+		// And again before the expensive half. A re-snapshot is the whole
+		// document, which on this link is the most costly thing a tab can be
+		// asked for; one for a page that has already been navigated past is the
+		// link spent twice on the same mistake.
+		if !t.onPage(epoch) {
+			return
 		}
 		if _, err := t.eval(ctx, resnapshotIfSettled); err != nil {
 			t.log.Debug("post-navigation snapshot check failed", "tab", t.ID, "err", err)
@@ -590,8 +599,51 @@ round trip to the browser, and this is the one part that has to happen before
 any of them. What is queued for the page just left is queued now, being fetched
 now, and shipping down the link now.
 */
-func (t *Tab) pageCommitted() {
-	t.out.PageChanged(t.ID, t.navEpoch.Add(1))
+func (t *Tab) pageCommitted() uint64 {
+	epoch := t.navEpoch.Add(1)
+	t.out.PageChanged(t.ID, epoch)
+	return epoch
+}
+
+/*
+onPage reports whether an epoch is still the page this tab is on.
+
+Every navigation starts work that outlives the round trip it began with, and
+nothing sequences those runs against each other: a `Page.getNavigationHistory`
+is a round trip whose latency this side does not control, CDP calls are
+multiplexed by id, and a reader who presses back twice — 1.8 s apart, in the
+capture §51 came from — has two of them genuinely racing. See §52.
+
+So a run that has been overtaken stops instead of finishing. Whatever it was
+going to do, the run that overtook it is already doing for the page the reader
+is actually on.
+*/
+func (t *Tab) onPage(epoch uint64) bool { return t.navEpoch.Load() == epoch }
+
+/*
+announceCommit says where a navigation landed, and reports whether it was still
+the tab's business to say so.
+
+The address comes from the event rather than from the browser, which is what
+makes this the one step a stale run must not take: everything else in the
+navigation's tail reads live state and is merely redundant when overtaken, while
+this states an address that was true and is not. It carries the tab's cached
+history flags with it — see the note in onFrameNavigated about why they have to
+travel in the same frame — and it forces `Loading` back on, which nothing fires
+a second time to clear.
+
+False means the run is over. There is nothing for the caller to do afterwards
+either: applying the blocklist of a page the reader has left would put that
+page's denials on the one they are on.
+*/
+func (t *Tab) announceCommit(epoch uint64, url string) bool {
+	if !t.onPage(epoch) {
+		t.log.Debug("dropping the tail of a navigation the reader left",
+			"tab", t.ID, "epoch", epoch, "url", url)
+		return false
+	}
+	t.emitState(protocol.TabState{URL: url, Loading: true})
+	return true
 }
 
 // resnapshotIfSettled re-mirrors a document that navigation delivered already
@@ -628,6 +680,7 @@ const resnapshotIfSettled = `(function () {
 // the recovery would leave the tab wearing its busy cursor throughout.
 func (t *Tab) onLoad() {
 	t.setLoading(false)
+	epoch := t.navEpoch.Load()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -638,6 +691,14 @@ func (t *Tab) onLoad() {
 		// The agent snapshots itself on DOMContentLoaded; ask for a CSS pass now
 		// that late stylesheets have landed.
 		_, _ = t.eval(ctx, "__skyhook && __skyhook.flush()")
+		// Recovery is a round trip per sheet — three of them on the page §51's
+		// capture came from — and the page it would recover them for is the one
+		// the reader has just left. What is here reads live state, so a stale
+		// run is redundant rather than wrong; on a busy CDP session redundant is
+		// still what the tab they are on is waiting behind.
+		if !t.onPage(epoch) {
+			return
+		}
 		t.recoverBlockedSheets(ctx)
 		t.RefreshState(ctx)
 	}()

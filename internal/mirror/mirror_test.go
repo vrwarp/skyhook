@@ -2,6 +2,8 @@ package mirror
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -1107,5 +1109,52 @@ func TestACommitStampsWhatThePageAsksFor(t *testing.T) {
 		if c[0] != 3 || c[1] != uint64(i+1) {
 			t.Errorf("navigation %d was announced as tab %d epoch %d", i, c[0], c[1])
 		}
+	}
+}
+
+/*
+The navigation that lost the race does not get to say where the reader is.
+
+Every commit starts a run that outlives the round trip it began with, and
+nothing sequences those runs: `Page.getNavigationHistory` is a round trip whose
+latency this side does not control, and CDP calls are multiplexed by id, so two
+of them are genuinely concurrent. A reader who presses back twice — 1.8 s apart,
+in the capture §51 came from — has two runs in flight, each holding the address
+its own event named.
+
+If the older one finishes second it announces the page *before* the one the
+reader is on, with that page's history flags and with Loading forced back on;
+and because nothing fires a second time to correct it, the shell sits on the
+wrong URL under a spinner until the stale run works through the rest of its own
+chain. Which is what "it seems to be jumping around between pages" describes.
+*/
+func TestAnOvertakenNavigationSaysNothing(t *testing.T) {
+	sink := &stateSink{}
+	tab := &Tab{ID: 1, out: sink, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	first := tab.pageCommitted()
+	second := tab.pageCommitted()
+
+	// The first commit's run, finishing after the second's.
+	if tab.announceCommit(first, "https://example.test/one") {
+		t.Error("a navigation the reader had already left announced itself")
+	}
+	if _, spoke := sink.last(); spoke {
+		t.Fatal("the tab was announced as being on a page it had left")
+	}
+
+	if !tab.announceCommit(second, "https://example.test/two") {
+		t.Fatal("the page the reader is on was not announced")
+	}
+	st, ok := sink.last()
+	if !ok || st.URL != "https://example.test/two" {
+		t.Fatalf("the tab says it is on %q, want the second page", st.URL)
+	}
+
+	// And once more, in the order a quiet reader produces: the run for the page
+	// they are on is never the one dropped.
+	third := tab.pageCommitted()
+	if !tab.announceCommit(third, "https://example.test/three") {
+		t.Fatal("an uncontested navigation was dropped")
 	}
 }
