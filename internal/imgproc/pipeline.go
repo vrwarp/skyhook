@@ -37,6 +37,10 @@ type Request struct {
 	Src []byte
 	// Box places a region shot inside its element; see protocol.ImageMeta.Box.
 	Box []int
+	// Epoch names the page this asset was named by. The pipeline never reads
+	// it; it hands it back to Relevance, which is the only thing here that
+	// knows what a page is. Zero means unstamped, and unstamped is never stale.
+	Epoch uint64
 }
 
 // Fetcher retrieves image bytes through the landside browser, so an asset is
@@ -85,6 +89,32 @@ never arrived at all.
 */
 var ErrEmptyResource = errors.New("imgproc: the fetch succeeded and returned no bytes")
 
+/*
+Relevance says whether work is still for a page somebody is looking at.
+
+An image outlives the document that named it. Fetching one is a round trip to an
+origin, transcoding it is CPU, and shipping it is the whole link for as long as
+it takes — and a queue that holds a few hundred of them holds minutes of all
+three. None of that stops when the reader navigates, so all of it went on being
+spent on a page they had left. A capture of a phone on a 1.2 s link shows the
+tail of it: the reader pressed back at 02:47:28, and the images of the article
+they left were still being fetched and transcoded at 02:48:46 — seventy-eight
+seconds, four workers, and a link the page they were actually waiting for had to
+share the whole time.
+
+The pipeline cannot answer this itself. It knows tabs and keys; the session
+knows which document a tab is on. So it asks, at the two points where the answer
+changes what happens next: before a fetch it has not started, and after one it
+has, before paying to transcode the bytes.
+*/
+type Relevance interface {
+	// Stale reports that the document a request was made for is gone.
+	Stale(tab uint32, epoch uint64) bool
+}
+
+// ErrStale is why work for a page the reader has left is not finished.
+var ErrStale = errors.New("imgproc: the page that asked for this is gone")
+
 // Delivery is how the pipeline hands results back to the session.
 type Delivery interface {
 	// ImageReady reports metadata (blurhash, dimensions) for a key.
@@ -106,6 +136,7 @@ type Pipeline struct {
 	log       *slog.Logger
 	client    *http.Client
 	cache     *diskCache
+	relevant  Relevance
 
 	hi   chan Request
 	lo   chan Request
@@ -150,6 +181,10 @@ type PipelineOptions struct {
 	// UserAgent is sent on the direct path, so the fallback at least agrees
 	// with the browser about who it is.
 	UserAgent string
+	// Relevance says which requests are still for a page somebody is on. Nil
+	// means every request is, which is what the tests want and what every build
+	// before there was one did.
+	Relevance Relevance
 }
 
 // NewPipeline starts the workers.
@@ -182,7 +217,7 @@ func NewPipeline(opts PipelineOptions, d Delivery) (*Pipeline, error) {
 	p := &Pipeline{
 		tc: New(opts.Transcode), deliver: d, fetcher: opts.Fetcher, raster: opts.Rasterizer,
 		userAgent: opts.UserAgent,
-		log:       opts.Logger, client: cl, cache: cache,
+		log:       opts.Logger, client: cl, cache: cache, relevant: opts.Relevance,
 		hi: make(chan Request, 512), lo: make(chan Request, 4096),
 		stop:     make(chan struct{}),
 		inFlight: map[string]bool{},
@@ -422,13 +457,38 @@ func (p *Pipeline) process(req Request) {
 		delete(p.inFlight, req.Key)
 		p.mu.Unlock()
 	}()
+	// The cheapest place to notice: the request has been sitting in a queue that
+	// is thousands deep and hundreds of kbps wide, and the page that named it
+	// has had every chance to go. Nothing has been spent on it yet.
+	if p.stale(req) {
+		p.abandon(req, ErrStale)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	// And while the fetch runs, because that is where the seconds are: a slow
+	// origin holds this worker for as long as it likes, and a reader who has
+	// navigated away is not waiting for any of it. The watchdog lives exactly as
+	// long as the request does.
+	defer p.watchStale(ctx, req, cancel)()
 
 	src, err := p.fetch(ctx, req)
 	if err != nil {
+		if p.stale(req) {
+			// Cancelled by the watchdog, or lost the race with it. Either way
+			// this is not a fetch that failed.
+			p.abandon(req, ErrStale)
+			return
+		}
 		p.log.Debug("image fetch failed", "url", req.URL, "err", err)
 		p.abandon(req, err)
+		return
+	}
+	// The bytes are here and cost nothing more to hold; the transcode is the
+	// expensive half and the ship is the link. Neither is owed to a page that
+	// went while the fetch was in the air.
+	if p.stale(req) {
+		p.abandon(req, ErrStale)
 		return
 	}
 	res, err := p.tc.Transcode(ctx, src, req.W, req.H)
@@ -464,6 +524,46 @@ func (p *Pipeline) process(req Request) {
 	for _, tab := range waiting {
 		p.deliver.ImageBytes(tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
 	}
+}
+
+// stale asks whether the page that wanted this request still has the reader.
+// An unstamped request, or a build with nothing to ask, is never stale.
+func (p *Pipeline) stale(req Request) bool {
+	return p.relevant != nil && req.Epoch != 0 && p.relevant.Stale(req.Tab, req.Epoch)
+}
+
+// staleWatch is how often a fetch in progress is asked whether it still has a
+// page to come back to. A second is far below the link's own round trip and far
+// above the cost of the question, which is a map lookup.
+const staleWatch = time.Second
+
+// watchStale cancels a request's context once the page that asked for it has
+// gone, and returns the function that stops watching. It does nothing at all
+// when there is nothing to ask, so a build without Relevance starts no
+// goroutine.
+func (p *Pipeline) watchStale(ctx context.Context, req Request, cancel context.CancelFunc) func() {
+	if p.relevant == nil || req.Epoch == 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(staleWatch)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if p.relevant.Stale(req.Tab, req.Epoch) {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // wantGrace is how long a key is given to turn out to be in flight after all.

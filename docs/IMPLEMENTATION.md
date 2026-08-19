@@ -3609,3 +3609,178 @@ release now happens before the document it is releasing is replaced.
 mid-animation and carries a background on a style attribute, and checks the
 picture for both. Against the old client the fade comes back `rgb(239,15,14)` —
 the red it starts at — and the tile comes back the page's own grey.
+
+### 51. The link was still paying for the page the reader had left
+
+A capture, with the reader's own note on it: *"it seems to be jumping around
+between pages. it eventually loads. what's happening?"* — a phone on a 412 ms
+round trip, `hashesAgree: true`, `journalComplete: true`, nothing wrong with the
+document at either end. Everything wrong with it was in the timeline.
+
+```
+02:47:17  click             the article on the Hacker News page
+02:47:28  navigate  back    ← the reader gives up on it
+02:47:29  navigate  back    ← and again, because nothing happened
+02:47:51  image transcode failed  philo.gay/…/accel_dis.jpg  source image too large
+02:47:56  navigate  back    ← a third time
+02:48:03  client disconnected
+02:48:06  a picture the queue would not take   457596 bytes
+   …      thirty-one more of them
+02:48:46  a picture the queue would not take   122650 bytes
+```
+
+The reader pressed back at 02:47:28. The article they were leaving was still
+being fetched, decoded and encoded at 02:48:46 — seventy-eight seconds later,
+across four pipeline workers, and for the first thirty-five of those the bytes
+were going down the link the page they *were* waiting for had to share. Then the
+client dropped, and the last forty seconds of that work were thrown away one
+image at a time by a queue with nowhere to put it: `claimed=false`, thirty-three
+times, several hundred kilobytes each.
+
+Nothing in the server had ever been told a navigation happened. `worthSending`
+knows about a tab that has *closed*; a tab that has merely gone somewhere else
+is live, owes its images, and gets them. `Pipeline.process` opened
+`context.Background()` with a sixty-second timeout and no relationship to
+anything: the queues in front of it hold 512 and 4096 requests, so a request can
+sit for a minute before a worker reaches it, and by then the page that named it
+may be two navigations old.
+
+**Requests are stamped with the page that named them.** `Tab.navEpoch` counts
+document commits — `onFrameNavigated` on the main frame, and nothing else.
+Deliberately not `docEpoch`, which counts snapshots: a page building itself
+re-snapshots several times a second and every one of those is the same page, so
+an epoch that counted them would call a page stale while it was still arriving.
+`Tab.wantImage` stamps every request centrally, because a call site that forgot
+would produce work nothing could ever decide about.
+
+**The pipeline asks whether the page is still there**, through a `Relevance` it
+is given rather than anything it knows itself — it has tabs and keys, and the
+session has documents. It asks at the two points where the answer changes what
+happens next: before a fetch it has not started, which is the free one, and
+after one returns, before paying for the transcode and the link. And while the
+fetch runs, on a one-second ticker, because that is where the seconds actually
+are: a slow origin holds a worker for as long as it likes, and the direct path
+waits 45 s before it gives up. Unstamped work is never stale — "epoch 0" means
+nobody said, not "the first page".
+
+Tab ids are handed out per session and every session starts at 1, so the router
+that answers this takes every session owning the id and calls the work stale
+only if not one of them is still on the document it was stamped with. The
+delivery methods beside it can live with the ambiguity — an image is named by
+the hash of its content, so a picture delivered to a session that did not ask
+for it is one it already has under that name — but a *cancellation* cannot: one
+reader navigating would call off what another is waiting for.
+
+**And what was already queued goes back.** `Session.PageChanged` drops the media
+class for that tab the moment a navigation commits. The queue is bounded in
+frames and not in bytes — a thousand slots is however many megabytes the last
+page happened to name — so "it will drain" was never an answer for a reader who
+navigates twice while the first page is still shipping. Only media: the dom and
+ctrl queues hold the new document and the announcement that says which page it
+is, which are the two things the reader is waiting for.
+
+Which turned up the older half of it. **A frame the queue threw away was
+recorded as delivered.** `mayShipImage` claims a key by the act of deciding to
+send it — that is §37's fix, and it is what stops two overlapping submissions
+both spending the link on one picture — and `noteImageAnswered` gives the claim
+back when the attempt fails. It runs from `onSent`, which runs from the writer.
+Neither `dropTab` nor `dropIf` ever called it. So every picture dropped by
+`drainOffline` when a client went out of coverage, and every one dropped by a
+tab closing, left the ledger certain the client was holding it; the next resync
+skipped it, and the reader kept a blank box until they thought to ask. Both
+drops now settle what they discard as unsent.
+
+`TestNavigationCallsOffThePicturesOfThePageBefore` drives it end to end against
+an origin that will not hand over its picture until the test says so, so the
+fetch is provably in flight at the moment the tab navigates. The picture is
+above the fold, which means nothing has to ask for it — it would be pushed the
+instant it was ready, and that it is not is the whole assertion. Against the
+unwired build the picture crosses the link, and the test says so in under a
+second.
+
+Three things the same capture shows that are not this, and are not changed:
+
+- **The client was gone for 116 seconds** after the disconnect at 02:48:03, with
+  `reconnectDelayMs: 500` and a backoff that caps at 5 s. That is a phone with
+  its screen off, not a reconnect loop failing.
+- **The two halves disagree about the page's height** — 130275 px landside,
+  140985 px in the mirror. That is the known gap §49 records: the landside
+  browser lays the page out for the mouse it thinks it has, and the mirror lays
+  it out for a finger.
+- **A 4.9 MB variable font and eight multi-megabyte JPEGs were refused** by the
+  transcoder's 1 MB and dimension caps. Correctly, and §50 covers what has to
+  happen to the references when they are.
+
+### 52. Three more of the same shape, and the one that had the reader's words
+
+[§51](#51-the-link-was-still-paying-for-the-page-the-reader-had-left) is one
+instance of a class: work that outlives the thing that asked for it, and that
+nothing ever calls off. Reading the rest of the code for that shape found three
+more. The first is the one whose symptom is the sentence the reader actually
+wrote.
+
+**A navigation that lost the race got to say where the reader was.**
+`onFrameNavigated` starts a goroutine per commit, and nothing sequences them
+against each other:
+
+```go
+go func() {
+    t.syncHistory(ctx)                                                // a round trip
+    t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})   // this commit's URL
+    t.applyBlocklist(ctx, p.Frame.URL)
+    ...
+}()
+```
+
+That URL is read from the event, not from the browser, and
+`Page.getNavigationHistory` is a round trip whose latency this side does not
+control — CDP calls are multiplexed by id (`Client.Call`), so two of them are
+genuinely concurrent. The capture has two back presses 1.8 s apart, on a
+landside browser that was at that moment fetching thirty-three images through
+that same tab's session. The older run finishing second announces the page
+*before* the one the reader is on, with that page's cached `canBack`/`canForward`
+— which the comment right above it explains is how a back gesture gets dropped
+on the floor — and with `Loading` forced back on, which nothing fires a second
+time to clear. The tab sits on the wrong address under a spinner until the stale
+run finishes the rest of its own chain, which on this link is seconds. Then it
+applies that page's request blocklist to the page the reader is on, and asks for
+a re-snapshot: 403,073 bytes on the wire, for the page in this very capture.
+
+A run that has been overtaken now stops. `announceCommit` is the one step that
+must not be taken late — everything else in the tail reads live state and is
+merely redundant — so it is the step that carries the check, and it reports
+whether there is any point going on. `onLoad`'s tail gets the same guard before
+`recoverBlockedSheets`, which is a round trip per sheet for a page that has been
+navigated past.
+
+**The send queues were bounded in frames, not in bytes.** Four classes, 1024
+slots each. A ctrl frame is a hundred bytes and an image frame is hundreds of
+kilobytes, so one number meant "a hundred kilobytes" in one class and "several
+hundred megabytes" in another — and the second is not a queue, it is hours. Each
+class now has a byte budget as well, chosen by what being full costs rather than
+by what fits: media is expendable and self-heals through the ledger and the
+client's next ask, so 4 MB — the capture names thirty-three pictures in forty
+seconds adding up to 6,448,130 bytes, for one article; dom is repaired only by a
+resync, so 16 MB, which is around forty of the largest document this has ever
+been pointed at. A message
+larger than its whole budget still goes when nothing else is queued, because a
+frame no queue can accept is worse than a queue briefly over its mark.
+
+`Backlogged` had the same unit problem and it matters more, because it is the
+one signal that stops optional work — following an animation, photographing a
+canvas again — from piling onto a link that is not keeping up. Eight frames is
+eight of whatever the queue holds: eight mutations is a moment, eight pictures
+is a minute and a half at 250 kbps. It now answers on bytes too.
+
+**A region-shot run outlived the page that started it.** Up to `shotFollowMax`
+passes with a delay between each, a screenshot and a transcode per region per
+pass, carrying straight across a navigation. Every pass reads the live document
+so it was waste rather than error, and the page that arrives starts a run of its
+own from its snapshot — there was never anything in the old run the new page
+needed. The pass is now stamped with the page that scheduled it.
+
+Two things with this shape that were checked and left alone: `recoverBlockedSheets`
+and `RefreshState` both re-read live state on every call, so a late run states
+the truth rather than yesterday's. The first was worth suspecting — it looked
+like page A's stylesheets could be injected into page B — and it is not what the
+code does.

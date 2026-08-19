@@ -819,6 +819,41 @@ type harness struct {
 	// against the sheet. Nothing is served from there; see
 	// TestAStylesheetsImagesResolveAgainstTheSheet.
 	misresolved *atomic.Int32
+	// held gates /held.png, so a test can have an image request that is
+	// genuinely in flight at the moment it navigates away. See
+	// TestNavigationCallsOffThePicturesOfThePageBefore.
+	held *heldAsset
+}
+
+/*
+heldAsset is an origin that answers when the test says so.
+
+An asset that arrives promptly cannot be used to ask what happens to one that
+has not arrived yet, and sleeping for a while and hoping is how a suite gets a
+test that passes on a quiet machine. This blocks the response until it is
+released, and says when it was asked, so a test can be certain the fetch was
+running before it does the thing it is about.
+*/
+type heldAsset struct {
+	hits chan string
+	open chan struct{}
+	once sync.Once
+}
+
+func newHeldAsset() *heldAsset {
+	return &heldAsset{hits: make(chan string, 16), open: make(chan struct{})}
+}
+
+func (a *heldAsset) release() { a.once.Do(func() { close(a.open) }) }
+
+// waitForFetch waits for the origin to have been asked for the asset at all.
+func (a *heldAsset) waitForFetch(t *testing.T, within time.Duration) {
+	t.Helper()
+	select {
+	case <-a.hits:
+	case <-time.After(within):
+		t.Fatal("the origin was never asked for the held picture, so nothing was in flight to call off")
+	}
 }
 
 type router struct{ mgr *session.Manager }
@@ -846,6 +881,21 @@ func (r *router) FetchImage(ctx context.Context, tab uint32, url string, limit i
 		}
 	}
 	return nil, errors.New("no live tab for image fetch")
+}
+
+// Stale mirrors the server's own router: tab ids are per session, so work is
+// only called off when not one session that owns the id is still on the page it
+// was stamped with. See deliveryRouter.Stale.
+func (r *router) Stale(tab uint32, epoch uint64) bool {
+	if epoch == 0 {
+		return false
+	}
+	for _, s := range r.mgr.Sessions() {
+		if s.HasTab(tab) && !s.Stale(tab, epoch) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *router) RasterizeImage(ctx context.Context, tab uint32, src []byte, w, h int) ([]byte, error) {
@@ -1149,6 +1199,11 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	t.Cleanup(cdn.Close)
 
 	var misresolved atomic.Int32
+	held := newHeldAsset()
+	// Nothing is left waiting on a gate the test never opened: a handler parked
+	// in a select outlives the test that started it, and the fixture server's
+	// own Close waits for its handlers.
+	t.Cleanup(held.release)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1340,6 +1395,32 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			</body></html>`)
 	})
 	mux.HandleFunc("/hero.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(heroPNG)
+	})
+	// A page whose only picture the origin will not hand over until the test
+	// says so, which is what makes "the reader navigated while it was still
+	// coming" a thing a test can state rather than time.
+	mux.HandleFunc("/held-picture", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Held</title></head>
+			<body style="margin:0">
+			<img id="held" src="/held.png" width="320" height="320" alt="the picture that is still coming">
+			<h1>the page whose picture is still coming</h1>
+			</body></html>`)
+	})
+	mux.HandleFunc("/held.png", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case held.hits <- r.URL.Path:
+		default:
+		}
+		select {
+		case <-held.open:
+		case <-r.Context().Done():
+			return
+		case <-time.After(budget(90 * time.Second)):
+			return
+		}
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(heroPNG)
 	})
@@ -1838,12 +1919,14 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	h := &harness{
 		t: t, site: site, browser: br, token: "test-token",
 		listenAddr: listenAddr, logs: logs, log: log, misresolved: &misresolved,
+		held: held,
 	}
 	r := &router{}
 	pipe, err := imgproc.NewPipeline(imgproc.PipelineOptions{
 		Workers: 2, CacheDir: t.TempDir(), CacheSize: 8 << 20, Logger: log,
 		Fetcher:    r,
 		Rasterizer: r,
+		Relevance:  r,
 		Transcode:  imgproc.Options{Encoder: imgproc.EncoderPNG},
 	}, r)
 	if err != nil {

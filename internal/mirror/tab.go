@@ -100,6 +100,10 @@ type Emitter interface {
 	EmitFrame(ch protocol.Channel, f *protocol.Frame)
 	// WantImage asks the image pipeline for an asset.
 	WantImage(tab uint32, req ImageRequest)
+	// PageChanged says a navigation has committed and names the document that
+	// arrived. What was queued for the one before it is bytes the link is no
+	// longer going to spend on a page the reader has left.
+	PageChanged(tab uint32, epoch uint64)
 	// Backlogged reports that the link is not keeping up with what has already
 	// been queued. Only work that is optional asks: following an animation adds
 	// frames nobody requested, and doing it into a queue that is already deep
@@ -120,6 +124,10 @@ type ImageRequest struct {
 	Src []byte
 	// Box places a region shot inside its element; see protocol.ImageMeta.Box.
 	Box []int
+	// Epoch is the document this asset was named by; see Tab.NavEpoch. Stamped
+	// by wantImage so that nothing has to remember to, and read by the pipeline
+	// to tell work still worth doing from work for a page that is gone.
+	Epoch uint64
 }
 
 // Options configures a mirrored tab.
@@ -208,6 +216,14 @@ type Tab struct {
 	// integrity check anchors on a number the client acknowledges, so it needs
 	// this to know the answer it got is about the document it measured.
 	docEpoch atomic.Uint64
+
+	// navEpoch counts the documents this tab has *navigated* to, which is not
+	// the same question as docEpoch and is the one an image has to ask. A page
+	// building itself re-snapshots several times a second and every one of
+	// those is the same page; a commit is the reader somewhere else. Work
+	// stamped with an epoch the tab has moved past is work for a document
+	// neither half is looking at any more.
+	navEpoch atomic.Uint64
 
 	// spliceGen counts changes to what the client holds of this tab's frames.
 	// The integrity check reads it either side of its walk: a walk that spans a
@@ -523,6 +539,11 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 	t.ctxID = 0
 	t.mu.Unlock()
 
+	// Before anything else: the pictures of the page that has just been left
+	// are already queued and already being fetched, and on a link measured in
+	// hundreds of kbps they are minutes of it. See §51.
+	epoch := t.pageCommitted()
+
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -545,11 +566,20 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		// reader called off, this is not it.
 		t.wantsLoading()
 		t.syncHistory(ctx)
-		t.emitState(protocol.TabState{URL: p.Frame.URL, Loading: true})
+		if !t.announceCommit(epoch, p.Frame.URL) {
+			return
+		}
 
 		t.applyBlocklist(ctx, p.Frame.URL)
 		if err := t.ensureWorld(ctx); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
+		}
+		// And again before the expensive half. A re-snapshot is the whole
+		// document, which on this link is the most costly thing a tab can be
+		// asked for; one for a page that has already been navigated past is the
+		// link spent twice on the same mistake.
+		if !t.onPage(epoch) {
+			return
 		}
 		if _, err := t.eval(ctx, resnapshotIfSettled); err != nil {
 			t.log.Debug("post-navigation snapshot check failed", "tab", t.ID, "err", err)
@@ -558,6 +588,62 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		// change moves the history under a URL that has already been announced.
 		t.RefreshState(ctx)
 	}()
+}
+
+/*
+pageCommitted records that this tab is now on a different page, and says so.
+
+Split out from onFrameNavigated because it is the whole of what the epoch means
+and none of what a navigation otherwise involves: everything else there is a
+round trip to the browser, and this is the one part that has to happen before
+any of them. What is queued for the page just left is queued now, being fetched
+now, and shipping down the link now.
+*/
+func (t *Tab) pageCommitted() uint64 {
+	epoch := t.navEpoch.Add(1)
+	t.out.PageChanged(t.ID, epoch)
+	return epoch
+}
+
+/*
+onPage reports whether an epoch is still the page this tab is on.
+
+Every navigation starts work that outlives the round trip it began with, and
+nothing sequences those runs against each other: a `Page.getNavigationHistory`
+is a round trip whose latency this side does not control, CDP calls are
+multiplexed by id, and a reader who presses back twice — 1.8 s apart, in the
+capture §51 came from — has two of them genuinely racing. See §52.
+
+So a run that has been overtaken stops instead of finishing. Whatever it was
+going to do, the run that overtook it is already doing for the page the reader
+is actually on.
+*/
+func (t *Tab) onPage(epoch uint64) bool { return t.navEpoch.Load() == epoch }
+
+/*
+announceCommit says where a navigation landed, and reports whether it was still
+the tab's business to say so.
+
+The address comes from the event rather than from the browser, which is what
+makes this the one step a stale run must not take: everything else in the
+navigation's tail reads live state and is merely redundant when overtaken, while
+this states an address that was true and is not. It carries the tab's cached
+history flags with it — see the note in onFrameNavigated about why they have to
+travel in the same frame — and it forces `Loading` back on, which nothing fires
+a second time to clear.
+
+False means the run is over. There is nothing for the caller to do afterwards
+either: applying the blocklist of a page the reader has left would put that
+page's denials on the one they are on.
+*/
+func (t *Tab) announceCommit(epoch uint64, url string) bool {
+	if !t.onPage(epoch) {
+		t.log.Debug("dropping the tail of a navigation the reader left",
+			"tab", t.ID, "epoch", epoch, "url", url)
+		return false
+	}
+	t.emitState(protocol.TabState{URL: url, Loading: true})
+	return true
 }
 
 // resnapshotIfSettled re-mirrors a document that navigation delivered already
@@ -594,6 +680,7 @@ const resnapshotIfSettled = `(function () {
 // the recovery would leave the tab wearing its busy cursor throughout.
 func (t *Tab) onLoad() {
 	t.setLoading(false)
+	epoch := t.navEpoch.Load()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -604,6 +691,14 @@ func (t *Tab) onLoad() {
 		// The agent snapshots itself on DOMContentLoaded; ask for a CSS pass now
 		// that late stylesheets have landed.
 		_, _ = t.eval(ctx, "__skyhook && __skyhook.flush()")
+		// Recovery is a round trip per sheet — three of them on the page §51's
+		// capture came from — and the page it would recover them for is the one
+		// the reader has just left. What is here reads live state, so a stale
+		// run is redundant rather than wrong; on a busy CDP session redundant is
+		// still what the tab they are on is waiting behind.
+		if !t.onPage(epoch) {
+			return
+		}
 		t.recoverBlockedSheets(ctx)
 		t.RefreshState(ctx)
 	}()
@@ -1092,7 +1187,7 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	t.out.EmitFrame(protocol.ChDom, f)
 	t.requestImages(s.Images)
 	for _, req := range cssImages {
-		t.out.WantImage(t.ID, req)
+		t.wantImage(req)
 	}
 	// A page that draws itself into a canvas has just arrived with that canvas
 	// empty, and nothing it does from here on will be a mutation.
@@ -1160,7 +1255,7 @@ func (t *Tab) emitMutation(m *agentMutation) {
 	t.emitMu.Unlock()
 	t.requestImages(m.Images)
 	for _, req := range cssImages {
-		t.out.WantImage(t.ID, req)
+		t.wantImage(req)
 	}
 	// A frame waiting to be spliced was waiting for its element to reach the
 	// client, and this is the frame that may have carried it.
@@ -1284,7 +1379,7 @@ func (t *Tab) emitFrameOps(slot int64, ops []protocol.Op, strs []string, images 
 	t.emitMu.Unlock()
 	t.requestImages(images)
 	for _, req := range cssImages {
-		t.out.WantImage(t.ID, req)
+		t.wantImage(req)
 	}
 	// A frame inside this one has been waiting for its element to reach the
 	// client, and this is the frame that carried it. Without this the chain
@@ -1424,6 +1519,15 @@ func (t *Tab) RasterizeImage(ctx context.Context, src []byte, w, h int) ([]byte,
 	return base64.StdEncoding.DecodeString(b64)
 }
 
+// wantImage stamps an asset request with the page that named it and passes it
+// on. Every request goes through here so that no call site has to remember to;
+// a request that reached the pipeline unstamped would be one nothing could ever
+// decide was stale.
+func (t *Tab) wantImage(req ImageRequest) {
+	req.Epoch = t.navEpoch.Load()
+	t.out.WantImage(t.ID, req)
+}
+
 func (t *Tab) requestImages(imgs []agentImage) {
 	if len(imgs) == 0 {
 		return
@@ -1435,7 +1539,7 @@ func (t *Tab) requestImages(imgs []agentImage) {
 		if im.URL == "" || im.Key == "" {
 			continue
 		}
-		t.out.WantImage(t.ID, ImageRequest{
+		t.wantImage(ImageRequest{
 			Key: im.Key, URL: im.URL, W: im.W, H: im.H, Alt: im.Alt,
 			Priority: im.Pri, Node: im.N, Referer: ref,
 		})
@@ -1497,6 +1601,11 @@ func (t *Tab) RefreshState(ctx context.Context) {
 // replaces what the client holds, which is the one event that makes a sequence
 // number mean a different frame than it meant a moment ago.
 func (t *Tab) DocEpoch() uint64 { return t.docEpoch.Load() }
+
+// NavEpoch says which page this tab is on. It changes when a navigation
+// commits, and only then, which is what makes it the right thing to stamp work
+// that outlives the document that asked for it.
+func (t *Tab) NavEpoch() uint64 { return t.navEpoch.Load() }
 
 // Seq reports the last emitted mutation sequence.
 func (t *Tab) Seq() uint64 {

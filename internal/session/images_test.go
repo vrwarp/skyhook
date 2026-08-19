@@ -325,3 +325,193 @@ func TestAPictureQueuedAndNeverWrittenIsNotOnTheBooks(t *testing.T) {
 	t.Error("a picture the link never carried is recorded as sent: the next resync" +
 		" will refuse to send it, and the reader keeps the space it left")
 }
+
+/*
+The pictures of the page the reader left do not keep the link.
+
+A navigation is the reader saying they want something else. What is queued on
+the media channel at that moment is the page they had, and on a link measured
+in hundreds of kbps every one of those frames is seconds the page they are
+waiting for does not get. The queue is bounded in frames and not in bytes, so
+waiting for it to drain is not a plan: a thousand slots is however many
+megabytes the last page happened to name.
+*/
+func TestANavigationTakesBackThePicturesOfThePageBefore(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	armedTab(t, s, 1)
+	conn, release := newHeldConn()
+	s.Attach(conn)
+	t.Cleanup(release)
+
+	const pics = 6
+	for i := 0; i < pics; i++ {
+		s.ImageBytes(1, protocol.ImageData{
+			Hash: fmt.Sprintf("old%04x", i), Mime: "image/png", Data: []byte("pretend pixels"),
+		})
+	}
+	// The writer takes one and blocks on it; the rest are what a navigation
+	// arrives to find. Waited for exactly, not at least: a queue that still has
+	// all six is a writer that has not started, and dropping all six would leave
+	// nothing to prove the one already in the writer's hands is untouched.
+	waitForQueue(t, s, protocol.ChMedia, pics-1)
+
+	s.PageChanged(1, 2)
+	if d := s.sendQ[protocol.ChMedia.Priority()].depth(); d != 0 {
+		t.Fatalf("%d picture frames survived the navigation, want 0", d)
+	}
+
+	// And the ledger has its claims back: a picture the queue threw away is a
+	// picture the client never got, so the next document that names it has to
+	// be able to send it.
+	for i := 1; i < pics; i++ {
+		hash := fmt.Sprintf("old%04x", i)
+		if send, _ := s.mayShipImage(hash); !send {
+			t.Fatalf("%s is on the books as delivered, and it never left the queue", hash)
+		}
+	}
+
+	release()
+	waitForFrames(t, conn, 1)
+	if got := imageFrames(t, s, conn); got != 1 {
+		t.Fatalf("%d image frames reached the link, want the 1 the writer already had", got)
+	}
+}
+
+// A tab's own frames are the only ones a navigation in it takes back.
+func TestANavigationLeavesTheOtherTabsAlone(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	armedTab(t, s, 1)
+	armedTab(t, s, 2)
+	conn, release := newHeldConn()
+	s.Attach(conn)
+	t.Cleanup(release)
+
+	for i := 0; i < 4; i++ {
+		s.ImageBytes(1, protocol.ImageData{Hash: fmt.Sprintf("a%04x", i), Data: []byte("pixels")})
+		s.ImageBytes(2, protocol.ImageData{Hash: fmt.Sprintf("b%04x", i), Data: []byte("pixels")})
+	}
+	waitForQueue(t, s, protocol.ChMedia, 7)
+
+	s.PageChanged(1, 2)
+	left := s.sendQ[protocol.ChMedia.Priority()].depth()
+	if left < 3 {
+		t.Fatalf("a navigation in tab 1 took tab 2's pictures too: %d left, want at least 3", left)
+	}
+	for i := 0; i < 4; i++ {
+		if send, _ := s.mayShipImage(fmt.Sprintf("b%04x", i)); send {
+			t.Fatalf("tab 2's picture %d was given back by a navigation in tab 1", i)
+		}
+	}
+}
+
+/*
+Staleness is answered per tab and per document.
+
+Tab ids are handed out per session, so the answer is only ever about this
+session's tab — and within it, only about a document the tab has moved past.
+*/
+func TestStaleIsOnlyTrueForADocumentTheTabHasLeft(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	armedTab(t, s, 1)
+	// A tab with no page cannot say which document it is on, and a request for
+	// a tab this session does not have is owed nothing either way.
+	if !s.Stale(9, 3) {
+		t.Fatal("work for a tab this session does not have was called current")
+	}
+	if s.Stale(1, 0) {
+		t.Fatal("unstamped work was called stale")
+	}
+}
+
+/*
+waitForQueue waits for a channel's class to hold exactly n messages.
+
+Exactly, because these tests are about the difference between a frame in the
+queue and a frame the writer already has, and "at least n" cannot tell them
+apart: a writer that has not run yet leaves everything queued, and a test that
+accepted that would be asserting about a drop it had arranged to be total.
+Against a held connection the count settles and stays there, so this is a wait
+for a state rather than a race with one.
+*/
+func waitForQueue(t *testing.T, s *Session, ch protocol.Channel, n int) {
+	t.Helper()
+	q := s.sendQ[ch.Priority()]
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if q.depth() == n {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the %s queue held %d messages, want %d", ch, q.depth(), n)
+}
+
+/*
+A picture the outage threw away is a picture the client has not been sent.
+
+Media is expendable across an outage — by the time the link returns the page has
+usually moved on — and dropping it is right. What was wrong is what the drop
+said: the frames went out of the queue without ever reaching the writer, so
+nothing gave back the claim the ledger took when it decided to send them, and
+the session was left certain the client held pictures that never left the
+building. The next resync then skipped every one of them.
+*/
+func TestAnOutageGivesBackThePicturesItThrewAway(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	armedTab(t, s, 1)
+	conn, release := newHeldConn()
+	s.Attach(conn)
+	t.Cleanup(release)
+
+	const pics = 5
+	for i := 0; i < pics; i++ {
+		s.ImageBytes(1, protocol.ImageData{
+			Hash: fmt.Sprintf("gone%04x", i), Mime: "image/png", Data: []byte("pretend pixels"),
+		})
+	}
+	waitForQueue(t, s, protocol.ChMedia, pics-1)
+
+	s.drainOffline()
+	for i := 1; i < pics; i++ {
+		hash := fmt.Sprintf("gone%04x", i)
+		if send, _ := s.mayShipImage(hash); !send {
+			t.Fatalf("%s is on the books as delivered, and the outage threw it away", hash)
+		}
+	}
+}
+
+/*
+The link is behind on bytes before it is behind on frames.
+
+Backlogged is the one signal that stops optional work — following an animation,
+photographing a canvas again — from piling onto a link that is not keeping up.
+It counted frames, and eight frames is eight of whatever the queue happens to
+hold: eight mutations is a moment, eight pictures is a minute and a half at
+250 kbps. So the traffic most able to bury the reader's page was the traffic the
+signal could not see.
+*/
+func TestBacklogIsMeasuredInBytesAsWellAsFrames(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	armedTab(t, s, 1)
+	conn, release := newHeldConn()
+	s.Attach(conn)
+	t.Cleanup(release)
+
+	if s.Backlogged() {
+		t.Fatal("an idle session reports itself behind")
+	}
+	// Two pictures. Far short of the eight frames the old signal wanted, and
+	// most of a minute of this link.
+	for i := 0; i < 2; i++ {
+		s.ImageBytes(1, protocol.ImageData{
+			Hash: fmt.Sprintf("big%04x", i), Mime: "image/png",
+			Data: make([]byte, 256<<10),
+		})
+	}
+	waitForQueue(t, s, protocol.ChMedia, 1)
+	if !s.Backlogged() {
+		frames, bytes := s.sendQ[protocol.ChMedia.Priority()].waiting()
+		t.Fatalf("%d frames and %d bytes of pictures queued, and the link says it is keeping up",
+			frames, bytes)
+	}
+}

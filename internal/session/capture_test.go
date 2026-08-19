@@ -57,11 +57,28 @@ type fakeConn struct {
 	done        chan struct{}
 	closeCode   uint32
 	closeReason string
+	// hold, while open, makes every write wait for it. A test about what is in
+	// the queue is a test that has to stop the writer emptying it — and the
+	// writer empties it faster than anything can look. Set before the
+	// connection is attached and never written again, so only the close of it
+	// crosses goroutines.
+	hold chan struct{}
 }
 
 func newFakeConn() *fakeConn { return &fakeConn{done: make(chan struct{})} }
 
+// newHeldConn is a connection whose writes wait until release is called, which
+// is how a queue is looked at while it still has something in it.
+func newHeldConn() (c *fakeConn, release func()) {
+	c = &fakeConn{done: make(chan struct{}), hold: make(chan struct{})}
+	var once sync.Once
+	return c, func() { once.Do(func() { close(c.hold) }) }
+}
+
 func (c *fakeConn) Send(_ protocol.Channel, msg []byte) error {
+	if c.hold != nil {
+		<-c.hold
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.failSends {

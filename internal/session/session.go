@@ -316,11 +316,12 @@ func newSession(id string, mgr *Manager, opts Options) (*Session, error) {
 	}
 	s.wake = make(chan struct{}, 1)
 	for i := range s.sendQ {
-		s.sendQ[i] = newFairQueue(1024)
+		s.sendQ[i] = newFairQueue(1024, classBudget[i])
 	}
 	// Ctrl is the exception: small frames whose order across tabs is the plane
 	// side's only way of knowing which tab it asked for first. See fairQueue.
-	s.sendQ[protocol.ChCtrl.Priority()] = newOrderedQueue(1024)
+	ctrl := protocol.ChCtrl.Priority()
+	s.sendQ[ctrl] = newOrderedQueue(1024, classBudget[ctrl])
 	go s.writer()
 	go s.integrityLoop()
 	return s, nil
@@ -612,8 +613,64 @@ func (s *Session) WantImage(tab uint32, req mirror.ImageRequest) {
 	s.mgr.images.Submit(imgproc.Request{
 		Tab: tab, Key: req.Key, URL: req.URL, W: req.W, H: req.H, Alt: req.Alt,
 		Priority: pri, Node: req.Node, Referer: req.Referer,
-		Src: req.Src, Box: req.Box,
+		Src: req.Src, Box: req.Box, Epoch: req.Epoch,
 	})
+}
+
+/*
+PageChanged implements mirror.Emitter: a navigation has committed.
+
+What is queued on the media channel for this tab is the page the reader has just
+left. Every one of those frames is a picture of a document neither half is
+looking at any anymore, and on this link each is seconds the page they are
+waiting for does not get. The queue is bounded in frames and not in bytes — a
+thousand slots of image is however many megabytes the last page happened to
+name — so "it will drain" is not an answer; a reader who navigates twice while
+the first page is still shipping is behind a queue nothing takes back.
+
+Only media. The dom queue holds the new document and the ctrl queue holds the
+announcement that says which page this is, and both are what the reader is
+waiting for.
+
+Each dropped frame is settled as unsent, which is what gives the image ledger
+back its claim: a picture thrown away here has not been delivered, and the next
+document that names it has to be able to send it again.
+*/
+func (s *Session) PageChanged(tab uint32, epoch uint64) {
+	q := s.sendQ[protocol.ChMedia.Priority()]
+	frames, bytes := q.dropIf(func(m outbound) bool {
+		return m.ch == protocol.ChMedia && m.tab == tab
+	})
+	if frames == 0 {
+		return
+	}
+	s.log.Debug("dropped the pictures of the page the reader left",
+		"session", s.ID, "tab", tab, "epoch", epoch, "frames", frames, "bytes", bytes)
+}
+
+/*
+Stale implements imgproc.Relevance: whether a request still has a page.
+
+The pipeline is shared by every session and knows nothing about documents, so
+this is the only place the question can be answered. A tab that has navigated
+past the epoch a request was stamped with is a tab whose reader is somewhere
+else; a tab this session no longer has is the same answer for a different
+reason, and either way the fetch, the transcode and the bytes are not owed.
+
+Unstamped work — a request from a build or a test that does not stamp — is never
+stale, because "epoch 0" means "nobody said", not "the first page".
+*/
+func (s *Session) Stale(tab uint32, epoch uint64) bool {
+	if epoch == 0 {
+		return false
+	}
+	s.mu.Lock()
+	ts := s.tabs[tab]
+	s.mu.Unlock()
+	if ts == nil || ts.tab == nil {
+		return true
+	}
+	return ts.tab.NavEpoch() != epoch
 }
 
 /*
@@ -755,13 +812,27 @@ func (s *Session) noteImageSent(hash string) {
 // longer for the thing they actually did.
 const backloggedFrames = 8
 
+/*
+backloggedBytes is the same question in the unit the link is measured in.
+
+Eight frames is eight of whatever this queue happens to hold. Eight mutations is
+a moment; eight pictures is a minute and a half at 250 kbps, and a count cannot
+tell them apart — so the one signal that stops optional work from piling onto a
+struggling link was blind to the traffic most able to bury it. 128 kB is about
+four seconds there, which is the same order as what eight ordinary dom frames
+cost and is the point at which anything queued behind it is late.
+*/
+const backloggedBytes = 128 << 10
+
 // Backlogged implements mirror.Emitter.
 func (s *Session) Backlogged() bool {
-	depth := 0
+	frames, bytes := 0, 0
 	for _, q := range s.sendQ {
-		depth += q.depth()
+		f, b := q.waiting()
+		frames += f
+		bytes += b
 	}
-	return depth >= backloggedFrames
+	return frames >= backloggedFrames || bytes >= backloggedBytes
 }
 
 // ImageReady implements imgproc.Delivery.

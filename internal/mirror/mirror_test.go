@@ -2,6 +2,8 @@ package mirror
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -936,8 +938,10 @@ func slotsOf(fs []*subFrame) []int64 {
 
 // stateSink records the tab-state frames a tab emits.
 type stateSink struct {
-	mu     sync.Mutex
-	states []protocol.TabState
+	mu      sync.Mutex
+	states  []protocol.TabState
+	images  []ImageRequest
+	commits [][2]uint64
 }
 
 func (s *stateSink) EmitFrame(_ protocol.Channel, f *protocol.Frame) {
@@ -953,8 +957,30 @@ func (s *stateSink) EmitFrame(_ protocol.Channel, f *protocol.Frame) {
 	s.states = append(s.states, st)
 }
 
-func (s *stateSink) WantImage(uint32, ImageRequest) {}
-func (s *stateSink) Backlogged() bool               { return false }
+func (s *stateSink) WantImage(_ uint32, req ImageRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.images = append(s.images, req)
+}
+
+func (s *stateSink) PageChanged(tab uint32, epoch uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commits = append(s.commits, [2]uint64{uint64(tab), epoch})
+}
+
+func (s *stateSink) Backlogged() bool { return false }
+
+// stamps returns the epoch each image request was stamped with.
+func (s *stateSink) stamps() []uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]uint64, 0, len(s.images))
+	for _, r := range s.images {
+		out = append(out, r.Epoch)
+	}
+	return out
+}
 
 func (s *stateSink) last() (protocol.TabState, bool) {
 	s.mu.Lock()
@@ -1030,5 +1056,105 @@ func TestAPressIsNotLengthenedByTheTripToTheBrowser(t *testing.T) {
 	// but not make it longer still.
 	if got := pressHold(50*time.Millisecond, 200*time.Millisecond); got != 0 {
 		t.Errorf("slept %v on top of a trip already longer than the press, want none", got)
+	}
+}
+
+/*
+A commit says which page a tab is on, and stamps what that page asks for.
+
+The epoch is the only thing that tells work outliving its document apart from
+work still worth doing, and everything downstream of it — a queued picture, a
+fetch in progress, a transcode about to start — is decided by comparing the two
+numbers. So it has to move on a navigation and only on a navigation: a page
+building itself re-snapshots several times a second, and an epoch that counted
+those would call a page stale while it was still arriving.
+*/
+func TestACommitStampsWhatThePageAsksFor(t *testing.T) {
+	sink := &stateSink{}
+	tab := &Tab{ID: 3, out: sink}
+
+	tab.pageCommitted()
+	tab.wantImage(ImageRequest{Key: "first"})
+	tab.wantImage(ImageRequest{Key: "second"})
+	if got := tab.NavEpoch(); got != 1 {
+		t.Fatalf("the first page is epoch %d, want 1", got)
+	}
+
+	// A re-snapshot is the same page arriving again, not a different one. It
+	// goes through none of this.
+	tab.docEpoch.Add(1)
+	tab.wantImage(ImageRequest{Key: "third"})
+
+	tab.pageCommitted()
+	tab.wantImage(ImageRequest{Key: "fourth"})
+
+	want := []uint64{1, 1, 1, 2}
+	got := sink.stamps()
+	if len(got) != len(want) {
+		t.Fatalf("%d requests were stamped, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("request %d is stamped epoch %d, want %d", i, got[i], want[i])
+		}
+	}
+
+	sink.mu.Lock()
+	commits := append([][2]uint64(nil), sink.commits...)
+	sink.mu.Unlock()
+	if len(commits) != 2 {
+		t.Fatalf("%d navigations were announced, want 2", len(commits))
+	}
+	for i, c := range commits {
+		if c[0] != 3 || c[1] != uint64(i+1) {
+			t.Errorf("navigation %d was announced as tab %d epoch %d", i, c[0], c[1])
+		}
+	}
+}
+
+/*
+The navigation that lost the race does not get to say where the reader is.
+
+Every commit starts a run that outlives the round trip it began with, and
+nothing sequences those runs: `Page.getNavigationHistory` is a round trip whose
+latency this side does not control, and CDP calls are multiplexed by id, so two
+of them are genuinely concurrent. A reader who presses back twice — 1.8 s apart,
+in the capture §51 came from — has two runs in flight, each holding the address
+its own event named.
+
+If the older one finishes second it announces the page *before* the one the
+reader is on, with that page's history flags and with Loading forced back on;
+and because nothing fires a second time to correct it, the shell sits on the
+wrong URL under a spinner until the stale run works through the rest of its own
+chain. Which is what "it seems to be jumping around between pages" describes.
+*/
+func TestAnOvertakenNavigationSaysNothing(t *testing.T) {
+	sink := &stateSink{}
+	tab := &Tab{ID: 1, out: sink, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	first := tab.pageCommitted()
+	second := tab.pageCommitted()
+
+	// The first commit's run, finishing after the second's.
+	if tab.announceCommit(first, "https://example.test/one") {
+		t.Error("a navigation the reader had already left announced itself")
+	}
+	if _, spoke := sink.last(); spoke {
+		t.Fatal("the tab was announced as being on a page it had left")
+	}
+
+	if !tab.announceCommit(second, "https://example.test/two") {
+		t.Fatal("the page the reader is on was not announced")
+	}
+	st, ok := sink.last()
+	if !ok || st.URL != "https://example.test/two" {
+		t.Fatalf("the tab says it is on %q, want the second page", st.URL)
+	}
+
+	// And once more, in the order a quiet reader produces: the run for the page
+	// they are on is never the one dropped.
+	third := tab.pageCommitted()
+	if !tab.announceCommit(third, "https://example.test/three") {
+		t.Fatal("an uncontested navigation was dropped")
 	}
 }
