@@ -12,7 +12,7 @@ this is what survived contact.
 | **M1 — Wire a mirror** | CDP snapshot → CBOR/zstd → patcher; click and type forwarding | **Done.** Verified end-to-end against real Chromium in `test/e2e_test.go`. |
 | **M2 — Feel** | Local echo, ghost-send, scroll telemetry, images with blurhash, used-CSS | **Done.** Echo and reconciliation are unit-tested; used-CSS filtering and image transcoding are covered end-to-end. |
 | **M3 — Survive** | Reconnect, resync, offline mode | **Done for reconnect/resync/offline queueing.** 0-RTT resumption is enabled in the QUIC config; it is not separately asserted by a test. FEC is not implemented — see below. |
-| **M4 — Chat adapter** | Warm open ≤ 3 s, offline history, outbox | **Framework and adapter are built** (append-log, outbox, backlog replay, client archive and UI). The Google Chat selectors are a starting point, not a validated set: they need a session against the real app to tune. |
+| **M4 — Chat adapter** | Warm open ≤ 3 s, offline history, outbox | **Framework and adapter are built** (append-log, outbox, backlog replay, client archive and UI). The Google Chat selectors are validated against a real conversation as of §54, from a capture rather than a live session; they will need re-cutting whenever Chat's DOM moves. |
 | **M5 — Polish** | Speculative prefetch, per-origin dictionaries, tabs/bookmarks, metrics HUD | **Tabs, bookmarks and the HUD are built. Prefetch was built and then removed** — see deviation 17. Bookmarks are a start page, a panel and address-bar completion rather than a list that is only written to — see deviation 23, and the address bar completes from where the reader has been as well as from what they saved — see deviation 34. Dictionary training is implemented and tested server-side but is not enabled on the wire — see below. |
 
 The client is a Chrome-targeted PWA served by the server itself; the Electron
@@ -2131,7 +2131,12 @@ These are unbuilt or thin, and are honest to-dos rather than deviations:
   not there.
 - **Find-in-page** works through Blink natively in the mirror, but there is no
   chrome-UI affordance for it yet.
-- **The chat adapter's selectors are unvalidated** against the live app.
+- **The chat adapter's selectors are validated against one conversation, not
+  against Chat.** §54 checked them against a real direct message from a reader's
+  capture, which is what turned four wrong ones up; a space with several people
+  in it, a thread, and Chat inside Gmail have still never been read. The unread
+  count in particular hangs off a minified class because Chat gives its badge no
+  role, label or data attribute.
 - **0-RTT resumption** is enabled but not asserted by a test; proving it needs a
   client that survives process restart, which the Go test client does not model.
 - **Bookmarks are per-device and stay there.** The list is plane-side only, with
@@ -3864,3 +3869,78 @@ converges more slowly and occasionally not at all. The smallest encode found is
 then shipped even though it is still over the cap: a picture that costs too much
 is a better answer than an empty box, and it is the answer the reader had before
 any of this existed.
+
+### 54. The chat adapter had never seen a chat
+
+[§5](#5-the-google-chat-adapter-scrapes-rather-than-using-the-chat-api) put all
+the app-specific knowledge in a `Config` of CSS selectors, and the milestone
+table said what that was worth: *"a starting point, not a validated set: they
+need a session against the real app to tune"*. The captures from §48 and §50 are
+that session — a reader's own Chat, DOM and all — and running the real extractor
+with the shipped config against it is a one-line experiment nobody had run.
+
+What it produces, from a conversation holding one direct message and two
+messages in it:
+
+```
+spaces:   []
+space:    {id: "", name: ""}
+messages: [{id:"Kiyw_2D928g", space:"", author:"", text:"You",         ts:0},
+           {id:"GRXYmFCJIKA", space:"", author:"", text:"Benson Tsai", ts:0}]
+```
+
+The message bodies are the senders' names. That is worse than the failure §5
+promised — *"every selector failure degrades to found nothing"* — because it is
+not nothing, it is junk, and the archive it feeds is append-only.
+
+Four selectors were wrong, and three of them were wrong because the obvious
+reading of Chat's DOM is the wrong one.
+
+**A message is not `[data-message-id]`.** Chat puts that attribute on the
+sender's `<span role="heading">`; the body, the timestamps and the reactions are
+all outside it. So `qs(el, messageText)` found nothing inside the span, and
+`text(… || el)` fell back to the element's own text — the sender's name — while
+the timestamp element was equally out of reach and every message came out at
+epoch zero. What holds one message is a `[data-topic-id]`. There are two other
+kinds of those in a conversation — the "History is on" notice and an "Add
+reaction" strip — and the one that is a message is the one holding a body, which
+is what `[data-topic-id]:has([jsname="bgckF"])` says.
+
+**The open conversation is not a selected roster entry.** Chat marks no entry as
+selected at all, so `ActiveSpace` never matched and every message was filed
+under the empty string. What does say which conversation is open is the
+`role="main"` panel, which carries the same `data-group-id` the roster entry
+does.
+
+**A roster entry's name is not its text.** Its text is "Active Unread Benson
+Tsai 1 Notification", spread across minified role-less spans that no selector
+can tell apart. The name is on `[data-name]`, whose own text is empty — so
+`scanSpaces` found the one chat, resolved its name to nothing, and dropped it on
+`if (!name) return`. `label()` now reads a configured list of attributes before
+falling back to text, which fixes the same failure for message authors: the
+second message's author element has the name only in an attribute too.
+
+**And `[aria-label*="unread" i]` matched "Mark as unread".** Chat's own context
+menu, counted as an unread badge on every conversation in the roster.
+
+The unread count is the one that is still unsatisfying. Chat's badge is a bare
+`<span aria-hidden="true">1</span>` with no role, no label and no data
+attribute, and six other aria-hidden spans sit in the same roster entry — so it
+is named by a minified class, against §5's own rule, because there is nothing
+else to name it with. It will rot, and when it does it reports no unread
+messages rather than wrong ones.
+
+`TestGoogleChatReadsARealChat` runs the real script with the real config against
+`internal/adapter/googlechat/testdata/conversation.html`, which is that
+conversation lifted out of the capture with nothing renamed. It asserts the
+whole extraction rather than one selector at a time, because what failed here
+was not one selector missing but four of them agreeing on a shape Chat does not
+have. The payload it injects comes from `Extractor`, which is now the only place
+that builds one — the config keys are written out by hand rather than taken from
+the struct tags, so a test that assembled its own could have passed while the
+adapter shipped something without them.
+
+Two things this still has not seen: a space with several people in it, and Chat
+inside Gmail, which is where `Config.URL` points. The selectors changed here are
+all about the inner Chat app rather than the shell around it, so they should
+carry, but nothing here proves it.

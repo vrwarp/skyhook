@@ -34,44 +34,93 @@ const worldName = "skyhookchat"
 // Config holds the selectors and timings. Chat's DOM is minified and unstable,
 // so these are data, overridable from disk without a rebuild.
 type Config struct {
-	URL            string        `json:"url"`
-	PollInterval   time.Duration `json:"-"`
-	PollMS         int           `json:"pollMs"`
-	SpaceItem      string        `json:"spaceItem"`
-	SpaceName      string        `json:"spaceName"`
-	SpaceUnread    string        `json:"spaceUnread"`
-	SpaceUnreadCls string        `json:"spaceUnreadClass"`
-	SpaceIDAttrs   []string      `json:"spaceIdAttrs"`
-	ActiveSpace    string        `json:"activeSpace"`
-	MessageItem    string        `json:"messageItem"`
-	MessageText    string        `json:"messageText"`
-	MessageAuthor  string        `json:"messageAuthor"`
-	MessageTime    string        `json:"messageTime"`
-	MessageIDAttrs []string      `json:"messageIdAttrs"`
-	Composer       string        `json:"composer"`
-	MaxMessages    int           `json:"maxMessages"`
+	URL          string        `json:"url"`
+	PollInterval time.Duration `json:"-"`
+	PollMS       int           `json:"pollMs"`
+	SpaceItem    string        `json:"spaceItem"`
+	SpaceName    string        `json:"spaceName"`
+	// SpaceNameAttrs are read off the name element before its text is. Chat
+	// keeps a roster entry's name in an attribute and fills the entry's text
+	// with "Active", "Unread" and the notification count, so the text of the
+	// element a selector finds is usually not the name. See label() in
+	// extract.js.
+	SpaceNameAttrs []string `json:"spaceNameAttrs"`
+	SpaceUnread    string   `json:"spaceUnread"`
+	SpaceUnreadCls string   `json:"spaceUnreadClass"`
+	SpaceIDAttrs   []string `json:"spaceIdAttrs"`
+	ActiveSpace    string   `json:"activeSpace"`
+	MessageItem    string   `json:"messageItem"`
+	MessageText    string   `json:"messageText"`
+	MessageAuthor  string   `json:"messageAuthor"`
+	// MessageAuthorAttrs are read off the author element before its text is,
+	// for the same reason SpaceNameAttrs are.
+	MessageAuthorAttrs []string `json:"messageAuthorAttrs"`
+	MessageTime        string   `json:"messageTime"`
+	MessageIDAttrs     []string `json:"messageIdAttrs"`
+	Composer           string   `json:"composer"`
+	MaxMessages        int      `json:"maxMessages"`
 }
 
-// DefaultConfig targets the standalone Chat web app. The selectors are chosen
-// from stable-ish ARIA roles rather than minified class names, because roles
-// survive Google's redesigns considerably better.
+/*
+DefaultConfig targets the standalone Chat web app.
+
+These were written from the outside and shipped unvalidated, which they no
+longer are: every selector below is checked against a conversation lifted out of
+a reader's capture (testdata/conversation.html) by TestGoogleChatReadsARealChat.
+Three of them did not survive that, and what they were replaced with is worth
+saying, because the obvious reading of Chat's DOM is the wrong one twice.
+
+  - A message is not `[data-message-id]`. Chat puts that attribute on the
+    sender's `<span role="heading">`, and the body, the timestamp and the
+    reactions are all outside it. What holds one message is a `[data-topic-id]`,
+    of which there are two other kinds — the "History is on" notice and an
+    "Add reaction" strip — so the one that is a message is the one holding a
+    body. `:has()` is what says that, and Chromium has had it since 105.
+
+  - The open conversation is not a selected roster entry. Chat marks no entry
+    as selected at all; what says which conversation is open is the `role=main`
+    panel, which carries the same `data-group-id` the roster entry does.
+
+  - A roster entry's name is not its text. Its text is "Active Unread Benson
+    Tsai 1 Notification", in minified spans a selector cannot tell apart. The
+    name is on `[data-name]`, whose own text is empty — hence SpaceNameAttrs.
+
+Roles and data attributes rather than minified class names throughout, because
+roles survive Google's redesigns considerably better; where a class name appears
+it is because there is nothing else, and it is expected to rot.
+*/
 func DefaultConfig() Config {
 	return Config{
 		URL:            "https://mail.google.com/chat/u/0/#chat/home",
 		PollInterval:   6 * time.Second,
 		SpaceItem:      `[role="listitem"][data-group-id], [role="listitem"][data-member-id], nav [role="listitem"]`,
 		SpaceName:      `[data-name], span[title], h3, .cJ7Ldc`,
-		SpaceUnread:    `[aria-label*="unread" i], .unread-count`,
+		SpaceNameAttrs: []string{"data-name", "aria-label", "title"},
+		// "unread message" and not "unread": Chat's own menu has a "Mark as
+		// unread" item, which the looser match picked up as an unread count on
+		// every conversation in the roster.
+		//
+		// `.SaMfhe` is the badge itself, and is here under protest. Chat gives
+		// it no role, no label and no data attribute — the count is a bare
+		// `<span aria-hidden="true">1</span>`, and there are six other
+		// aria-hidden spans in the same roster entry — so a minified class is
+		// the only thing left that names it. It will rot; when it does this
+		// reports no unread messages rather than the wrong ones, and
+		// TestGoogleChatReadsARealChat says so the next time the fixture is
+		// re-cut from a capture.
+		SpaceUnread:    `[aria-label*="unread message" i], .unread-count, .SaMfhe`,
 		SpaceUnreadCls: "unread",
 		SpaceIDAttrs:   []string{"data-group-id", "data-member-id", "data-topic-id", "id"},
-		ActiveSpace:    `[role="listitem"][aria-selected="true"], [role="listitem"].selected`,
-		MessageItem:    `[data-message-id], [role="listitem"][data-topic-id], div[jsname][data-message-id]`,
-		MessageText:    `[data-message-text], .message-text, [jsname="bgckF"]`,
-		MessageAuthor:  `[data-sender-name], [data-name], .sender-name`,
-		MessageTime:    `[data-absolute-timestamp], time, .timestamp`,
-		MessageIDAttrs: []string{"data-message-id", "data-topic-id", "id"},
-		Composer:       `[role="textbox"][contenteditable="true"], div[contenteditable="true"][aria-label*="message" i], textarea[aria-label*="message" i]`,
-		MaxMessages:    80,
+		ActiveSpace: `[role="listitem"][aria-selected="true"], [role="listitem"].selected, ` +
+			`[role="main"][data-group-id]`,
+		MessageItem:        `[data-topic-id]:has([jsname="bgckF"]), [role="listitem"][data-message-id]`,
+		MessageText:        `[data-message-text], .message-text, [jsname="bgckF"]`,
+		MessageAuthor:      `[data-sender-name], [data-name], .sender-name`,
+		MessageAuthorAttrs: []string{"data-sender-name", "data-name"},
+		MessageTime:        `[data-absolute-timestamp], time, .timestamp`,
+		MessageIDAttrs:     []string{"data-topic-id", "data-message-id", "id"},
+		Composer:           `[role="textbox"][contenteditable="true"], div[contenteditable="true"][aria-label*="message" i], textarea[aria-label*="message" i]`,
+		MaxMessages:        80,
 	}
 }
 
@@ -428,25 +477,10 @@ func (a *Adapter) ensureWorld(ctx context.Context) error {
 	}, &world); err != nil {
 		return err
 	}
-	cfg, err := json.Marshal(map[string]any{
-		"spaceItem":        a.cfg.SpaceItem,
-		"spaceName":        a.cfg.SpaceName,
-		"spaceUnread":      a.cfg.SpaceUnread,
-		"spaceUnreadClass": a.cfg.SpaceUnreadCls,
-		"spaceIdAttrs":     a.cfg.SpaceIDAttrs,
-		"activeSpace":      a.cfg.ActiveSpace,
-		"messageItem":      a.cfg.MessageItem,
-		"messageText":      a.cfg.MessageText,
-		"messageAuthor":    a.cfg.MessageAuthor,
-		"messageTime":      a.cfg.MessageTime,
-		"messageIdAttrs":   a.cfg.MessageIDAttrs,
-		"composer":         a.cfg.Composer,
-		"maxMessages":      a.cfg.MaxMessages,
-	})
+	source, err := Extractor(a.cfg)
 	if err != nil {
 		return err
 	}
-	source := strings.Replace(extractJS, "SKYHOOK_CHAT_CONFIG", string(cfg), 1)
 	var res struct {
 		ExceptionDetails *struct {
 			Text string `json:"text"`
@@ -477,3 +511,39 @@ func jsString(s string) string {
 
 // ExtractorSource exposes the injected script for tests.
 func ExtractorSource() string { return extractJS }
+
+/*
+Extractor is the script as it is actually injected: the source with the config
+substituted into it.
+
+Exported because the selectors are the part of this adapter most likely to be
+wrong, and the only way to know they are right is to run the real script with
+the real config against a real Chat document — which is what
+TestGoogleChatReadsARealChat does. The keys below are written out by hand rather
+than taken from the struct tags, so a test that rebuilt this payload for itself
+could pass while the adapter injected something without them. This function
+exists so there is one payload and not two.
+*/
+func Extractor(cfg Config) (string, error) {
+	blob, err := json.Marshal(map[string]any{
+		"spaceItem":          cfg.SpaceItem,
+		"spaceName":          cfg.SpaceName,
+		"spaceNameAttrs":     cfg.SpaceNameAttrs,
+		"spaceUnread":        cfg.SpaceUnread,
+		"spaceUnreadClass":   cfg.SpaceUnreadCls,
+		"spaceIdAttrs":       cfg.SpaceIDAttrs,
+		"activeSpace":        cfg.ActiveSpace,
+		"messageItem":        cfg.MessageItem,
+		"messageText":        cfg.MessageText,
+		"messageAuthor":      cfg.MessageAuthor,
+		"messageAuthorAttrs": cfg.MessageAuthorAttrs,
+		"messageTime":        cfg.MessageTime,
+		"messageIdAttrs":     cfg.MessageIDAttrs,
+		"composer":           cfg.Composer,
+		"maxMessages":        cfg.MaxMessages,
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.Replace(extractJS, "SKYHOOK_CHAT_CONFIG", string(blob), 1), nil
+}
