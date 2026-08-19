@@ -434,10 +434,11 @@ func (t *Transcoder) encodeExternal(ctx context.Context, img image.Image, enc En
 /*
 pngTemp is one picture written once as PNG, for encoders that read a file.
 
-The ladder in squeeze can ask for the same image at half a dozen qualities, and
-PNG-encoding a 4000px source for each of those costs more than every cwebp run
-put together — the handoff, not the codec, would be the expensive part. Written
-once and handed to each run, it is back to being the cheap half.
+The ladder in squeeze can ask for the same image at a dozen sizes and
+qualities, and PNG-encoding a 4000px source for each of those costs more than
+every cwebp run put together — the handoff, not the codec, would be the
+expensive part. Written once and handed to each run, it is back to being the
+cheap half.
 */
 type pngTemp struct {
 	dir  string
@@ -511,22 +512,24 @@ func (t *Transcoder) runEncoder(ctx context.Context, src *pngTemp, enc Encoder, 
 /*
 The ladder squeeze walks to get a picture under MaxOutBytes.
 
-Quality first, size second, and both in coarse steps. Quality first because the
-box the page laid the image out in is the size the reader is going to see it
-at, and resampling below that is the one thing here that cannot be undone by
-looking closer — a photograph at q30 is a photograph, a photograph at a quarter
-of its box is a thumbnail. The floor is 30 rather than 10 because below about
-that WebP stops looking soft and starts looking broken, and a smaller picture
-at a decent quality reads better than a full-size one made of blocks.
+Quality first, size second. Quality first because the box the page laid the
+image out in is the size the reader is going to see it at, and resampling below
+that is the one thing here that cannot be undone by looking closer — a
+photograph at q30 is a photograph, a photograph at a quarter of its box is a
+thumbnail. The floor is 30 rather than 10 because below about that WebP stops
+looking soft and starts looking broken, and a smaller picture at a decent
+quality reads better than a full-size one made of blocks.
 
-Coarse steps because each rung is an encode, and the point of a cap measured in
-megabytes is not to land on it exactly. The first rung that fits wins, which in
-practice is the first or second: a picture only reaches here at all because its
-honest encode was already over the cap, and a lossy re-encode of one is
-typically a fifth of it.
+Two quality steps, not four, because each rung is an encode and the ones
+between them do not decide anything. Anything that reaches here has already
+been encoded at q70 and come back over the cap, so a rung above 55 is spent to
+come back barely smaller; and by the time 55 has missed, the gap to the cap is
+not one a step to 40 closes — 30 either takes it or the picture was always
+going to have to get smaller. The point of a cap measured in megabytes is not
+to land on it exactly.
 */
 var (
-	squeezeQualities = []int{75, 55, 40, 30}
+	squeezeQualities = []int{55, 30}
 	squeezeScales    = []float64{1, 0.7, 0.5, 0.35, 0.25, 0.15}
 )
 
@@ -558,18 +561,8 @@ func (t *Transcoder) squeeze(ctx context.Context, img image.Image, have []byte, 
 	b := img.Bounds()
 	best, bestMime, bestW, bestH := have, haveMime, b.Dx(), b.Dy()
 
-	// A picture whose first encode was already lossy has nothing to gain from
-	// the top of the ladder: that encode was WebP at q70 or AVIF at q40, and
-	// asking for q75 spends a rung to come back bigger than what it is
-	// replacing. A lossless PNG is the opposite case, and the one where the
-	// top rung both fits and still looks untouched.
-	ladder := squeezeQualities
-	if haveMime != "image/png" {
-		ladder = squeezeQualities[1:]
-	}
-
-	// One PNG for the whole ladder. cwebp resamples from it, so a dozen rungs
-	// at four sizes cost one handoff rather than four — and on a source this
+	// One PNG for the whole ladder. cwebp resamples from it, so every rung at
+	// every size costs one handoff rather than one each — and on a source this
 	// large the handoff, not the codec, is the expensive half.
 	var src *pngTemp
 	if t.haveWebP {
@@ -591,7 +584,7 @@ func (t *Transcoder) squeeze(ctx context.Context, img image.Image, have []byte, 
 		// process, and only if they are reached at all.
 		var cand image.Image
 		fits := false
-		for _, q := range ladder {
+		for _, q := range squeezeQualities {
 			if ctx.Err() != nil {
 				break
 			}

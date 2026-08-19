@@ -3806,14 +3806,14 @@ the second one is a megabyte — thirty-two seconds at 250 kbps, which is the
 whole page's budget spent on one hero.
 
 `MaxOutBytes` is the third behaviour, and it defaults to 1 MB. Over it, the
-picture goes down a ladder until it fits: quality first, in four coarse steps to
-a floor of 30, then size, at 0.7, 0.5, 0.35, 0.25 and 0.15 of the box. Quality
-first because the box is the size the reader is going to see the picture at and
-resampling below it is the one loss here that looking closer cannot undo — a
-photograph at q30 is a photograph, a photograph at a quarter of its box is a
-thumbnail. The floor is 30 rather than 10 because below about that WebP stops
-looking soft and starts looking broken, and a smaller picture at a decent
-quality reads better than a full-size one made of blocks.
+picture goes down a ladder until it fits: quality first, at 55 and then 30, then
+size, at 0.7, 0.5, 0.35, 0.25 and 0.15 of the box. Quality first because the box
+is the size the reader is going to see the picture at and resampling below it is
+the one loss here that looking closer cannot undo — a photograph at q30 is a
+photograph, a photograph at a quarter of its box is a thumbnail. The floor is 30
+rather than 10 because below about that WebP stops looking soft and starts
+looking broken, and a smaller picture at a decent quality reads better than a
+full-size one made of blocks.
 
 WebP is the target for three reasons, and the third is the one that decided it.
 It is lossy at every quality the ladder names, so the ladder is a ladder. It
@@ -3830,13 +3830,19 @@ each rung meant writing the image out as PNG first — and PNG-encoding a 2400px
 source five times costs more than every `cwebp` run put together. The PNG is now
 written once and `cwebp -resize` does the resampling, so a full ladder is one
 handoff. On an adversarial input (2400×2400 of incompressible noise, which no
-real page carries) a transcode that costs 2.9 s uncapped costs 7.8 s down to
+real page carries) a transcode that costs 2.9 s uncapped costs 7.1 s down to
 1 MB; a real photograph of those dimensions fits on the first rung.
 
-**The top rung is skipped when the first encode was already lossy.** That encode
-was WebP at q70 or AVIF at q40, and asking for q75 spends a rung to come back
-*bigger* than the thing it is replacing. A lossless PNG is the opposite case,
-and the one where the top rung both fits and still looks untouched.
+**Two quality steps, not four.** The ladder started at 75 and stepped through 40,
+and neither rung decided anything. Anything that reaches here has already been
+encoded at q70 and come back over the cap, so 75 is spent to come back barely
+smaller than the thing it is replacing; and by the time 55 has missed, the gap
+left is not one a step to 40 closes. Measured against the four-step ladder on
+1200px and 2400px sources at caps of 1 MB, 256 KB and 64 KB, every case landed
+on the same dimensions — the difference is that where 40 used to fit, 30 now
+does, so the result undershoots the cap by more (150 KB rather than 196 KB under
+a 256 KB cap). Bytes left on the table, in exchange for the encodes not spent
+finding them.
 
 **A rung that resampled changes what the metadata says.** `Result.W`/`H` are
 what the client reserves space with, so they are now the dimensions of the bytes
