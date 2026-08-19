@@ -25,11 +25,6 @@
     try { return root.querySelector(sel); } catch (e) { return null; }
   }
 
-  function text(el) {
-    if (!el) return '';
-    return (el.textContent || '').replace(/\s+/g, ' ').trim();
-  }
-
   function attr(el, names) {
     if (!el) return '';
     for (var i = 0; i < names.length; i++) {
@@ -38,6 +33,30 @@
     }
     return '';
   }
+
+  function text(el) {
+    if (!el) return '';
+    return (el.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  /*
+   * label reads a person's or a space's name off an element.
+   *
+   * The attributes come first because in Chat the name is usually only there.
+   * A roster entry's `[data-name]` is the avatar, whose text is empty, and the
+   * elements around it that do carry text carry "Active", "Unread" and
+   * "1 Notification" in the same minified, role-less spans as the name — so
+   * the text of the entry is not a name and no selector over it is. Taking the
+   * element's text when no attribute has one keeps this working on a DOM that
+   * writes the name where it can be read.
+   */
+  function label(el, names) {
+    if (!el) return '';
+    var fromAttr = attr(el, names || []);
+    if (fromAttr) return fromAttr.replace(/\s+/g, ' ').trim();
+    return text(el);
+  }
+
 
   // stableID derives an identifier for a message when the DOM does not carry
   // one, so re-scans dedupe instead of duplicating the whole log.
@@ -65,7 +84,7 @@
     var out = [];
     docs().forEach(function (d) {
       qsa(d, CFG.spaceItem).forEach(function (el) {
-        var name = text(qs(el, CFG.spaceName) || el);
+        var name = label(qs(el, CFG.spaceName) || el, CFG.spaceNameAttrs);
         if (!name) return;
         var id = attr(el, CFG.spaceIdAttrs || ['data-group-id', 'data-member-id', 'id']) || name;
         if (seen[id]) return;
@@ -91,7 +110,7 @@
       if (el) {
         return {
           id: attr(el, CFG.spaceIdAttrs || ['data-group-id', 'id']) || text(el),
-          name: text(qs(el, CFG.spaceName) || el)
+          name: label(qs(el, CFG.spaceName) || el, CFG.spaceNameAttrs)
         };
       }
     }
@@ -105,7 +124,7 @@
       qsa(d, CFG.messageItem).forEach(function (el) {
         var body = text(qs(el, CFG.messageText) || el);
         if (!body) return;
-        var author = text(qs(el, CFG.messageAuthor));
+        var author = label(qs(el, CFG.messageAuthor), CFG.messageAuthorAttrs);
         var tsEl = qs(el, CFG.messageTime);
         var tsRaw = tsEl ? (attr(tsEl, ['data-absolute-timestamp', 'datetime', 'title']) || text(tsEl)) : '';
         var ts = 0;
