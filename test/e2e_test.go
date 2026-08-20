@@ -1428,6 +1428,13 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
 	})
+	// The icon the agent's default falls back to when a page declares none —
+	// which the fixture pages deliberately do not, so every one of them
+	// exercises the fallback (P-104).
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pixelPNG)
+	})
 	// An inline background, which is how a page states the one picture that
 	// belongs to one element: a hero, an avatar, a card. Relative, because that
 	// is how it is written, and because the mirror frame resolves a relative

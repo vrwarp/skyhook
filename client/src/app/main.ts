@@ -510,8 +510,17 @@ function renderTabs(): void {
     node.dataset.tab = String(tab.id);
     // Before the title, where a favicon goes and where a browser puts this: a
     // background tab fetching a page is the case the bar over the mirror cannot
-    // show, because the mirror it would sit over is another tab's.
-    if (busy) node.appendChild(spinner());
+    // show, because the mirror it would sit over is another tab's. The icon
+    // takes the same seat once the page has one and the seat is free (P-104).
+    if (busy) {
+      node.appendChild(spinner());
+    } else if (tab.favicon?.startsWith('data:image/')) {
+      const ico = document.createElement('img');
+      ico.className = 'favicon';
+      ico.alt = '';
+      ico.src = tab.favicon;
+      node.appendChild(ico);
+    }
 
     const title = document.createElement('span');
     title.className = 'title';

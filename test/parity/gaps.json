@@ -26,8 +26,10 @@
       "status": "open",
       "refs": [
         "docs/IMPLEMENTATION.md:2110",
-        "internal/mirror/agent.js"
-      ]
+        "internal/mirror/agent.js",
+        "internal/mirror/tab.go"
+      ],
+      "notes": "measured to the wall: an API face finishes loading as a paramless CSS.fontsUpdated (a CSS-declared face's event names family and src), JavaScript cannot read a FontFace's source back out of it, and the agent's isolated world does not enumerate page-realm FontFaceSet entries at all — its document.fonts sees only CSS-connected faces. What remains is reading the page's own world, which the page could detect, and the mirror's first principle is that the page never knows. The investigation still shipped one thing: CSS.fontsUpdated now feeds __skyhook.fontFaceSeen, which synthesizes a @font-face for a family whose declaring stylesheet the agent cannot read — a CDN sheet's icon font ships even when sheet recovery failed"
     },
     {
       "id": "P-004",
@@ -109,7 +111,8 @@
       "status": "open",
       "refs": [
         "docs/IMPLEMENTATION.md:2173"
-      ]
+      ],
+      "notes": "closed means closed to the isolated world too: attachShadow's return value is the only handle, and it was handed to page script the mirror never sees. The two routes in are wrapping attachShadow before page scripts run — a main-world modification the page can detect, against the mirror's first principle — or serialising through the CDP DOM domain's pierce, which is a second, parallel serialiser for one corpus page. Both stand rejected for now; shadow/closed's geometry expectedFail pins the shape"
     },
     {
       "id": "P-013",
@@ -202,11 +205,11 @@
     {
       "id": "P-023",
       "title": "A cross-origin frame smaller than 64x32 gets no label at all — indistinguishable from a bug",
-      "status": "open",
+      "status": "by-design",
       "refs": [
         "internal/mirror/agent.js"
       ],
-      "noPage": "the missing label is a policy about one half, not a divergence between them — both probes agree about a tiny unlabelled box; recorded until the affordance floor is asserted somewhere"
+      "noPage": "settled as the design: a frame below the label floor is an ad pixel or a tracking beacon, and naming its host would put furniture on every page that carries them. The affordance floor is FRAME_LABEL_MIN_W/H in agent.js; the frame element, its box and its src still cross, so a bundle can always tell the box from a bug"
     },
     {
       "id": "P-101",
@@ -291,11 +294,12 @@
     {
       "id": "P-109",
       "title": "window.open and a plain click on target=_blank open a landside tab no client tab will ever show",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "internal/mirror/frames.go:253",
-        "client/src/mirror/host.ts"
-      ]
+        "internal/cdp/browser.go",
+        "internal/session/session.go"
+      ],
+      "notes": "popups are recognised at browser level by their opener — a page session's autoAttach never delivers them — and adopted as ordinary tabs (Browser.OnPopup, Session.PopupOpened): attach, mirror, announce, and snapshot the document if it settled before the agent existed (Tab.Adopted). Discovery can announce one target twice, so adoption dedups on the owned set. The reader is not switched to the new tab; a row appearing is the honest version of a window opening off-stage. nav/target-blank's shell-tab count pins it"
     },
     {
       "id": "P-110",

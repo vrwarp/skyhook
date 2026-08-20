@@ -187,6 +187,7 @@
   var pendingImages = [];
   var flushTimer = null;
   var cssTimer = null;
+  var syntheticFonts = new Map(); // family -> a synthesized @font-face (P-003)
   var emittedCSS = new Map();   // rule text -> index
   var scopedEmitted = new Map(); // shadow-root id -> its own emitted-rule set
   var cssOrder = [];
@@ -3260,6 +3261,14 @@
       cssOrder.push(rootRule);
       adds.push(rootRule);
     }
+    // Faces the page registered through the FontFace API: no stylesheet
+    // declares them, so the walk above can never find them (P-003).
+    syntheticFonts.forEach(function (text) {
+      if (emittedCSS.has(text)) return;
+      emittedCSS.set(text, 1);
+      cssOrder.push(text);
+      adds.push(text);
+    });
     return { adds: adds, scoped: scoped };
   }
 
@@ -3305,6 +3314,40 @@
     }
     scheduleFlush(false);
     return true;
+  }
+
+  // familyHasFaceRule reports whether any readable stylesheet declares a
+  // @font-face for this family: such a face ships through the ordinary walk,
+  // and synthesizing a twin would be a second copy of the font.
+  function familyHasFaceRule(family) {
+    var want = String(family).toLowerCase().replace(/^["']|["']$/g, '');
+    var docs = [document];
+    observedDocs.forEach(function (d) { if (d !== document) docs.push(d); });
+    for (var d = 0; d < docs.length; d++) {
+      var sheets = null;
+      try { sheets = docs[d].styleSheets; } catch (e) { continue; }
+      if (!sheets) continue;
+      for (var i = 0; i < sheets.length; i++) {
+        var rules = null;
+        try { rules = sheets[i].cssRules; } catch (e) { continue; }
+        if (rules && faceRuleIn(rules, want)) return true;
+      }
+    }
+    return false;
+  }
+
+  function faceRuleIn(rules, want) {
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (r.type === 5) { // CSSRule.FONT_FACE_RULE
+        var fam = '';
+        try { fam = String(r.style.getPropertyValue('font-family')); } catch (e) { fam = ''; }
+        if (fam.toLowerCase().replace(/^["']|["']$/g, '') === want) return true;
+      } else if (r.cssRules && faceRuleIn(r.cssRules, want)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function scheduleCSS() {
@@ -3761,12 +3804,38 @@
       // doctype still parses into quirks mode, and the mirror has to render
       // under the same rules the landside page really got (P-125).
       quirks: document.compatMode === 'BackCompat',
+      icon: pageIconURL(),
       images: imgs,
       docHeight: Math.max(
         document.documentElement ? document.documentElement.scrollHeight : 0,
         document.body ? document.body.scrollHeight : 0)
     });
     pendingStrings = [];
+  }
+
+  /*
+   * pageIconURL names the page's favicon, for the tab strip (P-104). The
+   * smallest raster the page declares wins — the strip draws it at 14px, so
+   * a 16px icon beats the 512px maskable one — and a page that declares
+   * nothing gets the /favicon.ico every browser would have asked for.
+   */
+  function pageIconURL() {
+    if (!/^https?:$/.test(location.protocol)) return '';
+    var links = document.querySelectorAll('link[rel~="icon" i], link[rel="shortcut icon" i]');
+    var best = '', bestScore = -1;
+    for (var i = 0; i < links.length; i++) {
+      var href = links[i].getAttribute('href');
+      if (!href) continue;
+      var sizes = String(links[i].getAttribute('sizes') || '').toLowerCase();
+      var score = 2;
+      if (sizes.indexOf('16x16') >= 0) score = 5;
+      else if (sizes.indexOf('32x32') >= 0) score = 4;
+      else if (sizes === 'any') score = 3;
+      else if (sizes) score = 1; // declared, and declared big
+      if (score > bestScore) { bestScore = score; best = href; }
+    }
+    if (!best) best = '/favicon.ico';
+    return absolute(location.href, best);
   }
 
   function start() {
@@ -4032,6 +4101,25 @@
      * execCommand, which fires the input events a framework listens for;
      * fields splice at the caret through the native setter.
      */
+    /*
+     * fontFaceSeen is the landside browser telling the agent a web font
+     * finished loading (CSS.fontsUpdated), with the one fact JavaScript can
+     * never read back out of a FontFace: where it came from. A face the
+     * page registered through the FontFace API has no @font-face rule for
+     * the used-CSS walk to ship (P-003), so one is synthesized here and
+     * rides the ordinary pipeline — rewrite, bytes, blob resolution and
+     * all. A family a stylesheet already declares is left to that rule.
+     */
+    fontFaceSeen: function (family, src) {
+      if (!family || !src) return false;
+      if (syntheticFonts.has(family)) return true;
+      if (familyHasFaceRule(family)) return false;
+      syntheticFonts.set(family,
+        '@font-face{font-family:' + JSON.stringify(String(family)) +
+        ';src:url(' + JSON.stringify(String(src)) + ')}');
+      scheduleCSS();
+      return true;
+    },
     insertText: function (id, text) {
       var el = byId.get(id);
       if (!el || !text) return false;

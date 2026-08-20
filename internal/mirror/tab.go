@@ -109,6 +109,11 @@ type Emitter interface {
 	// frames nobody requested, and doing it into a queue that is already deep
 	// delays the ones they did.
 	Backlogged() bool
+	// PopupOpened hands over a window the page opened of its own accord —
+	// window.open, or a click on target=_blank (P-109). The target exists and
+	// is loading by the time this is called; tabs are the receiver's to make,
+	// by attaching to it.
+	PopupOpened(opener uint32, targetID, url string)
 }
 
 // ImageRequest describes an image the mirror wants transcoded.
@@ -175,6 +180,8 @@ type Tab struct {
 	url     string
 	title   string
 	loading bool
+	// faviconURL is the icon the strip is already wearing; see deliverFavicon.
+	faviconURL string
 	// calledOff is set by stop and cleared by anything that starts a load the
 	// reader is waiting for. While it is set, a lifecycle event saying the page
 	// has started loading is about the load that was just called off: the CDP
@@ -283,7 +290,68 @@ func NewTab(ctx context.Context, id uint32, br *cdp.Browser, sess *cdp.Session, 
 	if err := t.install(ctx); err != nil {
 		return nil, err
 	}
+	// A window this page opens is a tab the reader is owed (P-109). The
+	// browser recognises popups by their opener at browser level — a page
+	// session's autoAttach never delivers them.
+	br.OnPopup(sess.Target, func(targetID, url string) {
+		out.PopupOpened(id, targetID, url)
+	})
+	// A font the page registers through the FontFace API has no @font-face
+	// rule to ship, and no JavaScript can read a FontFace's source back out
+	// of it. DevTools can: fontsUpdated names the URL, and the agent is told
+	// so it can synthesize the rule (P-003).
+	sess.Subscribe("CSS.fontsUpdated", t.onFontsUpdated)
 	return t, nil
+}
+
+// onFontsUpdated relays a loaded web font's source into the agent's world.
+// The agent ignores families a stylesheet already declares, so the ordinary
+// @font-face path never gets a synthesized twin.
+func (t *Tab) onFontsUpdated(_ string, params json.RawMessage) {
+	var p struct {
+		Font struct {
+			Family string `json:"fontFamily"`
+			Src    string `json:"src"`
+		} `json:"font"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return
+	}
+	fam, src := p.Font.Family, p.Font.Src
+	if fam == "" || (!strings.HasPrefix(src, "http://") && !strings.HasPrefix(src, "https://")) {
+		// An API-registered face finishes loading as a paramless update: no
+		// family, no source, just "the fonts changed". Its source is visible
+		// nowhere — see P-003's notes.
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		expr := fmt.Sprintf("__skyhook.fontFaceSeen(%s,%s)", jsString(fam), jsString(src))
+		if _, err := t.eval(ctx, expr); err != nil {
+			t.log.Debug("font face relay failed", "tab", t.ID, "family", fam, "err", err)
+		}
+	}()
+}
+
+/*
+Adopted finishes a tab whose page existed before its mirror did: a popup.
+
+The document is anywhere between first byte and fully loaded when the tab is
+attached. A document still parsing snapshots itself on DOMContentLoaded — the
+injected agent's ordinary arrival — but one that finished loading before the
+agent existed never would, so a settled document is snapshotted here, the way
+a back/forward-cache restore is.
+*/
+func (t *Tab) Adopted(ctx context.Context) {
+	if err := t.ensureWorldRetry(ctx, t.navEpoch.Load()); err != nil {
+		t.log.Warn("world setup for an adopted popup failed", "tab", t.ID, "err", err)
+		return
+	}
+	if _, err := t.eval(ctx, resnapshotIfSettled); err != nil {
+		t.log.Debug("adopted-popup snapshot check failed", "tab", t.ID, "err", err)
+	}
+	t.RefreshState(ctx)
 }
 
 func (t *Tab) install(ctx context.Context) error {
@@ -898,6 +966,81 @@ func (t *Tab) ensureWorld(ctx context.Context) error {
 	return nil
 }
 
+// faviconMaxBytes caps what a tab state will carry for its icon. A favicon
+// is a few hundred bytes of PNG; a site shipping a quarter-megabyte .ico gets
+// a strip row with no icon rather than a control channel with a picture in it.
+const faviconMaxBytes = 32 << 10
+
+/*
+deliverFavicon fetches the page's icon and ships it inside the tab state as a
+data URL (P-104): the FaviconID field rode the wire unset since the protocol
+was born, and the strip identified tabs by their titles alone. A favicon is
+chrome UI — the one part of a page the mirror's DOM never carries.
+
+A data URL rather than the image pipeline, deliberately. The pipeline
+sequences a page's pictures by viewport priority and delivers them keyed for
+elements in the mirror; an icon belongs to none of that, is smaller than the
+machinery it would ride, and wants to arrive with the tab state it decorates.
+
+The URL is remembered so a same-site navigation does not refetch what the
+strip is already wearing.
+*/
+func (t *Tab) deliverFavicon(url string) {
+	t.mu.Lock()
+	seen := t.faviconURL == url
+	t.mu.Unlock()
+	if seen {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	data, err := t.FetchResource(ctx, url, faviconMaxBytes)
+	if err != nil || len(data) == 0 {
+		t.log.Debug("favicon fetch failed", "tab", t.ID, "url", url, "err", err)
+		return
+	}
+	mime := faviconMime(data)
+	if mime == "" {
+		return
+	}
+	t.mu.Lock()
+	t.faviconURL = url
+	t.mu.Unlock()
+	t.emitState(protocol.TabState{
+		FaviconID: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data),
+	})
+}
+
+// faviconMime types icon bytes by their magic, and refuses what it cannot
+// name: whatever a server answered with — an HTML 404, say — must never be
+// stamped image/* and handed to the strip.
+func faviconMime(data []byte) string {
+	switch {
+	case len(data) > 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n":
+		return "image/png"
+	case len(data) > 4 && string(data[:4]) == "GIF8":
+		return "image/gif"
+	case len(data) > 4 && string(data[:4]) == "\x00\x00\x01\x00":
+		return "image/x-icon"
+	case len(data) > 3 && string(data[:3]) == "\xff\xd8\xff":
+		return "image/jpeg"
+	case len(data) > 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP":
+		return "image/webp"
+	case looksLikeSVG(data):
+		return "image/svg+xml"
+	}
+	return ""
+}
+
+func looksLikeSVG(data []byte) bool {
+	head := data
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	s := strings.TrimSpace(string(head))
+	return strings.HasPrefix(s, "<svg") || (strings.HasPrefix(s, "<?xml") && strings.Contains(s, "<svg"))
+}
+
 // forgetWorld drops a stored context id if it is still the one given —
 // a concurrent navigation may already have replaced it with a live one.
 func (t *Tab) forgetWorld(id int64) {
@@ -1050,6 +1193,7 @@ type agentSnapshot struct {
 	DocHeight int                 `json:"docHeight"`
 	Scoped    []agentScopedCSS    `json:"scoped"`
 	Quirks    bool                `json:"quirks"`
+	Icon      string              `json:"icon"`
 }
 
 // agentScopedCSS is one shadow root's stylesheet, as the agent reports it.
@@ -1254,6 +1398,9 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	}
 	f.Seq = 0
 	t.out.EmitFrame(protocol.ChDom, f)
+	if s.Icon != "" {
+		go t.deliverFavicon(s.Icon)
+	}
 	t.requestImages(s.Images)
 	for _, req := range cssImages {
 		t.wantImage(req)

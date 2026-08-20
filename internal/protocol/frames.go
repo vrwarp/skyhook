@@ -265,9 +265,14 @@ type TabState struct {
 	Loading    bool   `cbor:"3,keyasint,omitempty"`
 	CanBack    bool   `cbor:"4,keyasint,omitempty"`
 	CanForward bool   `cbor:"5,keyasint,omitempty"`
-	FaviconID  string `cbor:"6,keyasint,omitempty"`
-	Closed     bool   `cbor:"7,keyasint,omitempty"`
-	Error      string `cbor:"8,keyasint,omitempty"`
+	// FaviconID carries the page's icon itself, as a data: URL (P-104). An
+	// icon is a few hundred bytes that wants to arrive with the tab state it
+	// decorates, not a pipeline asset; the name is historical — the field was
+	// wired into the client before anything set it, and nothing ever assigned
+	// an id.
+	FaviconID string `cbor:"6,keyasint,omitempty"`
+	Closed    bool   `cbor:"7,keyasint,omitempty"`
+	Error     string `cbor:"8,keyasint,omitempty"`
 	// Ref echoes Navigate.Ref on the frame that announces an opened tab, and is
 	// absent on every other TabState.
 	Ref string `cbor:"9,keyasint,omitempty"`

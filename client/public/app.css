@@ -71,6 +71,7 @@ body {
 
 .tab.active { background: #374151; color: var(--fg); }
 .tab .title { overflow: hidden; text-overflow: ellipsis; }
+.tab .favicon { width: 14px; height: 14px; flex: none; border-radius: 2px; }
 .tab .close { color: var(--muted); padding: 0 2px; }
 
 /* A tab waiting for a page, and a tab that does not exist yet because the

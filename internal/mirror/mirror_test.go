@@ -1064,6 +1064,8 @@ func (s *stateSink) PageChanged(tab uint32, epoch uint64) {
 
 func (s *stateSink) Backlogged() bool { return false }
 
+func (s *stateSink) PopupOpened(uint32, string, string) {}
+
 // stamps returns the epoch each image request was stamped with.
 func (s *stateSink) stamps() []uint64 {
 	s.mu.Lock()

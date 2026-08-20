@@ -251,9 +251,11 @@ func (t *Tab) onFrameAttached(_ string, params json.RawMessage) {
 		return
 	}
 	if p.TargetInfo.Type != "iframe" {
-		// Workers, service workers and popups are not documents in this tab.
-		// Nothing is installed in them, but a target held at its first line with
-		// nobody coming would hang whatever opened it.
+		// Workers, service workers and the like are not documents in this
+		// tab. Nothing is installed in them, but a target held at its first
+		// line with nobody coming would hang whatever opened it. Popups never
+		// arrive here at all — they surface as browser-level targets, and
+		// Browser.OnPopup adopts them into tabs of their own (P-109).
 		if p.WaitingForDebugger {
 			go t.releaseTarget(p.SessionID)
 		}

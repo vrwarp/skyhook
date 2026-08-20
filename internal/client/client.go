@@ -307,6 +307,12 @@ func (c *Client) handle(f *protocol.Frame) {
 			return
 		}
 		c.mu.Lock()
+		// Merge the icon the way the real client does (tabs.applyState): most
+		// states report the one thing that changed and carry no icon, and a
+		// replace here would wear the icon only until the next loading toggle.
+		if st.FaviconID == "" {
+			st.FaviconID = c.state[f.Tab].FaviconID
+		}
 		c.state[f.Tab] = st
 		if st.Ref != "" {
 			c.opened[st.Ref] = f.Tab

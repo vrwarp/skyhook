@@ -68,6 +68,13 @@ type Browser struct {
 	// attached records that the browser was already running when we arrived,
 	// which makes every destructive call somebody else's business.
 	attached bool
+	// popupWatch maps an opener target to whoever wants its popups: a page's
+	// window.open creates a target no page-session autoAttach ever delivers,
+	// so they are recognised at browser level by their opener (P-109).
+	popupMu    sync.Mutex
+	popupWatch map[string]func(targetID, url string)
+	popupsOn   sync.Once
+
 	// owned is the set of targets we created. In attached mode it is the guest
 	// list for closing and attaching: a tab that is not on it is the user's.
 	ownedMu sync.Mutex
@@ -604,6 +611,71 @@ func (b *Browser) awaitOpened(ctx context.Context, anchor string) (string, error
 			return "", ctx.Err()
 		case <-time.After(25 * time.Millisecond):
 		}
+	}
+}
+
+/*
+OnPopup asks to be told when a page target appears with this opener — a
+window.open, or a click on target=_blank (P-109).
+
+Browser level, not page level, because that is where these targets surface: a
+page session's setAutoAttach delivers the frames and workers a page spawns,
+but a popup is a top-level target and arrives only through target discovery.
+Discovery is armed on the first registration; arming replays every existing
+target, none of which can match a registry that was empty until now.
+*/
+func (b *Browser) OnPopup(opener string, fn func(targetID, url string)) {
+	b.popupMu.Lock()
+	if b.popupWatch == nil {
+		b.popupWatch = map[string]func(targetID, url string){}
+	}
+	b.popupWatch[opener] = fn
+	b.popupMu.Unlock()
+	b.popupsOn.Do(b.watchPopups)
+}
+
+// OffPopup forgets an opener. Call it when the opener's tab closes.
+func (b *Browser) OffPopup(opener string) {
+	b.popupMu.Lock()
+	delete(b.popupWatch, opener)
+	b.popupMu.Unlock()
+}
+
+func (b *Browser) watchPopups() {
+	b.On("", "Target.targetCreated", func(_ string, params json.RawMessage) {
+		var p struct {
+			TargetInfo TargetInfo `json:"targetInfo"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return
+		}
+		info := p.TargetInfo
+		if info.Type != "page" || info.OpenerID == "" {
+			return
+		}
+		b.popupMu.Lock()
+		fn := b.popupWatch[info.OpenerID]
+		b.popupMu.Unlock()
+		if fn == nil {
+			return
+		}
+		// Ours now: the popup was made by a page we drive, and closing time
+		// must treat it like anything we opened ourselves. Marking it is also
+		// the dedup — discovery can announce one target twice (the arming
+		// replay racing the live event), and twice adopted is two tabs.
+		b.ownedMu.Lock()
+		dup := b.owned[info.TargetID]
+		b.owned[info.TargetID] = true
+		b.ownedMu.Unlock()
+		if dup {
+			return
+		}
+		fn(info.TargetID, info.URL)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := b.Call(ctx, "", "Target.setDiscoverTargets", map[string]any{"discover": true}, nil); err != nil {
+		b.log.Warn("target discovery unavailable; window.open stays landside", "err", err)
 	}
 }
 
