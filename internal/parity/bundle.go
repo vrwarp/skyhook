@@ -39,7 +39,7 @@ func OpenBundle(name string) (*Bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parity: open bundle: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	b := &Bundle{files: map[string][]byte{}}
 	for _, f := range r.File {
 		rc, err := f.Open()
@@ -47,7 +47,9 @@ func OpenBundle(name string) (*Bundle, error) {
 			return nil, fmt.Errorf("parity: %s: %w", f.Name, err)
 		}
 		data, err := io.ReadAll(rc)
-		rc.Close()
+		// A member's checksum failure surfaces on the read; this close has
+		// nothing left to say.
+		_ = rc.Close()
 		if err != nil {
 			return nil, fmt.Errorf("parity: %s: %w", f.Name, err)
 		}
