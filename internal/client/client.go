@@ -43,6 +43,9 @@ type Client struct {
 	dlData    map[string]*dlBuffer
 	// clipboard is the last copy the server relayed (P-008).
 	clipboard protocol.Clipboard
+	// fileAsks is every file chooser the server has intercepted, keyed by
+	// tab (P-007).
+	fileAsks  map[uint32][]protocol.FileAsk
 	adapter   []protocol.AdapterRecord
 	stats     protocol.Stats
 	sessionID string
@@ -113,6 +116,7 @@ func Attach(ctx context.Context, conn transport.Conn, opts Options) (*Client, er
 		imageData: map[string][]byte{},
 		downloads: map[string]protocol.Download{},
 		dlData:    map[string]*dlBuffer{},
+		fileAsks:  map[uint32][]protocol.FileAsk{},
 		events:    make(chan Event, 256), closed: make(chan struct{}),
 	}
 	caps := []string{}
@@ -436,6 +440,15 @@ func (c *Client) handle(f *protocol.Frame) {
 		c.clipboard = cb
 		c.mu.Unlock()
 		c.emit(Event{Kind: "clipboard"})
+	case protocol.TypeFileAsk:
+		var ask protocol.FileAsk
+		if err := f.DecodeBody(&ask); err != nil {
+			return
+		}
+		c.mu.Lock()
+		c.fileAsks[f.Tab] = append(c.fileAsks[f.Tab], ask)
+		c.mu.Unlock()
+		c.emit(Event{Kind: "fileask", Tab: f.Tab})
 	case protocol.TypeError:
 		var e protocol.ErrorBody
 		_ = f.DecodeBody(&e)
@@ -449,6 +462,50 @@ func (c *Client) Clipboard() protocol.Clipboard {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.clipboard
+}
+
+// FileAsks reports the file choosers the server has intercepted for a tab.
+func (c *Client) FileAsks(tab uint32) []protocol.FileAsk {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]protocol.FileAsk, len(c.fileAsks[tab]))
+	copy(out, c.fileAsks[tab])
+	return out
+}
+
+// Upload answers a file ask with one file, chunked the way the real client
+// sends it, and closes the ask.
+func (c *Client) Upload(tab uint32, ask uint32, name, mime string, data []byte) error {
+	const chunk = 32 << 10
+	first := true
+	for off := 0; off < len(data) || first; off += chunk {
+		end := off + chunk
+		if end > len(data) {
+			end = len(data)
+		}
+		p := protocol.UploadPart{Ask: ask, Off: int64(off), Data: data[off:end]}
+		if first {
+			p.Name, p.Mime, p.Size = name, mime, int64(len(data))
+			first = false
+		}
+		if end == len(data) {
+			p.Last = true
+		}
+		if err := c.send(protocol.ChBulk, protocol.TypeUploadPart, tab, p); err != nil {
+			return err
+		}
+		if end == len(data) {
+			break
+		}
+	}
+	return c.send(protocol.ChBulk, protocol.TypeUploadPart, tab,
+		protocol.UploadPart{Ask: ask, Done: true})
+}
+
+// CancelUpload ends a file ask with nothing, the way a dismissed picker does.
+func (c *Client) CancelUpload(tab uint32, ask uint32) error {
+	return c.send(protocol.ChBulk, protocol.TypeUploadPart, tab,
+		protocol.UploadPart{Ask: ask, Err: "canceled"})
 }
 
 // dlBuffer assembles one fetched download from its parts. next is the offset

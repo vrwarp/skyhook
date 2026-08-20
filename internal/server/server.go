@@ -178,6 +178,8 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 		// serving. The listeners below resolve the same root for the handler
 		// that serves it.
 		WebRoot: resolveWebRoot(cfg),
+		// Beside the downloads directory, wiped on the same terms.
+		UploadDir: filepath.Join(cfg.DataDir, "uploads"),
 	}
 	if !mgrOpts.Capture.Enabled() {
 		log.Info("diagnostic captures are off (captureKeep is 0)")

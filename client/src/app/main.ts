@@ -28,8 +28,8 @@ import {
   verdict,
 } from './upgrade.js';
 import type {
-  AdapterRecord, CaptureDone, CaptureRequest, Download, ImageMeta, Mutation, Refusal, Snapshot,
-  Stats, TabState, Viewport, Welcome,
+  AdapterRecord, CaptureDone, CaptureRequest, Download, FileAsk, ImageMeta, Mutation, Refusal,
+  Snapshot, Stats, TabState, Viewport, Welcome,
 } from '../shared/protocol.js';
 import { PROTOCOL_VERSION } from '../shared/protocol.js';
 import * as transfers from './transfers.js';
@@ -461,6 +461,12 @@ function handle(kind: string, args: Record<string, unknown>): void {
     case 'clipboard':
       relayClipboard(String(args.text ?? ''));
       break;
+    case 'fileAsk':
+      onFileAsk(Number(args.tab), args.ask as unknown as FileAsk);
+      break;
+    case 'uploadDone':
+      toast('The file is with the page on your server.');
+      break;
     case 'log':
       log(String(args.message ?? ''));
       break;
@@ -546,6 +552,76 @@ function renderTransfers(): void {
   if (!el.panel.hidden && panelView === 'transfers') {
     transfers.render(el.panelBody, transferActions);
   }
+}
+
+// -------------------------------------------------------------------- uploads
+
+/**
+ * A page asked for a file (P-007). The ask arrives a round trip after the
+ * reader's click on the mirrored input — the mirror suppressed its own
+ * picker, which led nowhere — and is answered with the shell's picker, whose
+ * files actually cross. The click's activation usually survives the round
+ * trip, so the picker opens by itself; when the browser says no, the toast's
+ * button is a fresh gesture that cannot be refused.
+ */
+let pendingFileAsk: { tab: number; ask: number } | null = null;
+let uploadInput: HTMLInputElement | null = null;
+
+function uploadPicker(): HTMLInputElement {
+  if (uploadInput) return uploadInput;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.id = 'upload-input';
+  input.hidden = true;
+  input.addEventListener('change', onPickerChange);
+  // The dialog dismissed is an answer too: the page is told it gets nothing,
+  // the way a native chooser tells it.
+  input.addEventListener('cancel', cancelFileAsk);
+  document.body.appendChild(input);
+  return (uploadInput = input);
+}
+
+function onFileAsk(tab: number, ask: FileAsk): void {
+  // A newer ask supersedes an unanswered one — the reader clicked again —
+  // and the page behind the old one sees a dismissed chooser.
+  cancelFileAsk();
+  pendingFileAsk = { tab, ask: ask.id };
+  const input = uploadPicker();
+  input.multiple = ask.multiple;
+  input.value = '';
+  input.click();
+  toast('The page asks for a file.', { label: 'Choose…', run: () => uploadPicker().click() });
+}
+
+function cancelFileAsk(): void {
+  const stale = pendingFileAsk;
+  pendingFileAsk = null;
+  if (stale) send('uploadCancel', stale);
+}
+
+/** How big is big enough to ask first. Five megabytes is minutes on the link
+ *  this client is written for. */
+const UPLOAD_CONFIRM_BYTES = 5 * 1024 * 1024;
+
+function onPickerChange(): void {
+  const ask = pendingFileAsk;
+  const files = Array.from(uploadInput?.files ?? []);
+  if (!ask) return;
+  if (!files.length) {
+    cancelFileAsk();
+    return;
+  }
+  const total = files.reduce((n, f) => n + f.size, 0);
+  if (total > UPLOAD_CONFIRM_BYTES && !window.confirm(
+    `Send ${files.length > 1 ? `${files.length} files` : `“${files[0].name}”`}`
+    + ` (${transfers.fmtSize(total)}) over the link? On a slow link this can take minutes.`)) {
+    cancelFileAsk();
+    return;
+  }
+  pendingFileAsk = null;
+  send('uploadFiles', { tab: ask.tab, ask: ask.ask, files });
+  toast(`Sending ${files.length > 1 ? `${files.length} files` : `“${files[0].name}”`}`
+    + ` (${transfers.fmtSize(total)})…`);
 }
 
 // ------------------------------------------------------------------ clipboard

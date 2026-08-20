@@ -1012,6 +1012,7 @@ func (s *Session) adoptTab(ctx context.Context, id uint32, ts *tabState, vp prot
 		AcceptLanguage: s.mgr.opts.AcceptLanguage,
 		Blocked:        s.mgr.opts.Blocked,
 		StreamEvery:    s.mgr.opts.CanvasStream,
+		UploadDir:      s.mgr.opts.UploadDir,
 	})
 	if err != nil {
 		s.openFailed(id, ts, err)
@@ -1046,6 +1047,7 @@ func (s *Session) buildTab(ctx context.Context, id uint32, ts *tabState, vp prot
 		AcceptLanguage: s.mgr.opts.AcceptLanguage,
 		Blocked:        s.mgr.opts.Blocked,
 		StreamEvery:    s.mgr.opts.CanvasStream,
+		UploadDir:      s.mgr.opts.UploadDir,
 	})
 	if err != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1971,6 +1973,21 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return err
 		}
 		return s.downloadCmd(cmd)
+	case protocol.TypeUploadPart:
+		var part protocol.UploadPart
+		if err := f.DecodeBody(&part); err != nil {
+			return err
+		}
+		// On the tab's own queue, like input: parts must land in order behind
+		// one another, and the Done part ends in a CDP call the connection's
+		// read loop must not wait on.
+		return s.submit(f.Tab, tabJob{what: "upload", run: func(ctx context.Context) error {
+			t, err := s.page(f.Tab)
+			if err != nil {
+				return err
+			}
+			return t.UploadPart(ctx, &part)
+		}})
 	case protocol.TypeKill:
 		return s.Kill(ctx)
 	case protocol.TypeError:

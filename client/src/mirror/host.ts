@@ -395,6 +395,16 @@ function stripFragment(url: URL): string {
   return url.origin + url.pathname + url.search;
 }
 
+/** Whether a click here would open a file picker: the input itself, or a
+ *  label wired to one. */
+function fileControl(target: HTMLElement | null): boolean {
+  const input = target?.closest?.('input') as HTMLInputElement | null;
+  if (input?.type === 'file') return true;
+  const label = target?.closest?.('label') as HTMLLabelElement | null;
+  const control = label?.control as HTMLInputElement | null;
+  return control?.type === 'file';
+}
+
 /**
  * The element a fragment names, by the rules a browser follows: an id first,
  * then a named anchor. A fragment that names nothing here is not a fragment
@@ -924,6 +934,12 @@ export class MirrorHost {
     // never do, and lands on a cross-origin document that the patcher can no
     // longer touch, which kills the tab for the rest of the session.
     if (anchor) ev.preventDefault();
+    // A file input's default is the reader's own picker opening into a
+    // document whose value can never cross — a dead end that looks like the
+    // feature. The click still goes landside, where the real chooser is
+    // intercepted and comes back as a file ask the shell answers with a
+    // picker that actually leads somewhere (P-007).
+    if (fileControl(target)) ev.preventDefault();
     // Ctrl/⌘-click is the keyboard half of "open in a new tab", and it means
     // the same thing here. Sending it landside instead would open a tab on
     // the VPS that this side has no handle on. It goes before the bail below

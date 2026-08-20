@@ -154,6 +154,10 @@ type Options struct {
 	// the reader did. This is the one setting here that spends bandwidth on a
 	// page nobody is interacting with, which is why an operator has to ask.
 	StreamEvery time.Duration
+	// UploadDir is where the reader's files land before they are handed to a
+	// page's file input (P-007). Empty means uploads are off and a page's
+	// chooser ask is logged and dropped. See upload.go.
+	UploadDir string
 }
 
 // Tab is one mirrored landside tab.
@@ -176,6 +180,12 @@ type Tab struct {
 	// clipProbe is true while a clipboard probe is pending, so a burst of
 	// clicks costs one read rather than one each. See clipboard.go.
 	clipProbe atomic.Bool
+
+	// uploads is the file-chooser asks awaiting the reader's answer, by ask
+	// id; askSeq mints the ids. See upload.go.
+	uploadMu sync.Mutex
+	uploads  map[uint32]*fileAsk
+	askSeq   atomic.Uint64
 
 	mu      sync.Mutex
 	ctxID   int64
@@ -424,6 +434,13 @@ func (t *Tab) install(ctx context.Context) error {
 	}
 	go t.reconcile()
 	s.Subscribe("Page.javascriptDialogOpening", t.onDialog)
+	// File choosers are intercepted rather than shown (P-007): headless has
+	// no dialog to show, and the reader the dialog is for is on the plane.
+	if err := s.Do(ctx, "Page.setInterceptFileChooserDialog", map[string]any{"enabled": true}, nil); err != nil {
+		t.log.Debug("file chooser interception unavailable", "err", err)
+	} else {
+		s.Subscribe("Page.fileChooserOpened", t.onFileChooser)
+	}
 	s.Subscribe("Inspector.targetCrashed", func(string, json.RawMessage) {
 		t.log.Warn("tab crashed", "tab", t.ID)
 		t.emitState(protocol.TabState{Error: "renderer crashed"})
@@ -1929,6 +1946,8 @@ func (t *Tab) Close(ctx context.Context) error {
 	}
 	target := t.sess.Target
 	t.mu.Unlock()
+	// The page can no longer read them, so the reader's files go now.
+	t.dropAsks()
 	err := t.browser.CloseTarget(ctx, target)
 	// After the target is gone, so nothing that was still in flight arrives at
 	// a tab that has stopped listening: this drops the subscriptions installed

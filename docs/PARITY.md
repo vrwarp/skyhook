@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-53 gaps: 16 open, 11 by-design, 25 fixed, 1 disproven.
+53 gaps: 15 open, 11 by-design, 26 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -126,7 +126,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-004 | open | wheel and hover are protocol surface no client sends | — needs a pointer-move vocabulary the interaction executor does not have yet; P-115's page will carry both when it grows one |
 | P-005 | by-design | Password and sensitive-autocomplete values never cross the wire | forms/password |
 | P-006 | open | The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half | — both harness browsers are mice too, so the divergence cannot arise in-corpus; imported real pages carry the widened page-height band it causes |
-| P-007 | open | File upload is not implemented | — clicking a file input landside opens a native chooser nothing intercepts — the gap includes that hazard — so no safe corpus interaction exists until Page.setInterceptFileChooserDialog is wired |
+| P-007 | fixed | File upload is not implemented | — |
 | P-008 | fixed | Clipboard copy executes plane-side only; cross-tab paste fidelity is absent | — |
 | P-009 | open | Find-in-page has no chrome-UI affordance | — a chrome-UI gap, not a mirror-rendering one |
 | P-010 | open | A frame is only preemptible between messages; a large snapshot owns the link while it sends | — a latency property of the scheduler, measured by the netem suite's timings rather than by parity |

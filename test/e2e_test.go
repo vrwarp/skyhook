@@ -809,8 +809,10 @@ type harness struct {
 	// not only by the test that opens a bundle.
 	captureDir string
 	// downloadDir is where landside downloads land (P-108), so a test can see
-	// that a discard really deletes the bytes.
+	// that a discard really deletes the bytes; uploadDir stages the reader's
+	// files on their way into a page (P-007).
 	downloadDir string
+	uploadDir   string
 	logs        *diag.Ring
 	// log is the harness's own logger, exposed so that everything a test starts
 	// — the PWA's app server as much as the landside half — writes to the one
@@ -1467,6 +1469,27 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			<body><h1>files to take home</h1>
 			<a id="get" href="/report.bin">get the report</a></body></html>`)
 	})
+	// A page that wants a file: what TestAFileReachesThePagesChooser feeds
+	// (P-007). The page reads the file itself, so the status line proves the
+	// bytes really reached page JavaScript, not merely the input element.
+	mux.HandleFunc("/upload", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Upload</title></head>
+			<body><h1>send us your notes</h1>
+			<input type="file" id="pick">
+			<input type="file" id="many" multiple>
+			<p id="st">no file yet</p>
+			<script>
+			document.getElementById('pick').addEventListener('change', function () {
+			  var f = this.files[0];
+			  if (!f) { document.getElementById('st').textContent = 'no file chosen'; return; }
+			  f.text().then(function (text) {
+			    document.getElementById('st').textContent =
+			      'received ' + f.name + ' (' + f.size + ' bytes): ' + text.slice(0, 24);
+			  });
+			});
+			</script></body></html>`)
+	})
 	// A page with a Copy button of its own: what TestACopyThePageMakesReachesTheReader
 	// clicks (P-008). The status line is how the test knows the landside
 	// writeText really ran — and really succeeded.
@@ -1999,9 +2022,11 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	h.images = pipe
 
 	h.captureDir = t.TempDir()
+	h.uploadDir = t.TempDir()
 	mgrOpts := session.ManagerOptions{
 		Logger: log, Token: h.token, TTL: time.Hour, RingBytes: 1 << 20,
 		Compression: true, ProfileDir: t.TempDir(), MaxTabs: 8,
+		UploadDir: h.uploadDir,
 		Capture: session.CaptureOptions{
 			Dir: h.captureDir, Keep: 10, MaxBytes: 32 << 20, ClientBytes: 8 << 20,
 			Screenshots: true, JournalBytes: 4 << 20, Wait: budget(30 * time.Second),

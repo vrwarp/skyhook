@@ -63,11 +63,13 @@
     {
       "id": "P-007",
       "title": "File upload is not implemented",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "docs/IMPLEMENTATION.md:2128"
+        "internal/mirror/upload.go",
+        "client/src/app/main.ts",
+        "client/src/mirror/host.ts"
       ],
-      "noPage": "clicking a file input landside opens a native chooser nothing intercepts — the gap includes that hazard — so no safe corpus interaction exists until Page.setInterceptFileChooserDialog is wired"
+      "notes": "the chooser is intercepted instead of shown: Page.setInterceptFileChooserDialog suppresses the landside dialog (headless never had one) and the ask crosses as TypeFileAsk naming the mirrored input; the mirror's own picker is suppressed too, since it opened into a document whose value can never cross. The reader answers with the shell's native picker — the click's activation usually survives the round trip, and the toast's Choose button is a fresh gesture when it does not — with a confirm past 5 MB. Files stream back as TypeUploadPart chunks on bulk through an ordered queue, land under one staging subdirectory per file so the page sees the reader's own filename, and DOM.setFileInputFiles fires the change the page was waiting for; a dismissed picker shows the page a dismissed chooser, and the staging dies with the tab or the kill switch. Pinned by TestAFileReachesThePagesChooser and TestPWAPickedFileReachesThePage, both asserting on the page reading the file's own bytes"
     },
     {
       "id": "P-008",

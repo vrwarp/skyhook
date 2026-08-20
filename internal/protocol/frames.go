@@ -143,6 +143,10 @@ const (
 	// relayed so the reader's own clipboard ends up holding what the page
 	// told them it would (P-008).
 	TypeClipboard Type = 33 // server -> client
+	// File upload (P-007): a page's file chooser, intercepted landside and
+	// asked across the link; the reader's files come back the other way.
+	TypeFileAsk    Type = 34 // server -> client, the page wants files
+	TypeUploadPart Type = 35 // client -> server on bulk, one chunk of them
 )
 
 // Frame is the envelope. Body is a CBOR-encoded, type-specific payload; keeping
@@ -621,6 +625,32 @@ type Clipboard struct {
 // coordinates, share-link or code snippet a Copy button produces; past it the
 // relay is more likely moving a document than helping a reader.
 const ClipboardCap = 64 << 10
+
+// FileAsk is a page's file chooser, intercepted landside (P-007). Node names
+// the mirrored input when the server could resolve it, so the client can read
+// its accept attribute; zero is still answerable.
+type FileAsk struct {
+	ID       uint32 `cbor:"1,keyasint"`
+	Node     int64  `cbor:"2,keyasint,omitempty"`
+	Multiple bool   `cbor:"3,keyasint,omitempty"`
+}
+
+// UploadPart is one piece of the reader's answer to a FileAsk, client to
+// server on the bulk channel. A part opening a new file carries Name (and
+// Mime/Size for display); Last closes the current file; Done closes the ask
+// and hands everything to the input. Err ends the ask with nothing — the
+// reader dismissed the picker — and the page sees a dismissed chooser.
+type UploadPart struct {
+	Ask  uint32 `cbor:"1,keyasint"`
+	Name string `cbor:"2,keyasint,omitempty"`
+	Mime string `cbor:"3,keyasint,omitempty"`
+	Size int64  `cbor:"4,keyasint,omitempty"`
+	Off  int64  `cbor:"5,keyasint,omitempty"`
+	Data []byte `cbor:"6,keyasint,omitempty"`
+	Last bool   `cbor:"7,keyasint,omitempty"`
+	Done bool   `cbor:"8,keyasint,omitempty"`
+	Err  string `cbor:"9,keyasint,omitempty"`
+}
 
 // ---------------------------------------------------------------------------
 // adapter bodies

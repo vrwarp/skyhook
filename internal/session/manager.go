@@ -65,6 +65,11 @@ type ManagerOptions struct {
 	// own and offers the reader the upgrade. Empty means no app is served, and
 	// then the question simply goes unanswered.
 	WebRoot string
+	// UploadDir is where the reader's files land on their way into a page's
+	// file input (P-007). Created and emptied at construction — staged files
+	// from a previous run belong to asks nobody holds any more — and wiped by
+	// the kill switch. Empty means uploads are off.
+	UploadDir string
 }
 
 // Manager owns the browser and the set of sessions.
@@ -116,8 +121,27 @@ func NewManager(br *cdp.Browser, images *imgproc.Pipeline, opts ManagerOptions) 
 		sessions:  map[string]*Session{},
 		clientApp: appver.NewReader(opts.WebRoot),
 	}
+	if opts.UploadDir != "" {
+		if err := os.MkdirAll(opts.UploadDir, 0o700); err != nil {
+			opts.Logger.Warn("uploads are off: staging dir unusable", "dir", opts.UploadDir, "err", err)
+			m.opts.UploadDir = ""
+		} else {
+			emptyDir(opts.UploadDir)
+		}
+	}
 	go m.janitor()
 	return m
+}
+
+// emptyDir deletes a directory's contents, best-effort.
+func emptyDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+	}
 }
 
 // Images exposes the shared image pipeline.
@@ -359,8 +383,12 @@ func (m *Manager) WipeProfile(ctx context.Context) error {
 		m.log.Warn("browser close during wipe", "err", err)
 	}
 	// The shelf goes with the profile: its files were fetched with the same
-	// cookies the wipe exists to destroy.
+	// cookies the wipe exists to destroy. Staged uploads are the reader's own
+	// files and go for the same reason.
 	m.WipeDownloads()
+	if m.opts.UploadDir != "" {
+		emptyDir(m.opts.UploadDir)
+	}
 	entries, err := os.ReadDir(m.opts.ProfileDir)
 	if err != nil {
 		return err

@@ -15,9 +15,9 @@ import { decode as cborDecode, Encoder } from 'cbor-x';
 import { decompress as zstdDecompress } from 'fzstd';
 
 import {
-  CaptureDone, CaptureRequest, Channel, ClipboardRelay, Download, DownloadPart, F, Frame,
-  FrameType, ImageMeta, MirrorNode, Mutation, MutationOp, NodeKind, OpCode, Snapshot, Stats,
-  TabState, Viewport, Welcome, AdapterRecord, TabRef,
+  CaptureDone, CaptureRequest, Channel, ClipboardRelay, Download, DownloadPart, F, FileAsk,
+  Frame, FrameType, ImageMeta, MirrorNode, Mutation, MutationOp, NodeKind, OpCode, Snapshot,
+  Stats, TabState, Viewport, Welcome, AdapterRecord, TabRef,
 } from './protocol.js';
 
 export const CODEC_RAW = 0;
@@ -363,6 +363,15 @@ export function decodeClipboard(body: unknown): ClipboardRelay {
   };
 }
 
+export function decodeFileAsk(body: unknown): FileAsk {
+  const f = bodyFields(body);
+  return {
+    id: num(f, F.fileAsk.id),
+    node: num(f, F.fileAsk.node),
+    multiple: bool(f, F.fileAsk.multiple),
+  };
+}
+
 export function decodeDownloadPart(body: unknown): DownloadPart {
   const f = bodyFields(body);
   const data = f?.[F.downloadPart.data];
@@ -564,6 +573,23 @@ export function captureRequestBody(o: { reason: string; note?: string }): Map<nu
  * `tagUint8Array: false`, so a Uint8Array encodes as a plain CBOR byte string,
  * which is what the Go decoder expects for a `[]byte` field.
  */
+export function uploadPartBody(o: {
+  ask: number; name?: string; mime?: string; size?: number; off?: number;
+  data?: Uint8Array; last?: boolean; done?: boolean; error?: string;
+}): Map<number, unknown> {
+  const m = new Map<number, unknown>();
+  m.set(F.uploadPart.ask, safeInt(o.ask));
+  if (o.name) m.set(F.uploadPart.name, o.name);
+  if (o.mime) m.set(F.uploadPart.mime, o.mime);
+  if (o.size) m.set(F.uploadPart.size, safeInt(o.size));
+  if (o.off) m.set(F.uploadPart.off, safeInt(o.off));
+  if (o.data?.length) m.set(F.uploadPart.data, o.data);
+  if (o.last) m.set(F.uploadPart.last, true);
+  if (o.done) m.set(F.uploadPart.done, true);
+  if (o.error) m.set(F.uploadPart.error, o.error);
+  return m;
+}
+
 export function downloadCmdBody(o: {
   id: string; cmd: 'fetch' | 'stop' | 'discard'; offset?: number;
 }): Map<number, unknown> {

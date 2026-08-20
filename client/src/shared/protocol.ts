@@ -56,6 +56,10 @@ export enum FrameType {
   // A copy the page performed landside because of the reader's own input,
   // relayed so their device's clipboard holds it too (P-008).
   Clipboard = 33,
+  // File upload (P-007): the page's chooser, intercepted landside and asked
+  // across the link; the reader's files go back the other way on bulk.
+  FileAsk = 34,
+  UploadPart = 35,
 }
 
 /** Why a diagnostic capture was taken. Matches the server's constants. */
@@ -404,6 +408,16 @@ export interface ClipboardRelay {
   cause: number;
 }
 
+/**
+ * A page's file chooser, intercepted landside (P-007). node names the
+ * mirrored input when the server could resolve it; zero is still answerable.
+ */
+export interface FileAsk {
+  id: number;
+  node: number;
+  multiple: boolean;
+}
+
 /** Field numbers, kept next to the decoders that use them. */
 export const F = {
   frame: { type: 1, tab: 2, seq: 3, base: 4, body: 5, cause: 6 },
@@ -468,4 +482,6 @@ export const F = {
   downloadCmd: { id: 1, cmd: 2, offset: 3 },
   downloadPart: { id: 1, off: 2, data: 3, done: 4, size: 5, error: 6 },
   clipboard: { text: 1, cause: 2 },
+  fileAsk: { id: 1, node: 2, multiple: 3 },
+  uploadPart: { ask: 1, name: 2, mime: 3, size: 4, off: 5, data: 6, last: 7, done: 8, error: 9 },
 } as const;

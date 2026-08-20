@@ -14,10 +14,10 @@
 import {
   ackBody, adapterCommandBody, capturePartBody, captureRequestBody, decodeAdapterBatch,
   decodeCaptureDone, decodeCaptureRequest, decodeClipboard, decodeDownload, decodeDownloadPart,
-  decodeError, decodeFrame, decodeImageData, decodeImageMeta, decodeMutation, decodeSnapshot,
-  decodeStats, decodeTabState, decodeWelcome, downloadCmdBody, encodeFrame, frameMessage,
-  helloBody, imageWantBody, inputBody, navigateBody, resyncBody, scrollBody, unframeMessage,
-  viewportBody, InputEventInit,
+  decodeError, decodeFileAsk, decodeFrame, decodeImageData, decodeImageMeta, decodeMutation,
+  decodeSnapshot, decodeStats, decodeTabState, decodeWelcome, downloadCmdBody, encodeFrame,
+  frameMessage, helloBody, imageWantBody, inputBody, navigateBody, resyncBody, scrollBody,
+  unframeMessage, uploadPartBody, viewportBody, InputEventInit,
 } from '../shared/codec.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { BUILD, CLIENT_ID } from '../shared/build.js';
@@ -430,6 +430,12 @@ function handleMessage(msg: Uint8Array): void {
     case FrameType.Clipboard:
       post('clipboard', decodeClipboard(frame.body) as unknown as Record<string, unknown>);
       break;
+    case FrameType.FileAsk:
+      post('fileAsk', {
+        tab: frame.tab,
+        ask: decodeFileAsk(frame.body) as unknown as Record<string, unknown>,
+      });
+      break;
     case FrameType.Error:
       post('log', { message: `server error: ${JSON.stringify(decodeError(frame.body))}` });
       break;
@@ -624,6 +630,51 @@ function ingestDownloadPart(p: DownloadPart): void {
   }
 }
 
+// -------------------------------------------------------------------- uploads
+
+/**
+ * The reader's answer to a file ask, streamed in order (P-007).
+ *
+ * File objects cross into this worker by reference, so reading and chunking
+ * them here keeps megabytes off the main thread. Strictly sequential for the
+ * same reason capture parts are: a chunk that overtakes its predecessor
+ * reassembles into a corrupt file landside — inside a page that will upload
+ * it somewhere believing it is the reader's.
+ */
+let uploadQueue: Promise<void> = Promise.resolve();
+
+function queueUpload(tab: number, ask: number, files: File[]): void {
+  uploadQueue = uploadQueue.then(() => sendUpload(tab, ask, files)).catch((err: unknown) => {
+    post('log', { message: `upload failed: ${String(err)}` });
+    void send(Channel.Bulk, encodeFrame(FrameType.UploadPart, tab,
+      uploadPartBody({ ask, error: String(err) })));
+  });
+}
+
+async function sendUpload(tab: number, ask: number, files: File[]): Promise<void> {
+  for (const file of files) {
+    let off = 0;
+    let first = true;
+    do {
+      const slice = file.slice(off, Math.min(off + CAPTURE_CHUNK, file.size));
+      const data = new Uint8Array(await slice.arrayBuffer());
+      const last = off + data.length >= file.size;
+      await send(Channel.Bulk, encodeFrame(FrameType.UploadPart, tab, uploadPartBody({
+        ask, off, data, last,
+        name: first ? (file.name || 'file') : undefined,
+        mime: first ? file.type : undefined,
+        size: first ? file.size : undefined,
+      })));
+      first = false;
+      off += data.length;
+    } while (off < file.size);
+    post('uploadProgress', { tab, ask, name: file.name, done: true });
+  }
+  await send(Channel.Bulk, encodeFrame(FrameType.UploadPart, tab,
+    uploadPartBody({ ask, done: true })));
+  post('uploadDone', { tab, ask, count: files.length });
+}
+
 // ------------------------------------------------------- commands from the app
 
 self.addEventListener('message', (event: MessageEvent) => {
@@ -752,6 +803,13 @@ self.addEventListener('message', (event: MessageEvent) => {
       fetches.delete(String(cmd.args.id));
       void send(Channel.Ctrl, encodeFrame(FrameType.DownloadCmd, 0,
         downloadCmdBody({ id: String(cmd.args.id), cmd: 'discard' })));
+      break;
+    case 'uploadFiles':
+      queueUpload(Number(cmd.args.tab), Number(cmd.args.ask), cmd.args.files as File[]);
+      break;
+    case 'uploadCancel':
+      void send(Channel.Bulk, encodeFrame(FrameType.UploadPart, Number(cmd.args.tab),
+        uploadPartBody({ ask: Number(cmd.args.ask), error: 'canceled' })));
       break;
     case 'kill':
       void send(Channel.Ctrl, encodeFrame(FrameType.Kill, 0));
