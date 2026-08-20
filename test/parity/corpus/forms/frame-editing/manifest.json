@@ -10,15 +10,5 @@
     {"do": "waitText", "value": "edited-top: hi", "name": "a top-level edit reaches the page"},
     {"do": "type", "target": "#pad-frame", "value": "yo"},
     {"do": "waitText", "value": "edited-frame: yo", "within": 12, "name": "an edit inside a frame reaches its page"}
-  ],
-  "expectedFail": {
-    "interaction": {
-      "gap": "P-102",
-      "reason": "setvalue is evaluated in the top-level agent's world, where a frame's node ids name nothing"
-    },
-    "text": {
-      "gap": "P-102",
-      "reason": "the echo shows the reader their edit locally, so the two halves end holding different text"
-    }
-  }
+  ]
 }

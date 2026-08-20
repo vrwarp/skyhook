@@ -342,7 +342,7 @@ function handle(kind: string, args: Record<string, unknown>): void {
       void applySnapshot(Number(args.tab), args.snapshot as Snapshot);
       break;
     case 'mutation':
-      void applyMutation(Number(args.tab), args.mutation as Mutation, Number(args.seq));
+      void applyMutation(Number(args.tab), args.mutation as Mutation, Number(args.seq), Number(args.cause ?? 0));
       break;
     case 'tabState': {
       const st = args.state as TabState;
@@ -452,9 +452,9 @@ async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
   if (progress.arrived(tab, snap.url)) renderProgress();
 }
 
-async function applyMutation(tab: number, m: Mutation, seq: number): Promise<void> {
+async function applyMutation(tab: number, m: Mutation, seq: number, cause = 0): Promise<void> {
   const host = await hostFor(tab);
-  host?.applyMutation(m, seq);
+  host?.applyMutation(m, seq, cause);
 }
 
 async function hostFor(tab: number): Promise<MirrorHost | null> {

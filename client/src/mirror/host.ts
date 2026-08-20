@@ -419,6 +419,10 @@ export class MirrorHost {
   private echo: EchoEngine | null = null;
   private doc: Document | null = null;
   private inputSeq = 0;
+  /** The newest input the reader made whose point was to move focus. */
+  private lastFocusInputSeq = 0;
+  /** Which input provoked the mutation being applied right now, 0 if none. */
+  private applyingCause = 0;
   private lastSeq = 0;
   private pendingImages = new Map<string, HTMLImageElement[]>();
   /** Canvas and video elements waiting for the bytes of a region shot. */
@@ -584,6 +588,13 @@ export class MirrorHost {
       rewriteCSS: (rule) => this.resolveCSSImages(rule),
       onFocus: (node) => {
         if (this.echo?.ownedId) return;
+        // A focus echo provoked by an input older than the reader's latest
+        // focus-moving gesture is the past calling (P-121): mid-gesture,
+        // between one field's ownership ending and the next one's starting,
+        // it used to yank focus back to the field the reader had just left —
+        // and everything typed landed in the wrong box. A cause of zero is
+        // the page's own script moving focus, which is current by definition.
+        if (this.applyingCause && this.applyingCause < this.lastFocusInputSeq) return;
         // preventScroll matters more here than it looks: focusing an element
         // scrolls it into view by default, so a landside focus change — a click
         // landing on a control, page script focusing a search box — would throw
@@ -625,6 +636,13 @@ export class MirrorHost {
 
   private send(ev: Record<string, unknown>): void {
     this.inputSeq += 1;
+    // Where focus last moved because the reader moved it. A click's default
+    // action is a focus change, so clicks count with the explicit pair.
+    const k = ev.kind;
+    if (k === InputKind.Click || k === InputKind.DblClick || k === InputKind.Context ||
+        k === InputKind.Focus || k === InputKind.Blur) {
+      this.lastFocusInputSeq = this.inputSeq;
+    }
     this.events.input(this.tab, {
       tab: this.tab,
       seq: this.inputSeq,
@@ -1051,7 +1069,27 @@ export class MirrorHost {
       this.echo?.blur((op) => this.applyOne(op), this.pressing);
       if (held) this.heldBlur = held;
     }, true);
-    doc.addEventListener('input', (ev) => this.echo?.input(ev as InputEvent), true);
+    // The composed target, not ev.target: a field inside a mirrored
+    // sub-document lives in a shadow root, and by the time the event reaches
+    // the document it has been retargeted to name the frame's stand-in — so
+    // the echo compared the wrong element and dropped the edit (P-102).
+    doc.addEventListener('input',
+      (ev) => this.echo?.input(ev as InputEvent, this.eventTarget(ev)), true);
+    // A select's popup is native here — the reader really does choose from
+    // it — but the choice used to stay in the mirror: nothing sent it, and
+    // the landside page's own select never changed (P-101). The change event
+    // is the moment the choice is settled; multiple selects join their
+    // values the way form submission does.
+    doc.addEventListener('change', (ev) => {
+      const el = this.eventTarget(ev) as HTMLSelectElement | null;
+      if (!el || el.tagName !== 'SELECT') return;
+      const node = this.patcher?.idOf(el) ?? 0;
+      if (!node) return;
+      const value = el.multiple
+        ? Array.from(el.selectedOptions).map((o) => o.value).join('\n')
+        : el.value;
+      this.send({ kind: InputKind.SetValue, node, text: value });
+    }, true);
     doc.addEventListener('keydown', (ev) => {
       const key = ev as KeyboardEvent;
       // Escape shuts the shell's menu before it means anything to the page.
@@ -1538,8 +1576,9 @@ export class MirrorHost {
     this.requestPendingImages();
   }
 
-  applyMutation(m: Mutation, seq: number): void {
+  applyMutation(m: Mutation, seq: number, cause = 0): void {
     if (!this.patcher) return;
+    this.applyingCause = cause;
     // A batch this document has already had. The worker drops replays before
     // they get here, but it decides from what it has handed over and this is
     // what has actually been applied — the two differ across a reconnect, where
@@ -1557,6 +1596,7 @@ export class MirrorHost {
       return !this.echo?.defer(op, (id) => this.patcher?.nodeFor(id));
     });
     this.patcher.applyMutation({ ...m, ops }, seq);
+    this.applyingCause = 0;
     this.retireGhosts();
     this.requestPendingImages();
   }

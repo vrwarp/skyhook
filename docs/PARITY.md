@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-52 gaps: 34 open, 10 by-design, 7 fixed, 1 disproven.
+52 gaps: 31 open, 10 by-design, 10 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -143,8 +143,8 @@ The table below is generated from `gaps.json` and the corpus by
 | P-021 | open | A mirrored sub-document is laid out plane-side against a box, not a viewport: reader fonts, no percentage heights, fixed and sticky resolve against the wrong thing | frames/viewport-units |
 | P-022 | by-design | A cross-origin frame that cannot be mirrored stays a labelled box; past the depth or count limits, so does one that could be | — |
 | P-023 | open | A cross-origin frame smaller than 64x32 gets no label at all — indistinguishable from a bug | — the missing label is a policy about one half, not a divergence between them — both probes agree about a tiny unlabelled box; recorded until the affordance floor is asserted somewhere |
-| P-101 | open | A select change never reaches the landside page except through a form submit | forms/select |
-| P-102 | open | setvalue and blur are dispatched to the top-level agent only; a non-append edit inside a mirrored cross-origin frame is silently lost | forms/frame-editing |
+| P-101 | fixed | A select change never reaches the landside page except through a form submit | forms/select |
+| P-102 | fixed | setvalue and blur are dispatched to the top-level agent only; a non-append edit inside a mirrored cross-origin frame is silently lost | forms/frame-editing |
 | P-103 | open | A blob: image source serialises as a landside blob URL the client can never fetch: a broken image with no fallback and no Missing notice | images/blob-src |
 | P-104 | open | Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing | — a favicon is chrome UI, invisible to the mirror probes; recorded so the dead wire surface is not mistaken for a feature |
 | P-105 | by-design | HTML comments are never mirrored, though KindComment exists on both halves of the protocol | — |
@@ -163,7 +163,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-118 | open | The GIF tap-to-play the transcoder's comment promises does not exist in the client | — the still-frame half is P-016's page; this records the docs-versus-code drift so one of them gets fixed |
 | P-119 | fixed | The mirror's own :root color and font leak into pages that rely on UA defaults | css/ua-defaults, real/hn-front, real/wikipedia-article |
 | P-120 | fixed | A top margin that collapses through the page's body is lost at the mirror boundary | css/margin-collapse |
-| P-121 | open | The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left | — timing-dependent by nature: the executor settles before each step so every other page measures its own gap, and a page for this needs a deliberate fast-click knob in the executor first |
+| P-121 | fixed | The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left | — timing-dependent by nature: the executor settles before each step so every other page measures its own gap; the guard is exercised by every interaction page's focus traffic and the fix is pinned by the staleness comparison itself |
 | P-122 | open | Top-layer state does not cross: a popover the page showed, or a modal dialog, is closed in the mirror | textmisc/disclosure |
 | P-123 | open | In the script-disabled mirror a canvas is not a replaced element: it stretches to its container and its attribute aspect ratio scales it | media/canvas, media/canvas-restyle |
 | P-124 | fixed | The document hash disagrees across languages on non-ASCII text: the agent and patcher fold UTF-16 code units while the Go replicas fold byte-indexed runes, so a healthy mirror of any page with a multi-byte character in a text node's first 32 characters reports divergence | — |

@@ -175,6 +175,7 @@
   var boxWatch = new Map();
   var boxDirty = new Set();      // frames to re-measure before the next flush
   var boxObservers = new Map();  // window -> its ResizeObserver
+  var imgShipped = new WeakMap(); // img element -> the "WxH" the client was told
   var reframeTimer = null;
   var pendingOps = [];
   var pendingImages = [];
@@ -247,7 +248,7 @@
       lastText.delete(id);
       lastScroll.delete(id);
     }
-    if (node.tagName === 'IFRAME') unwatchBox(node);
+    if (node.tagName === 'IFRAME' || VOID_IMAGE_TAGS[node.tagName]) unwatchBox(node);
     liveWatch.delete(node);
     var kids = node.childNodes;
     if (kids) for (var i = 0; i < kids.length; i++) forget(kids[i]);
@@ -453,6 +454,7 @@
         if (img.w) pairs.push(intern('width'), intern(String(img.w)));
         if (img.h) pairs.push(intern('height'), intern(String(img.h)));
         pendingImages.push(img);
+        watchImg(el, img.w, img.h);
       }
     }
     out.flags = flags;
@@ -529,6 +531,21 @@
   function watchBox(el, box, host) {
     boxWatch.set(el, box + ' ' + host);
     boxDirty.delete(el);
+    observeResize(el);
+  }
+
+  // watchImg remembers the size an image was described at. The description is
+  // a measurement, and it is routinely taken early: an image serialised before
+  // the page's stylesheet has loaded ships the box it has *without* that CSS,
+  // and nothing in a MutationObserver ever corrects it — the border that
+  // arrives with the sheet changes layout, not the DOM. The client then holds
+  // a width= the landside page stopped rendering half a second in.
+  function watchImg(el, w, h) {
+    imgShipped.set(el, w + 'x' + h);
+    observeResize(el);
+  }
+
+  function observeResize(el) {
     var win = null;
     try { win = el.ownerDocument && el.ownerDocument.defaultView; } catch (e) { win = null; }
     if (!win || typeof win.ResizeObserver !== 'function') return;
@@ -541,8 +558,9 @@
   }
 
   function unwatchBox(el) {
-    if (!boxWatch.has(el)) return;
+    if (!boxWatch.has(el) && !imgShipped.has(el)) return;
     boxWatch.delete(el);
+    imgShipped.delete(el);
     boxDirty.delete(el);
     boxObservers.forEach(function (obs) {
       try { obs.unobserve(el); } catch (e) { /* not this one's */ }
@@ -561,6 +579,7 @@
       var el = els[i];
       var id = idOf.get(el);
       if (id === undefined || !el.isConnected) { unwatchBox(el); continue; }
+      if (imgShipped.has(el)) { syncImg(el, id); continue; }
       var box = frameBox(el);
       var host = opaqueHost(el, box);
       var was = (boxWatch.get(el) || ' ').split(' ');
@@ -573,6 +592,20 @@
         pendingOps.push([3, id, intern(OPAQUE_ATTR), host ? intern(host) : -1]);
       }
     }
+  }
+
+  // syncImg re-states an image's size when the rendered box has drifted from
+  // the one it was described with. Only the attributes move: the transcode
+  // keyed to the old size is a few pixels soft at worst, which is invisible,
+  // while a wrong width= is a wrong layout for every element beside it.
+  function syncImg(el, id) {
+    var img = describeImage(el, docBase(el));
+    if (!img) return;
+    var now = img.w + 'x' + img.h;
+    if (imgShipped.get(el) === now) return;
+    imgShipped.set(el, now);
+    if (img.w) pendingOps.push([3, id, intern('width'), intern(String(img.w))]);
+    if (img.h) pendingOps.push([3, id, intern('height'), intern(String(img.h))]);
   }
 
   // ------------------------------------------------------ live control state
@@ -2220,7 +2253,7 @@
       fetch(href, { credentials: 'include' }).then(function (r) {
         return r && r.ok ? r.text() : null;
       }).then(function (t) {
-        if (t) { sheetSources.set(href, t); scheduleCSS(); }
+        if (t) { sheetSources.set(href, t); sheetSourceFetches.set(href, 'ok'); scheduleCSS(); }
         else { sheetSourceFetches.set(href, 'failed'); }
       }, function () { sheetSourceFetches.set(href, 'failed'); });
     } catch (e) { sheetSourceFetches.set(href, 'failed'); }
@@ -3884,6 +3917,44 @@
       // frame's field reports a failure that did not happen.
       return el.ownerDocument.activeElement === el;
     },
+    /*
+     * insertText types into a node from inside its own document, for the
+     * frames CDP typing cannot reach: Input.insertText goes to the
+     * browser's focused frame, and focusing an element from within an
+     * inlined frame's agent does not make that frame the focused one — so
+     * a keystroke aimed into a frame landed in the top document's body and
+     * vanished (the other half of P-102). Contenteditable goes through
+     * execCommand, which fires the input events a framework listens for;
+     * fields splice at the caret through the native setter.
+     */
+    insertText: function (id, text) {
+      var el = byId.get(id);
+      if (!el || !text) return false;
+      try { el.focus({ preventScroll: true }); } catch (e) { /* still typed below */ }
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        var proto = el.tagName === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        var cur = el.value || '';
+        var s = typeof el.selectionStart === 'number' ? el.selectionStart : cur.length;
+        var e2 = typeof el.selectionEnd === 'number' ? el.selectionEnd : s;
+        setter.call(el, cur.slice(0, s) + text + cur.slice(e2));
+        try { el.setSelectionRange(s + text.length, s + text.length); } catch (e) { /* number inputs */ }
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        return true;
+      }
+      if (el.isContentEditable) {
+        // execCommand reports failure by returning false, not by throwing —
+        // and it does fail, in a frame whose document does not hold the
+        // browser's focus. The fallback types the crude way: append and say so.
+        var done = false;
+        try { done = el.ownerDocument.execCommand('insertText', false, text); } catch (e) { done = false; }
+        if (done) return true;
+        el.textContent = (el.textContent || '') + text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
+        return true;
+      }
+      return false;
+    },
     setValue: function (id, value, start, end) {
       var el = byId.get(id);
       if (!el) return false;
@@ -3895,6 +3966,30 @@
           try { el.setSelectionRange(start, typeof end === 'number' ? end : start); } catch (e) { /* number inputs */ }
         }
         // Frameworks listen for input/change, not for value assignment.
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        return true;
+      }
+      if (el.tagName === 'SELECT') {
+        // The reader chose from the mirror's own popup; here the choice is
+        // applied as a value, exactly as typing is (P-101 — a select's
+        // change used to reach this page only inside a form submit). The
+        // native setter sidesteps any page-patched accessor, and a value
+        // no option answers to leaves the control unchanged, which is what
+        // the real popup would have done too. A multiple select crosses as
+        // its selected values joined with newlines, which no option value
+        // can contain.
+        if (el.multiple) {
+          var want = {};
+          var parts = String(value).split('\n');
+          for (var pi = 0; pi < parts.length; pi++) want[parts[pi]] = true;
+          for (var oi = 0; oi < el.options.length; oi++) {
+            el.options[oi].selected = !!want[el.options[oi].value];
+          }
+        } else {
+          var sel = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+          sel.call(el, value);
+        }
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         return true;

@@ -2,11 +2,11 @@
   "page": "forms/select",
   "dimensions": {
     "attributes": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "attrsExtraPlane": 1,
-        "attrsMissingPlane": 1,
-        "nodesDiffering": 2,
+        "attrsExtraPlane": 0,
+        "attrsMissingPlane": 0,
+        "nodesDiffering": 0,
         "valuesDiffering": 0
       }
     },
@@ -21,9 +21,9 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 1
+        "failed": 0
       },
       "checks": [
         {
@@ -32,7 +32,7 @@
         },
         {
           "name": "a select change reaches the page",
-          "pass": false
+          "pass": true
         }
       ]
     },
@@ -80,10 +80,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "attributes": "P-101",
-    "interaction": "P-101"
   },
   "gaps": [
     "P-101"

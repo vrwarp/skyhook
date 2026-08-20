@@ -211,21 +211,22 @@
     {
       "id": "P-101",
       "title": "A select change never reaches the landside page except through a form submit",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/agent.js",
         "internal/mirror/input.go:603"
       ],
-      "notes": "setValue handles INPUT, TEXTAREA and contenteditable and answers false for everything else; the echo shows the reader their choice and the page never hears it"
+      "notes": "fixed two-sided: the host sends a change event's selection as a setvalue (multiple selects join their values with newlines, the way submit serializes them), and the agent's setValue grew a SELECT branch that picks options through the native value setter and fires input+change. forms/select's interaction and attributes dimensions pin it"
     },
     {
       "id": "P-102",
       "title": "setvalue and blur are dispatched to the top-level agent only; a non-append edit inside a mirrored cross-origin frame is silently lost",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/input.go:603",
         "internal/mirror/frames.go:598"
-      ]
+      ],
+      "notes": "three fixes, one per leg: setvalue and blur route through evalInSlot like every other input; typed text is spliced by the frame's own agent (__skyhook.insertText) because Input.insertText only reaches the browser's focused frame, which a programmatic focus inside an inlined frame never is; and the host hands the echo the composed event target, since an input event from a sub-document's shadow root reaches the document renamed to the frame's stand-in. forms/frame-editing pins all three"
     },
     {
       "id": "P-103",
@@ -400,13 +401,13 @@
     {
       "id": "P-121",
       "title": "The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/host.ts",
         "internal/mirror/input.go"
       ],
-      "notes": "found by the interaction executor's first run: reader focuses A, the landside replay confirms it, the reader clicks B, and the confirmation for A — applied through the host's onFocus in the gap after ownership of A ends — steals focus back. On the 1.2s link this bites any reader who moves between fields within a round trip.",
-      "noPage": "timing-dependent by nature: the executor settles before each step so every other page measures its own gap, and a page for this needs a deliberate fast-click knob in the executor first"
+      "notes": "the host now stamps every focus-moving input with its sequence number and each mutation carries the input that caused it, so onFocus drops a focus echo whose cause predates the last focus-moving input (host.ts applyingCause < lastFocusInputSeq): the confirmation of a field the reader already left arrives, is recognised as stale, and moves nothing.",
+      "noPage": "timing-dependent by nature: the executor settles before each step so every other page measures its own gap; the guard is exercised by every interaction page's focus traffic and the fix is pinned by the staleness comparison itself"
     },
     {
       "id": "P-122",

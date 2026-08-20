@@ -81,7 +81,11 @@ func (t *Tab) dispatchInput(ctx context.Context, ev *protocol.InputEvent) error 
 		_, err := t.evalInSlot(ctx, frameSlot(ev.Node), fmt.Sprintf("__skyhook.focus(%d)", ev.Node))
 		return err
 	case protocol.InBlur:
-		_, err := t.eval(ctx, "document.activeElement && document.activeElement.blur()")
+		// In the slot the node lives in, like every other input (P-102): a
+		// blur aimed at a field inside an inlined frame used to reach the top
+		// document, whose activeElement is the frame element itself.
+		_, err := t.evalInSlot(ctx, frameSlot(ev.Node),
+			"document.activeElement && document.activeElement.blur()")
 		return err
 	case protocol.InSubmit:
 		return t.submit(ctx, ev)
@@ -552,7 +556,15 @@ func (t *Tab) insertText(ctx context.Context, ev *protocol.InputEvent) error {
 	if ev.Text == "" {
 		return nil
 	}
-	if err := t.sess.Do(ctx, "Input.insertText", map[string]any{"text": ev.Text}, nil); err != nil {
+	if slot := frameSlot(ev.Node); slot != 0 {
+		// Input.insertText goes to the frame the browser considers focused,
+		// and focusing an element inside an inlined frame programmatically
+		// does not make that frame it (P-102). Splice in-world instead.
+		expr := fmt.Sprintf("__skyhook.insertText(%d,%s)", ev.Node, jsString(ev.Text))
+		if _, err := t.evalInSlot(ctx, slot, expr); err != nil {
+			return err
+		}
+	} else if err := t.sess.Do(ctx, "Input.insertText", map[string]any{"text": ev.Text}, nil); err != nil {
 		return err
 	}
 	go t.flushSoon(120 * time.Millisecond)
@@ -603,7 +615,10 @@ func (t *Tab) key(ctx context.Context, ev *protocol.InputEvent) error {
 func (t *Tab) setValue(ctx context.Context, ev *protocol.InputEvent) error {
 	expr := fmt.Sprintf("__skyhook.setValue(%d,%s,%d,%d)",
 		ev.Node, jsString(ev.Text), ev.Start, ev.End)
-	if _, err := t.eval(ctx, expr); err != nil {
+	// In the node's own slot, the way submit always was (P-102): a bare eval
+	// reached only the top agent, and a non-append edit inside an inlined
+	// frame was silently lost.
+	if _, err := t.evalInSlot(ctx, frameSlot(ev.Node), expr); err != nil {
 		return err
 	}
 	go t.flushSoon(120 * time.Millisecond)

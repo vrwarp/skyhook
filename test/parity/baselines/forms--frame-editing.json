@@ -21,9 +21,9 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 1
+        "failed": 0
       },
       "checks": [
         {
@@ -32,7 +32,7 @@
         },
         {
           "name": "an edit inside a frame reaches its page",
-          "pass": false
+          "pass": true
         }
       ]
     },
@@ -75,15 +75,11 @@
       }
     },
     "text": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "nodesDiffering": 1
+        "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "interaction": "P-102",
-    "text": "P-102"
   },
   "gaps": [
     "P-102"

@@ -497,6 +497,21 @@ func settleTab(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.
 			time.Sleep(250 * time.Millisecond)
 			continue
 		}
+		// The checkpoint drains mutations that exist; it cannot drain the CSS
+		// pass the agent has merely scheduled, or the sheet-source fetch the
+		// var() shorthand repair is still waiting on — either one means the
+		// stylesheet the client holds is about to change (and with it layout,
+		// and with layout the boxes every image is re-described against).
+		var diag struct {
+			CSSPending bool `json:"cssPending"`
+		}
+		if raw, err := mt.AgentDiag(ctx); err == nil {
+			_ = json.Unmarshal(raw, &diag)
+		}
+		if diag.CSSPending {
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
 		var raw json.RawMessage
 		evalJSON(ctx, t, page, fmt.Sprintf(`window.__skyhookParity(%d)`, tab), &raw)
 		if len(raw) == 0 || string(raw) == "null" {

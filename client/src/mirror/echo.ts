@@ -89,10 +89,12 @@ export class EchoEngine {
     for (const op of owned.deferred) apply(op);
   }
 
-  /** Called on input events in the owned element. */
-  input(ev: InputEvent): void {
+  /** Called on input events in the owned element. `target` is the composed
+   *  target when the caller has one — `ev.target` renames an event from
+   *  inside a shadow root to the host, which is never the owned field. */
+  input(ev: InputEvent, target?: EventTarget | null): void {
     const owned = this.owned;
-    if (!owned || ev.target !== owned.node) return;
+    if (!owned || (target ?? ev.target) !== owned.node) return;
     const now = valueOf(owned.node);
     const prev = owned.local;
     owned.local = now;
