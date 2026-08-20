@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-52 gaps: 31 open, 10 by-design, 10 fixed, 1 disproven.
+52 gaps: 27 open, 10 by-design, 14 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -145,10 +145,10 @@ The table below is generated from `gaps.json` and the corpus by
 | P-023 | open | A cross-origin frame smaller than 64x32 gets no label at all — indistinguishable from a bug | — the missing label is a policy about one half, not a divergence between them — both probes agree about a tiny unlabelled box; recorded until the affordance floor is asserted somewhere |
 | P-101 | fixed | A select change never reaches the landside page except through a form submit | forms/select |
 | P-102 | fixed | setvalue and blur are dispatched to the top-level agent only; a non-append edit inside a mirrored cross-origin frame is silently lost | forms/frame-editing |
-| P-103 | open | A blob: image source serialises as a landside blob URL the client can never fetch: a broken image with no fallback and no Missing notice | images/blob-src |
+| P-103 | fixed | A blob: image source serialises as a landside blob URL the client can never fetch: a broken image with no fallback and no Missing notice | images/blob-src |
 | P-104 | open | Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing | — a favicon is chrome UI, invisible to the mirror probes; recorded so the dead wire surface is not mistaken for a feature |
 | P-105 | by-design | HTML comments are never mirrored, though KindComment exists on both halves of the protocol | — |
-| P-106 | open | object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box | textmisc/object-embed |
+| P-106 | fixed | object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box | textmisc/object-embed |
 | P-107 | open | Dead wire surface: TypeIntegrity, OpImage and ScrollEvent.Visible are never produced or consumed | — wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it |
 | P-108 | open | Downloads are unhandled: a download link writes a file onto the VPS and the reader sees nothing happen | — clicking a download link landside leaves a file on the test host and no observable mirror change to assert on; needs Browser.setDownloadBehavior wiring first |
 | P-109 | open | window.open and a plain click on target=_blank open a landside tab no client tab will ever show | nav/target-blank |
@@ -164,8 +164,8 @@ The table below is generated from `gaps.json` and the corpus by
 | P-119 | fixed | The mirror's own :root color and font leak into pages that rely on UA defaults | css/ua-defaults, real/hn-front, real/wikipedia-article |
 | P-120 | fixed | A top margin that collapses through the page's body is lost at the mirror boundary | css/margin-collapse |
 | P-121 | fixed | The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left | — timing-dependent by nature: the executor settles before each step so every other page measures its own gap; the guard is exercised by every interaction page's focus traffic and the fix is pinned by the staleness comparison itself |
-| P-122 | open | Top-layer state does not cross: a popover the page showed, or a modal dialog, is closed in the mirror | textmisc/disclosure |
-| P-123 | open | In the script-disabled mirror a canvas is not a replaced element: it stretches to its container and its attribute aspect ratio scales it | media/canvas, media/canvas-restyle |
+| P-122 | fixed | Top-layer state does not cross: a popover the page showed, or a modal dialog, is closed in the mirror | textmisc/disclosure |
+| P-123 | fixed | In the script-disabled mirror a canvas is not a replaced element: it stretches to its container and its attribute aspect ratio scales it | media/canvas, media/canvas-restyle |
 | P-124 | fixed | The document hash disagrees across languages on non-ASCII text: the agent and patcher fold UTF-16 code units while the Go replicas fold byte-indexed runes, so a healthy mirror of any page with a multi-byte character in a text node's first 32 characters reports divergence | — |
 | P-125 | open | The mirror renders every page in standards mode: a quirks-mode page loses its quirks — table cells stop refusing the page font, and the geometry cascade follows | real/hn-front |
 | P-126 | fixed | A shorthand property set with var() loses its longhands in used-CSS extraction: the CSSOM serialises them as empty strings, the wire carries “border-top-color: ;”, and the mirror's parser drops the declarations | css/var-shorthand, real/wikipedia-article |

@@ -546,6 +546,8 @@ export class Patcher {
         const style = (el as HTMLElement).style;
         style.removeProperty('width');
         style.removeProperty('height');
+      } else if (lower === 'data-sky-display') {
+        (el as HTMLElement).style.removeProperty('display');
       } else if (lower === 'data-sky-checked') {
         // These two carry properties, and a property is not unset by dropping
         // the attribute that described it. The mark going away means the page
@@ -554,6 +556,11 @@ export class Patcher {
         (el as HTMLInputElement).checked = false;
       } else if (lower === 'data-sky-selected') {
         (el as HTMLOptionElement).selected = false;
+      } else if (lower === 'data-sky-open') {
+        // The mark going away is the popover hidden or the dialog closed.
+        this.applyTopLayer(el as HTMLElement, null);
+      } else if (el.tagName === 'CANVAS' && (lower === 'width' || lower === 'height')) {
+        this.sizeCanvas(el as HTMLElement);
       }
       return;
     }
@@ -617,7 +624,66 @@ export class Patcher {
       (el as HTMLInputElement).checked = value === '1';
     } else if (lower === 'data-sky-selected') {
       (el as HTMLOptionElement).selected = value === '1';
+    } else if (lower === 'data-sky-open') {
+      this.applyTopLayer(el as HTMLElement, value);
+    } else if (lower === 'data-sky-display') {
+      this.applyDisplay(el as HTMLElement, value);
+    } else if (el.tagName === 'CANVAS' && (lower === 'width' || lower === 'height')) {
+      this.sizeCanvas(el as HTMLElement);
     }
+  }
+
+  /** The display the landside plugin computed. `inline` becomes inline-block
+   *  because the real element was replaced — it honoured its box inline —
+   *  and the stand-in is an ordinary div that would not. */
+  private applyDisplay(el: HTMLElement, display: string): void {
+    el.style.display = display === 'inline' ? 'inline-block' : display;
+  }
+
+  /**
+   * Reproduces top-layer membership (P-122): a popover the landside page
+   * showed, or a dialog it made modal, is rendering state no ordinary
+   * attribute carries — the mirror held the same DOM with the popover closed.
+   *
+   * Deferred a microtask because the state arrives with the element's other
+   * attributes, and showPopover throws on an element that is not yet in the
+   * document; by the time the microtask runs the batch that carried it has
+   * finished building the tree. The calls throw on state that is already
+   * right, which is fine — arriving twice is not a change.
+   */
+  private applyTopLayer(el: HTMLElement, state: string | null): void {
+    queueMicrotask(() => {
+      try {
+        if (state === 'popover') el.showPopover?.();
+        else if (state === 'modal') {
+          // showModal refuses a dialog already open; the wire's `open`
+          // attribute describes the shown state this call is about to create.
+          el.removeAttribute('open');
+          (el as HTMLDialogElement).showModal?.();
+        } else {
+          if (el.popover != null) el.hidePopover?.();
+          if (el.tagName === 'DIALOG') (el as HTMLDialogElement).close?.();
+        }
+      } catch { /* already in the asked-for state, or detached again */ }
+    });
+  }
+
+  /**
+   * Restates a canvas's landside intrinsic size.
+   *
+   * In this scripting-disabled document a canvas is not a replaced element —
+   * the spec says it renders as its fallback content — so it has no intrinsic
+   * 300x150, stretches to its container, and its attribute aspect ratio
+   * scales it (P-123). The size goes into inline custom properties rather
+   * than width/height so the page's own CSS keeps beating it through the
+   * shell's zero-specificity rule, the way author CSS beats a replaced
+   * element's intrinsic size landside.
+   */
+  private sizeCanvas(el: HTMLElement): void {
+    const w = Number(el.getAttribute('width'));
+    const h = Number(el.getAttribute('height'));
+    el.style.setProperty('--sky-canvas-w', `${w > 0 ? w : 300}px`);
+    el.style.setProperty('--sky-canvas-h', `${h > 0 ? h : 150}px`);
   }
 
   /**
@@ -636,6 +702,11 @@ export class Patcher {
   private restoreOwnStyle(el: Element, live: boolean): void {
     const box = el.getAttribute('data-sky-box');
     if (box !== null) this.applyBox(el, box);
+    const disp = el.getAttribute('data-sky-display');
+    if (disp !== null) this.applyDisplay(el as HTMLElement, disp);
+    // The intrinsic-size properties live in the same inline declaration the
+    // page's write just replaced.
+    if (el.tagName === 'CANVAS') this.sizeCanvas(el as HTMLElement);
     if (live) this.hooks.onRestyled?.(el as HTMLElement);
   }
 

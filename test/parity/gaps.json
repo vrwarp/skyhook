@@ -231,11 +231,12 @@
     {
       "id": "P-103",
       "title": "A blob: image source serialises as a landside blob URL the client can never fetch: a broken image with no fallback and no Missing notice",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/agent.js",
-        "client/src/mirror/patcher.ts"
-      ]
+        "internal/mirror/tab.go"
+      ],
+      "notes": "a blob image is described and shipped like any other; the bytes are read by an in-page fetch (Tab.fetchBlob) because only the page's own realm can resolve the URL the network stack has never heard of. A blob a frame minted, or one the page revoked before the pipeline asked, still fails — to the Missing notice now, not to a silent broken image. images/blob-src pins the working case"
     },
     {
       "id": "P-104",
@@ -260,10 +261,12 @@
     {
       "id": "P-106",
       "title": "object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "internal/mirror/agent.js"
-      ]
+        "internal/mirror/agent.js",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "plugin containers now cross on the iframe bargain: the element (not its fallback children), its measured box, its computed display — the CSS that made it a block selects a tag the stand-in no longer answers to — and a host label when the box is big enough to owe one. textmisc/object-embed's geometry pins the healed hole"
     },
     {
       "id": "P-107",
@@ -412,22 +415,22 @@
     {
       "id": "P-122",
       "title": "Top-layer state does not cross: a popover the page showed, or a modal dialog, is closed in the mirror",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/agent.js",
         "client/src/mirror/patcher.ts"
       ],
-      "notes": "found by the corpus's first run: showPopover() puts an element in the top layer landside, which is rendering state no attribute carries — the mirror holds the same DOM with the popover closed"
+      "notes": "the agent reports top-layer membership as data-sky-open — read at serialisation and kept current by capture-phase toggle/close listeners, since the events do not bubble — and the patcher reproduces it with showPopover()/showModal() in the mirror's own document, whose top layer is the frame's. textmisc/disclosure's style dimension pins the shown popover"
     },
     {
       "id": "P-123",
       "title": "In the script-disabled mirror a canvas is not a replaced element: it stretches to its container and its attribute aspect ratio scales it",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/host.ts",
-        "internal/mirror/agent.js"
+        "client/src/mirror/patcher.ts"
       ],
-      "notes": "found by the corpus's first run: with scripting off the spec renders <canvas> as its fallback content, so a 200x120 canvas fills the mirror's width at 1264x759 while its photograph waits to be painted over it. Sizing the stand-in from the width/height attributes, the way data-sky-box sizes a frame, is the likely fix"
+      "notes": "the patcher restates the landside intrinsic size (width/height attributes, spec defaults 300x150 absent them) as inline custom properties, and the shell's zero-specificity :where(canvas) rule renders them — so the page's own CSS still overrides the size exactly as it overrides a real canvas's intrinsic one. media/canvas and media/canvas-restyle geometry pin it"
     },
     {
       "id": "P-124",

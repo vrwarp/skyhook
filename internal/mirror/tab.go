@@ -1435,10 +1435,52 @@ func (t *Tab) emitFrameMutation(f *subFrame, m *agentMutation) {
 // frame as the initiator. The image pipeline uses it so that assets are
 // fetched by the client that rendered the page, not beside it.
 func (t *Tab) FetchResource(ctx context.Context, url string, limit int) ([]byte, error) {
+	if strings.HasPrefix(url, "blob:") {
+		// A blob URL names bytes held by the page's own process; the network
+		// stack that loadNetworkResource asks has never heard of it (P-103).
+		// The page's realm is the one place it resolves, so ask there.
+		return t.fetchBlob(ctx, url, limit)
+	}
 	t.mu.Lock()
 	frame := t.frameID
 	t.mu.Unlock()
 	return t.sess.FetchResource(ctx, frame, url, limit)
+}
+
+// fetchBlob reads a blob: URL from inside the page and carries the bytes out
+// base64'd, the way rasterJS carries pixels. The agent's isolated world shares
+// the page's origin, which is the scope a blob URL is minted for.
+func (t *Tab) fetchBlob(ctx context.Context, url string, limit int) ([]byte, error) {
+	expr := fmt.Sprintf(`(async () => {
+  try {
+    const r = await fetch(%s);
+    if (!r.ok) return '!http ' + r.status;
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength > %d) return '!larger than the transcoder accepts';
+    const u8 = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < u8.length; i += 32768) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + 32768));
+    }
+    return btoa(s);
+  } catch (e) { return '!' + (e && e.message ? e.message : e); }
+})()`, jsString(url), limit)
+	raw, err := t.eval(ctx, expr)
+	if err != nil {
+		return nil, err
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("mirror: blob fetch returned no string: %w", err)
+	}
+	if strings.HasPrefix(s, "!") {
+		return nil, fmt.Errorf("mirror: blob fetch: %s", s[1:])
+	}
+	data, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("mirror: blob fetch: %w", err)
+	}
+	return data, nil
 }
 
 // rasterMaxBytes caps what is worth sending back into the browser to be read.

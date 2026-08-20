@@ -94,6 +94,23 @@ img { background-repeat: no-repeat; background-size: cover; }
   content: attr(data-sky-frame) " — not mirrored";
   font: 12px/1.4 system-ui, sans-serif; color: #767676; text-align: center;
 }
+/* Plugin containers get the same bargain (P-106): their content cannot come —
+   an object is a nested resource, an embed a plugin — but the hole they left
+   was unexplained, and everything below it sat a plugin's height too high.
+   The agent ships the box; a big enough one is labelled like an opaque frame. */
+[data-skyhook-tag="object"], [data-skyhook-tag="embed"], [data-skyhook-tag="applet"] {
+  display: inline-block; box-sizing: border-box; overflow: hidden;
+}
+[data-skyhook-tag="object"][data-sky-frame], [data-skyhook-tag="embed"][data-sky-frame],
+[data-skyhook-tag="applet"][data-sky-frame] {
+  display: inline-flex; align-items: center; justify-content: center; padding: 4px;
+  border: 1px dashed rgba(0,0,0,.18); border-radius: 3px; background: #fbfbfb;
+}
+[data-skyhook-tag="object"][data-sky-frame]::after, [data-skyhook-tag="embed"][data-sky-frame]::after,
+[data-skyhook-tag="applet"][data-sky-frame]::after {
+  content: attr(data-sky-frame) " — not mirrored";
+  font: 12px/1.4 system-ui, sans-serif; color: #767676; text-align: center;
+}
 /* The frame's own html/body are inside the root now, where a document rule
    cannot reach them: this is delivered through Patcher.baseRootCSS instead, and
    kept here only so the two are read together. */
@@ -117,6 +134,14 @@ img { background-repeat: no-repeat; background-size: cover; }
   background: repeating-linear-gradient(45deg, #eee, #eee 8px, #e5e5e5 8px, #e5e5e5 16px);
   touch-action: none;
 }
+/* In this scripting-disabled document a canvas is not a replaced element: the
+   spec renders it as its fallback content, so it stretches to its container
+   and its attribute aspect ratio scales it — a 200x120 canvas became the full
+   column width (P-123). The patcher restates the landside intrinsic size as
+   inline custom properties, and :where keeps this at zero specificity so the
+   page's own CSS still overrides it exactly as it overrides a real canvas's
+   intrinsic size. The fallbacks are the spec's own defaults. */
+:where(canvas) { width: var(--sky-canvas-w, 300px); height: var(--sky-canvas-h, 150px); }
 /* A page on its way. The cursor is the one affordance that appears where the
    reader is already looking — on the link they just clicked — and it is the
    operating system's own word for "taken, working on it". Links only: over

@@ -104,10 +104,15 @@
   // Tags never mirrored: they either carry code, or carry styling we ship
   // separately as used-CSS.
   var SKIP_TAGS = {
-    SCRIPT: 1, NOSCRIPT: 1, STYLE: 1, LINK: 1, META: 1, BASE: 1, TEMPLATE: 1,
-    OBJECT: 1, EMBED: 1, APPLET: 1
+    SCRIPT: 1, NOSCRIPT: 1, STYLE: 1, LINK: 1, META: 1, BASE: 1, TEMPLATE: 1
   };
   var CANVAS_TAGS = { CANVAS: 1, VIDEO: 1, AUDIO: 1 };
+  // Plugin containers cross as labelled boxes, the iframe bargain (P-106):
+  // their content cannot be mirrored, but dropping them whole left an
+  // unexplained hole where everything below sat a plugin's height too high.
+  // Their children are fallback content a landside page with the resource
+  // loaded never renders, so they are not descended into.
+  var PLUGIN_TAGS = { OBJECT: 1, EMBED: 1, APPLET: 1 };
   var VOID_IMAGE_TAGS = { IMG: 1, IMAGE: 1 };
   // Attributes dropped: event handlers, integrity/nonce metadata, and the
   // responsive-image machinery we replace with one server-chosen rendition.
@@ -176,6 +181,7 @@
   var boxDirty = new Set();      // frames to re-measure before the next flush
   var boxObservers = new Map();  // window -> its ResizeObserver
   var imgShipped = new WeakMap(); // img element -> the "WxH" the client was told
+  var topLayerShipped = new WeakMap(); // element -> the top-layer state the client holds
   var reframeTimer = null;
   var pendingOps = [];
   var pendingImages = [];
@@ -446,6 +452,26 @@
       if (host) pairs.push(intern(OPAQUE_ATTR), intern(host));
       watchBox(el, box, host);
     }
+    if (PLUGIN_TAGS[tag]) {
+      // The iframe bargain for plugin content (P-106): a labelled box the
+      // size the plugin had, instead of an unexplained hole. The computed
+      // display travels too, because the CSS that made the real object a
+      // block selects on a tag name the stand-in no longer answers to.
+      var pbox = frameBox(el);
+      var phost = pluginHost(el, pbox);
+      if (pbox !== '0x0') pairs.push(intern('data-sky-box'), intern(pbox));
+      if (phost) pairs.push(intern(OPAQUE_ATTR), intern(phost));
+      var pdisp = pluginDisplay(el);
+      if (pdisp) pairs.push(intern('data-sky-display'), intern(pdisp));
+      watchBox(el, pbox, phost);
+    }
+    var tl = topLayerState(el);
+    if (tl) {
+      // A popover shown or a dialog made modal before this element was
+      // serialised (P-122); later changes arrive through onTopLayer.
+      pairs.push(intern('data-sky-open'), intern(tl));
+      topLayerShipped.set(el, tl);
+    }
     if (VOID_IMAGE_TAGS[tag]) {
       var img = describeImage(el, base);
       if (img) {
@@ -518,6 +544,30 @@
     } catch (e) { return ''; }
   }
 
+  // pluginDisplay is the display the landside plugin computed, for the
+  // stand-in to reproduce. Read once at serialisation: a plugin that changes
+  // display after that is rarer than one that never should have crossed.
+  function pluginDisplay(el) {
+    try {
+      var win = el.ownerDocument.defaultView || globalThis;
+      return String(win.getComputedStyle(el).display || '');
+    } catch (e) { return ''; }
+  }
+
+  // pluginHost is opaqueHost for a plugin container, which names its resource
+  // with `data` (object) or `src` (embed), and is opaque by nature rather
+  // than by origin.
+  function pluginHost(el, box) {
+    var wh = box.split('x');
+    if (+wh[0] < FRAME_LABEL_MIN_W || +wh[1] < FRAME_LABEL_MIN_H) return '';
+    var src = el.getAttribute('data') || el.getAttribute('src') || '';
+    if (!src) return '';
+    try {
+      var u = new URL(absolute(docBase(el), src));
+      return u.protocol === 'http:' || u.protocol === 'https:' ? u.host : '';
+    } catch (e) { return ''; }
+  }
+
   function onBoxResize(entries) {
     for (var i = 0; i < entries.length; i++) boxDirty.add(entries[i].target);
     // The size is read at flush time, not here: during a transition this runs
@@ -581,7 +631,7 @@
       if (id === undefined || !el.isConnected) { unwatchBox(el); continue; }
       if (imgShipped.has(el)) { syncImg(el, id); continue; }
       var box = frameBox(el);
-      var host = opaqueHost(el, box);
+      var host = PLUGIN_TAGS[el.tagName] ? pluginHost(el, box) : opaqueHost(el, box);
       var was = (boxWatch.get(el) || ' ').split(' ');
       if (was[0] === box && was[1] === host) continue;
       boxWatch.set(el, box + ' ' + host);
@@ -725,7 +775,9 @@
       // Small inline images are cheaper left alone than round-tripped.
       if (src.length < 4096) return null;
     }
-    if (/^blob:/i.test(src)) return null;
+    // blob: crosses described like anything else (P-103): serialised verbatim
+    // it named bytes only this page's process holds — a broken image with no
+    // fallback and no notice. The pipeline reads it from inside the page.
     var r = el.getBoundingClientRect();
     var w = Math.round(r.width) || el.naturalWidth || 0;
     var h = Math.round(r.height) || el.naturalHeight || 0;
@@ -795,6 +847,16 @@
       if (box !== '0x0') { out['data-sky-box'] = box; any = true; }
       if (host) { out[OPAQUE_ATTR] = host; any = true; }
     }
+    if (PLUGIN_TAGS[tag]) {
+      var pbox = frameBox(el);
+      var phost = pluginHost(el, pbox);
+      if (pbox !== '0x0') { out['data-sky-box'] = pbox; any = true; }
+      if (phost) { out[OPAQUE_ATTR] = phost; any = true; }
+      var pdisp = pluginDisplay(el);
+      if (pdisp) { out['data-sky-display'] = pdisp; any = true; }
+    }
+    var tl = topLayerState(el);
+    if (tl) { out['data-sky-open'] = tl; any = true; }
     if (VOID_IMAGE_TAGS[tag]) {
       var img = describeImage(el, base);
       if (img) {
@@ -908,7 +970,7 @@
     var n = 1;
 
     if (tag === 'HEAD') return n; // head content is replaced by used-CSS
-    if (CANVAS_TAGS[tag]) return n;
+    if (CANVAS_TAGS[tag] || PLUGIN_TAGS[tag]) return n;
 
     if (node.shadowRoot) {
       // The boundary is mirrored, not flattened away. A component's stylesheet
@@ -3374,6 +3436,11 @@
           if (img) {
             pendingImages.push(img);
             val = 'skyhook://img/' + img.key;
+            // The size the description was made at, the way a snapshot ships
+            // it — and watched, so a box that settles later is re-stated.
+            if (img.w) pendingOps.push([3, id, intern('width'), intern(String(img.w))]);
+            if (img.h) pendingOps.push([3, id, intern('height'), intern(String(img.h))]);
+            watchImg(el, img.w, img.h);
           }
         } else if (name === 'style') {
           // A background a script assigns as it scrolls arrives here rather
@@ -3447,7 +3514,35 @@
       root.addEventListener('scroll', onScroll, { capture: true, passive: true });
       root.addEventListener('focusin', onFocus, { capture: true, passive: true });
       root.addEventListener('input', onInput, { capture: true, passive: true });
+      // Top-layer membership is rendering state no attribute carries (P-122):
+      // showPopover() and showModal() change what the reader sees without
+      // touching anything a MutationObserver reports. The events do not
+      // bubble, but capture reaches a non-bubbling event's target fine.
+      root.addEventListener('toggle', onTopLayer, { capture: true, passive: true });
+      root.addEventListener('close', onTopLayer, { capture: true, passive: true });
     }
+  }
+
+  // topLayerState names the top-layer membership an element holds: a shown
+  // popover, a modal dialog, or nothing. A non-modal open dialog is not here
+  // — its `open` attribute crosses like any attribute and renders in place.
+  function topLayerState(el) {
+    try { if (el.matches(':popover-open')) return 'popover'; } catch (e) { /* old engine */ }
+    try { if (el.matches(':modal')) return 'modal'; } catch (e) { /* old engine */ }
+    return '';
+  }
+
+  function onTopLayer(ev) {
+    var el = ev.target;
+    if (!el || el.nodeType !== KIND_ELEMENT) return;
+    var id = idOf.get(el);
+    if (id === undefined) return;
+    var state = topLayerState(el);
+    if ((topLayerShipped.get(el) || '') === state) return;
+    if (state) topLayerShipped.set(el, state);
+    else topLayerShipped.delete(el);
+    pendingOps.push([3, id, intern('data-sky-open'), state ? intern(state) : -1]);
+    scheduleFlush(false);
   }
 
   /*

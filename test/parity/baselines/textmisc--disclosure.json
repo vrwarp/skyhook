@@ -64,12 +64,10 @@
       ]
     },
     "style": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "nodesDiffering": 1,
-        "prop:display": 1,
-        "prop:position": 1,
-        "visibilityDiffering": 1
+        "nodesDiffering": 0,
+        "visibilityDiffering": 0
       }
     },
     "text": {
@@ -78,9 +76,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "style": "P-122"
   },
   "gaps": [
     "P-122"
