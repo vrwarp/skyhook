@@ -23,7 +23,11 @@ type Bundle struct {
 	files map[string][]byte
 	// Manifest is the bundle's own manifest.json, untyped: triage passes
 	// through what it finds rather than insisting on a schema, because old
-	// bundles are exactly the ones worth reading.
+	// bundles are exactly the ones worth reading. Untyped means JSON
+	// numbers surface as float64 — today the manifest carries none that
+	// matter, but a 64-bit hash read through this map would round (the
+	// state.json hashes rotted exactly that way once); decode through a
+	// typed struct instead if you ever need one exactly.
 	Manifest map[string]any
 }
 

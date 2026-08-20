@@ -269,6 +269,38 @@ func TestTriageSweepQuirksAreNotDivergence(t *testing.T) {
 	}
 }
 
+// The client trades an external SVG sprite reference for a blob it fetched,
+// the way it does an img src — the skip table is derived from the agent's
+// URL_ATTRS plus the client's own rewrites, and this pins the xlink:href
+// member the first derivation missed.
+func TestTriageSpriteRewriteIsNotDivergence(t *testing.T) {
+	files, _ := consistentBundle(t)
+	files["landside/tabs/1/expected.html"] = []byte(
+		`<html><body><svg><use xlink:href="http://cdn.test/sprite.svg#gear"></use></svg></body></html>`)
+	files["planeside/tabs/1/mirror.html"] = []byte(
+		`<html><body><svg><use xlink:href="blob:https://plane/0f3a"></use></svg></body></html>`)
+	r := Triage(openTestBundle(t, files))
+	if leg := r.Tabs[0].PatcherLeg; leg.Verdict != "clean" {
+		t.Fatalf("patcher leg = %+v", leg)
+	}
+}
+
+// An agent that never started hashes an empty id map and reports the bare
+// FNV basis; the report says so instead of leaving a constant to recognise.
+func TestTriageNamesTheUnstartedAgentHash(t *testing.T) {
+	files, _ := consistentBundle(t)
+	files["landside/tabs/1/state.json"] = mustJSON(t, map[string]any{
+		"url": "https://example.test/page", "serverHash": uint64(0x811c9dc5),
+	})
+	r := Triage(openTestBundle(t, files))
+	if note := r.Tabs[0].Note; !strings.Contains(note, "P-127") {
+		t.Fatalf("note = %q", note)
+	}
+	if !strings.Contains(r.Text(), "FNV basis") {
+		t.Fatalf("the rendered report does not carry the diagnosis:\n%s", r.Text())
+	}
+}
+
 // The fingerprint writers disagree about vocabulary at the edges (P-128):
 // nodeType against protocol kind for a shadow root, name case for SVG's
 // clipPath, and the truncation window when an emoji splits into surrogates.
@@ -304,6 +336,18 @@ func TestTriageFingerprintToleratesWriterVocabulary(t *testing.T) {
 	}
 	if !fingerprintsDisagree(fingerprintRow{Kind: 3, Value: "abc"}, fingerprintRow{Kind: 1, Value: "abc"}) {
 		t.Fatal("text against non-text must still count")
+	}
+	// Two astral characters push the agent's 32-unit window down to 30
+	// runes; the Go side's 32-rune value is what keeps the prefix rule
+	// engaged, however many surrogate pairs the text opens with. The two
+	// values are built the way the two writers build them: the same long
+	// text cut at 32 UTF-16 units and at 32 runes.
+	agentCut := "\U0001F389\U0001F389" + strings.Repeat("a", 28) // 32 units, 30 runes
+	goCut := "\U0001F389\U0001F389" + strings.Repeat("a", 30)    // 32 runes
+	if fingerprintsDisagree(
+		fingerprintRow{Kind: 3, Value: agentCut},
+		fingerprintRow{Kind: 3, Value: goCut}) {
+		t.Fatal("a double-surrogate truncation window must not count")
 	}
 }
 

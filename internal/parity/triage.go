@@ -43,6 +43,8 @@ type TriageTab struct {
 	Tab   int    `json:"tab"`
 	URL   string `json:"url,omitempty"`
 	Title string `json:"title,omitempty"`
+	// Note carries a diagnosis the numbers alone would hide.
+	Note string `json:"note,omitempty"`
 
 	// Hashes passes through the bundle's own agreement record.
 	Hashes map[string]any `json:"hashes,omitempty"`
@@ -188,6 +190,15 @@ func triageTab(b *Bundle, tab int) TriageTab {
 			if v != nil {
 				tt.Hashes[k] = *v
 			}
+		}
+		// The FNV-1a basis is the hash of nothing at all. An agent reporting
+		// it hashed an empty id map: it was injected but never started (the
+		// race P-127 describes), and the reader should not spend the day
+		// diffing documents to explain a constant.
+		if state.ServerHash != nil && *state.ServerHash == 0x811c9dc5 {
+			tt.Note = "serverHash is the bare FNV basis: the landside agent had not " +
+				"started when the capture ran (see P-127); its half of this bundle " +
+				"describes no document"
 		}
 	}
 
@@ -687,14 +698,17 @@ func agentSkipsAttr(key string) bool {
 	}
 	// Live control state and image sources are compared by the live parity
 	// suite; in a bundle they are two different moments of the same field.
-	// The other URL attributes go for a different reason: the agent
-	// absolutises them on the way out (the mirror has no base to resolve
-	// against), so the live page's relative form can never string-match the
-	// wire's — a real capture's protocol-relative form action proved it.
+	// The second group is exactly the agent's URL_ATTRS table (agent.js):
+	// those are absolutised on the way out — the mirror has no base to
+	// resolve against — so the live page's relative form can never
+	// string-match the wire's; a real capture's protocol-relative form
+	// action proved it. xlink:href is rewritten by the other half: the
+	// client trades an external SVG reference for a blob it fetched, the
+	// same way it does an img src, so it is no more comparable than one.
 	switch key {
-	case "value", "src", "href", "style", "width", "height":
+	case "value", "src", "href", "xlink:href", "style", "width", "height":
 		return true
-	case "action", "formaction", "poster", "cite", "background", "usemap", "data":
+	case "action", "formaction", "poster", "cite", "data":
 		return true
 	}
 	// Every data-sky-* attribute is a wire synthetic — control state, frame
@@ -714,6 +728,9 @@ func (r *TriageReport) Text() string {
 	for i := range r.Tabs {
 		t := &r.Tabs[i]
 		fmt.Fprintf(&b, "\ntab %d  %s\n", t.Tab, t.URL)
+		if t.Note != "" {
+			fmt.Fprintf(&b, "  note: %s\n", t.Note)
+		}
 		if len(t.Hashes) > 0 {
 			keys := make([]string, 0, len(t.Hashes))
 			for k := range t.Hashes {
