@@ -88,6 +88,21 @@ func (t *Tab) probeClipboard(ev *protocol.InputEvent) {
 	}()
 }
 
+// seedClipboardBaseline pins the relay's baseline at the input boundary:
+// called just before a click or a key is replayed, so a copy seen afterwards
+// can only be the input's own doing. Instant once the agent is seeded — one
+// promise, no clipboard read — and one blocking read the first time, which is
+// the price of never mistaking what was already on the clipboard for the
+// input's copy, and never mistaking the input's copy for the baseline. A
+// refusal is tolerated: the probe ladder will report it by name.
+func (t *Tab) seedClipboardBaseline(ctx context.Context, node int64) {
+	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if _, err := t.evalInSlot(sctx, frameSlot(node), "__skyhook.clipSeed()"); err != nil {
+		t.log.Debug("clipboard baseline seed failed", "tab", t.ID, "err", err)
+	}
+}
+
 // readClipboardOnce runs one agent probe. It reports fresh text (empty when
 // the clipboard is unchanged) and whether reading is worth trying again — a
 // read the browser refused will be refused next time too, and the refusal's

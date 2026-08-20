@@ -4115,9 +4115,13 @@
   // What the clipboard held last time anyone looked, so a probe can tell a
   // fresh copy from what was already there (P-008). Unseeded until one read
   // succeeds; the seeding read never relays, so whatever was on the OS
-  // clipboard before this document existed stays where it is.
+  // clipboard before this document existed stays where it is. clipInputSeen
+  // marks the first replayed input: past it, only the input-boundary paths
+  // may seed — a background seeder landing after an input could seed with
+  // the very copy that input caused, and swallow it.
   var clipLast = null;
   var clipSeeded = false;
+  var clipInputSeen = false;
 
   var api = {
     version: 1,
@@ -4136,6 +4140,7 @@
      * never unseeds.
      */
     clipProbe: function () {
+      clipInputSeen = true;
       var clip = navigator.clipboard;
       if (!clip || !clip.readText) return Promise.resolve({ e: 'unavailable' });
       return clip.readText().then(function (text) {
@@ -4145,6 +4150,26 @@
         clipLast = text;
         return { t: fresh ? text.slice(0, 65536) : '' };
       }, function (err) { return { e: (err && err.name) || 'rejected' }; });
+    },
+    /*
+     * clipSeed pins the relay's baseline at the input boundary: the host
+     * calls it just before replaying a click or a key, so "fresh" afterwards
+     * can only mean that input's own doing. This is what makes the baseline
+     * correct on builds where document-start reads are refused — the seeding
+     * used to happen whenever a read first succeeded, and on those builds
+     * that moment was the first probe after the click, which then swallowed
+     * the page's copy as its own baseline. Instant once seeded: one promise,
+     * no clipboard read.
+     */
+    clipSeed: function () {
+      clipInputSeen = true;
+      if (clipSeeded) return Promise.resolve(true);
+      var clip = navigator.clipboard;
+      if (!clip || !clip.readText) return Promise.resolve(false);
+      return clip.readText().then(function (text) {
+        if (!clipSeeded) { clipSeeded = true; clipLast = text; }
+        return true;
+      }, function () { return false; });
     },
     node: function (id) { return byId.get(id) || null; },
     rect: function (id) {
@@ -4803,9 +4828,11 @@
     try {
       if (!navigator.clipboard || !navigator.clipboard.readText) return;
       navigator.clipboard.readText().then(function (text) {
-        if (!clipSeeded) { clipSeeded = true; clipLast = text; }
+        // Never over an input's head: past the first replayed input, a late
+        // success here could be reading the very copy that input caused.
+        if (!clipSeeded && !clipInputSeen) { clipSeeded = true; clipLast = text; }
       }, function () {
-        if (tries > 0 && !clipSeeded) {
+        if (tries > 0 && !clipSeeded && !clipInputSeen) {
           setTimeout(function () { seedClipboard(tries - 1); }, 700);
         }
       });

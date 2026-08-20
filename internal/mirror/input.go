@@ -58,6 +58,12 @@ func (t *Tab) HandleInput(ctx context.Context, ev *protocol.InputEvent) error {
 	t.pendingInput = ev.Seq
 	t.mu.Unlock()
 
+	// Before the replay, so the clipboard baseline is pinned on the near side
+	// of anything this input makes the page do (P-008). See clipboard.go.
+	switch ev.Kind {
+	case protocol.InClick, protocol.InDblClick, protocol.InKey:
+		t.seedClipboardBaseline(ctx, ev.Node)
+	}
 	err := t.dispatchInput(ctx, ev)
 	// A canvas repaints without touching the DOM, so no mutation will ever
 	// report that the board moved or the map panned. This is the moment we
