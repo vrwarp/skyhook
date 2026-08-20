@@ -344,12 +344,12 @@
     {
       "id": "P-115",
       "title": "The shell's font-src 'self' may refuse every blob: webfont the pipeline ships",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/server/webapp.go:58",
         "client/src/mirror/host.ts"
       ],
-      "notes": "suspected from reading the CSP against the blob resolution; fonts/csp-blob is the verification, and its first measured run settles this entry's status"
+      "notes": "fixed: font-src gains blob:, for the same reason img-src always had it — the client rebuilds @font-face sources from bytes fetched over the protocol, and 'self' alone refused every one of them at render. fonts/faces pins it: cspViolations 1 → 0 and skyprobe now loads plane-side; the page's remaining expected failure is P-003's apiface"
     },
     {
       "id": "P-116",

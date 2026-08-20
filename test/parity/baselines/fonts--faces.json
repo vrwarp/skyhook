@@ -30,8 +30,8 @@
       "status": "fail",
       "counts": {
         "consoleErrors": 0,
-        "cspViolations": 1,
-        "fontsMustLoadMissing": 2,
+        "cspViolations": 0,
+        "fontsMustLoadMissing": 1,
         "imgBrokenLand": 0,
         "imgBrokenPlane": 0,
         "pendingAtProbe": 0,
@@ -39,7 +39,7 @@
         "substitutedTags": 0
       },
       "buckets": {
-        "fontsMissingPlane": "skyprobe",
+        "fontsMissingPlane": "",
         "missingImages": "none"
       }
     },
