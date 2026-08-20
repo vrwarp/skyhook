@@ -409,11 +409,11 @@ describe('Patcher', () => {
     // (TestHashMatchesTheJavaScriptConvention); 1767627470 is the fold the
     // agent, this patcher and the Go replicas must all compute. clipPath
     // pins the case unification (the wire name keeps SVG's case, every
-    // hasher lowercases);   and the emoji pin UTF-16-unit folding.
+    // hasher lowercases);   and the emoji pin UTF-16-unit folding.
     const snap: Snapshot = {
       strings: [
         'html', 'clipPath',
-        'a b — dash',
+        'a\u00a0b \u2014 dash',
         '\u{1F389} party with a very long tail beyond the window',
       ],
       nodes: [
