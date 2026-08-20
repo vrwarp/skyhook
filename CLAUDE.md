@@ -4,15 +4,19 @@ This file is about writing and debugging the tests. For what Skyhook is, read
 [README.md](README.md); for what is built and why it diverges from the design,
 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
 
-## The two suites
+## The three suites
 
 | | where | what it needs | run it with |
 |---|---|---|---|
 | unit | `internal/...`, `cmd/...` | nothing | `make test` |
 | end-to-end | `test/` (package `e2e`) | a Chromium, and `client/dist` for the PWA tests | `make test-e2e` |
+| parity | `test/` (`TestParity*`), data in `test/parity/` | a Chromium and `client/dist` | `make test-parity` |
 
 `make test` deliberately excludes `./test` — the e2e package needs a browser and
 runs in its own CI job. It also runs with `-race`, which the e2e suite does not.
+The parity tests live in the same package but run as their own suite and CI
+job: `test-e2e` and `test-slow` carry `-skip '^TestParity'` so their measured
+timings stay measured over the same set of tests.
 
 The e2e tests **skip** when there is no Chromium, so `go test ./...` stays useful
 on a machine without one. `SKYHOOK_E2E=1` turns that skip into a failure, which
@@ -107,6 +111,33 @@ to be resumed, and with as many such tests as there are lanes, nothing is left
 to hand one back — the suite deadlocks rather than failing. `leaseShapedAddr` is
 called from inside the harness for exactly this reason.
 
+## Working on the parity suite
+
+[docs/PARITY.md](docs/PARITY.md) explains the system; the corpus authoring
+rules are in [test/parity/README.md](test/parity/README.md). The workflow
+rules that are not obvious:
+
+- **Never edit a baseline by hand.** `test/parity/baselines/*.json` are
+  measurements. `make parity-baseline` rewrites them (and the registry table
+  in docs/PARITY.md); the diff of that run is the review artifact.
+- **A gated failure is never just accepted.** Either it is a regression to
+  fix, or it is a real gap: give it an id in `test/parity/gaps.json`, an
+  `expectedFail` entry in the page's manifest, and let the ratchet pin its
+  shape. The runner enforces this — an uncatalogued failure fails the suite
+  even when the baseline agrees with it.
+- **An expected failure that starts passing is a fix.** The suite fails with
+  a lock-in message: flip the gap's status, drop the `expectedFail`, and
+  re-baseline in the same commit as the code change.
+- **Corpus pages are static by rule.** The settle barrier treats a page that
+  never quiets as a bug, not a flake; a page that needs to move does it in
+  manifest `interactions`, which re-settle between every step.
+
+`TestParityBundleTools` is also a conformance test: it captures a real bundle
+through the real client UI and asserts `skyhookctl bundle triage` reads it
+back clean, so a new agent drop rule or client synthetic attribute shows up
+there as a triage divergence — update the tables in
+`internal/parity/triage.go` when it does.
+
 ## Debugging a failing test
 
 **Read the failure dump first.** A test that fails prints its own server log,
@@ -165,6 +196,7 @@ Other things worth knowing when a test misbehaves:
 make lint          # go vet, gofmt, and the client's lint + typecheck
 make test          # unit tests, with -race
 make test-e2e      # needs a browser
+make test-parity   # when the mirror, protocol, client or corpus changed
 ```
 
 CI runs the same commands and then some: `make test-slow`'s shaped suite,

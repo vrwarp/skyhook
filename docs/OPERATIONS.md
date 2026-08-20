@@ -892,6 +892,15 @@ disagreement between two different instants.
 `session/events.json` is the reproduction steps: what the reader clicked and
 typed, in order, with each resync and divergence in place.
 
+The reading above is also mechanised: `skyhookctl bundle triage <zip>` runs
+the three-way split, the fingerprint cross-diff and a journal replay offline
+and renders a verdict per tab (exit 0 clean, 1 diverged, 2 unreadable). The
+manual procedure stays here because the tool's output is only meaningful if
+you know what each leg *means* — and because half a bundle, which the tool
+tolerates, is read by a person. When a bundle turns out to capture a bug worth
+keeping, `skyhookctl bundle import` turns its page into a parity-corpus
+skeleton; [PARITY.md](PARITY.md#bundle-triage-and-import) has that workflow.
+
 ### What a bundle costs, and what it will not contain
 
 Everything is bounded. `captureMaxBytes` caps a bundle; `captureKeep` bounds how
