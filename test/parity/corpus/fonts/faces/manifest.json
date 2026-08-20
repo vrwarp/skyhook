@@ -1,0 +1,18 @@
+{
+  "id": "fonts/faces",
+  "title": "a declared webfont ships and draws; a FontFace-API font can be shipped at all",
+  "covers": ["@font-face", "FontFace API", "font shipping", "font-src CSP"],
+  "gaps": ["P-003", "P-115"],
+  "waitText": "api face done",
+  "fonts": {"mustLoad": ["skyprobe", "apiface"]},
+  "expectedFail": {
+    "resources": {
+      "gap": "P-003",
+      "reason": "apiface has no @font-face rule to rewrite, so it can never cross; whether skyprobe's blob is additionally refused by font-src 'self' is P-115, answered by this page's cspViolations count"
+    }
+  },
+  "attribution": "probe.ttf is DejaVu Sans Mono Oblique, from the DejaVu fonts (Bitstream Vera derivative, freely redistributable — see FONT-LICENSE beside it)",
+  "exclude": {
+    "pixels": "half the page renders in a substitute face by design of the measurement"
+  }
+}

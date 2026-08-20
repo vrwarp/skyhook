@@ -39,6 +39,8 @@ func main() {
 		chat(args)
 	case "capture":
 		capture(args)
+	case "bundle":
+		bundle(args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -56,6 +58,7 @@ func usage() {
   kill     wipe the landside session and browser profile
   chat     drive the chat adapter (list, send)
   capture  take a diagnostic bundle of both halves of a mirrored tab
+  bundle   read a capture zip: triage a divergence, or import it as a parity page
 
 Run "skyhookctl <command> -h" for flags.
 `)

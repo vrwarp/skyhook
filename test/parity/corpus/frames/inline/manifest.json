@@ -1,0 +1,7 @@
+{
+  "id": "frames/inline",
+  "title": "a same-origin frame's document arrives behind a real boundary, laid out in its own coordinates",
+  "covers": ["same-origin iframes", "inlined documents", "scoped sheets"],
+  "waitText": "widget text settled",
+  "serve": {}
+}

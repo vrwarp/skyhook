@@ -244,6 +244,14 @@ export function hashFromImage(img: Element | null | undefined): string | undefin
   return hash || undefined;
 }
 
+/** The first family of a computed font-family list, unquoted. The parity
+ *  probe asks the document whether each of these can actually be drawn. */
+function firstFamilyName(list: string): string {
+  const comma = list.indexOf(',');
+  const first = (comma >= 0 ? list.slice(0, comma) : list).trim();
+  return first.replace(/^["']|["']$/g, '');
+}
+
 /**
  * A 1x1 transparent GIF, held by every image whose bytes have not landed.
  *
@@ -411,6 +419,15 @@ export class MirrorHost {
    * nothing in it.
    */
   private missing = new Set<string>();
+  /**
+   * securitypolicyviolation events inside the mirror document. Every resource
+   * this frame shows went through the whole pipeline to get here, so a
+   * violation is that work refused at the last step — a font shipped across
+   * the link and then blocked by the shell's own policy is the canonical
+   * case, and before this counter it was invisible: nothing failed, the text
+   * simply drew in the wrong face.
+   */
+  private cspViolations = 0;
   private cssRefresh: ReturnType<typeof setTimeout> | null = null;
   private imageRequest: ReturnType<typeof setTimeout> | null = null;
   private ready: Promise<void>;
@@ -522,6 +539,7 @@ export class MirrorHost {
     if (this.doc === doc && this.patcher) return;
     forceStandardsMode(doc);
     this.doc = doc;
+    doc.addEventListener('securitypolicyviolation', () => { this.cspViolations += 1; });
 
     const style = doc.createElement('style');
     style.textContent = MIRROR_CSS;
@@ -2040,8 +2058,88 @@ export class MirrorHost {
       // shows a frame the reader never saw — and says nothing about it. See
       // pinAnimationsInto.
       pinnedAnimations: pinned,
+      // Resources the shell's own Content-Security-Policy refused inside this
+      // frame. Work the pipeline did for nothing, and otherwise invisible.
+      cspViolations: this.cspViolations,
     };
     return base;
+  }
+
+  /**
+   * parityProbe assembles this tab's half of the comparison internal/parity
+   * runs: the patcher's per-element probe, the document-level facts beside
+   * it, and the bookkeeping only this host knows — what is still pending,
+   * what the server said is never coming, what had to be substituted.
+   *
+   * The landside twin is mirror.Tab.ParityProbe. Both are reads; neither may
+   * change what the reader is looking at.
+   */
+  parityProbe(limit = 4096): Record<string, unknown> | null {
+    const doc = this.doc;
+    if (!doc || !this.patcher) return null;
+    const probe = this.patcher.parityProbe(limit, {
+      hasBlob: (hash: string): boolean => this.blobs.has(hash),
+      isMissing: (hash: string): boolean => this.missing.has(hash),
+    });
+    // Whether a family can actually be drawn is this document's question —
+    // the @font-face rules the server shipped registered themselves here.
+    // Registered faces are reported with their real load state; check() only
+    // answers for the rest, because it says true for any family the system
+    // can fall back for, including ones this document has never heard of.
+    const fonts: { family: string; loaded: boolean; reg?: boolean }[] = [];
+    const seen = new Set<string>();
+    try {
+      doc.fonts.forEach((face) => {
+        const fam = firstFamilyName(String(face.family ?? ''));
+        if (!fam || seen.has(fam)) return;
+        seen.add(fam);
+        fonts.push({ family: fam, loaded: face.status === 'loaded', reg: true });
+      });
+    } catch { /* no FontFaceSet, nothing to say */ }
+    for (const n of probe.nodes) {
+      const fam = firstFamilyName(String((n as { f?: unknown }).f ?? ''));
+      if (!fam || seen.has(fam)) continue;
+      seen.add(fam);
+      let loaded = false;
+      try { loaded = doc.fonts.check(`12px "${fam.replace(/"/g, '')}"`); } catch { /* stays false */ }
+      fonts.push({ family: fam, loaded });
+    }
+    fonts.sort((a, b) => (a.family < b.family ? -1 : a.family > b.family ? 1 : 0));
+    const root = doc.documentElement;
+    const win = this.frame.contentWindow;
+    return {
+      docs: [{
+        slot: 0,
+        url: this.pageUrl || this.url,
+        title: doc.title || '',
+        compat: doc.compatMode,
+        scrollW: Math.max(root?.scrollWidth ?? 0, doc.body?.scrollWidth ?? 0),
+        scrollH: Math.max(root?.scrollHeight ?? 0, doc.body?.scrollHeight ?? 0),
+        vw: win?.innerWidth ?? 0,
+        vh: win?.innerHeight ?? 0,
+        dpr: window.devicePixelRatio || 1,
+        nodes: this.patcher.size,
+        fonts,
+      }],
+      nodes: probe.nodes,
+      truncated: probe.truncated,
+      seq: this.lastSeq,
+      hash: this.patcher.docHash(),
+      plane: {
+        pendingImages: this.pendingImages.size,
+        pendingCSS: this.pendingCSS.size,
+        pendingShots: this.pendingShots.size,
+        missingImages: this.missing.size,
+        substituted: doc.querySelectorAll('[data-skyhook-tag]').length,
+        ghosts: doc.querySelectorAll('[data-skyhook-ghost]').length,
+        cspViolations: this.cspViolations,
+        // Painted, not merely assigned: the attribute survives a style write
+        // that wiped the photograph out of the declaration (P-117), and a
+        // count that read the attribute would call a blank canvas fine.
+        shotsPainted: Array.from(doc.querySelectorAll('[data-skyhook-shot]'))
+          .filter((el) => ((el as HTMLElement).style.backgroundImage || '').includes('url(')).length,
+      },
+    };
   }
 
   /** Marks the mirror as showing stale content during an outage. */

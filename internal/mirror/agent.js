@@ -134,6 +134,22 @@
   var FRAME_LABEL_MIN_W = 64, FRAME_LABEL_MIN_H = 32;
   var SENSITIVE_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc)(\s|$)/i;
 
+  // The computed properties the parity probe reports, in this order. One copy
+  // here, one in client/src/mirror/patcher.ts, one in internal/parity/types.go
+  // (StyleProps) — the same three-implementations bargain the document hash
+  // makes. Change one, change all three, and regenerate the parity baselines.
+  var STYLE_PROPS = [
+    'display', 'position', 'float', 'visibility', 'opacity',
+    'overflow-x', 'overflow-y',
+    'color', 'background-color', 'background-image',
+    'font-family', 'font-size', 'font-weight', 'font-style', 'line-height',
+    'text-align', 'text-transform', 'text-decoration-line', 'white-space',
+    'direction',
+    'border-top-width', 'border-top-style', 'border-top-color',
+    'margin-top', 'margin-left', 'padding-top', 'padding-left',
+    'z-index', 'box-sizing', 'list-style-type'
+  ];
+
   // Ids start inside this agent's slot; slot 0 is the top-level document, whose
   // ids are exactly what they always were. A frame's slot arrives with adopt,
   // before anything has been serialised.
@@ -685,6 +701,146 @@
       alt: el.getAttribute('alt') || '',
       pri: r.top < (globalThis.innerHeight || 900) * 1.5 && r.bottom > -200 ? 0 : 1
     };
+  }
+
+  // ------------------------------------------------------------- parity probe
+
+  /**
+   * probeAttrs is serializeAttrs without the wire: the attributes this agent
+   * would put on a node if it serialised it right now, as a plain object.
+   *
+   * Kept in step with serializeAttrs by hand — the two walk the same rules in
+   * the same order — because the serialiser cannot be reused directly: it
+   * interns strings, queues images for transcoding and registers observers,
+   * and a probe that changed what the reader is looking at would be measuring
+   * itself. What this returns is compared against the attributes the patcher
+   * actually holds, so the pair only agrees when every mutation arrived.
+   */
+  function probeAttrs(el) {
+    var out = {};
+    var any = false;
+    var attrs = el.attributes;
+    var base = docBase(el);
+    for (var i = 0; i < attrs.length; i++) {
+      var a = attrs[i];
+      var name = a.name;
+      if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+        if (/^on[a-z]/.test(name)) continue;
+      }
+      if (SKIP_ATTRS[name]) continue;
+      if (SENSITIVE_ATTRS[name] && isSensitive(el)) continue;
+      var value = a.value;
+      if (URL_ATTRS[name]) {
+        value = absolute(base, value);
+        if (/^javascript:/i.test(value)) continue;
+      } else if (name === 'style') {
+        var shot = styleAttrImages(value, base, el);
+        if (shot) value = shot.text; // and the images stay unqueued
+        value = pinColorSchemes(value);
+      }
+      out[name] = value;
+      any = true;
+    }
+    var tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+      if (!isSensitive(el)) {
+        out['data-sky-value'] = el.value == null ? '' : String(el.value);
+        any = true;
+      }
+      if (el.checked) { out['data-sky-checked'] = '1'; any = true; }
+    } else if (tag === 'OPTION') {
+      if (el.selected) { out['data-sky-selected'] = '1'; any = true; }
+    }
+    if (isCustom(el) && !isDefined(el)) { out[UNDEFINED_ATTR] = ''; any = true; }
+    if (el === markedTarget) { out[TARGET_ATTR] = ''; any = true; }
+    if (tag === 'IFRAME') {
+      var box = frameBox(el);
+      var host = opaqueHost(el, box);
+      if (box !== '0x0') { out['data-sky-box'] = box; any = true; }
+      if (host) { out[OPAQUE_ATTR] = host; any = true; }
+    }
+    if (VOID_IMAGE_TAGS[tag]) {
+      var img = describeImage(el, base);
+      if (img) {
+        out.src = 'skyhook://img/' + img.key;
+        if (img.w) out.width = String(img.w);
+        if (img.h) out.height = String(img.h);
+        any = true;
+      }
+    }
+    return any ? out : null;
+  }
+
+  /**
+   * probeElement is one row of the parity probe: everything the comparison
+   * engine wants to hold against the patcher's copy of the same node.
+   *
+   * The box is the raw viewport rectangle plus the id of the element's own
+   * document root; the engine subtracts the root's box from the node's, which
+   * cancels scroll and puts an inlined frame's content into the frame's own
+   * coordinates — the same coordinates the plane side measures it in.
+   */
+  function probeElement(el, id, families) {
+    var d = ownerDoc(el);
+    var win = d.defaultView || globalThis;
+    var cs = null;
+    try { cs = win.getComputedStyle(el); } catch (e) { cs = null; }
+    var style = [];
+    for (var i = 0; i < STYLE_PROPS.length; i++) {
+      style.push(cs ? String(cs.getPropertyValue(STYLE_PROPS[i])) : '');
+    }
+    var r = { left: 0, top: 0, width: 0, height: 0 };
+    try { r = el.getBoundingClientRect(); } catch (e) { /* keep zeros */ }
+    var display = cs ? cs.getPropertyValue('display') : '';
+    var visibility = cs ? cs.getPropertyValue('visibility') : '';
+    var visible = display !== 'none' && visibility !== 'hidden' && r.width > 0 && r.height > 0;
+    // Own text only: the direct text children, collapsed the way
+    // internal/parity's collapseText does. Deep text belongs to the
+    // descendants that carry it.
+    var text = '';
+    var kids = el.childNodes;
+    for (var c = 0; c < kids.length && text.length < 96; c++) {
+      if (kids[c].nodeType === KIND_TEXT) text += kids[c].nodeValue || '';
+    }
+    text = text.replace(/\s+/g, ' ').replace(/^ | $/g, '').slice(0, 24);
+    var rootEl = d.documentElement;
+    var probe = {
+      i: id,
+      t: localNameOf(el).toLowerCase(),
+      b: [r.left, r.top, r.width, r.height],
+      s: style,
+      v: visible,
+      r: rootEl ? (idOf.get(rootEl) || 0) : 0
+    };
+    if (text) probe.x = text;
+    var attrs = probeAttrs(el);
+    if (attrs) probe.a = attrs;
+    if (tagOf(el) === 'IMG') {
+      probe.g = {
+        ok: !!(el.complete && el.naturalWidth > 0),
+        w: el.naturalWidth | 0,
+        h: el.naturalHeight | 0
+      };
+    }
+    if (cs) {
+      var fam = String(cs.getPropertyValue('font-family'));
+      probe.f = fam;
+      var first = firstFamilyName(fam);
+      if (first && !families.has(first)) families.set(first, d);
+    }
+    return probe;
+  }
+
+  function tagOf(el) {
+    return el.tagName ? String(el.tagName).toUpperCase() : '';
+  }
+
+  function firstFamilyName(list) {
+    var first = list;
+    var comma = list.indexOf(',');
+    if (comma >= 0) first = list.slice(0, comma);
+    first = first.replace(/^\s+|\s+$/g, '');
+    return first.replace(/^["']|["']$/g, '');
   }
 
   // serializeNode appends [id, parent, kind, ref, flags, attrs] rows in document
@@ -3672,6 +3828,92 @@
           node.nodeType === KIND_ELEMENT ? flagsOf(node) : 0]);
       }
       return { total: ids.length, truncated: ids.length > out.length, nodes: out };
+    },
+    /**
+     * parityProbe reports what the fingerprint cannot: attributes, computed
+     * styles, boxes, text and image state, per element, for the comparison
+     * against the patcher's copy (internal/parity). The hash agreeing means
+     * the two documents have the same shape; this is for the bugs that ship
+     * anyway — a stylesheet that never arrived, a value a mutation lost, a
+     * picture that is a placeholder on the other side.
+     *
+     * Reads only. Like fingerprint, this must not change what the reader is
+     * looking at, which is why serializeAttrs — which queues images and
+     * registers observers — has a pure twin above instead of being called.
+     *
+     * Elements only, ascending id, sampled evenly past `limit` — except the
+     * document roots, which are always included because every other element's
+     * box is expressed relative to its root's.
+     */
+    parityProbe: function (limit) {
+      var max = limit || 4096;
+      var ids = [];
+      byId.forEach(function (node, id) {
+        if (node.nodeType === KIND_ELEMENT) ids.push(id);
+      });
+      ids.sort(function (a, b) { return a - b; });
+      var stride = ids.length > max ? Math.ceil(ids.length / max) : 1;
+      var families = new Map(); // first font family -> the document that uses it
+      var out = [];
+      var seen = {};
+      function push(id) {
+        if (seen[id]) return;
+        var el = byId.get(id);
+        if (!el || el.nodeType !== KIND_ELEMENT || !el.isConnected) return;
+        seen[id] = 1;
+        out.push(probeElement(el, id, families));
+      }
+      for (var k = 0; k < ids.length; k += stride) push(ids[k]);
+      for (var j = 0; j < out.length; j++) {
+        var root = out[j].r;
+        if (root && !seen[root]) push(root);
+      }
+      var fonts = [];
+      var seenFam = {};
+      // Registered faces first: their load state is the truthful answer, and
+      // a family registered on one half that never crossed is exactly what
+      // check() cannot see — it answers true for any family the system can
+      // fall back for, known or not.
+      var fontDocs = [document];
+      families.forEach(function (d) {
+        if (fontDocs.indexOf(d) < 0) fontDocs.push(d);
+      });
+      for (var fd = 0; fd < fontDocs.length; fd++) {
+        try {
+          fontDocs[fd].fonts.forEach(function (face) {
+            var fam = firstFamilyName(String(face.family || ''));
+            if (!fam || seenFam[fam]) return;
+            seenFam[fam] = 1;
+            fonts.push({ family: fam, loaded: face.status === 'loaded', reg: true });
+          });
+        } catch (e) { /* no FontFaceSet here */ }
+      }
+      families.forEach(function (d, fam) {
+        if (seenFam[fam]) return;
+        seenFam[fam] = 1;
+        var loaded = false;
+        try { loaded = d.fonts.check('12px "' + fam.replace(/"/g, '') + '"'); } catch (e) { loaded = false; }
+        fonts.push({ family: fam, loaded: loaded });
+      });
+      fonts.sort(function (a, b) { return a.family < b.family ? -1 : a.family > b.family ? 1 : 0; });
+      var doc = document.documentElement;
+      return {
+        docs: [{
+          slot: SLOT,
+          url: location.href,
+          title: document.title || '',
+          compat: document.compatMode,
+          scrollW: Math.max(doc ? doc.scrollWidth : 0, document.body ? document.body.scrollWidth : 0),
+          scrollH: Math.max(doc ? doc.scrollHeight : 0, document.body ? document.body.scrollHeight : 0),
+          vw: globalThis.innerWidth | 0,
+          vh: globalThis.innerHeight | 0,
+          dpr: globalThis.devicePixelRatio || 1,
+          nodes: byId.size,
+          fonts: fonts
+        }],
+        nodes: out,
+        truncated: stride > 1
+      };
     },
     /**
      * checkpoint anchors a divergence check to one frame.

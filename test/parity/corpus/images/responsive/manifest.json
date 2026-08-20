@@ -1,0 +1,8 @@
+{
+  "id": "images/responsive",
+  "title": "srcset and picture collapse to the one rendition the landside browser chose, and that rendition arrives",
+  "covers": ["srcset", "picture", "currentSrc"],
+  "gaps": ["P-015"],
+  "waitText": "renditions settled",
+  "notes": "P-015 is by design and this page must PASS: the responsive machinery is dropped, the chosen rendition ships, and both halves show it"
+}

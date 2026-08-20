@@ -1,9 +1,11 @@
 # Go
 /skyhookd
 /skyhookctl
+/bin/
 /dist/
 *.test
 *.out
+__pycache__/
 
 # Client
 client/node_modules/

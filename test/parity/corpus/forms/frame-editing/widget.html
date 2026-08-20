@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>the widget</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 6px; }
+  #pad-frame { min-height: 20px; border: 1px solid rgb(120, 120, 200); }
+  div { min-height: 18px; }
+</style>
+</head>
+<body>
+  <p>widget settled</p>
+  <div id="pad-frame" contenteditable="true"></div>
+  <div id="out-frame">edited-frame: (nothing)</div>
+  <script>
+    document.getElementById('pad-frame').addEventListener('input', function (e) {
+      document.getElementById('out-frame').textContent = 'edited-frame: ' + e.target.textContent;
+    });
+  </script>
+</body>
+</html>

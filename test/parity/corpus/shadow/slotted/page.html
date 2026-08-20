@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>slotted</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  /* Styled from outside, through the part the component exports. */
+  info-card::part(face) { padding: 6px; border: 1px solid rgb(0, 80, 160); }
+</style>
+</head>
+<body>
+  <h1>a component</h1>
+  <p>slots settled</p>
+  <info-card>
+    <span slot="title">the slotted title</span>
+    light content in the default slot
+  </info-card>
+  <script>
+    customElements.define('info-card', class extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML =
+          '<style>.face { color: rgb(30, 30, 90); } ::slotted(span) { font-weight: bold; }</style>' +
+          '<div class="face" part="face"><slot name="title"></slot><div><slot></slot></div></div>';
+      }
+    });
+  </script>
+</body>
+</html>

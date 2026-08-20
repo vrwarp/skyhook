@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>two ways to a face</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  /* The declared way: an @font-face rule the pipeline can see, asked for with
+     ligatures so the shipping heuristic classes it as an icon font and sends
+     the file across. Whether the shell's own CSP then lets the blob: URL load
+     is P-115's question, and this page is the verification. */
+  @font-face { font-family: skyprobe; src: url(probe.ttf); }
+  .declared { font-family: skyprobe, monospace; font-feature-settings: "liga" 1; }
+  /* The API way: the same file registered through document.fonts.add, which
+     leaves no rule for the pipeline to rewrite — P-003. */
+  .api { font-family: apiface, monospace; }
+</style>
+</head>
+<body>
+  <h1>faces</h1>
+  <p>faces settled</p>
+  <div class="declared">declared face &#xE000;&#xE001;</div>
+  <div class="api">api face &#xE000;&#xE001;</div>
+  <div id="api-state">api face pending</div>
+  <script>
+    var face = new FontFace('apiface', 'url({{SITE}}/fonts/faces/probe.ttf)');
+    document.fonts.add(face);
+    face.load().then(function () {
+      document.getElementById('api-state').textContent = 'api face done: loaded';
+    }, function (err) {
+      document.getElementById('api-state').textContent = 'api face done: ' + String(err);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "id": "shadow/slotted",
+  "title": "an open shadow root, its slots, ::slotted and ::part mean the same thing on both halves",
+  "covers": ["shadow DOM", "slots", "::part", "::slotted"],
+  "waitText": "slots settled"
+}

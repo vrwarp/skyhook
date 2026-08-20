@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>checkbox and radio</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+</style>
+</head>
+<body>
+  <h1>ticks and dots</h1>
+  <p>controls settled</p>
+  <label>subscribe <input id="sub" type="checkbox"></label>
+  <div id="subout">subscribed: no</div>
+  <label><input id="opta" type="radio" name="way" value="a" checked> the a way</label>
+  <label><input id="optb" type="radio" name="way" value="b"> the b way</label>
+  <div id="wayout">way: a</div>
+  <script>
+    document.getElementById('sub').addEventListener('change', function (e) {
+      document.getElementById('subout').textContent = 'subscribed: ' + (e.target.checked ? 'yes' : 'no');
+    });
+    document.getElementById('optb').addEventListener('change', function () {
+      document.getElementById('wayout').textContent = 'way: b';
+    });
+  </script>
+</body>
+</html>

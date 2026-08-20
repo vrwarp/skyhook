@@ -322,6 +322,28 @@ the reproduction steps and worth keeping, but they are also sometimes a
 password. [docs/OPERATIONS.md](docs/OPERATIONS.md#diagnosing-the-mirror) has the
 full contents of a bundle and how to read one.
 
+`skyhookctl bundle triage <zip>` reads a bundle and renders the diff-the-right-pair
+judgement mechanically; `skyhookctl bundle import` turns one into a parity-corpus
+page (below), so a bug found in the wild becomes a regression test.
+
+## Measuring fidelity
+
+The document hash says the two trees agree; it says nothing about attributes,
+styles, layout or images, and the implementation notes record six shipped
+rendering bugs it waved through. So parity is measured, not assumed: both
+halves carry a probe reporting the same per-element facts (box, computed-style
+vector, text, attributes, fonts, images), and `make test-parity` runs a corpus
+of feature pages through the real pipeline — real Chromium landside, the real
+client in a real browser plane-side — comparing the probes across seven gated
+dimensions plus an advisory pixel score.
+
+Every known divergence is an entry in `test/parity/gaps.json` with a status
+and a corpus page that measures it; every page's results are pinned by a
+checked-in baseline, and any drift — regression *or* improvement — fails CI
+until it is either fixed or deliberately locked in with `make parity-baseline`.
+[docs/PARITY.md](docs/PARITY.md) explains the system and carries the generated
+gap table.
+
 ## Repository layout
 
 | Path | What lives there |
@@ -337,11 +359,13 @@ full contents of a bundle and how to read one.
 | `internal/diag` | Diagnostic bundles: the zip writer and the server's log ring |
 | `internal/adapter` | Adapter framework and the Google Chat adapter |
 | `internal/client` | A headless Go client, used by tests and `skyhookctl` |
+| `internal/parity` | The parity engine: probes compared, baselines, bundle triage/import |
 | `client/` | The PWA: app shell, sandboxed mirror host, patcher, local echo |
 | `client/src/mirror` | Patcher, echo engine and the sandboxed-frame host |
 | `client/src/worker` | The network worker that owns the connection |
 | `client/src/sw` | Service worker: offline shell, image cache, egress denial |
 | `test/` | End-to-end tests against a real Chromium |
+| `test/parity` | The parity corpus, gap registry and baselines |
 | `deploy/`, `scripts/` | Container, systemd unit, link emulation |
 
 ## Testing
@@ -350,6 +374,7 @@ full contents of a bundle and how to read one.
 go test ./...                    # unit tests; e2e skips without a browser
 SKYHOOK_E2E=1 go test ./test -v  # end-to-end against real Chromium
 cd client && npm test            # patcher, echo, codec, encoding, conformance
+make test-parity                 # the rendering-parity corpus, ratcheted
 ```
 
 The wire format is pinned by cross-language fixtures in `testdata/`, in both

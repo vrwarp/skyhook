@@ -1,0 +1,6 @@
+{
+  "id": "shadow/late-upgrade",
+  "title": "a custom element that upgrades after the snapshot converges: the grown shadow root and its styling arrive",
+  "covers": ["custom elements", "late upgrade", ":defined"],
+  "waitText": "upgraded settled"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "css/margin-collapse",
+  "title": "a top margin collapsing through the page's body survives the mirror boundary",
+  "covers": ["margin collapse", "root-in-body"],
+  "gaps": ["P-120"],
+  "waitText": "collapse settled",
+  "expectedFail": {
+    "geometry": {
+      "gap": "P-120",
+      "reason": "the collapsed margin escapes differently at the boundary: content sits 30px down landside and hard against the top here"
+    }
+  },
+  "exclude": {
+    "pixels": "the offset is the divergence; the geometry dimension already carries it"
+  }
+}

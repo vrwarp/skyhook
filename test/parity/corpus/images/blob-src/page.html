@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>a blob image</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  img { width: 120px; height: 80px; }
+</style>
+</head>
+<body>
+  <h1>an image with no address</h1>
+  <p>blob settled</p>
+  <!-- The way an SPA hands over an avatar it built or fetched itself: a blob
+       URL minted in the page's own realm. The landside URL means nothing
+       anywhere else (P-103). -->
+  <img id="made" alt="a made picture">
+  <script>
+    var c = document.createElement('canvas');
+    c.width = 120; c.height = 80;
+    var g = c.getContext('2d');
+    g.fillStyle = 'rgb(180, 60, 120)';
+    g.fillRect(0, 0, 120, 80);
+    c.toBlob(function (blob) {
+      var img = document.getElementById('made');
+      img.onload = function () {
+        var p = document.createElement('p');
+        p.textContent = 'blob drawn';
+        document.body.appendChild(p);
+      };
+      img.src = URL.createObjectURL(blob);
+    });
+  </script>
+</body>
+</html>

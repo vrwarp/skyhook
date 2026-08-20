@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>plugins and objects</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  object, embed { display: block; background: rgb(240, 238, 235); }
+</style>
+</head>
+<body>
+  <h1>boxes the mirror drops</h1>
+  <p>objects settled</p>
+  <!-- Both render as sized boxes landside and are dropped whole by the
+       mirror — unlike an iframe, which at least leaves a labelled stand-in.
+       The paragraph after them is the ruler that shows the hole (P-106). -->
+  <object type="application/pdf" width="300" height="150"></object>
+  <embed type="video/nothing" width="200" height="100">
+  <p id="after">the paragraph after the objects</p>
+</body>
+</html>

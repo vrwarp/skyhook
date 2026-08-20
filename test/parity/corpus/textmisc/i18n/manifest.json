@@ -1,0 +1,6 @@
+{
+  "id": "textmisc/i18n",
+  "title": "RTL, CJK, combining marks and preformatted whitespace survive the wire and lay out alike",
+  "covers": ["dir=rtl", "CJK", "combining marks", "pre"],
+  "waitText": "scripts settled"
+}

@@ -1,0 +1,85 @@
+{
+  "page": "real/wikipedia-article",
+  "dimensions": {
+    "attributes": {
+      "status": "pass",
+      "counts": {
+        "attrsExtraPlane": 0,
+        "attrsMissingPlane": 0,
+        "nodesDiffering": 0,
+        "valuesDiffering": 0
+      }
+    },
+    "geometry": {
+      "status": "pass",
+      "counts": {
+        "nodesOff": 0
+      },
+      "buckets": {
+        "pageHeightPct": "+0",
+        "worst": "0"
+      }
+    },
+    "interaction": {
+      "status": "pass",
+      "counts": {
+        "failed": 0
+      }
+    },
+    "resources": {
+      "status": "pass",
+      "counts": {
+        "consoleErrors": 0,
+        "cspViolations": 0,
+        "fontsMustLoadMissing": 0,
+        "imgBrokenLand": 2,
+        "imgBrokenPlane": 0,
+        "pendingAtProbe": 0,
+        "shotsMissingPlane": 0,
+        "substitutedTags": 0
+      },
+      "buckets": {
+        "fontsMissingPlane": "",
+        "missingImages": "none"
+      }
+    },
+    "structure": {
+      "status": "pass",
+      "counts": {
+        "missingLand": 0,
+        "missingPlane": 0,
+        "tagMismatch": 0
+      },
+      "checks": [
+        {
+          "name": "hashesAgree",
+          "pass": true
+        }
+      ]
+    },
+    "style": {
+      "status": "fail",
+      "counts": {
+        "nodesDiffering": 4,
+        "prop:border-top-color": 4,
+        "prop:border-top-style": 2,
+        "prop:border-top-width": 2,
+        "prop:color": 2,
+        "visibilityDiffering": 0
+      }
+    },
+    "text": {
+      "status": "pass",
+      "counts": {
+        "nodesDiffering": 0
+      }
+    }
+  },
+  "expectedFail": {
+    "style": "P-126"
+  },
+  "gaps": [
+    "P-119",
+    "P-126"
+  ]
+}

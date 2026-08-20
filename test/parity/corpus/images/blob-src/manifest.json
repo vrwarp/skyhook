@@ -1,0 +1,20 @@
+{
+  "id": "images/blob-src",
+  "title": "an image whose source is a page-minted blob URL has pixels on both halves",
+  "covers": ["blob: images"],
+  "gaps": ["P-103"],
+  "waitText": "blob drawn",
+  "expectedFail": {
+    "resources": {
+      "gap": "P-103",
+      "reason": "the blob URL is serialised verbatim and means nothing outside the landside page: a broken image with no fallback and no Missing notice"
+    },
+    "geometry": {
+      "gap": "P-103",
+      "reason": "the broken image collapses to its alt text's box, and everything below it sits high by the picture's height"
+    }
+  },
+  "exclude": {
+    "pixels": "the broken picture is the divergence; resources already carries it"
+  }
+}

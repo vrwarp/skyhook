@@ -1,0 +1,8 @@
+{
+  "id": "images/broken",
+  "title": "an image broken landside is honestly broken plane-side: a Missing notice and alt text, not an eternal placeholder",
+  "covers": ["broken images", "Missing notices", "alt fallback"],
+  "waitText": "broken settled",
+  "settle": {"allowPending": ["images"]},
+  "notes": "the pipeline reports the failed fetch as Missing; the pinned missingImages count is the measurement"
+}

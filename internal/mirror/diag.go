@@ -154,6 +154,66 @@ func (t *Tab) Fingerprint(ctx context.Context, limit int) (json.RawMessage, erro
 	return raw, nil
 }
 
+// ParityProbe reports, for up to limit elements per agent, what the
+// fingerprint cannot: attributes as the serialiser would emit them now,
+// computed styles, boxes, text and image state. The plane side reports the
+// same shape from the patcher's map, and internal/parity compares the two.
+//
+// The walk covers every agent feeding this tab — the page and each attached
+// frame — in slot order, the way DocHash chains, and the assembled probe
+// carries that hash so a comparison and the documents it compared are pinned
+// to the same instant by the caller's settle barrier.
+func (t *Tab) ParityProbe(ctx context.Context, limit int) (json.RawMessage, error) {
+	if limit <= 0 {
+		limit = 4096
+	}
+	var out struct {
+		Docs      []json.RawMessage `json:"docs"`
+		Nodes     []json.RawMessage `json:"nodes"`
+		Truncated bool              `json:"truncated,omitempty"`
+		Hash      uint64            `json:"hash,omitempty"`
+	}
+	add := func(raw json.RawMessage) error {
+		var part struct {
+			Docs      []json.RawMessage `json:"docs"`
+			Nodes     []json.RawMessage `json:"nodes"`
+			Truncated bool              `json:"truncated"`
+		}
+		if err := json.Unmarshal(raw, &part); err != nil {
+			return err
+		}
+		out.Docs = append(out.Docs, part.Docs...)
+		out.Nodes = append(out.Nodes, part.Nodes...)
+		out.Truncated = out.Truncated || part.Truncated
+		return nil
+	}
+	raw, err := t.eval(ctx, fmt.Sprintf("__skyhook.parityProbe(%d)", limit))
+	if err != nil {
+		return nil, err
+	}
+	if err := add(raw); err != nil {
+		return nil, fmt.Errorf("mirror: bad parity probe: %w", err)
+	}
+	for _, f := range t.framesInOrder() {
+		raw, err := t.evalInSlot(ctx, f.slot, fmt.Sprintf("__skyhook.parityProbe(%d)", limit))
+		if err != nil {
+			return nil, fmt.Errorf("mirror: frame slot %d: %w", f.slot, err)
+		}
+		if err := add(raw); err != nil {
+			return nil, fmt.Errorf("mirror: frame slot %d: bad parity probe: %w", f.slot, err)
+		}
+	}
+	if h, err := t.DocHash(ctx); err == nil {
+		out.Hash = h
+	}
+	return json.Marshal(out)
+}
+
+// SlotOf reports which agent's id space a node belongs to: 0 for the page,
+// and the frame's slot above it. Exported for the parity tooling, which reads
+// bundles whose landside fingerprints cover slot 0 only.
+func SlotOf(node int64) int64 { return frameSlot(node) }
+
 // RejectedCSS is what the used-rule filter turned down on its last pass.
 type RejectedCSS struct {
 	Seen      int      `json:"seen"`

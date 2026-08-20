@@ -1,0 +1,15 @@
+{
+  "id": "real/wikipedia-article",
+  "title": "a Wikipedia article in the vector-2022 skin, trimmed",
+  "covers": ["heavy real-world CSS", "sticky chrome", "figures with captions", "animated GIF stills", "footnote links", "real-world markup"],
+  "gaps": ["P-119", "P-126"],
+  "waitText": "momentum exchange tether",
+  "expectedFail": {
+    "style": {
+      "gap": "P-126",
+      "reason": "the thumbnail figures set border: 1px solid var(--border-color-subtle,#c8ccd1), and a var()-carrying shorthand's longhands cross the wire as empty declarations, so the mirrored figures paint no border; the html and head colour rows are P-119's root-inheritance leak"
+    }
+  },
+  "notes": "captured from the live site through the pipeline (capture 20260820-072628), imported with bundle import -fetch-assets, trimmed to the lead, History and Rotating skyhook sections. Two of its stylesheet bundles carry 1153 rules — the corpus's largest used-CSS workload by far. The header's logo images are import placeholders (the mirror had not fetched them); the article figures are the real files",
+  "attribution": "\"Skyhook (structure)\", English Wikipedia (https://en.wikipedia.org/wiki/Skyhook_(structure)), fetched 2026-08-20 and trimmed. Text CC BY-SA 4.0, authors per the article's history; figures from Wikimedia Commons under their own licences (Skyhooks.gif and Cycloid_f.gif CC BY-SA, Nasa_space_elev.jpg NASA public domain); MediaWiki/Vector skin styles GPL-2.0"
+}

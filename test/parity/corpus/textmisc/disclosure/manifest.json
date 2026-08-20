@@ -1,0 +1,17 @@
+{
+  "id": "textmisc/disclosure",
+  "title": "details opens on both halves; a declared-open dialog and a page-shown popover render alike",
+  "covers": ["details/summary", "dialog", "popover"],
+  "gaps": ["P-122"],
+  "waitText": "popover: shown",
+  "interactions": [
+    {"do": "click", "target": "text=show more"},
+    {"do": "waitText", "value": "the revealed words", "name": "a details toggle round-trips"}
+  ],
+  "expectedFail": {
+    "style": {
+      "gap": "P-122",
+      "reason": "showPopover puts the element in the top layer, which is rendering state no attribute carries: shown landside, closed here"
+    }
+  }
+}

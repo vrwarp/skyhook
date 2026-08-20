@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>select</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+</style>
+</head>
+<body>
+  <h1>select</h1>
+  <p>pick settled</p>
+  <!-- The checkbox is the positive control: it proves this page's listener
+       wiring works over the mirror before the select is blamed. -->
+  <label>agree <input id="agree" type="checkbox"></label>
+  <div id="ack">agreed: no</div>
+  <select id="pick">
+    <option value="a" selected>alpha</option>
+    <option value="b">beta</option>
+  </select>
+  <div id="chosen">picked: (nothing)</div>
+  <script>
+    document.getElementById('agree').addEventListener('change', function (e) {
+      document.getElementById('ack').textContent = 'agreed: ' + (e.target.checked ? 'yes' : 'no');
+    });
+    document.getElementById('pick').addEventListener('change', function (e) {
+      document.getElementById('chosen').textContent = 'picked: ' + e.target.value;
+    });
+  </script>
+</body>
+</html>

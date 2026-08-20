@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>editing inside a frame</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  #pad-top { min-height: 20px; border: 1px solid rgb(200, 200, 200); }
+  div { min-height: 18px; }
+  iframe { width: 400px; height: 160px; border: 1px solid rgb(160, 160, 160); }
+</style>
+</head>
+<body>
+  <h1>frame editing</h1>
+  <p>frames settled</p>
+  <!-- The top-level twin of the frame's editor: the positive control that
+       proves the edit path works at all before the frame is blamed. -->
+  <div id="pad-top" contenteditable="true"></div>
+  <div id="out-top">edited-top: (nothing)</div>
+  <iframe src="{{CDN}}/widget.html"></iframe>
+  <script>
+    document.getElementById('pad-top').addEventListener('input', function (e) {
+      document.getElementById('out-top').textContent = 'edited-top: ' + e.target.textContent;
+    });
+  </script>
+</body>
+</html>

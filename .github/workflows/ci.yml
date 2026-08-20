@@ -152,9 +152,13 @@ jobs:
         # leased; the only limit on concurrency here is the runner. Each test
         # owns a Chromium and the PWA ones own two, so four at a time is about
         # what the box will carry.
+        #
+        # -skip keeps the parity suite in its own job below; the set run here
+        # is byte-identical to what it was before parity existed, so the 20m
+        # budget still covers exactly what it was measured over.
         run: |
           set -o pipefail
-          go test -count=1 -timeout 20m -parallel 4 -v ./test 2>&1 | tee /tmp/e2e.log
+          go test -count=1 -timeout 20m -parallel 4 -skip '^TestParity' -v ./test 2>&1 | tee /tmp/e2e.log
 
       # Which test failed, on its own, at the end of the log.
       #
@@ -170,6 +174,92 @@ jobs:
           grep -E '^(\s+)?--- FAIL' /tmp/e2e.log | tee -a "$GITHUB_STEP_SUMMARY" || true
           echo '### What they said' >> "$GITHUB_STEP_SUMMARY"
           grep -E '_test\.go:[0-9]+:' /tmp/e2e.log | tail -40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+  parity:
+    name: Rendering parity against the corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Build the client
+        # The parity runner drives the real PWA, same as the e2e job.
+        run: |
+          cd client
+          npm ci
+          npm run build
+
+      - name: Install the image encoders
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libavif-bin webp
+
+      - name: Locate a browser
+        id: browser
+        run: |
+          for candidate in google-chrome chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null; then
+              echo "path=$(command -v $candidate)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "::error::no browser on the runner"
+          exit 1
+
+      - name: Parity suite
+        env:
+          SKYHOOK_E2E: '1'
+          SKYHOOK_CHROME: ${{ steps.browser.outputs.path }}
+          SKYHOOK_PARITY_OUT: /tmp/parity
+        # Unshaped on purpose: parity is a correctness property and the
+        # settled document is the same at any link speed; the netem job runs
+        # at its measured capacity and this suite would double it.
+        #
+        # 30m is the Makefile's budget. Measured on the dev box at 3m36s
+        # (-parallel 4, the full 29-page corpus including real/, final run on
+        # the branch that added it); replace with the first CI measurement.
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 30m -parallel 4 -run '^TestParity' -v ./test 2>&1 | tee /tmp/parity.log
+
+      - name: Scoreboard into the job summary
+        # On failure too: the scoreboard of a failing run is the diagnosis.
+        if: always()
+        run: |
+          if [ -f /tmp/parity/scoreboard.md ]; then
+            cat /tmp/parity/scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'no scoreboard was written' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # As in the e2e job: the failure of a parallel suite is not where the
+      # log ends.
+      - name: Which tests failed
+        if: failure()
+        run: |
+          echo '### Failed tests' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^(\s+)?--- FAIL' /tmp/parity.log | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '### What they said' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '_test\.go:[0-9]+:' /tmp/parity.log | tail -40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload the scoreboard and reports
+        # The full per-page reports ride along so a baseline can be rewritten
+        # from a CI run without reproducing it locally.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-scoreboard
+          path: /tmp/parity
+          retention-days: 30
+          if-no-files-found: ignore
 
   netem:
     name: End-to-end over an emulated 1.2s / 250kbps link
@@ -263,9 +353,13 @@ jobs:
         # 45m stays, and it is now a very wide margin over a short run rather
         # than a number that tracks the measurement. The next time it is close,
         # the lane count is the dial to turn, not this.
+        #
+        # -skip keeps the parity suite out: it runs unshaped in its own job —
+        # the settled document is the same at any link speed — and this suite
+        # stays exactly the set its numbers above were measured over.
         run: |
           set -o pipefail
-          go test -count=1 -timeout 45m -parallel 8 -v ./test 2>&1 | tee /tmp/netem.log
+          go test -count=1 -timeout 45m -parallel 8 -skip '^TestParity' -v ./test 2>&1 | tee /tmp/netem.log
 
       # As above: the failure of a parallel suite is not where the log ends.
       - name: Which tests failed

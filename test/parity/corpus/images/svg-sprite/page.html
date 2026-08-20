@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>a sprite from elsewhere</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  svg { display: block; }
+</style>
+</head>
+<body>
+  <h1>an icon from a sprite sheet</h1>
+  <p>sprite settled</p>
+  <!-- The design-system pattern: every icon on the site lives in one sprite
+       on the CDN and pages draw them by reference. The reference is
+       absolutised on the way over, to a URL the sandboxed frame's CSP will
+       never let it fetch (P-116). -->
+  <svg width="32" height="32" viewBox="0 0 10 10">
+    <use href="{{CDN}}/images/svg-sprite/sprite.svg#star"></use>
+  </svg>
+  <p>after the icon</p>
+</body>
+</html>

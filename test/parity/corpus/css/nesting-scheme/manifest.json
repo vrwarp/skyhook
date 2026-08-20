@@ -1,0 +1,18 @@
+{
+  "id": "css/nesting-scheme",
+  "title": "a colour-scheme question nested inside a style rule is answered landside like its top-level twin",
+  "covers": ["CSS nesting", "prefers-color-scheme resolution"],
+  "gaps": ["P-114"],
+  "waitText": "nesting settled",
+  "interactions": [
+    {"do": "assertMirrorCSSLacks", "value": "prefers-color-scheme",
+     "name": "colour-scheme questions are answered before they cross"}
+  ],
+  "expectedFail": {
+    "interaction": {
+      "gap": "P-114",
+      "reason": "collectRules resolves top-level media queries but pushes a nested rule's cssText whole, question intact"
+    }
+  },
+  "notes": "both harness browsers answer the question identically (light), so the computed dimensions cannot see this; the delivered stylesheet's text can, which is what the assertion reads"
+}

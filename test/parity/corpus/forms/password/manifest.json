@@ -1,0 +1,12 @@
+{
+  "id": "forms/password",
+  "title": "typing into a password field reaches the page while its value never enters the mirror",
+  "covers": ["password", "sensitive redaction"],
+  "gaps": ["P-005"],
+  "waitText": "secret settled",
+  "interactions": [
+    {"do": "type", "target": "#pw", "value": "hunter2"},
+    {"do": "waitText", "value": "secret length: 7", "name": "typing reaches the page"}
+  ],
+  "notes": "P-005 is by design and this page must PASS: the length crossing proves the keystrokes arrived landside, and the attributes dimension proves no data-sky-value ever came back"
+}

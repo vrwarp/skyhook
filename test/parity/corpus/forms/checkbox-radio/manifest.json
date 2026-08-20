@@ -1,0 +1,12 @@
+{
+  "id": "forms/checkbox-radio",
+  "title": "checkbox and radio state round-trips: the click reaches the page, the page's answer reaches the mirror",
+  "covers": ["checkbox", "radio", "data-sky-checked"],
+  "waitText": "controls settled",
+  "interactions": [
+    {"do": "click", "target": "#sub"},
+    {"do": "waitText", "value": "subscribed: yes", "name": "a checkbox change reaches the page"},
+    {"do": "click", "target": "#optb"},
+    {"do": "waitText", "value": "way: b", "name": "a radio change reaches the page"}
+  ]
+}

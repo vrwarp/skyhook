@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>late upgrade</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  slow-widget:not(:defined) { display: block; min-height: 40px; background: rgb(240, 240, 240); }
+</style>
+</head>
+<body>
+  <h1>a slow definition</h1>
+  <slow-widget>placeholder light content</slow-widget>
+  <script>
+    // Defined after the first snapshot has almost certainly been taken, the
+    // way lazy-loaded design systems do it. The sweep notices the upgrade and
+    // the settle barrier holds the probes until both halves have it.
+    setTimeout(function () {
+      customElements.define('slow-widget', class extends HTMLElement {
+        connectedCallback() {
+          if (this.shadowRoot) return;
+          const root = this.attachShadow({ mode: 'open' });
+          root.innerHTML = '<style>.late { color: rgb(0, 100, 50); }</style>'
+            + '<div class="late">upgraded settled</div><slot></slot>';
+        }
+      });
+    }, 150);
+  </script>
+</body>
+</html>

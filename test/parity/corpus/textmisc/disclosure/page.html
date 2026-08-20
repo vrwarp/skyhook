@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>disclosures</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  dialog { position: static; margin: 8px 0; }
+  [popover] { position: static; margin: 8px 0; }
+</style>
+</head>
+<body>
+  <h1>things that open</h1>
+  <p>disclosure settled</p>
+  <details id="more">
+    <summary>show more</summary>
+    <p>the revealed words</p>
+  </details>
+  <dialog open>an open dialog, declared open</dialog>
+  <div id="pop" popover="manual">a popover the page showed itself</div>
+  <div id="out">popover: unknown</div>
+  <script>
+    try {
+      document.getElementById('pop').showPopover();
+      document.getElementById('out').textContent = 'popover: shown';
+    } catch (e) {
+      document.getElementById('out').textContent = 'popover: unsupported';
+    }
+  </script>
+</body>
+</html>

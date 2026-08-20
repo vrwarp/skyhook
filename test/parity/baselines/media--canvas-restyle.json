@@ -1,0 +1,87 @@
+{
+  "page": "media/canvas-restyle",
+  "dimensions": {
+    "attributes": {
+      "status": "pass",
+      "counts": {
+        "attrsExtraPlane": 0,
+        "attrsMissingPlane": 0,
+        "nodesDiffering": 0,
+        "valuesDiffering": 0
+      }
+    },
+    "geometry": {
+      "status": "fail",
+      "counts": {
+        "nodesOff": 5
+      },
+      "buckets": {
+        "pageHeightPct": "+22",
+        "worst": "\u003e64px"
+      }
+    },
+    "interaction": {
+      "status": "pass",
+      "counts": {
+        "failed": 0
+      },
+      "checks": [
+        {
+          "name": "the restyle reaches the page",
+          "pass": true
+        }
+      ]
+    },
+    "resources": {
+      "status": "pass",
+      "counts": {
+        "consoleErrors": 0,
+        "cspViolations": 0,
+        "fontsMustLoadMissing": 0,
+        "imgBrokenLand": 0,
+        "imgBrokenPlane": 0,
+        "pendingAtProbe": 0,
+        "shotsMissingPlane": 0,
+        "substitutedTags": 0
+      },
+      "buckets": {
+        "fontsMissingPlane": "",
+        "missingImages": "none"
+      }
+    },
+    "structure": {
+      "status": "pass",
+      "counts": {
+        "missingLand": 0,
+        "missingPlane": 0,
+        "tagMismatch": 0
+      },
+      "checks": [
+        {
+          "name": "hashesAgree",
+          "pass": true
+        }
+      ]
+    },
+    "style": {
+      "status": "pass",
+      "counts": {
+        "nodesDiffering": 0,
+        "visibilityDiffering": 0
+      }
+    },
+    "text": {
+      "status": "pass",
+      "counts": {
+        "nodesDiffering": 0
+      }
+    }
+  },
+  "expectedFail": {
+    "geometry": "P-123"
+  },
+  "gaps": [
+    "P-117",
+    "P-123"
+  ]
+}

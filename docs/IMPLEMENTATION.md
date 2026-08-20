@@ -2093,7 +2093,10 @@ the middle and open at both ends is the shape all three of those bugs share.
 
 ## Known gaps
 
-These are unbuilt or thin, and are honest to-dos rather than deviations:
+These are unbuilt or thin, and are honest to-dos rather than deviations.
+Every gap here — and every gap found since — carries an id in the registry at
+`test/parity/gaps.json`, most with a corpus page that *measures* it, so the
+prose below is the explanation and [PARITY.md](PARITY.md) is the ledger:
 
 - **A canvas that animates unprompted is not followed by default.** See
   [§23](#23-a-canvas-is-pixels-and-pixels-have-to-be-photographed): an

@@ -1,0 +1,18 @@
+{
+  "id": "nav/target-blank",
+  "title": "a window the page opens becomes a tab the reader can see",
+  "covers": ["window.open", "popup adoption"],
+  "gaps": ["P-109"],
+  "waitText": "windows settled",
+  "interactions": [
+    {"do": "click", "target": "#open"},
+    {"do": "waitText", "value": "opened one", "name": "the opening click reaches the page"},
+    {"do": "assertShellTabs", "value": "+1", "name": "the opened window becomes a reader-visible tab"}
+  ],
+  "expectedFail": {
+    "interaction": {
+      "gap": "P-109",
+      "reason": "a target that is not an iframe is released and abandoned landside: the window opens on the VPS and no client tab will ever show it"
+    }
+  }
+}
