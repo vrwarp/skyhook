@@ -194,6 +194,7 @@ function decodeImage(i: Fields): ImageMeta {
     alt: str(i, F.imageMeta.alt),
     box: arr<number>(i, F.imageMeta.box).map(Number),
     missing: bool(i, F.imageMeta.missing),
+    anim: bool(i, F.imageMeta.anim),
   };
 }
 

@@ -35,6 +35,11 @@ type Request struct {
 	// a video frame exists only as pixels the landside browser was asked to
 	// photograph, and no URL names it. Set, it replaces both fetch paths.
 	Src []byte
+	// Raw ships the fetched bytes untranscoded. The one use is tap-to-play
+	// (P-118): the reader asked for the original animated GIF, and the
+	// browser plays a GIF natively — a transcode would only strip the frames
+	// they tapped for.
+	Raw bool
 	// Box places a region shot inside its element; see protocol.ImageMeta.Box.
 	Box []int
 	// Epoch names the page this asset was named by. The pipeline never reads
@@ -147,6 +152,7 @@ type Pipeline struct {
 	inFlight map[string]bool
 	meta     map[string]protocol.ImageMeta
 	metaAge  *list.List          // keys oldest-first, so meta can be bounded
+	sources  map[string]string   // key -> the URL it was fetched from, LRU'd with meta
 	wanted   map[string][]uint32 // key -> tabs waiting for bytes
 }
 
@@ -223,6 +229,7 @@ func NewPipeline(opts PipelineOptions, d Delivery) (*Pipeline, error) {
 		inFlight: map[string]bool{},
 		meta:     map[string]protocol.ImageMeta{},
 		metaAge:  list.New(),
+		sources:  map[string]string{},
 		wanted:   map[string][]uint32{},
 	}
 	for i := 0; i < opts.Workers; i++ {
@@ -345,8 +352,18 @@ func (p *Pipeline) warm(key string) {
 // Under the lock, meta and wanted are consistent with each other: the worker
 // writes the cache before it publishes the metadata, so a key in meta is a key
 // whose bytes are there to send.
+// AnimSuffix marks a want for an image's original bytes rather than its
+// transcode: tap-to-play re-requests the animation the still was made from
+// (P-118). The derived key rides the ordinary want list, so the client's
+// cross-flight cache holds originals exactly the way it holds renditions.
+const AnimSuffix = "@anim"
+
 func (p *Pipeline) Want(tab uint32, keys []string) {
 	for _, k := range keys {
+		if base, ok := strings.CutSuffix(k, AnimSuffix); ok {
+			p.wantOriginal(tab, base)
+			continue
+		}
 		// Both of these settle before the lock is taken, so the decision made
 		// under it is still the single atomic one this comment is about.
 		p.warm(k)
@@ -451,6 +468,21 @@ func (p *Pipeline) worker() {
 	}
 }
 
+// wantOriginal queues the untranscoded bytes behind a key the pipeline has
+// already served a rendition for. Nothing is fetched for a key it has never
+// seen: the URL is only known from having transcoded it.
+func (p *Pipeline) wantOriginal(tab uint32, base string) {
+	p.mu.Lock()
+	url := p.sources[base]
+	p.mu.Unlock()
+	key := base + AnimSuffix
+	if url == "" {
+		p.deliver.ImageReady(tab, protocol.ImageMeta{Hash: key, Missing: true})
+		return
+	}
+	p.Submit(Request{Tab: tab, Key: key, URL: url, Raw: true, Priority: 0})
+}
+
 func (p *Pipeline) process(req Request) {
 	defer func() {
 		p.mu.Lock()
@@ -491,6 +523,10 @@ func (p *Pipeline) process(req Request) {
 		p.abandon(req, ErrStale)
 		return
 	}
+	if req.Raw {
+		p.deliverRaw(req, src)
+		return
+	}
 	res, err := p.tc.Transcode(ctx, src, req.W, req.H)
 	if errors.Is(err, ErrNoDecoder) {
 		res, err = p.rasterize(ctx, req, src, err)
@@ -521,6 +557,9 @@ func (p *Pipeline) process(req Request) {
 	})
 	p.mu.Lock()
 	p.remember(req.Key, meta)
+	if req.URL != "" {
+		p.sources[req.Key] = req.URL
+	}
 	waiting := p.wanted[req.Key]
 	delete(p.wanted, req.Key)
 	p.mu.Unlock()
@@ -531,6 +570,31 @@ func (p *Pipeline) process(req Request) {
 	}
 	for _, tab := range waiting {
 		p.deliver.ImageBytes(tab, protocol.ImageData{Hash: req.Key, Mime: res.Mime, Data: res.Data})
+	}
+}
+
+// deliverRaw ships fetched bytes as they are, for the reader who asked for
+// the original (P-118). Only what sniffs as an image goes: whatever else an
+// origin answered with must never be handed to the mirror as one.
+func (p *Pipeline) deliverRaw(req Request, src []byte) {
+	mime := Sniff(src)
+	if !strings.HasPrefix(mime, "image/") {
+		p.abandon(req, errors.New("imgproc: the original is not an image"))
+		return
+	}
+	meta := protocol.ImageMeta{
+		Hash: req.Key, Mime: mime, Bytes: len(src), Priority: req.Priority,
+	}
+	p.cache.put(req.Key, src, cacheHeader{Mime: mime})
+	p.mu.Lock()
+	p.remember(req.Key, meta)
+	waiting := p.wanted[req.Key]
+	delete(p.wanted, req.Key)
+	p.mu.Unlock()
+	p.deliver.ImageReady(req.Tab, meta)
+	p.deliver.ImageBytes(req.Tab, protocol.ImageData{Hash: req.Key, Mime: mime, Data: src})
+	for _, tab := range waiting {
+		p.deliver.ImageBytes(tab, protocol.ImageData{Hash: req.Key, Mime: mime, Data: src})
 	}
 }
 
@@ -702,6 +766,7 @@ func (p *Pipeline) remember(key string, meta protocol.ImageMeta) {
 		old := p.metaAge.Front()
 		p.metaAge.Remove(old)
 		delete(p.meta, old.Value.(string))
+		delete(p.sources, old.Value.(string))
 	}
 }
 

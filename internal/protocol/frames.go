@@ -451,6 +451,10 @@ type ImageMeta struct {
 	// bytes and lets the element fall back to its alt text, which is the thing
 	// the page's author wrote for exactly this.
 	Missing bool `cbor:"11,keyasint,omitempty"`
+	// Anim says the still was made from an animation (an animated GIF): the
+	// client offers tap-to-play, which re-requests the original under this
+	// hash plus imgproc.AnimSuffix (P-118).
+	Anim bool `cbor:"12,keyasint,omitempty"`
 }
 
 // ImageData carries the encoded bytes for a hash.

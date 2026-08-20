@@ -233,6 +233,8 @@ export interface MenuTarget {
   /** Content hash of the image under the pointer. */
   image?: string;
   imageAlt?: string;
+  /** The still under the pointer was made from an animation (P-118). */
+  imageAnim?: boolean;
   /** Text selected in the field, or in the document if there is no field. */
   selection: string;
 }
@@ -1499,6 +1501,10 @@ export class MirrorHost {
       linkText: link?.text,
       image: hashFromImage(img),
       imageAlt: img?.getAttribute('alt') ?? undefined,
+      imageAnim: (() => {
+        const h = hashFromImage(img);
+        return h ? this.patcher?.images.get(h)?.anim : undefined;
+      })(),
       selection: this.selectionIn(field),
     };
   }
@@ -1745,6 +1751,31 @@ export class MirrorHost {
   }
 
   /** Called when the store has bytes for a hash: show them. */
+  /**
+   * Swaps a GIF's still for its original animation (P-118).
+   *
+   * The still is the design (P-016) — an animation nobody asked for is pure
+   * byte cost — and the tap is the ask. The original travels under the
+   * still's key plus the anim suffix, on the ordinary want list, so the
+   * cross-flight cache and the pending machinery need nothing new; when the
+   * bytes land, showImage puts them on every element wearing the still.
+   */
+  playAnimated(hash: string): void {
+    if (!hash || !this.doc) return;
+    const key = hash + '@anim';
+    const imgs = Array.from(
+      this.doc.querySelectorAll(`img[data-skyhook-img="${CSS.escape(hash)}"]`),
+    ) as HTMLImageElement[];
+    if (!imgs.length) return;
+    const known = this.blobs.get(key);
+    if (known) {
+      for (const el of imgs) this.showImage(el, known);
+      return;
+    }
+    this.pendingImages.set(key, imgs);
+    this.requestImagesSoon();
+  }
+
   imageArrived(hash: string): void {
     if (!this.pendingImages.has(hash) && !this.pendingCSS.has(hash)
       && !this.pendingShots.has(hash)) return;

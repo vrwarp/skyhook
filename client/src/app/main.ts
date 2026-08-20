@@ -1428,14 +1428,24 @@ function mirrorMenu(tab: number, target: MenuTarget): MenuGroups {
 
   const image = target.image;
   if (image) {
-    groups.push([
+    const imageGroup: MenuGroups[number] = [
       { label: 'Save image', run: () => void saveImage(image, target.imageAlt ?? '') },
       {
         label: 'Copy image description',
         disabled: !target.imageAlt,
         run: () => copyText(target.imageAlt ?? ''),
       },
-    ]);
+    ];
+    if (target.imageAnim) {
+      // The still is the design; the tap is the ask (P-118). The hint is the
+      // cost, the way every entry that spends the link says so.
+      imageGroup.unshift({
+        label: 'Play animation',
+        hint: 'fetches the original',
+        run: () => hosts.get(tab)?.playAnimated(image),
+      });
+    }
+    groups.push(imageGroup);
   }
 
   const field = target.field;

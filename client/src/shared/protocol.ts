@@ -269,6 +269,8 @@ export interface ImageMeta {
    * announce this hash again unless a resync makes the server try afresh.
    */
   missing: boolean;
+  /** The still was made from an animation; tap-to-play can ask for it. */
+  anim?: boolean;
 }
 
 export interface TabState {
@@ -400,7 +402,7 @@ export const F = {
   mutation: { strings: 1, ops: 2, docHash: 3, flush: 4 },
   imageMeta: {
     node: 1, hash: 2, w: 3, h: 4, blur: 5, mime: 6, bytes: 7, priority: 8, alt: 9, box: 10,
-    missing: 11,
+    missing: 11, anim: 12,
   },
   imageData: { hash: 1, mime: 2, data: 3 },
   imageWant: { hashes: 1, have: 2 },

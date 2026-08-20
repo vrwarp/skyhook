@@ -334,13 +334,12 @@
     {
       "id": "P-113",
       "title": "DPR is never applied to image transcodes or region shots: every picture is soft on a 2x or 3x screen",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/agent.js",
-        "internal/mirror/shot.go:267",
-        "docs/DESIGN.md:128"
+        "internal/mirror/shot.go"
       ],
-      "noPage": "measuring softness needs a dpr-2 client viewport, a knob the runner does not have yet; at dpr 1 the transcode-to-box is correct by design"
+      "notes": "the transcode ceiling is now in device pixels: the landside tab emulates the reader's deviceScaleFactor, so the agent's devicePixelRatio is theirs, and describeImage scales the target by it (capped 3x) — folding the density into the dimensions folds it into the cache key, so readers at different densities never collide on one rendition. Region shots were already at density for the same reason: the capture renders under the emulated scale. fit() still never upscales past the source, so 1x sources cost nothing new. Pinned by TestPicturesShipAtTheReadersDensity, which opens the same page at densities 1 and 2 and measures what arrives; the parity runner still has no dpr-2 knob, so the e2e pin is the measurement"
     },
     {
       "id": "P-114",
@@ -383,11 +382,12 @@
     {
       "id": "P-118",
       "title": "The GIF tap-to-play the transcoder's comment promises does not exist in the client",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "internal/imgproc/transcode.go:311"
+        "internal/imgproc/pipeline.go",
+        "client/src/app/main.ts"
       ],
-      "noPage": "the still-frame half is P-016's page; this records the docs-versus-code drift so one of them gets fixed"
+      "notes": "the promise is now kept: the still's metadata says it was made from an animation (ImageMeta.Anim, detected by decoding the whole GIF), the context menu over such an image offers Play animation with its cost named, and the want travels as the still's key plus @anim on the ordinary want list — so the cross-flight cache holds originals exactly the way it holds renditions. The pipeline answers from the URL it remembered at transcode time and ships the fetched bytes untranscoded after sniffing them as an image; the browser plays the GIF natively. Pinned by TestATapFetchesTheOriginalAnimation"
     },
     {
       "id": "P-119",

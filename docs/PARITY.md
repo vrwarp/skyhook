@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-53 gaps: 21 open, 11 by-design, 20 fixed, 1 disproven.
+53 gaps: 19 open, 11 by-design, 22 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -155,12 +155,12 @@ The table below is generated from `gaps.json` and the corpus by
 | P-110 | open | There is no print path: window.print does nothing for the reader | — printing is chrome UI the harness cannot see; that @media print sheets do not leak into the screen is pinned by css/layers-scope |
 | P-111 | open | mousemove-driven widgets — drag-and-drop, sliders, hover menus — have no input path | — needs a pointer-move step in the interaction executor; catalogued for the executor's next revision alongside P-004 |
 | P-112 | open | An audio element is photographed as a still control strip; no audio ever crosses | media/audio |
-| P-113 | open | DPR is never applied to image transcodes or region shots: every picture is soft on a 2x or 3x screen | — measuring softness needs a dpr-2 client viewport, a knob the runner does not have yet; at dpr 1 the transcode-to-box is correct by design |
+| P-113 | fixed | DPR is never applied to image transcodes or region shots: every picture is soft on a 2x or 3x screen | — |
 | P-114 | fixed | A prefers-color-scheme media query nested inside a plain style rule crosses with its question intact instead of being resolved landside | css/nesting-scheme |
 | P-115 | fixed | The shell's font-src 'self' may refuse every blob: webfont the pipeline ships | fonts/faces |
 | P-116 | fixed | An external SVG sprite reference resolves to a URL the sandboxed frame can never fetch: the icon renders as nothing | images/svg-sprite |
 | P-117 | disproven | A style write onto a canvas permanently blanks its photograph until the reader touches something | media/canvas-restyle |
-| P-118 | open | The GIF tap-to-play the transcoder's comment promises does not exist in the client | — the still-frame half is P-016's page; this records the docs-versus-code drift so one of them gets fixed |
+| P-118 | fixed | The GIF tap-to-play the transcoder's comment promises does not exist in the client | — |
 | P-119 | fixed | The mirror's own :root color and font leak into pages that rely on UA defaults | css/ua-defaults, real/hn-front, real/wikipedia-article |
 | P-120 | fixed | A top margin that collapses through the page's body is lost at the mirror boundary | css/margin-collapse |
 | P-121 | fixed | The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left | — timing-dependent by nature: the executor settles before each step so every other page measures its own gap; the guard is exercised by every interaction page's focus traffic and the fix is pinned by the staleness comparison itself |

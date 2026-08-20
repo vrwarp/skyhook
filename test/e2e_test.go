@@ -1428,6 +1428,29 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
 	})
+	// A source with detail to lose: 240px of gradient drawn into a 60px box.
+	// What the transcoder keeps of it is how TestPicturesShipAtTheReadersDensity
+	// measures the density ceiling (P-113).
+	mux.HandleFunc("/dense.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(densePNG())
+	})
+	mux.HandleFunc("/loop.gif", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/gif")
+		_, _ = w.Write(loopGIF())
+	})
+	mux.HandleFunc("/loop", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Loop</title></head>
+			<body><h1>a looping picture</h1>
+			<img id="loop" src="/loop.gif" width="80" height="80" alt="loop"></body></html>`)
+	})
+	mux.HandleFunc("/dense", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Dense</title></head>
+			<body><h1>a dense picture</h1>
+			<img id="dense" src="/dense.png" width="60" height="60" alt="dense"></body></html>`)
+	})
 	// The icon the agent's default falls back to when a page declares none —
 	// which the fixture pages deliberately do not, so every one of them
 	// exercises the fallback (P-104).

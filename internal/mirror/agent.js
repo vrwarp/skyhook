@@ -804,6 +804,15 @@
     var aw = Math.round(r.width), ah = Math.round(r.height);
     var w = aw || el.naturalWidth || 0;
     var h = ah || el.naturalHeight || 0;
+    // The transcode ceiling is in device pixels, not CSS ones (P-113): the
+    // tab emulates the reader's density, so devicePixelRatio here is theirs,
+    // and a 2x reader gets a 2x rendition — fit() still never upscales past
+    // the source, so a 1x source costs nothing new. Folding the density into
+    // the dimensions also folds it into the key, so readers at different
+    // densities never collide in the transcode cache. Capped at 3x.
+    var dpr = globalThis.devicePixelRatio || 1;
+    if (dpr > 3) dpr = 3;
+    if (dpr > 1) { w = Math.round(w * dpr); h = Math.round(h * dpr); }
     if (w > 4096) w = 4096;
     if (h > 4096) h = 4096;
     var key = imageKey(src, w, h);
