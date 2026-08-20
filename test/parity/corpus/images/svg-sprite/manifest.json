@@ -4,6 +4,8 @@
   "covers": ["SVG sprites", "external <use> references"],
   "gaps": ["P-116"],
   "waitText": "sprite settled",
-  "serve": {"cdn": ["sprite.svg"]},
-  "notes": "the star's absence plane-side is invisible to the DOM probes — the <use> box is the same size empty or full — so this page pins whatever the CSP counter and the pixel score can see, and the registry entry carries the verdict"
+  "interactions": [
+    {"do": "assertMirrorSelector", "value": "svg path", "name": "the sprite's star is materialized in the mirror"}
+  ],
+  "notes": "the star's absence plane-side is invisible to the DOM probes — the <use> box is the same size empty or full — so the pin is the materialized symbol itself: the agent fetches the sprite, ships the fragment on the use element, and the patcher builds it into the mirror's own sprite holder"
 }

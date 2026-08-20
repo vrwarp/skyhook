@@ -166,15 +166,19 @@ type Interaction struct {
 // Assertion kinds beside the gesture kinds: assertMirrorCSSHas and
 // assertMirrorCSSLacks test the delivered stylesheet's text (for gaps whose
 // mechanism is a rule crossing in the wrong form, even when both harness
-// browsers happen to answer its question identically), and assertShellTabs
+// browsers happen to answer its question identically), assertShellTabs
 // tests how many mirror frames the shell holds relative to when the page
-// opened ("+1" — for the tab a target=_blank click should have produced).
+// opened ("+1" — for the tab a target=_blank click should have produced),
+// and assertMirrorSelector tests that the mirror document matches a CSS
+// selector (or, with a leading "!", does not) — for divergences no probe
+// dimension can see, like an empty <use> box that measures the same full.
 var interactionKinds = map[string]bool{
 	"click": true, "type": true, "select": true, "check": true,
 	"submit": true, "key": true, "scroll": true, "waitText": true,
 	"settle":             true,
 	"assertMirrorCSSHas": true, "assertMirrorCSSLacks": true,
-	"assertShellTabs": true,
+	"assertShellTabs":      true,
+	"assertMirrorSelector": true,
 }
 
 // LoadManifest reads and checks one page's manifest.

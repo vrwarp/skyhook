@@ -76,7 +76,13 @@ img { background-repeat: no-repeat; background-size: cover; }
    widget is its buttons: the reader is left looking at a captcha with no way
    to submit it and no indication anything is missing. A scrollbar is the
    honest version of the same failure, and it keeps the control reachable. */
-[data-skyhook-tag="iframe"] { display: block; overflow: auto; scrollbar-width: thin; }
+[data-skyhook-tag="iframe"] { display: block; overflow: auto; scrollbar-width: thin;
+  /* The containing block a frame's viewport provides (P-021): landside, an
+     absolutely- or fixed-positioned element inside the frame anchors to the
+     frame's own initial containing block; here the sub-document is ordinary
+     boxes, and without this its bottom-anchored toolbar anchors to the
+     bottom of the whole mirror. Layout containment re-homes both. */
+  contain: layout; }
 /* A frame whose document is on another origin. Nothing landside can read it —
    no agent runs in it and its contentDocument is closed — so the stand-in is
    empty however right its box is, and an empty box is invisible: Gmail's app
@@ -1162,12 +1168,14 @@ export class MirrorHost {
       if (this.scrollTimer) return;
       this.scrollTimer = setTimeout(() => {
         this.scrollTimer = null;
+        const anchor = this.scrollAnchor(doc, win);
         this.events.scroll(this.tab, {
           tab: this.tab,
           x: win.scrollX,
           y: win.scrollY,
           h: win.innerHeight,
           docH: doc.documentElement.scrollHeight,
+          ...(anchor ? { anchor: anchor.id, anchorY: anchor.top } : {}),
         });
       }, 250);
     }, { passive: true });
@@ -1349,6 +1357,35 @@ export class MirrorHost {
   }
 
   /** Scrolls the mirrored document, recording the position as ours. */
+
+  /**
+   * The mirrored element whose position anchors a document scroll (P-020).
+   *
+   * A range fraction lands approximately on a page whose landside height
+   * differs — substituted fonts alone change it — and approximately is what
+   * makes IntersectionObserver-driven lazy loading fire a viewport early or
+   * late. The same element put at the same offset is exact. The mirrored
+   * roots are skipped because anchoring on html or body degrades to absolute
+   * pixels, which is the fraction's failure mode with extra steps.
+   */
+  private scrollAnchor(doc: Document, win: Window): { id: number; top: number } | null {
+    const w = win.innerWidth || 0;
+    for (const fx of [0.5, 0.15, 0.85]) {
+      let el: Element | null;
+      try {
+        el = doc.elementFromPoint(w * fx, 1);
+      } catch {
+        continue;
+      }
+      for (; el; el = el.parentElement) {
+        if (el.hasAttribute('data-sky-doc')) break;
+        const id = this.patcher?.idOf(el) ?? 0;
+        if (id) return { id, top: Math.round(el.getBoundingClientRect().top) };
+      }
+    }
+    return null;
+  }
+
   private scrollDocTo(x: number, y: number): void {
     const win = this.frame.contentWindow;
     if (!win) return;

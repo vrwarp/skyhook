@@ -654,6 +654,26 @@ func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint3
 	case "settle":
 		_, _ = settleAndProbeTab(ctx, t, run.page, mt, tab, openedAt)
 		return true
+	case "assertMirrorSelector":
+		// A selector the mirror document must match — or, with a leading "!",
+		// must not. For divergences no probe dimension can see: the empty
+		// <use> box is the same size as a full one.
+		settleTab(ctx, t, run.page, mt, tab, openedAt, time.Now().Add(budget(45*time.Second)))
+		want := step.Value
+		negate := strings.HasPrefix(want, "!")
+		if negate {
+			want = want[1:]
+		}
+		var n int
+		evalJSON(ctx, t, run.page, fmt.Sprintf(`(() => {
+      const f = document.querySelector('iframe.mirror[data-tab="%d"]');
+      if (!f || !f.contentDocument) return -1;
+      return f.contentDocument.querySelectorAll(%q).length;
+    })()`, tab, want), &n)
+		if negate {
+			return n == 0
+		}
+		return n > 0
 	case "assertMirrorCSSHas", "assertMirrorCSSLacks":
 		// Give in-flight CSS a moment to land, then read the delivered rules.
 		settleTab(ctx, t, run.page, mt, tab, openedAt, time.Now().Add(budget(45*time.Second)))

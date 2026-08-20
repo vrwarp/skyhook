@@ -478,6 +478,7 @@ export function inputBody(ev: InputEventInit): Map<number, unknown> {
 
 export function scrollBody(o: {
   tab: number; x: number; y: number; h: number; docH: number; node?: number; seq?: number;
+  anchor?: number; anchorY?: number;
 }): Map<number, unknown> {
   const m = new Map<number, unknown>();
   m.set(F.scroll.tab, safeInt(o.tab));
@@ -487,6 +488,10 @@ export function scrollBody(o: {
   if (o.docH) m.set(F.scroll.docH, safeInt(o.docH));
   if (o.node) m.set(F.scroll.node, safeInt(o.node));
   if (o.seq) m.set(F.scroll.seq, safeInt(o.seq));
+  if (o.anchor) m.set(F.scroll.anchor, safeInt(o.anchor));
+  // Zero is a real offset here — the anchor's edge exactly at the viewport
+  // top — so the anchor's presence is the gate, not the value's truthiness.
+  if (o.anchor && o.anchorY !== undefined) m.set(F.scroll.anchorY, safeInt(o.anchorY));
   return m;
 }
 

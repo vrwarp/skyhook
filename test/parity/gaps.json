@@ -177,21 +177,23 @@
     {
       "id": "P-020",
       "title": "Landside scroll is matched by range fraction, so IntersectionObserver-driven lazy loading fires approximately",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "internal/mirror/input.go:658",
-        "internal/mirror/agent.js"
+        "internal/mirror/input.go",
+        "internal/mirror/agent.js",
+        "client/src/mirror/host.ts"
       ],
-      "noPage": "needs a scroll-then-measure page with a tolerant contract; planned for the corpus's next round"
+      "notes": "document scrolls are now anchored, not proportional: the client names the mirrored element at its viewport top and where its box sits (ScrollEvent.Anchor/AnchorY), and the landside replay puts the same element at the same offset — exact even when the two documents differ in height, which substituted fonts alone guarantee on real pages. The range fraction remains as the fallback for an anchor a mutation has since removed, and still owns the at-the-bottom case. textmisc/scroll-lazyload pins the whole path: telemetry, anchor resolution, landside scroll, the page's IntersectionObserver firing, and the revealed text mirroring back"
     },
     {
       "id": "P-021",
       "title": "A mirrored sub-document is laid out plane-side against a box, not a viewport: reader fonts, no percentage heights, fixed and sticky resolve against the wrong thing",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "docs/IMPLEMENTATION.md:1506",
-        "client/src/mirror/host.ts"
-      ]
+        "client/src/mirror/host.ts",
+        "client/src/mirror/patcher.ts"
+      ],
+      "notes": "three pieces make the stand-in behave like the viewport it replaces: layout containment on it re-homes absolute and fixed descendants that used to anchor to the bottom of the whole mirror; the shadow root's base sheet carries the sub-document twin of the margin-collapse padding (the shell's own stylesheet cannot reach past the boundary, which is why the top-document fix never applied inside frames); and data-sky-box is applied as the border box it was measured as, where content-box sizing added the stand-in's own border on top and ran every framed document 2px wide. The percentage-height chain itself already resolved — the stand-in's definite box is what 100% finds. frames/viewport-units pins all of it at zero nodes off"
     },
     {
       "id": "P-022",
@@ -362,11 +364,12 @@
     {
       "id": "P-116",
       "title": "An external SVG sprite reference resolves to a URL the sandboxed frame can never fetch: the icon renders as nothing",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/agent.js",
-        "internal/server/webapp.go:54"
-      ]
+        "client/src/mirror/patcher.ts"
+      ],
+      "notes": "the agent fetches the sprite from inside the page — browsers require these references to be same-origin, so it always can — carries the referenced fragment on the use element (data-sky-sprite, capped at 64KB) and re-points the reference at an id of the mirror's own; the patcher scrubs the fragment of script and foreignObject and builds it into a sprite holder on the frame's root, where a resync's body swap cannot take it. images/svg-sprite pins the materialized symbol, and its corpus page now serves the sprite same-origin the way the real pattern does — the old cross-origin reference drew nothing on either half, which is why every probe used to pass over a missing icon"
     },
     {
       "id": "P-117",

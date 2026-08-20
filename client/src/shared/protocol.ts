@@ -409,7 +409,10 @@ export const F = {
     x: 8, y: 9, fields: 10, expectSeq: 11, ts: 12, start: 13, end: 14, repeat: 16,
     hold: 17, point: 18, path: 19,
   },
-  scroll: { tab: 1, x: 2, y: 3, h: 4, docH: 5, node: 6, seq: 7, visible: 8 },
+  scroll: {
+    tab: 1, x: 2, y: 3, h: 4, docH: 5, node: 6, seq: 7, visible: 8,
+    anchor: 9, anchorY: 10,
+  },
   adapterRecord: {
     adapter: 1, kind: 2, id: 3, space: 4, author: 5, text: 6, ts: 7, seq: 8, unread: 9, extra: 10,
   },

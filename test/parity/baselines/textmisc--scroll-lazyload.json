@@ -1,5 +1,5 @@
 {
-  "page": "images/svg-sprite",
+  "page": "textmisc/scroll-lazyload",
   "dimensions": {
     "attributes": {
       "status": "pass",
@@ -27,7 +27,7 @@
       },
       "checks": [
         {
-          "name": "the sprite's star is materialized in the mirror",
+          "name": "a scroll fires the page's intersection observer",
           "pass": true
         }
       ]
@@ -78,6 +78,6 @@
     }
   },
   "gaps": [
-    "P-116"
+    "P-020"
   ]
 }

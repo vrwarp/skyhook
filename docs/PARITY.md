@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-53 gaps: 24 open, 11 by-design, 17 fixed, 1 disproven.
+53 gaps: 21 open, 11 by-design, 20 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -139,8 +139,8 @@ The table below is generated from `gaps.json` and the corpus by
 | P-017 | by-design | Canvas, WebGL and video are photographs: region shots, taken after input, never live | media/canvas |
 | P-018 | by-design | Ad and creative networks are blocked landside, so their content never exists to mirror | — |
 | P-019 | by-design | Alerts, confirms and prompts are auto-accepted landside and never shown to the reader | — |
-| P-020 | open | Landside scroll is matched by range fraction, so IntersectionObserver-driven lazy loading fires approximately | — needs a scroll-then-measure page with a tolerant contract; planned for the corpus's next round |
-| P-021 | open | A mirrored sub-document is laid out plane-side against a box, not a viewport: reader fonts, no percentage heights, fixed and sticky resolve against the wrong thing | frames/viewport-units |
+| P-020 | fixed | Landside scroll is matched by range fraction, so IntersectionObserver-driven lazy loading fires approximately | textmisc/scroll-lazyload |
+| P-021 | fixed | A mirrored sub-document is laid out plane-side against a box, not a viewport: reader fonts, no percentage heights, fixed and sticky resolve against the wrong thing | frames/viewport-units |
 | P-022 | by-design | A cross-origin frame that cannot be mirrored stays a labelled box; past the depth or count limits, so does one that could be | — |
 | P-023 | by-design | A cross-origin frame smaller than 64x32 gets no label at all — indistinguishable from a bug | — settled as the design: a frame below the label floor is an ad pixel or a tracking beacon, and naming its host would put furniture on every page that carries them. The affordance floor is FRAME_LABEL_MIN_W/H in agent.js; the frame element, its box and its src still cross, so a bundle can always tell the box from a bug |
 | P-101 | fixed | A select change never reaches the landside page except through a form submit | forms/select |
@@ -158,7 +158,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-113 | open | DPR is never applied to image transcodes or region shots: every picture is soft on a 2x or 3x screen | — measuring softness needs a dpr-2 client viewport, a knob the runner does not have yet; at dpr 1 the transcode-to-box is correct by design |
 | P-114 | fixed | A prefers-color-scheme media query nested inside a plain style rule crosses with its question intact instead of being resolved landside | css/nesting-scheme |
 | P-115 | fixed | The shell's font-src 'self' may refuse every blob: webfont the pipeline ships | fonts/faces |
-| P-116 | open | An external SVG sprite reference resolves to a URL the sandboxed frame can never fetch: the icon renders as nothing | images/svg-sprite |
+| P-116 | fixed | An external SVG sprite reference resolves to a URL the sandboxed frame can never fetch: the icon renders as nothing | images/svg-sprite |
 | P-117 | disproven | A style write onto a canvas permanently blanks its photograph until the reader touches something | media/canvas-restyle |
 | P-118 | open | The GIF tap-to-play the transcoder's comment promises does not exist in the client | — the still-frame half is P-016's page; this records the docs-versus-code drift so one of them gets fixed |
 | P-119 | fixed | The mirror's own :root color and font leak into pages that rely on UA defaults | css/ua-defaults, real/hn-front, real/wikipedia-article |

@@ -628,9 +628,68 @@ export class Patcher {
       this.applyTopLayer(el as HTMLElement, value);
     } else if (lower === 'data-sky-display') {
       this.applyDisplay(el as HTMLElement, value);
+    } else if (lower === 'data-sky-sprite') {
+      this.applySprite(el, value);
     } else if (el.tagName === 'CANVAS' && (lower === 'width' || lower === 'height')) {
       this.sizeCanvas(el as HTMLElement);
     }
+  }
+
+  /**
+   * Materialises an external sprite's fragment into the mirror (P-116).
+   *
+   * The agent re-points the use's reference at an id of the mirror's own and
+   * carries the fragment it fetched on the element; this builds that fragment
+   * into a hidden sprite holder under exactly that id. Scripts and
+   * foreignObject are stripped on the way in — the sandbox would refuse to
+   * run them anyway, but the mirror does not carry what it will not run. The
+   * holder is sized to nothing rather than display:none, because a browser
+   * will clone a symbol out of a hidden subtree but not every plain group.
+   */
+  private applySprite(el: Element, markup: string): void {
+    const ref = (el.getAttribute('href') ?? el.getAttributeNS(XLINK_NS, 'href') ?? '')
+      .replace(/^#/, '');
+    if (!ref || !ref.startsWith('sky-sprite-') || !markup || markup.length > 64 * 1024) return;
+    let parsed: Document;
+    try {
+      parsed = new DOMParser().parseFromString(markup, 'image/svg+xml');
+    } catch {
+      return;
+    }
+    const root = parsed.documentElement;
+    if (!root || root.tagName.toLowerCase() === 'parsererror' || root.querySelector('parsererror')) {
+      return;
+    }
+    const scrub = (n: Element): void => {
+      for (const a of Array.from(n.attributes)) {
+        if (/^on/i.test(a.name)) n.removeAttribute(a.name);
+      }
+      for (const child of Array.from(n.children)) {
+        const t = child.tagName.toLowerCase();
+        if (t === 'script' || t === 'foreignobject') {
+          child.remove();
+          continue;
+        }
+        scrub(child);
+      }
+    };
+    scrub(root);
+    const adopted = this.doc.importNode(root, true);
+    adopted.setAttribute('id', ref);
+    let holder = this.doc.querySelector('svg[data-skyhook-sprites]');
+    if (!holder) {
+      holder = this.doc.createElementNS(SVG_NS, 'svg');
+      holder.setAttribute('data-skyhook-sprites', '1');
+      holder.setAttribute('aria-hidden', 'true');
+      (holder as SVGElement).style.cssText =
+        'position:absolute;width:0;height:0;overflow:hidden';
+      // On the frame's root, not its body: a snapshot swaps the body's
+      // children out wholesale, and the holder has to outlive resyncs.
+      this.doc.documentElement?.appendChild(holder);
+    }
+    const old = this.doc.getElementById(ref);
+    if (old && old.parentNode === holder) old.remove();
+    holder.appendChild(adopted);
   }
 
   /** The display the landside plugin computed. `inline` becomes inline-block
@@ -710,12 +769,16 @@ export class Patcher {
     if (live) this.hooks.onRestyled?.(el as HTMLElement);
   }
 
-  /** Sizes a stand-in from the `WxH` the agent measured landside. */
+  /** Sizes a stand-in from the `WxH` the agent measured landside. The
+   *  measurement is a border box — getBoundingClientRect — so the box is
+   *  applied as one: content-box sizing added the stand-in's own border on
+   *  top and every framed sub-document ran 2px wide (P-021). */
   private applyBox(el: Element, box: string): void {
     const [w, h] = box.split('x');
     const style = (el as HTMLElement).style;
     if (w) style.width = `${Number(w)}px`;
     if (h) style.height = `${Number(h)}px`;
+    style.boxSizing = 'border-box';
   }
 
   private forget(node: Node): void {
@@ -757,7 +820,16 @@ export class Patcher {
    * that says so lives in the shell's own stylesheet, which stops at the
    * boundary like any other document rule. Said again inside, it reaches them.
    */
-  private static readonly baseRootCSS = 'html, body { display: block; }';
+  /*
+   * The furniture every mirrored sub-document needs, adopted into its shadow
+   * root because the shell's own stylesheet cannot reach past the boundary.
+   * The padding line is the sub-document twin of the shell's margin-collapse
+   * block (P-120, P-021): a real frame's root stops a child margin escaping,
+   * and without it the margin walks out of the document into the stand-in
+   * and every margin-led frame page sits high by exactly that margin.
+   */
+  private static readonly baseRootCSS = `html, body { display: block; }
+html:where([data-sky-doc]) { padding-top: 0.05px; padding-bottom: 0.05px; }`;
 
   private adoptBaseSheet(root: ShadowRoot): void {
     const win = this.doc.defaultView as (Window & typeof globalThis) | null;

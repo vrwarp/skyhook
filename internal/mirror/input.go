@@ -694,7 +694,16 @@ func (t *Tab) HandleScroll(ctx context.Context, ev *protocol.ScrollEvent) error 
 	if fraction < 0 {
 		fraction = 0
 	}
-	_, err := t.eval(ctx, fmt.Sprintf("__skyhook.scrollProbe(%f)", fraction))
+	// The anchor is the exact answer and the fraction the approximate one
+	// (P-020): the client names the element at its viewport top, and putting
+	// the same element at the same offset survives the two documents being
+	// different heights — which is what makes a lazy-load sentinel fire at
+	// the right scroll instead of a viewport early or late.
+	expr := fmt.Sprintf("__skyhook.scrollProbe(%f)", fraction)
+	if ev.Anchor != 0 {
+		expr = fmt.Sprintf("__skyhook.scrollAnchor(%d,%d,%f)", ev.Anchor, ev.AnchorY, fraction)
+	}
+	_, err := t.eval(ctx, expr)
 	if err != nil {
 		return err
 	}

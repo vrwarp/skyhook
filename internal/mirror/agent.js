@@ -385,6 +385,7 @@
     var base = docBase(el);
     var flags = 0;
     var pairs = [];
+    var spriteAttr = null;
     for (var i = 0; i < attrs.length; i++) {
       var a = attrs[i];
       var name = a.name;
@@ -408,8 +409,23 @@
         // pinColorSchemes.
         value = pinColorSchemes(value);
       }
+      if ((name === 'href' || name === 'xlink:href') && tagOf(el) === 'USE') {
+        var spr = useSpriteRef(el);
+        if (spr) {
+          // Re-pointed at the copy the client will build from the carried
+          // fragment (P-116); the sprite is fetched here, where it can be.
+          // The fragment itself is appended after the loop: the client
+          // materialises it by reading the reference this rewrite sets, so
+          // the reference has to be applied first.
+          value = '#' + spr.key;
+          var sm = spriteMarkup(spr.url, spr.frag);
+          if (sm) spriteAttr = sm;
+          else requestSprite(spr.url, el);
+        }
+      }
       pairs.push(intern(name), intern(value));
     }
+    if (spriteAttr) pairs.push(intern('data-sky-sprite'), intern(spriteAttr));
     // Live form state is a property, not an attribute; without this a mirrored
     // form loses everything the user (or the page) already typed. What is
     // recorded here is also what the sweep compares against, so a page that
@@ -832,6 +848,16 @@
         var shot = styleAttrImages(value, base, el);
         if (shot) value = shot.text; // and the images stay unqueued
         value = pinColorSchemes(value);
+      }
+      if ((name === 'href' || name === 'xlink:href') && tagOf(el) === 'USE') {
+        var spr = useSpriteRef(el);
+        if (spr) {
+          value = '#' + spr.key;
+          // Read-only twin of the serializer's branch: report the fragment
+          // when it is cached, and never start a fetch from a probe.
+          var sm = spriteMarkup(spr.url, spr.frag);
+          if (sm) { out['data-sky-sprite'] = sm; any = true; }
+        }
       }
       out[name] = value;
       any = true;
@@ -3316,6 +3342,101 @@
     return true;
   }
 
+  // ------------------------------------------------------------- svg sprites
+
+  /*
+   * An external <use> reference names a sprite file the sandboxed mirror can
+   * never fetch: its CSP is default-src 'none', so the absolutised URL the
+   * reference becomes draws nothing at all (P-116). Browsers require these
+   * references to be same-origin, so the agent can always fetch the sprite
+   * from inside the page. The fragment the reference names is carried on the
+   * use element itself (data-sky-sprite), the reference is re-pointed at the
+   * copy the client will build, and the client materialises the symbol into
+   * a sprite holder of the mirror's own.
+   */
+  var spriteSources = new Map();  // sprite url -> its text
+  var spriteFetches = new Map();  // sprite url -> 'pending' | 'ok' | 'failed'
+  var spriteSymbols = new Map();  // url#frag -> extracted markup ('' = none)
+  var spriteWaiters = new Map();  // sprite url -> use elements awaiting it
+
+  function useSpriteRef(el) {
+    var raw = el.getAttribute('href') || el.getAttribute('xlink:href') || '';
+    if (!raw || raw.charAt(0) === '#') return null;
+    var abs = absolute(docBase(el), raw);
+    var hash = abs.indexOf('#');
+    if (hash < 0) return null;
+    var url = abs.slice(0, hash);
+    var frag = abs.slice(hash + 1);
+    if (!frag || !/^https?:/i.test(url)) return null;
+    // A reference into the document's own URL is same-document already.
+    if (url === String(location.href).split('#')[0]) return null;
+    return { url: url, frag: frag, key: spriteKey(abs) };
+  }
+
+  function spriteKey(abs) {
+    var h = 5381;
+    for (var i = 0; i < abs.length; i++) h = ((h * 33) ^ abs.charCodeAt(i)) >>> 0;
+    return 'sky-sprite-' + h.toString(36);
+  }
+
+  function spriteMarkup(url, frag) {
+    var key = url + '#' + frag;
+    if (spriteSymbols.has(key)) return spriteSymbols.get(key);
+    var text = spriteSources.get(url);
+    if (!text) return '';
+    var markup = '';
+    try {
+      var sdoc = new DOMParser().parseFromString(text, 'image/svg+xml');
+      var frel = sdoc.getElementById(frag);
+      if (frel && frel.outerHTML && frel.outerHTML.length <= 65536) markup = frel.outerHTML;
+    } catch (e) { markup = ''; }
+    spriteSymbols.set(key, markup);
+    return markup;
+  }
+
+  function requestSprite(url, el) {
+    var els = spriteWaiters.get(url);
+    if (!els) { els = []; spriteWaiters.set(url, els); }
+    if (els.indexOf(el) < 0) els.push(el);
+    if (spriteFetches.has(url)) return;
+    spriteFetches.set(url, 'pending');
+    try {
+      fetch(url, { credentials: 'include' }).then(function (r) {
+        return r && r.ok ? r.text() : null;
+      }).then(function (t) {
+        if (t) { spriteSources.set(url, t); spriteFetches.set(url, 'ok'); spriteLanded(url); }
+        else { spriteFetches.set(url, 'failed'); spriteWaiters.delete(url); }
+      }, function () { spriteFetches.set(url, 'failed'); spriteWaiters.delete(url); });
+    } catch (e) { spriteFetches.set(url, 'failed'); spriteWaiters.delete(url); }
+  }
+
+  function pendingSpriteFetches() {
+    var n = 0;
+    spriteFetches.forEach(function (v) { if (v === 'pending') n++; });
+    return n;
+  }
+
+  // spriteLanded hands each waiting use element its fragment, as an ordinary
+  // attribute op: a sprite that arrives late rides the same train as one that
+  // was cached at serialisation.
+  function spriteLanded(url) {
+    var els = spriteWaiters.get(url) || [];
+    spriteWaiters.delete(url);
+    var queued = false;
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var id = idOf.get(el);
+      if (id === undefined || !el.isConnected) continue;
+      var ref = useSpriteRef(el);
+      if (!ref || ref.url !== url) continue;
+      var markup = spriteMarkup(ref.url, ref.frag);
+      if (!markup) continue;
+      pendingOps.push([3, id, intern('data-sky-sprite'), intern(markup)]);
+      queued = true;
+    }
+    if (queued) scheduleFlush(false);
+  }
+
   // familyHasFaceRule reports whether any readable stylesheet declares a
   // @font-face for this family: such a face ships through the ordinary walk,
   // and synthesizing a twin would be a second copy of the font.
@@ -3490,6 +3611,14 @@
             if (img.aw) pendingOps.push([3, id, intern('width'), intern(String(img.aw))]);
             if (img.ah) pendingOps.push([3, id, intern('height'), intern(String(img.ah))]);
             watchImg(el, img.aw, img.ah);
+          }
+        } else if ((name === 'href' || name === 'xlink:href') && tagOf(el) === 'USE') {
+          var spr = useSpriteRef(el);
+          if (spr) {
+            val = '#' + spr.key;
+            var sm = spriteMarkup(spr.url, spr.frag);
+            if (sm) pendingOps.push([3, id, intern('data-sky-sprite'), intern(sm)]);
+            else requestSprite(spr.url, el);
           }
         } else if (name === 'style') {
           // A background a script assigns as it scrolls arrives here rather
@@ -4221,6 +4350,26 @@
     // mapping is by range rather than by document height so that the top stays
     // the top and, more importantly, the bottom stays the bottom — an infinite
     // list only fetches more when the page is genuinely at its end.
+    /*
+     * scrollAnchor is the exact version of scrollProbe: put the element the
+     * reader has at their viewport top at the same offset here (P-020). The
+     * two documents differ in height — substituted fonts alone see to that —
+     * so a fraction lands a lazy-load sentinel a viewport early or late; the
+     * shared element lands it exactly. The fraction still travels, for the
+     * element a mutation has since removed.
+     */
+    scrollAnchor: function (id, anchorY, fraction) {
+      var el = byId.get(id);
+      if (el && el.getBoundingClientRect && el.isConnected) {
+        try {
+          var top = el.getBoundingClientRect().top + (globalThis.scrollY || 0);
+          globalThis.scrollTo({ top: Math.max(0, Math.round(top - anchorY)), behavior: 'instant' });
+          ownScroll(0);
+          return true;
+        } catch (e) { /* fall through to the fraction */ }
+      }
+      return api.scrollProbe(fraction);
+    },
     scrollProbe: function (fraction) {
       var h = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
       var range = Math.max(0, h - (globalThis.innerHeight || 800));
@@ -4321,7 +4470,7 @@
         // Pending covers the timer and any sheet-source fetch the var()
         // shorthand repair kicked off: either one means the stylesheet the
         // client holds is about to change.
-        cssPending: cssTimer !== null || pendingSheetFetches() > 0,
+        cssPending: cssTimer !== null || pendingSheetFetches() > 0 || pendingSpriteFetches() > 0,
         // What the used-CSS filter did on its last pass. A page missing its
         // styling and a page whose rules were all rejected look the same from
         // the client; these two numbers tell them apart.

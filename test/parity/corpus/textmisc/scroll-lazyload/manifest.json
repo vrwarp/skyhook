@@ -1,0 +1,12 @@
+{
+  "id": "textmisc/scroll-lazyload",
+  "title": "a scroll reaches the page's intersection observers where the reader actually is",
+  "covers": ["scroll replay", "IntersectionObserver", "lazy loading"],
+  "gaps": ["P-020"],
+  "waitText": "lazy settled",
+  "interactions": [
+    {"do": "scroll", "value": "2700"},
+    {"do": "waitText", "value": "the deep content arrived", "within": 12, "name": "a scroll fires the page's intersection observer"}
+  ],
+  "notes": "in-corpus both halves are the same height, so the anchored replay and the fraction fallback land alike; what this pins is the whole path — telemetry, anchor resolution, landside scroll, observer, mutation back. The height-divergent case the anchor exists for is real-page territory"
+}

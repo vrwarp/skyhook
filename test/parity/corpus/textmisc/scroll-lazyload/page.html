@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>content that waits to be scrolled to</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  .spacer { height: 2800px; background: linear-gradient(rgb(250, 250, 250), rgb(235, 235, 235)); }
+  #deep { min-height: 24px; }
+</style>
+</head>
+<body>
+  <h1>a long way down</h1>
+  <p>lazy settled</p>
+  <!-- The IntersectionObserver pattern every image-heavy page uses: nothing
+       below the fold exists until the reader approaches it. The scroll is
+       replayed anchored to the element at the reader's viewport top (P-020),
+       so the observer fires at the same content position on both halves. -->
+  <div class="spacer"></div>
+  <div id="deep">waiting for the reader</div>
+  <script>
+    new IntersectionObserver(function (entries, obs) {
+      for (var i = 0; i < entries.length; i++) {
+        if (entries[i].isIntersecting) {
+          document.getElementById('deep').textContent = 'the deep content arrived';
+          obs.disconnect();
+        }
+      }
+    }).observe(document.getElementById('deep'));
+  </script>
+</body>
+</html>

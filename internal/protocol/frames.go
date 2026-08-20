@@ -534,6 +534,13 @@ type ScrollEvent struct {
 	Node    int64   `cbor:"6,keyasint,omitempty"` // scroll container, 0 = document
 	Seq     uint64  `cbor:"7,keyasint,omitempty"`
 	Visible []int64 `cbor:"8,keyasint,omitempty"` // node ids near the viewport
+	// Anchor names the mirrored element at the top of the plane's viewport,
+	// and AnchorY where its border box sits relative to that top (P-020). A
+	// document scroll lands exactly when the same element is put at the same
+	// offset landside; the range fraction is the fallback for an anchor the
+	// landside document no longer has.
+	Anchor  int64 `cbor:"9,keyasint,omitempty"`
+	AnchorY int   `cbor:"10,keyasint,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
