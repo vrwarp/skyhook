@@ -430,14 +430,13 @@
     {
       "id": "P-124",
       "title": "The document hash disagrees across languages on non-ASCII text: the agent and patcher fold UTF-16 code units while the Go replicas fold byte-indexed runes, so a healthy mirror of any page with a multi-byte character in a text node's first 32 characters reports divergence",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/model.go",
         "internal/mirror/agent.js",
         "client/src/mirror/patcher.ts"
       ],
-      "noPage": "the corpus's structure dimension compares the agent's hash against the patcher's, and both fold UTF-16 code units, so they agree; the divergent pairing is JavaScript against Go — Model.Hash ranges over v byte-indexed (`for i, r := range v` breaks at byte 32, not unit 32, and folds the rune's low byte, not the surrogate pair's) — which no browser-to-browser page can measure. Proven by capture 20260820-072612 of the Hacker News front page: recomputing both conventions over the bundle's own fingerprint rows reproduces serverHash 1676248291 (UTF-16) and clientHash 2876902932 (Go) exactly; the U+00A0 in every \"N comments\" link is enough. Until Model.Hash folds UTF-16 code units, hashesAgree is false on healthy captures of most real pages, and every Go-side consumer of the hash (the capture's agreement record, skyhookctl's replica, integrity comparisons against either JS half) sees phantom divergence",
-      "notes": "the fingerprint implementations carry the same split: the agent truncates values at 32 UTF-16 units where the Go client stops at 32 runes, so an emoji-leading text row differs between the two files (conformance bundle 23, id 389) even before the hashes disagree"
+      "notes": "fixed: Model.Hash folds UTF-16 code units exactly as the agent and patcher do (foldHashValue, model.go). No corpus page can measure this — the browser-to-browser suite compares two JavaScript folds that always agreed — so the pin is the shared cross-language vector: TestHashMatchesTheJavaScriptConvention (internal/mirror) and the patcher's 'folds the cross-language vector' case assert the same 1767627470 over the same nodes, covering an nbsp, an em dash, a surrogate pair and clipPath's case. Discovery evidence: capture 20260820-072612 of the Hacker News front page, where both recorded hashes reproduced exactly under the two conventions"
     },
     {
       "id": "P-125",
@@ -470,12 +469,12 @@
     {
       "id": "P-128",
       "title": "The three fingerprint writers disagree at the edges: DOM nodeType against protocol kind for container roots, lowercased names against clipPath, 32 UTF-16 units against 32 runes",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/agent.js",
         "internal/client/client.go"
       ],
-      "noPage": "a diagnostic-surface inconsistency, not a rendering one — the documents agree while their descriptions differ. docs/OPERATIONS.md tells the reader to diff the two fingerprint.json files by hand, and on any page with SVG, sub-frames or emoji that diff reports phantom rows (conformance bundles 22 and 23: clippath/clipPath, kind 9/11, an emoji title cut a rune short). bundle triage compensates (fingerprintsDisagree in internal/parity/triage.go); the files themselves still disagree until the writers converge on one vocabulary"
+      "notes": "fixed: the writers now share one vocabulary — protocol kinds (the agent maps a sub-frame document to the wire's fragment kind), ASCII-lowercased element names (unifying also the patcher's docHash, which had folded wire-case clipPath and would have disagreed with a healthy agent), and values cut at 32 UTF-16 code units, backing off a split surrogate pair (fingerprintWindow in agent.js and patcher.ts, HashValueWindow in model.go, modelFingerprint in the Go client). bundle triage keeps its tolerant comparator for bundles written before the fix"
     }
   ]
 }

@@ -496,7 +496,11 @@ func (c *Client) sendCapture(req protocol.CaptureRequest, artifacts []captureArt
 }
 
 // modelFingerprint lists what the replica's hash is computed over, in the same
-// shape the agent and the browser patcher produce, so all three are diffable.
+// shape — and the same vocabulary — the agent and the browser patcher produce,
+// so all three are diffable (P-128: this writer used to keep DOM case and cut
+// at 32 runes where the others lowercase and cut at 32 UTF-16 units, and the
+// hand-diff OPERATIONS.md describes reported phantom rows on any page with
+// SVG or emoji).
 func modelFingerprint(m *mirror.Model) map[string]any {
 	nodes := make([][]any, 0, m.NodeCount())
 	// Under the replica's lock: the frame loop is still feeding it while a
@@ -510,11 +514,10 @@ func modelFingerprint(m *mirror.Model) map[string]any {
 			v = n.Text
 		case protocol.KindDoctype:
 			v = ""
+		default:
+			v = strings.ToLower(v)
 		}
-		if len([]rune(v)) > 32 {
-			v = string([]rune(v)[:32])
-		}
-		nodes = append(nodes, []any{id, n.Kind, v})
+		nodes = append(nodes, []any{id, n.Kind, mirror.HashValueWindow(v)})
 		return true
 	})
 	return map[string]any{"total": len(nodes), "truncated": false, "nodes": nodes}

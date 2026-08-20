@@ -150,6 +150,57 @@ func TestMutationsOnMissingNodesAreTolerated(t *testing.T) {
 	}
 }
 
+// The hash is a cross-language contract: this vector is shared verbatim
+// with the patcher's test (client/test/patcher.dom.test.ts, "folds the
+// cross-language vector"), and 1767627470 is what JavaScript's
+// charCodeAt-based fold computes over it. It pins the two edges P-124
+// shipped on: non-ASCII text (an   and an em dash — UTF-16 code units,
+// not runes or bytes) and an astral character (a surrogate pair, two
+// units), plus the case fold for SVG's clipPath.
+func TestHashMatchesTheJavaScriptConvention(t *testing.T) {
+	m := NewModel()
+	snap := &protocol.Snapshot{
+		Strings: []string{
+			"html", "clipPath",
+			"a b — dash",
+			"\U0001F389 party with a very long tail beyond the window",
+		},
+		Nodes: []protocol.Node{
+			{ID: 1, Kind: protocol.KindElement, Ref: 0},
+			{ID: 2, Parent: 1, Kind: protocol.KindElement, Ref: 1},
+			{ID: 3, Parent: 1, Kind: protocol.KindText, Ref: 2},
+			{ID: 4, Parent: 1, Kind: protocol.KindText, Ref: 3},
+		},
+	}
+	if err := m.ApplySnapshot(snap); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Hash(); got != 1767627470 {
+		t.Fatalf("hash = %d, want 1767627470 (the JavaScript fold of the same nodes)", got)
+	}
+}
+
+func TestHashValueWindowCutsLikeEveryOtherWriter(t *testing.T) {
+	ascii := strings.Repeat("a", 40)
+	if got := HashValueWindow(ascii); got != ascii[:32] {
+		t.Fatalf("plain cut = %q", got)
+	}
+	// An astral rune costs two units, so the window holds two fewer letters.
+	emoji := "\U0001F389" + strings.Repeat("b", 40)
+	if got := HashValueWindow(emoji); got != "\U0001F389"+strings.Repeat("b", 30) {
+		t.Fatalf("surrogate cut = %q", got)
+	}
+	// A pair straddling the boundary backs off rather than splitting: 31
+	// units, never a lone surrogate.
+	straddle := strings.Repeat("c", 31) + "\U0001F389x"
+	if got := HashValueWindow(straddle); got != strings.Repeat("c", 31) {
+		t.Fatalf("straddle cut = %q", got)
+	}
+	if got := HashValueWindow("short"); got != "short" {
+		t.Fatalf("short = %q", got)
+	}
+}
+
 func TestDocHashChangesWithContent(t *testing.T) {
 	m := buildModel(t)
 	before := m.Hash()

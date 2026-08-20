@@ -52,6 +52,19 @@ const XLINK_NS = 'http://www.w3.org/1999/xlink';
  * `use`) carry no clue of their own — except across `foreignObject`, which
  * exists precisely to put HTML back inside a drawing.
  */
+/**
+ * The 32-code-unit window every fingerprint reports — what docHash folds,
+ * except a cut landing inside a surrogate pair backs off one unit: the Go
+ * writers cannot hold a lone surrogate, and the lists are only diffable if
+ * everyone cuts the same way. Twin of the agent's fingerprintWindow and
+ * mirror.HashValueWindow (model.go).
+ */
+function fingerprintWindow(v: string): string {
+  if (v.length <= 32) return v;
+  const c = v.charCodeAt(31);
+  return v.slice(0, c >= 0xd800 && c <= 0xdbff ? 31 : 32);
+}
+
 function namespaceFor(tag: string, parent: Node | undefined): string | null {
   if (tag === 'svg') return SVG_NS;
   if (tag === 'math') return MATHML_NS;
@@ -797,7 +810,11 @@ export class Patcher {
   }
 
   /** Hashes the document the way the server and the Go replica do, so the
-   *  periodic integrity check compares like with like. */
+   *  periodic integrity check compares like with like. Element names are
+   *  lowercased before folding: wire names arrive in DOM case (clipPath),
+   *  and the agent hashes tagName.toLowerCase() — folding the wire case
+   *  made this hash disagree with a healthy agent's on any page with a
+   *  camelCase SVG element (P-128's family, found unifying the writers). */
   docHash(): number {
     let h = 0x811c9dc5;
     const ids = Array.from(this.nodes.keys()).sort((a, b) => a - b);
@@ -806,7 +823,7 @@ export class Patcher {
       if (!node) continue;
       const v = node.nodeType === Node.TEXT_NODE
         ? node.nodeValue ?? ''
-        : this.names.get(id) ?? (node as Element).tagName?.toLowerCase() ?? '';
+        : (this.names.get(id) ?? (node as Element).tagName ?? '').toLowerCase();
       h ^= id & 0xff;
       h = Math.imul(h, 16777619) >>> 0;
       for (let i = 0; i < v.length && i < 32; i++) {
@@ -843,11 +860,12 @@ export class Patcher {
       if (!node) continue;
       const v = node.nodeType === Node.TEXT_NODE
         ? node.nodeValue ?? ''
-        : this.names.get(id) ?? (node as Element).tagName?.toLowerCase() ?? '';
+        : (this.names.get(id) ?? (node as Element).tagName ?? '').toLowerCase();
       // The image flag is left out on both sides: it marks the act of queueing
       // an image for transcoding, which the plane side never does, so the two
       // could never agree on it.
-      out.push([id, node.nodeType, v.slice(0, 32), (this.flags.get(id) ?? 0) & ~NodeFlags.Image]);
+      out.push([id, node.nodeType, fingerprintWindow(v),
+        (this.flags.get(id) ?? 0) & ~NodeFlags.Image]);
     }
     return { total: ids.length, truncated: ids.length > out.length, nodes: out };
   }

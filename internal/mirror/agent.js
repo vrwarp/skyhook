@@ -3482,6 +3482,21 @@
     };
   }
 
+  /*
+   * The 32-code-unit window every fingerprint reports — exactly what docHash
+   * folds, except that a cut landing inside a surrogate pair backs off one
+   * unit: the Go writers cannot hold a lone surrogate in a string, and a
+   * list is only diffable if everyone cuts the same way. Twin of
+   * mirror.HashValueWindow (model.go) and the patcher's fingerprintWindow.
+   */
+  function fingerprintWindow(v) {
+    if (v.length <= 32) return v;
+    var end = 32;
+    var c = v.charCodeAt(31);
+    if (c >= 0xD800 && c <= 0xDBFF) end = 31;
+    return v.slice(0, end);
+  }
+
   // --------------------------------------------------------------- host API
 
   var api = {
@@ -3824,7 +3839,13 @@
         var isText = node.nodeType === KIND_TEXT;
         var v = isText ? (node.nodeValue || '')
           : (node.tagName ? node.tagName.toLowerCase() : '');
-        out.push([id, node.nodeType, v.slice(0, 32),
+        // An adopted sub-frame's document serialises as a fragment (the
+        // wire's KindFragment, 11); reporting its raw nodeType (9) made the
+        // three fingerprint lists disagree about the same node (P-128). The
+        // truncation backs off a split surrogate pair for the same reason:
+        // every writer must cut the same string the same way.
+        var kind = node.nodeType === 9 ? 11 : node.nodeType;
+        out.push([id, kind, fingerprintWindow(v),
           node.nodeType === KIND_ELEMENT ? flagsOf(node) : 0]);
       }
       return { total: ids.length, truncated: ids.length > out.length, nodes: out };
