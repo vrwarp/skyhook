@@ -178,8 +178,10 @@ type Tab struct {
 	emitMu sync.Mutex
 
 	// clipProbe is true while a clipboard probe is pending, so a burst of
-	// clicks costs one read rather than one each. See clipboard.go.
-	clipProbe atomic.Bool
+	// clicks costs one read rather than one each; clipGranted (under mu) is
+	// the origin the async clipboard was last granted to. See clipboard.go.
+	clipProbe   atomic.Bool
+	clipGranted string
 
 	// uploads is the file-chooser asks awaiting the reader's answer, by ask
 	// id; askSeq mints the ids. See upload.go.
@@ -627,6 +629,10 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 	t.url = p.Frame.URL
 	t.ctxID = 0
 	t.mu.Unlock()
+	// The origin that just committed is the one whose Copy buttons the relay
+	// has to hear (P-008); the wildcard grant alone is not honoured for
+	// clipboard-read on every Chrome build.
+	t.grantClipboardFor(p.Frame.URL)
 
 	// Before anything else: the pictures of the page that has just been left
 	// are already queued and already being fetched, and on a link measured in

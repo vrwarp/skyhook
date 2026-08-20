@@ -760,6 +760,22 @@ func (b *Browser) GrantClipboard(ctx context.Context) error {
 	}, nil)
 }
 
+// GrantClipboardFor grants the async clipboard to one origin. The wildcard
+// grant above is honoured unevenly across Chrome builds for clipboard-read —
+// CI's stable Chrome relays nothing under it while the page's own
+// gesture-ridden writeText works, which hides the miss — so the mirror also
+// grants each origin its tabs actually land on, the way Playwright always
+// has.
+func (b *Browser) GrantClipboardFor(ctx context.Context, origin string) error {
+	if b.attached {
+		return errors.New("cdp: an attached browser keeps its own permissions")
+	}
+	return b.Call(ctx, "", "Browser.grantPermissions", map[string]any{
+		"origin":      origin,
+		"permissions": []string{"clipboardReadWrite", "clipboardSanitizedWrite"},
+	}, nil)
+}
+
 // owns reports whether a target is ours to drive. Everything in a browser we
 // launched is; in a browser we attached to, only what we opened.
 func (b *Browser) owns(targetID string) bool {

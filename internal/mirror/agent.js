@@ -4126,23 +4126,25 @@
     flush: function () { scheduleFlush(true); return true; },
     /*
      * clipProbe answers "did the page just put something new on the
-     * clipboard?" — a promise of the fresh text, or null. The host asks after
-     * replaying a click or a key, which is the only time the answer is the
-     * reader's business: a copy nobody caused is not relayed, and neither is
-     * anything predating the first successful read. Reads fail quietly where
-     * the clipboard is unreadable (no permission, unfocused document); a
-     * failure never unseeds.
+     * clipboard?" — a promise of { t: freshText } with t empty when nothing
+     * is fresh, or { e: reason } when the clipboard cannot be read at all.
+     * The host asks after replaying a click or a key, which is the only time
+     * the answer is the reader's business: a copy nobody caused is not
+     * relayed, and neither is anything predating the first successful read.
+     * The refusal's name travels because a machine that denies
+     * clipboard-read looks exactly like a timing miss otherwise; a failure
+     * never unseeds.
      */
     clipProbe: function () {
       var clip = navigator.clipboard;
-      if (!clip || !clip.readText) return Promise.resolve(null);
+      if (!clip || !clip.readText) return Promise.resolve({ e: 'unavailable' });
       return clip.readText().then(function (text) {
         var fresh = clipSeeded && typeof text === 'string' &&
           text !== '' && text !== clipLast;
         clipSeeded = true;
         clipLast = text;
-        return fresh ? text.slice(0, 65536) : null;
-      }, function () { return null; });
+        return { t: fresh ? text.slice(0, 65536) : '' };
+      }, function (err) { return { e: (err && err.name) || 'rejected' }; });
     },
     node: function (id) { return byId.get(id) || null; },
     rect: function (id) {

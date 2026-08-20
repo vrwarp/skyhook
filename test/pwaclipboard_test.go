@@ -25,6 +25,12 @@ func TestPWARelayedCopyLandsOnTheClipboard(t *testing.T) {
 	if err := h.browser.GrantClipboard(ctx); err != nil {
 		t.Fatalf("grant clipboard on the client browser: %v", err)
 	}
+	// The app's own origin too: the wildcard grant is honoured unevenly for
+	// clipboard-read across Chrome builds, and the readText assertion below
+	// runs in the shell.
+	if err := h.browser.GrantClipboardFor(ctx, h.appURL); err != nil {
+		t.Fatalf("grant clipboard for the app origin: %v", err)
+	}
 
 	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
 		budget(45*time.Second), "the client to connect")
