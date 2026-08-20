@@ -668,7 +668,15 @@ async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
 
 async function applyMutation(tab: number, m: Mutation, seq: number, cause = 0): Promise<void> {
   const host = await hostFor(tab);
-  host?.applyMutation(m, seq, cause);
+  if (!host) {
+    // The one way a batch is dropped without anybody hearing: no host, so
+    // nothing applies it and nothing acknowledges it, and the server is left
+    // watching a client that has silently stopped short of a page it has
+    // already sent. Rare and always worth a line.
+    log(`no host for tab ${tab}: frame ${seq} was not applied`);
+    return;
+  }
+  host.applyMutation(m, seq, cause);
 }
 
 async function hostFor(tab: number): Promise<MirrorHost | null> {
