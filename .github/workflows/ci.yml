@@ -223,9 +223,9 @@ jobs:
         # settled document is the same at any link speed; the netem job runs
         # at its measured capacity and this suite would double it.
         #
-        # 30m is the Makefile's budget. Measured on the dev box at 3m35s
-        # (-parallel 4, two consecutive runs on the branch that added the
-        # corpus); replace this sentence with the first CI measurement.
+        # 30m is the Makefile's budget. Measured on the dev box at 3m36s
+        # (-parallel 4, the full 29-page corpus including real/, final run on
+        # the branch that added it); replace with the first CI measurement.
         run: |
           set -o pipefail
           go test -count=1 -timeout 30m -parallel 4 -run '^TestParity' -v ./test 2>&1 | tee /tmp/parity.log
