@@ -43,6 +43,10 @@ type Client struct {
 	dlData    map[string]*dlBuffer
 	// clipboard is the last copy the server relayed (P-008).
 	clipboard protocol.Clipboard
+	// docScrolls records every document scroll op the server sent, which the
+	// model ignores; a test asserting the server did not move the reader
+	// needs the ops, not their effect.
+	docScrolls map[uint32][]protocol.Op
 	// fileAsks is every file chooser the server has intercepted, keyed by
 	// tab (P-007).
 	fileAsks  map[uint32][]protocol.FileAsk
@@ -310,6 +314,14 @@ func (c *Client) handle(f *protocol.Frame) {
 		}
 		c.mu.Lock()
 		c.seqs[f.Tab] = f.Seq
+		for i := range mu.Ops {
+			if mu.Ops[i].Op == protocol.OpScroll && mu.Ops[i].Node == 0 {
+				if c.docScrolls == nil {
+					c.docScrolls = map[uint32][]protocol.Op{}
+				}
+				c.docScrolls[f.Tab] = append(c.docScrolls[f.Tab], mu.Ops[i])
+			}
+		}
 		c.mu.Unlock()
 		c.ack(f.Tab, f.Seq, m.Hash(), epoch)
 		c.emit(Event{Kind: "mutation", Tab: f.Tab, Seq: f.Seq})
@@ -462,6 +474,15 @@ func (c *Client) Clipboard() protocol.Clipboard {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.clipboard
+}
+
+// DocScrolls reports every document scroll op the server has sent for a tab.
+func (c *Client) DocScrolls(tab uint32) []protocol.Op {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]protocol.Op, len(c.docScrolls[tab]))
+	copy(out, c.docScrolls[tab])
+	return out
 }
 
 // FileAsks reports the file choosers the server has intercepted for a tab.

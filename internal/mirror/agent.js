@@ -4156,6 +4156,18 @@
       if (r.bottom < 0 || r.top > (globalThis.innerHeight || 0) ||
           r.right < 0 || r.left > (globalThis.innerWidth || 0)) {
         try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* older engines */ }
+        // The scroll that just happened is the host's own nudge, recorded so
+        // onScroll reports nothing — the same discipline as scrollProbe, and
+        // for the stakes see ownScroll's comment: this one echoed back as a
+        // scroll op and threw a reader to the bottom of the page they were
+        // reading, because a click on a below-the-fold element is exactly a
+        // scroll the client did not make. Ancestor scrollers too:
+        // scrollIntoView walks every scrollable box above the target.
+        ownScroll(0);
+        for (var sc = el.parentElement; sc; sc = sc.parentElement) {
+          var scid = idOf.get(sc);
+          if (scid) ownScroll(scid, sc);
+        }
         r = viewportRect(el);
       }
       return {
