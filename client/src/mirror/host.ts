@@ -2083,17 +2083,28 @@ export class MirrorHost {
     });
     // Whether a family can actually be drawn is this document's question —
     // the @font-face rules the server shipped registered themselves here.
-    const families = new Map<string, boolean>();
+    // Registered faces are reported with their real load state; check() only
+    // answers for the rest, because it says true for any family the system
+    // can fall back for, including ones this document has never heard of.
+    const fonts: { family: string; loaded: boolean; reg?: boolean }[] = [];
+    const seen = new Set<string>();
+    try {
+      doc.fonts.forEach((face) => {
+        const fam = firstFamilyName(String(face.family ?? ''));
+        if (!fam || seen.has(fam)) return;
+        seen.add(fam);
+        fonts.push({ family: fam, loaded: face.status === 'loaded', reg: true });
+      });
+    } catch { /* no FontFaceSet, nothing to say */ }
     for (const n of probe.nodes) {
       const fam = firstFamilyName(String((n as { f?: unknown }).f ?? ''));
-      if (!fam || families.has(fam)) continue;
+      if (!fam || seen.has(fam)) continue;
+      seen.add(fam);
       let loaded = false;
       try { loaded = doc.fonts.check(`12px "${fam.replace(/"/g, '')}"`); } catch { /* stays false */ }
-      families.set(fam, loaded);
+      fonts.push({ family: fam, loaded });
     }
-    const fonts = [...families]
-      .map(([family, loaded]) => ({ family, loaded }))
-      .sort((a, b) => (a.family < b.family ? -1 : a.family > b.family ? 1 : 0));
+    fonts.sort((a, b) => (a.family < b.family ? -1 : a.family > b.family ? 1 : 0));
     const root = doc.documentElement;
     const win = this.frame.contentWindow;
     return {
@@ -2122,6 +2133,11 @@ export class MirrorHost {
         substituted: doc.querySelectorAll('[data-skyhook-tag]').length,
         ghosts: doc.querySelectorAll('[data-skyhook-ghost]').length,
         cspViolations: this.cspViolations,
+        // Painted, not merely assigned: the attribute survives a style write
+        // that wiped the photograph out of the declaration (P-117), and a
+        // count that read the attribute would call a blank canvas fine.
+        shotsPainted: Array.from(doc.querySelectorAll('[data-skyhook-shot]'))
+          .filter((el) => ((el as HTMLElement).style.backgroundImage || '').includes('url(')).length,
       },
     };
   }

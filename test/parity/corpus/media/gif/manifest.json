@@ -1,0 +1,11 @@
+{
+  "id": "media/gif",
+  "title": "an animated GIF arrives as its first frame",
+  "covers": ["animated GIF", "first-frame transcode"],
+  "gaps": ["P-016"],
+  "waitText": "gif settled",
+  "notes": "P-016 is by design and this page must PASS: the still arrives and hangs on the element; that it does not move is the trade",
+  "exclude": {
+    "pixels": "landside the picture animates and the two screenshots catch different frames"
+  }
+}

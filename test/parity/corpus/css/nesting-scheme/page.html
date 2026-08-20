@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>nested scheme</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  /* The control: a top-level colour-scheme question, which the pipeline
+     resolves landside — in a light session the dark branch is dropped. */
+  @media (prefers-color-scheme: dark) {
+    .top-level { color: rgb(230, 230, 230); }
+  }
+  /* The measurement: the same question nested inside a plain style rule
+     (CSS nesting). The pipeline's resolver does not reach in here, so the
+     question crosses intact and is answered by the reader's browser —
+     which may not answer it the way the landside session was pinned. */
+  .card {
+    color: rgb(10, 20, 30);
+    @media (prefers-color-scheme: dark) {
+      color: rgb(200, 210, 220);
+    }
+  }
+</style>
+</head>
+<body>
+  <h1>nested questions</h1>
+  <p>nesting settled</p>
+  <div class="top-level">styled at the top level</div>
+  <div class="card">styled through a nested rule</div>
+</body>
+</html>

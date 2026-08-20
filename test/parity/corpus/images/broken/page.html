@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>a broken image</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  img { width: 100px; height: 70px; }
+</style>
+</head>
+<body>
+  <h1>an honest failure</h1>
+  <p>broken settled</p>
+  <!-- 404 on both halves. The landside page shows a broken image; the mirror
+       must end at its alt text via the Missing notice, not wait forever on a
+       transparent pixel. Sized by attributes so every serialisation pass
+       measures the same box: the image's key includes its size, and a page
+       that measures differently before and after its stylesheet lands would
+       declare two different keys missing. -->
+  <img src="not-there.png" width="100" height="70" alt="the picture that never was">
+</body>
+</html>

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="star" viewBox="0 0 10 10">
+    <path d="M5 0 L6.2 3.5 L10 3.8 L7 6.2 L8.1 10 L5 7.8 L1.9 10 L3 6.2 L0 3.8 L3.8 3.5 Z"
+          fill="rgb(200, 150, 20)"/>
+  </symbol>
+</svg>

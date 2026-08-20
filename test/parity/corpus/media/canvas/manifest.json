@@ -1,0 +1,14 @@
+{
+  "id": "media/canvas",
+  "title": "a canvas crosses as its photograph: the same box, wearing the same pixels",
+  "covers": ["canvas", "region shots"],
+  "gaps": ["P-017", "P-123"],
+  "waitText": "canvas settled",
+  "expectedFail": {
+    "geometry": {
+      "gap": "P-123",
+      "reason": "with scripting off the mirror renders a canvas as its fallback content: a 200x120 canvas stretches to the full column width, its attribute ratio scaling it"
+    }
+  },
+  "notes": "P-017 is by design and the resources dimension must PASS — the photograph arrives and the shot accounting says nothing is blank; the box it hangs on is P-123's business"
+}

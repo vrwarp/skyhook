@@ -1,0 +1,16 @@
+{
+  "id": "shadow/closed",
+  "title": "a component with a closed shadow root renders the same height on both halves",
+  "covers": ["closed shadow roots"],
+  "gaps": ["P-012"],
+  "waitText": "closed settled",
+  "expectedFail": {
+    "geometry": {
+      "gap": "P-012",
+      "reason": "a closed root is invisible to the agent's isolated world: 220px of landside content mirrors as one line of fallback, and everything after it sits high"
+    }
+  },
+  "exclude": {
+    "pixels": "the missing content is the divergence; geometry already carries it"
+  }
+}

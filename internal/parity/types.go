@@ -96,9 +96,16 @@ type NodeProbe struct {
 // FontFace is one font family and whether this half can actually draw it.
 type FontFace struct {
 	Family string `json:"family"`
-	// Loaded is document.fonts.check() — false means the text set in this
-	// family is being drawn in a substitute.
+	// Loaded: for a registered face, whether its bytes actually loaded; for an
+	// unregistered family, document.fonts.check() — which answers true for
+	// anything the system can fall back for, including families it has never
+	// heard of. Reg below is what makes the two answers comparable.
 	Loaded bool `json:"loaded"`
+	// Reg marks a family registered in this document's FontFaceSet — an
+	// @font-face rule or a FontFace API registration. A family registered
+	// landside and absent here is a face that never crossed, whatever check()
+	// politely claims.
+	Reg bool `json:"reg,omitempty"`
 }
 
 // DocProbe is document-level truth for one slot.
@@ -132,6 +139,11 @@ type PlaneState struct {
 	// document — a resource the shell's own policy refused to load, which is a
 	// delivery pipeline that did its work for nothing.
 	CSPViolations int `json:"cspViolations"`
+	// ShotsPainted counts elements currently wearing a region shot — the
+	// photograph that stands in for a canvas, video or audio element. Held
+	// against the landside count of such elements: a canvas without its
+	// photograph is a blank box the DOM cannot distinguish from a painted one.
+	ShotsPainted int `json:"shotsPainted"`
 }
 
 // SideProbe is everything one half reports about one tab.

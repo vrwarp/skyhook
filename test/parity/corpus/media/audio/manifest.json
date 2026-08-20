@@ -1,0 +1,11 @@
+{
+  "id": "media/audio",
+  "title": "an audio element crosses as a photograph of its controls, hung on the same box",
+  "covers": ["audio", "region shots"],
+  "gaps": ["P-112"],
+  "waitText": "audio settled",
+  "notes": "what a probe can measure — the box, the photograph's presence — must hold; that no sound can ever cross is P-112, which stays open until the mirror has an affordance to say so to the reader",
+  "exclude": {
+    "pixels": "the native control strip is browser chrome the photograph reproduces at slightly different subpixel rendering"
+  }
+}

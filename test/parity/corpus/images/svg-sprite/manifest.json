@@ -1,0 +1,9 @@
+{
+  "id": "images/svg-sprite",
+  "title": "an icon drawn by reference into an external sprite renders on both halves",
+  "covers": ["SVG sprites", "external <use> references"],
+  "gaps": ["P-116"],
+  "waitText": "sprite settled",
+  "serve": {"cdn": ["sprite.svg"]},
+  "notes": "the star's absence plane-side is invisible to the DOM probes — the <use> box is the same size empty or full — so this page pins whatever the CSP counter and the pixel score can see, and the registry entry carries the verdict"
+}

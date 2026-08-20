@@ -1,0 +1,16 @@
+{
+  "id": "textmisc/object-embed",
+  "title": "object and embed leave the space they occupy, or at least an explanation",
+  "covers": ["object", "embed"],
+  "gaps": ["P-106"],
+  "waitText": "objects settled",
+  "expectedFail": {
+    "geometry": {
+      "gap": "P-106",
+      "reason": "both elements are dropped whole with no stand-in, so everything after them sits 250px higher than it does landside"
+    }
+  },
+  "exclude": {
+    "pixels": "the hole is the divergence; geometry already carries it"
+  }
+}

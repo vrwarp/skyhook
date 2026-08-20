@@ -26,7 +26,15 @@ import (
 // One test per corpus group: a group shares a harness and a client browser,
 // and its pages run as serial subtests. See parityharness_test.go.
 
-func TestParityForms(t *testing.T) { runParityGroup(t, "forms") }
+func TestParityForms(t *testing.T)    { runParityGroup(t, "forms") }
+func TestParityCSS(t *testing.T)      { runParityGroup(t, "css") }
+func TestParityShadow(t *testing.T)   { runParityGroup(t, "shadow") }
+func TestParityFrames(t *testing.T)   { runParityGroup(t, "frames") }
+func TestParityFonts(t *testing.T)    { runParityGroup(t, "fonts") }
+func TestParityImages(t *testing.T)   { runParityGroup(t, "images") }
+func TestParityMedia(t *testing.T)    { runParityGroup(t, "media") }
+func TestParityNav(t *testing.T)      { runParityGroup(t, "nav") }
+func TestParityTextMisc(t *testing.T) { runParityGroup(t, "textmisc") }
 
 // TestParitySmokeFixture cross-checks the two probes themselves on the plain
 // fixture page: parse, node identity, and the dimensions that must hold on a
@@ -65,7 +73,7 @@ func TestParitySmokeFixture(t *testing.T) {
 		t.Fatal("the session lost its tab")
 	}
 
-	land, plane := settleAndProbeTab(ctx, t, page, mt, refs[0].Tab)
+	land, plane := settleAndProbeTab(ctx, t, page, mt, refs[0].Tab, time.Now().Add(-time.Minute))
 
 	if len(land.Nodes) == 0 || len(plane.Nodes) == 0 {
 		t.Fatalf("empty probe: %d landside nodes, %d plane-side", len(land.Nodes), len(plane.Nodes))

@@ -44,12 +44,13 @@
         "fontsMustLoadMissing": 0,
         "imgBrokenLand": 0,
         "imgBrokenPlane": 0,
-        "missingImages": 0,
         "pendingAtProbe": 0,
+        "shotsMissingPlane": 0,
         "substitutedTags": 0
       },
       "buckets": {
-        "fontsMissingPlane": ""
+        "fontsMissingPlane": "",
+        "missingImages": "none"
       }
     },
     "structure": {

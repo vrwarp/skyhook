@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>a canvas</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  canvas { display: block; border: 1px solid rgb(120, 120, 120); }
+</style>
+</head>
+<body>
+  <h1>painted pixels</h1>
+  <p>canvas settled</p>
+  <canvas id="art" width="200" height="120"></canvas>
+  <p>after the canvas</p>
+  <script>
+    var g = document.getElementById('art').getContext('2d');
+    g.fillStyle = 'rgb(0, 128, 255)';
+    g.fillRect(0, 0, 200, 120);
+    g.fillStyle = 'rgb(255, 200, 0)';
+    g.fillRect(40, 30, 120, 60);
+  </script>
+</body>
+</html>

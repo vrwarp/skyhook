@@ -1,0 +1,6 @@
+{
+  "id": "css/modern",
+  "title": "layers, generated content, counters, container queries, fixed and sticky all mean the same thing on both halves",
+  "covers": ["@layer", "::before/::after", "counters", "@container", "position:fixed", "position:sticky", "@media print"],
+  "waitText": "modern settled"
+}

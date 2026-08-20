@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>closed shadow</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+</style>
+</head>
+<body>
+  <h1>a closed door</h1>
+  <p>closed settled</p>
+  <sealed-box>fallback light content</sealed-box>
+  <p id="after">the paragraph after the box</p>
+  <script>
+    customElements.define('sealed-box', class extends HTMLElement {
+      constructor() {
+        super();
+        // Closed on purpose: no isolated world can read this root, so the
+        // mirror sees only the light DOM. Landside this renders 220px of
+        // content; the mirror renders the one-line fallback, and everything
+        // below sits 200px higher than it should.
+        const root = this.attachShadow({ mode: 'closed' });
+        root.innerHTML = '<div style="height: 220px; background: rgb(210, 225, 240);">'
+          + 'content behind a closed root</div>';
+      }
+    });
+  </script>
+</body>
+</html>

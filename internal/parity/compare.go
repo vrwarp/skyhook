@@ -95,9 +95,10 @@ type comparison struct {
 	// every per-node dimension runs over. Ids on one half only belong to the
 	// structure dimension and would double-report everywhere else.
 	common []int64
-	// planeFonts answers "can the plane side draw this family", lowercased.
-	planeFonts map[string]bool
-	landFonts  map[string]bool
+	// planeFonts and landFonts answer "can this half draw the family",
+	// lowercased; see planeDraws for why registration matters.
+	planeFonts fontState
+	landFonts  fontState
 }
 
 func (c *comparison) match() {
@@ -122,17 +123,38 @@ func (c *comparison) match() {
 	c.landFonts = fontMap(c.in.Land)
 }
 
-func fontMap(p *SideProbe) map[string]bool {
-	out := map[string]bool{}
+type fontState struct {
+	loaded     map[string]bool
+	registered map[string]bool
+}
+
+func fontMap(p *SideProbe) fontState {
+	out := fontState{loaded: map[string]bool{}, registered: map[string]bool{}}
 	for _, d := range p.Docs {
 		for _, f := range d.Fonts {
 			key := strings.ToLower(f.Family)
 			// A family listed by several documents is drawable if any of them
 			// can draw it.
-			out[key] = out[key] || f.Loaded
+			out.loaded[key] = out.loaded[key] || f.Loaded
+			out.registered[key] = out.registered[key] || f.Reg
 		}
 	}
 	return out
+}
+
+// planeDraws answers whether the plane side can draw a family with its own
+// glyphs. check() alone cannot: it answers true for any family the system can
+// fall back for, including ones it has never heard of — which is exactly what
+// a face that never crossed looks like. So a family the landside registered
+// is only drawable here if this side registered and loaded it too.
+func (c *comparison) planeDraws(family string) bool {
+	if c.planeFonts.registered[family] {
+		return c.planeFonts.loaded[family]
+	}
+	if c.landFonts.registered[family] {
+		return false
+	}
+	return c.planeFonts.loaded[family]
 }
 
 func (c *comparison) structure() *DimensionResult {
@@ -229,8 +251,9 @@ func (c *comparison) style() *DimensionResult {
 	perProp := map[string]int{}
 	for _, id := range c.common {
 		l, p := c.land[id], c.plane[id]
-		if substitutedNode(p) {
-			// A stand-in's own styling is the mirror's, not the page's.
+		if mirrorPaintedNode(p) {
+			// A stand-in's or a photographed element's own styling is the
+			// mirror's work, not the page's.
 			continue
 		}
 		if l.Visible != p.Visible {
@@ -323,9 +346,7 @@ func (c *comparison) substituted(l *NodeProbe) bool {
 	if fam == "" {
 		return false
 	}
-	landLoaded, landKnown := c.landFonts[fam]
-	planeLoaded, planeKnown := c.planeFonts[fam]
-	return landKnown && landLoaded && planeKnown && !planeLoaded
+	return c.landFonts.loaded[fam] && !c.planeDraws(fam)
 }
 
 func (c *comparison) text() *DimensionResult {
@@ -365,6 +386,17 @@ func (c *comparison) resources() *DimensionResult {
 	d.Counts["imgBrokenPlane"] = brokenPlane
 	d.Counts["imgBrokenLand"] = brokenLand
 
+	// A canvas without its photograph is a blank box nothing else can see:
+	// the DOM is identical painted or blank, which is why the count of shots
+	// actually worn is held against the count of elements that need one.
+	landCanvasables := 0
+	for _, id := range c.common {
+		if canvasable(c.land[id].Tag) {
+			landCanvasables++
+		}
+	}
+	shotsMissing := 0
+
 	var pending, missing, substitutedTags, csp int
 	if ps := c.in.Plane.Plane; ps != nil {
 		pending = ps.PendingImages + ps.PendingCSS + ps.PendingShots
@@ -383,23 +415,29 @@ func (c *comparison) resources() *DimensionResult {
 		missing = ps.MissingImages
 		substitutedTags = ps.Substituted
 		csp = ps.CSPViolations
+		if landCanvasables > ps.ShotsPainted {
+			shotsMissing = landCanvasables - ps.ShotsPainted
+			c.sample(d, "%d of %d photographed elements are blank plane-side", shotsMissing, landCanvasables)
+		}
 	}
 	d.Counts["pendingAtProbe"] = pending
-	d.Counts["missingImages"] = missing
+	// none/some rather than a count: the missing set is keyed by (url, box),
+	// and one broken picture measured at two moments can honestly be declared
+	// missing under two keys. Whether the mirror was told is the fact worth
+	// pinning; how many keys carried the news is timing.
+	d.Buckets["missingImages"] = noneSome(missing)
 	d.Counts["substitutedTags"] = substitutedTags
 	d.Counts["cspViolations"] = csp
 	d.Counts["consoleErrors"] = c.in.ConsoleErrors
+	d.Counts["shotsMissingPlane"] = shotsMissing
 
 	// Fonts: which families the landside can draw and the plane side cannot.
 	// Substitution is the design for prose; the bucket pins the current set so
 	// a change is seen. Only the families the manifest insists on are
 	// violations.
 	var missingFams []string
-	for fam, loaded := range c.landFonts {
-		if !loaded {
-			continue
-		}
-		if pl, known := c.planeFonts[fam]; known && !pl {
+	for fam, loaded := range c.landFonts.loaded {
+		if loaded && !c.planeDraws(fam) {
 			missingFams = append(missingFams, fam)
 		}
 	}
@@ -409,7 +447,7 @@ func (c *comparison) resources() *DimensionResult {
 	mustLoadMissing := 0
 	if c.in.Manifest.Fonts != nil {
 		for _, fam := range c.in.Manifest.Fonts.MustLoad {
-			if !c.planeFonts[strings.ToLower(fam)] {
+			if !c.planeDraws(strings.ToLower(fam)) {
 				mustLoadMissing++
 				c.sample(d, "font %q must load plane-side and did not", fam)
 			}
@@ -418,7 +456,7 @@ func (c *comparison) resources() *DimensionResult {
 	d.Counts["fontsMustLoadMissing"] = mustLoadMissing
 
 	d.Status = status(brokenPlane == 0 && pending == 0 && csp == 0 &&
-		c.in.ConsoleErrors == 0 && mustLoadMissing == 0)
+		c.in.ConsoleErrors == 0 && mustLoadMissing == 0 && shotsMissing == 0)
 	return d
 }
 
@@ -499,6 +537,13 @@ func attrUnion(a, b map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func noneSome(n int) string {
+	if n == 0 {
+		return "none"
+	}
+	return "some"
 }
 
 func visWord(v bool) string {

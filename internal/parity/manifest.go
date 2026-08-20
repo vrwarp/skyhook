@@ -163,10 +163,18 @@ type Interaction struct {
 	Name string `json:"name,omitempty"`
 }
 
+// Assertion kinds beside the gesture kinds: assertMirrorCSSHas and
+// assertMirrorCSSLacks test the delivered stylesheet's text (for gaps whose
+// mechanism is a rule crossing in the wrong form, even when both harness
+// browsers happen to answer its question identically), and assertShellTabs
+// tests how many mirror frames the shell holds relative to when the page
+// opened ("+1" — for the tab a target=_blank click should have produced).
 var interactionKinds = map[string]bool{
 	"click": true, "type": true, "select": true, "check": true,
 	"submit": true, "key": true, "scroll": true, "waitText": true,
-	"settle": true,
+	"settle":             true,
+	"assertMirrorCSSHas": true, "assertMirrorCSSLacks": true,
+	"assertShellTabs": true,
 }
 
 // LoadManifest reads and checks one page's manifest.
@@ -229,6 +237,9 @@ func (m *Manifest) validate() error {
 		}
 		if step.Do == "waitText" && step.Value == "" {
 			return fmt.Errorf("parity: %s interaction %d: waitText needs text to wait for", m.ID, i)
+		}
+		if strings.HasPrefix(step.Do, "assert") && step.Name == "" {
+			return fmt.Errorf("parity: %s interaction %d: an assertion is a measurement and must be named", m.ID, i)
 		}
 	}
 	if strings.HasPrefix(m.ID, "real/") && m.Attribution == "" {

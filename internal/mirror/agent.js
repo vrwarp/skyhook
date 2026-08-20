@@ -3869,7 +3869,28 @@
         if (root && !seen[root]) push(root);
       }
       var fonts = [];
+      var seenFam = {};
+      // Registered faces first: their load state is the truthful answer, and
+      // a family registered on one half that never crossed is exactly what
+      // check() cannot see — it answers true for any family the system can
+      // fall back for, known or not.
+      var fontDocs = [document];
+      families.forEach(function (d) {
+        if (fontDocs.indexOf(d) < 0) fontDocs.push(d);
+      });
+      for (var fd = 0; fd < fontDocs.length; fd++) {
+        try {
+          fontDocs[fd].fonts.forEach(function (face) {
+            var fam = firstFamilyName(String(face.family || ''));
+            if (!fam || seenFam[fam]) return;
+            seenFam[fam] = 1;
+            fonts.push({ family: fam, loaded: face.status === 'loaded', reg: true });
+          });
+        } catch (e) { /* no FontFaceSet here */ }
+      }
       families.forEach(function (d, fam) {
+        if (seenFam[fam]) return;
+        seenFam[fam] = 1;
         var loaded = false;
         try { loaded = d.fonts.check('12px "' + fam.replace(/"/g, '') + '"'); } catch (e) { loaded = false; }
         fonts.push({ family: fam, loaded: loaded });

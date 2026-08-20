@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>modern css</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; counter-reset: item; }
+  h1 { margin: 0; font-size: 20px; }
+
+  /* Layers: the later layer must win exactly as it does landside. */
+  @layer base, theme;
+  @layer base { .layered { color: rgb(120, 0, 0); } }
+  @layer theme { .layered { color: rgb(0, 90, 30); } }
+
+  /* Generated content and counters: rendered text no DOM node carries. */
+  .item { counter-increment: item; }
+  .item::before { content: counter(item) ") "; color: rgb(0, 60, 120); }
+  .flag::after { content: " [flagged]"; color: rgb(160, 40, 40); }
+
+  /* A container query, sized so it matches. */
+  .box { container-type: inline-size; width: 300px; }
+  @container (min-width: 200px) { .wide-only { color: rgb(200, 100, 0); } }
+
+  /* Fixed and sticky at the top level, where the mirror keeps the page's
+     root directly in the frame body so both resolve against the viewport. */
+  .pinned { position: fixed; top: 4px; right: 4px; width: 90px; height: 22px;
+            background: rgb(230, 230, 240); }
+  .stuck { position: sticky; top: 0; background: rgb(240, 240, 220); }
+
+  /* Print rules cross wrapped in their media so a reader can print some day;
+     they must not leak into the screen rendering on the way. */
+  @media print { .item { visibility: hidden; } }
+</style>
+</head>
+<body>
+  <h1>modern machinery</h1>
+  <p>modern settled</p>
+  <div class="layered">the theme layer wins</div>
+  <div class="item">first numbered</div>
+  <div class="item flag">second numbered, flagged</div>
+  <div class="box"><div class="wide-only">wide container</div></div>
+  <div class="stuck">stuck to the top</div>
+  <div class="pinned"></div>
+</body>
+</html>

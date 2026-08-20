@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>a restyled canvas</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+  <h1>a page that dresses its canvas</h1>
+  <p>restyle settled</p>
+  <canvas id="board" width="200" height="120"></canvas>
+  <button id="restyle">restyle</button>
+  <div id="out">not restyled</div>
+  <script>
+    var g = document.getElementById('board').getContext('2d');
+    g.fillStyle = 'rgb(60, 160, 90)';
+    g.fillRect(0, 0, 200, 120);
+    document.getElementById('restyle').addEventListener('click', function () {
+      // The page writing the canvas's style attribute is all it takes: the
+      // write replaces the declaration the photograph was painted into, and
+      // nothing repaints it until the reader touches something (P-117).
+      document.getElementById('board').setAttribute('style', 'display: block; outline: 2px solid rgb(200, 60, 60)');
+      document.getElementById('out').textContent = 'restyled now';
+    });
+  </script>
+</body>
+</html>

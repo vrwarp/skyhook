@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>the filler</title>
+<style>
+  /* The chain every full-height layout leans on. Inside a real frame this
+     resolves against the frame's 200px viewport; inside the mirror's
+     stand-in the sub-document is ordinary block boxes with no viewport, so
+     the percentages find nothing definite and collapse (P-021). */
+  html, body { height: 100%; margin: 0; }
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  .fill { height: 100%; background: rgb(235, 245, 235); }
+  .bottom { position: absolute; bottom: 4px; left: 4px; }
+</style>
+</head>
+<body>
+  <div class="fill">
+    <p>filler content settled</p>
+    <div class="bottom">anchored to the bottom</div>
+  </div>
+</body>
+</html>

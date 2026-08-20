@@ -63,6 +63,24 @@ func substitutedNode(p *NodeProbe) bool {
 	return ok
 }
 
+// mirrorPaintedNode also covers the elements the mirror paints its own pixels
+// onto — a canvas or video wearing its region shot as a background. Their
+// computed style is the mirror's work (the photograph is the design, P-017);
+// their geometry still has to match, which is why only the style dimension
+// asks this.
+func mirrorPaintedNode(p *NodeProbe) bool {
+	if substitutedNode(p) {
+		return true
+	}
+	_, ok := p.Attrs["data-skyhook-static"]
+	return ok
+}
+
+// canvasable reports the elements whose pixels can only cross as photographs.
+func canvasable(tag string) bool {
+	return tag == "canvas" || tag == "video" || tag == "audio"
+}
+
 var urlRef = regexp.MustCompile(`url\((?:[^)(]|\([^)(]*\))*\)`)
 
 // normStyle canonicalises one computed value so that only genuine differences

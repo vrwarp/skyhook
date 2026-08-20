@@ -1,0 +1,88 @@
+{
+  "page": "textmisc/disclosure",
+  "dimensions": {
+    "attributes": {
+      "status": "pass",
+      "counts": {
+        "attrsExtraPlane": 0,
+        "attrsMissingPlane": 0,
+        "nodesDiffering": 0,
+        "valuesDiffering": 0
+      }
+    },
+    "geometry": {
+      "status": "pass",
+      "counts": {
+        "nodesOff": 0
+      },
+      "buckets": {
+        "pageHeightPct": "+0",
+        "worst": "0"
+      }
+    },
+    "interaction": {
+      "status": "pass",
+      "counts": {
+        "failed": 0
+      },
+      "checks": [
+        {
+          "name": "a details toggle round-trips",
+          "pass": true
+        }
+      ]
+    },
+    "resources": {
+      "status": "pass",
+      "counts": {
+        "consoleErrors": 0,
+        "cspViolations": 0,
+        "fontsMustLoadMissing": 0,
+        "imgBrokenLand": 0,
+        "imgBrokenPlane": 0,
+        "pendingAtProbe": 0,
+        "shotsMissingPlane": 0,
+        "substitutedTags": 0
+      },
+      "buckets": {
+        "fontsMissingPlane": "",
+        "missingImages": "none"
+      }
+    },
+    "structure": {
+      "status": "pass",
+      "counts": {
+        "missingLand": 0,
+        "missingPlane": 0,
+        "tagMismatch": 0
+      },
+      "checks": [
+        {
+          "name": "hashesAgree",
+          "pass": true
+        }
+      ]
+    },
+    "style": {
+      "status": "fail",
+      "counts": {
+        "nodesDiffering": 1,
+        "prop:display": 1,
+        "prop:position": 1,
+        "visibilityDiffering": 1
+      }
+    },
+    "text": {
+      "status": "pass",
+      "counts": {
+        "nodesDiffering": 0
+      }
+    }
+  },
+  "expectedFail": {
+    "style": "P-122"
+  },
+  "gaps": [
+    "P-122"
+  ]
+}

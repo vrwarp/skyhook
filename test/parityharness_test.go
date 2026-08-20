@@ -284,13 +284,15 @@ func runParityPage(ctx context.Context, t *testing.T, run *parityRun, siteURL st
 	url := siteURL + "/" + m.ID + "/"
 	errsBefore := run.consoleErrors.Load()
 
+	framesBefore := mirrorFrameCount(ctx, t, run.page)
+	openedAt := time.Now()
 	tab, mt := openParityTab(ctx, t, run, url, m.WaitText)
 
 	scrolled := false
 	var checks []parity.Check
 	for i := range m.Interactions {
 		step := &m.Interactions[i]
-		ok := runInteraction(ctx, t, run, tab, mt, step)
+		ok := runInteraction(ctx, t, run, tab, mt, step, framesBefore+1, openedAt)
 		if step.Do == "scroll" {
 			scrolled = true
 		}
@@ -301,7 +303,7 @@ func runParityPage(ctx context.Context, t *testing.T, run *parityRun, siteURL st
 		}
 	}
 
-	land, plane := settleAndProbeTab(ctx, t, run.page, mt, tab)
+	land, plane := settleAndProbeTab(ctx, t, run.page, mt, tab, openedAt)
 
 	in := parity.Input{
 		Manifest:      m,
@@ -474,8 +476,17 @@ acting while the server's answer to the previous step is still in flight
 walks into P-121 — the stale focus echo that yanks the reader back into the
 field they just left — which is catalogued, not something every other page
 should trip over.
+
+openedAt exists because of the one thing no pending counter can see: a
+photograph that has not been taken yet. The load shot fires 900ms after the
+snapshot (internal/mirror/shot.go), and on a loopback link this whole barrier
+can pass, probe and tear the session down before that — which reads as
+"every canvas is blank" when the truth is "nobody waited for the camera". So
+while the page is young and holds photographable elements none of which wear
+a shot yet, the barrier is not satisfied; past the grace window a blank
+canvas is measured truth (P-117's page depends on exactly that).
 */
-func settleTab(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.Tab, tab uint32, deadline time.Time) *parity.SideProbe {
+func settleTab(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.Tab, tab uint32, openedAt, deadline time.Time) *parity.SideProbe {
 	t.Helper()
 	var last string
 	for time.Now().Before(deadline) {
@@ -499,6 +510,10 @@ func settleTab(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.
 		quiet := probe.Plane != nil &&
 			probe.Plane.PendingImages == 0 && probe.Plane.PendingCSS == 0 &&
 			probe.Plane.PendingShots == 0
+		if quiet && probe.Plane.ShotsPainted == 0 &&
+			time.Since(openedAt) < budget(3*time.Second) && hasPhotographables(probe) {
+			quiet = false
+		}
 		caughtUp := probe.Seq >= cp.Seq && probe.Hash == cp.Hash
 		// Two consecutive identical quiet reads: the second proving the first
 		// was not a moment between mutations.
@@ -513,13 +528,22 @@ func settleTab(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.
 	return nil
 }
 
+func hasPhotographables(probe *parity.SideProbe) bool {
+	for i := range probe.Nodes {
+		if _, ok := probe.Nodes[i].Attrs["data-skyhook-static"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // settleAndProbeTab settles, then probes both halves of one tab, retrying
 // until both probes describe the same document.
-func settleAndProbeTab(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.Tab, tab uint32) (*parity.SideProbe, *parity.SideProbe) {
+func settleAndProbeTab(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.Tab, tab uint32, openedAt time.Time) (*parity.SideProbe, *parity.SideProbe) {
 	t.Helper()
 	deadline := time.Now().Add(budget(60 * time.Second))
 	for time.Now().Before(deadline) {
-		plane := settleTab(ctx, t, page, mt, tab, deadline)
+		plane := settleTab(ctx, t, page, mt, tab, openedAt, deadline)
 		// One more paint so geometry is post-layout on the client side.
 		evalJSON(ctx, t, page,
 			`new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))`, nil)
@@ -553,7 +577,7 @@ headless CDP cannot open a native dropdown, so the option is chosen by script
 inside the mirror and announced with the events a real choice fires; the path
 measured — echo, setvalue, landside replay — is the same from there on.
 */
-func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint32, mt *mirror.Tab, step *parity.Interaction) bool {
+func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint32, mt *mirror.Tab, step *parity.Interaction, framesAtOpen int, openedAt time.Time) bool {
 	t.Helper()
 	switch step.Do {
 	case "click", "check", "submit", "type", "key", "select", "scroll":
@@ -561,7 +585,7 @@ func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint3
 		// step, not of whatever the previous one still had in flight — and a
 		// stale focus echo (P-121) must be a catalogued gap, not a hazard
 		// every page's script has to dodge.
-		settleTab(ctx, t, run.page, mt, tab, time.Now().Add(budget(45*time.Second)))
+		settleTab(ctx, t, run.page, mt, tab, openedAt, time.Now().Add(budget(45*time.Second)))
 	}
 	switch step.Do {
 	case "click", "check", "submit":
@@ -613,11 +637,71 @@ func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint3
 		}
 		return found
 	case "settle":
-		_, _ = settleAndProbeTab(ctx, t, run.page, mt, tab)
+		_, _ = settleAndProbeTab(ctx, t, run.page, mt, tab, openedAt)
 		return true
+	case "assertMirrorCSSHas", "assertMirrorCSSLacks":
+		// Give in-flight CSS a moment to land, then read the delivered rules.
+		settleTab(ctx, t, run.page, mt, tab, openedAt, time.Now().Add(budget(45*time.Second)))
+		var css string
+		evalJSON(ctx, t, run.page, mirrorCSSIn(tab), &css)
+		has := strings.Contains(css, step.Value)
+		if step.Do == "assertMirrorCSSHas" {
+			return has
+		}
+		return !has
+	case "assertShellTabs":
+		// Relative to the frames the shell held when this page opened, so a
+		// group's earlier pages do not count against it.
+		want := strings.TrimSpace(step.Value)
+		delta := 0
+		if _, err := fmt.Sscanf(want, "%d", &delta); err != nil {
+			t.Fatalf("assertShellTabs wants a signed delta like \"+1\", got %q", step.Value)
+		}
+		// A tab the landside opens without telling the client takes no time to
+		// not appear; a tab that should appear needs a round trip.
+		deadline := time.Now().Add(budget(5 * time.Second))
+		for time.Now().Before(deadline) {
+			if mirrorFrameCount(ctx, t, run.page) == framesAtOpen+delta {
+				return true
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+		return mirrorFrameCount(ctx, t, run.page) == framesAtOpen+delta
 	}
 	t.Fatalf("unknown interaction %q", step.Do)
 	return false
+}
+
+func mirrorFrameCount(ctx context.Context, t *testing.T, page *cdp.Session) int {
+	t.Helper()
+	var n int
+	evalJSON(ctx, t, page, `document.querySelectorAll('iframe.mirror').length`, &n)
+	return n
+}
+
+// mirrorCSSIn reads the stylesheet text one tab's mirror is actually using:
+// the document sheet plus every shadow root's own.
+func mirrorCSSIn(tab uint32) string {
+	return fmt.Sprintf(`(() => {
+  const f = document.querySelector('iframe.mirror[data-tab="%d"]');
+  if (!f || !f.contentDocument) return '';
+  const d = f.contentDocument;
+  const parts = [];
+  const sheet = d.querySelector('style[data-skyhook-css]');
+  if (sheet) parts.push(sheet.textContent || '');
+  const walk = (root) => {
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) {
+        for (const s of el.shadowRoot.adoptedStyleSheets || []) {
+          try { parts.push([...s.cssRules].map((r) => r.cssText).join('\n')); } catch { /* unreadable */ }
+        }
+        walk(el.shadowRoot);
+      }
+    }
+  };
+  walk(d);
+  return parts.join('\n');
+})()`, tab)
 }
 
 func pollMirrorText(ctx context.Context, page *cdp.Session, tab uint32, want string, within time.Duration) bool {
