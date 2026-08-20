@@ -139,6 +139,10 @@ const (
 	TypeDownload     Type = 30 // server -> client, a download's state
 	TypeDownloadCmd  Type = 31 // client -> server, fetch or discard one
 	TypeDownloadPart Type = 32 // server -> client on bulk, one chunk of the bytes
+	// A copy the page performed landside because of something the reader did,
+	// relayed so the reader's own clipboard ends up holding what the page
+	// told them it would (P-008).
+	TypeClipboard Type = 33 // server -> client
 )
 
 // Frame is the envelope. Body is a CBOR-encoded, type-specific payload; keeping
@@ -602,6 +606,21 @@ type DownloadPart struct {
 	Size int64  `cbor:"5,keyasint,omitempty"`
 	Err  string `cbor:"6,keyasint,omitempty"`
 }
+
+// Clipboard is text the landside page put on its clipboard because of
+// something the reader did — a Copy button, a Ctrl+C the page handled —
+// relayed so the reader's device holds it too. Cause is the input seq that
+// provoked it, which is what makes "because of something the reader did"
+// checkable plane-side. Text is capped landside at ClipboardCap.
+type Clipboard struct {
+	Text  string `cbor:"1,keyasint"`
+	Cause uint64 `cbor:"2,keyasint,omitempty"`
+}
+
+// ClipboardCap bounds a relayed copy, in bytes. 64 kB of text is beyond any
+// coordinates, share-link or code snippet a Copy button produces; past it the
+// relay is more likely moving a document than helping a reader.
+const ClipboardCap = 64 << 10
 
 // ---------------------------------------------------------------------------
 // adapter bodies

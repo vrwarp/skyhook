@@ -4099,11 +4099,38 @@
 
   // --------------------------------------------------------------- host API
 
+  // What the clipboard held last time anyone looked, so a probe can tell a
+  // fresh copy from what was already there (P-008). Unseeded until one read
+  // succeeds; the seeding read never relays, so whatever was on the OS
+  // clipboard before this document existed stays where it is.
+  var clipLast = null;
+  var clipSeeded = false;
+
   var api = {
     version: 1,
     start: start,
     snapshot: function () { snapshotDone = false; started = false; start(); return true; },
     flush: function () { scheduleFlush(true); return true; },
+    /*
+     * clipProbe answers "did the page just put something new on the
+     * clipboard?" — a promise of the fresh text, or null. The host asks after
+     * replaying a click or a key, which is the only time the answer is the
+     * reader's business: a copy nobody caused is not relayed, and neither is
+     * anything predating the first successful read. Reads fail quietly where
+     * the clipboard is unreadable (no permission, unfocused document); a
+     * failure never unseeds.
+     */
+    clipProbe: function () {
+      var clip = navigator.clipboard;
+      if (!clip || !clip.readText) return Promise.resolve(null);
+      return clip.readText().then(function (text) {
+        var fresh = clipSeeded && typeof text === 'string' &&
+          text !== '' && text !== clipLast;
+        clipSeeded = true;
+        clipLast = text;
+        return fresh ? text.slice(0, 65536) : null;
+      }, function () { return null; });
+    },
     node: function (id) { return byId.get(id) || null; },
     rect: function (id) {
       var n = byId.get(id);
@@ -4733,6 +4760,18 @@
   };
 
   Object.defineProperty(globalThis, '__skyhook', { value: api, configurable: true });
+
+  // Baseline the clipboard now, so the first probe after an input cannot
+  // mistake what was already there for a copy the page just made (P-008). A
+  // failed read leaves it unseeded, and then the first probe that can read
+  // seeds instead of relaying — the invariant lives in clipProbe.
+  try {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(function (text) {
+        if (!clipSeeded) { clipSeeded = true; clipLast = text; }
+      }, function () { /* unreadable; stay unseeded */ });
+    }
+  } catch (e) { /* no clipboard in this context */ }
 
   function startWhenReady() {
     if (document.readyState === 'loading') {

@@ -1467,6 +1467,23 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			<body><h1>files to take home</h1>
 			<a id="get" href="/report.bin">get the report</a></body></html>`)
 	})
+	// A page with a Copy button of its own: what TestACopyThePageMakesReachesTheReader
+	// clicks (P-008). The status line is how the test knows the landside
+	// writeText really ran — and really succeeded.
+	mux.HandleFunc("/copy", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Copy</title></head>
+			<body><h1>the copy page</h1>
+			<button id="share">Copy the coordinates</button>
+			<p id="st">not copied yet</p>
+			<script>
+			document.getElementById('share').addEventListener('click', function () {
+			  navigator.clipboard.writeText('the coordinates are 51.5N 0.1W').then(
+			    function () { document.getElementById('st').textContent = 'copied to the clipboard'; },
+			    function (e) { document.getElementById('st').textContent = 'copy failed: ' + e.name; });
+			});
+			</script></body></html>`)
+	})
 	// The icon the agent's default falls back to when a page declares none —
 	// which the fixture pages deliberately do not, so every one of them
 	// exercises the fallback (P-104).
@@ -1999,6 +2016,9 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	h.downloadDir = t.TempDir()
 	if err := h.mgr.EnableDownloads(ctx, h.downloadDir); err != nil {
 		t.Fatalf("enable downloads: %v", err)
+	}
+	if err := br.GrantClipboard(ctx); err != nil {
+		t.Fatalf("grant clipboard: %v", err)
 	}
 	t.Cleanup(func() {
 		c, cancel := context.WithTimeout(context.Background(), 20*time.Second)

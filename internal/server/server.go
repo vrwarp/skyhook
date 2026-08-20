@@ -219,6 +219,14 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, logs *diag.Ri
 	} else if err := s.mgr.EnableDownloads(ctx, filepath.Join(cfg.DataDir, "downloads")); err != nil {
 		log.Warn("downloads will land on this host untracked", "err", err)
 	}
+	if !br.Attached() {
+		// Headless has no permission prompt, so ungranted means every page
+		// Copy button rejects — and the relay (P-008) never has anything to
+		// notice.
+		if err := br.GrantClipboard(ctx); err != nil {
+			log.Warn("clipboard not granted; page copy buttons will fail landside", "err", err)
+		}
+	}
 
 	return s, nil
 }

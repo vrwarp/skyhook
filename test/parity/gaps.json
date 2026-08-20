@@ -72,11 +72,13 @@
     {
       "id": "P-008",
       "title": "Clipboard copy executes plane-side only; cross-tab paste fidelity is absent",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "docs/IMPLEMENTATION.md:2128"
+        "internal/mirror/clipboard.go",
+        "internal/mirror/agent.js",
+        "client/src/app/main.ts"
       ],
-      "noPage": "clipboard access needs permissions headless CDP does not grant uniformly; the plane-side path is covered by the client's unit tests"
+      "notes": "the copy leg is relayed, input-caused only: Browser.grantPermissions gives every origin the async clipboard (headless has no prompt, so ungranted meant every page Copy button rejected outright), and after replaying a click or key the agent's clipProbe reads the clipboard once and answers only with a change — seeded before it will relay anything, so whatever predates the document never crosses; nothing polls. The text travels as TypeClipboard (64 kB cap, Cause naming the input) and the shell writes it through the browser's own API inside the click's activation window, falling back to a toast whose Copy button is its own activation. Paste already worked: InText/InPaste carry the reader's text into the landside document. Chrome UI is invisible to the mirror probes, so the pins are TestACopyThePageMakesReachesTheReader and TestPWARelayedCopyLandsOnTheClipboard"
     },
     {
       "id": "P-009",

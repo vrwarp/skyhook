@@ -13,11 +13,11 @@
  */
 import {
   ackBody, adapterCommandBody, capturePartBody, captureRequestBody, decodeAdapterBatch,
-  decodeCaptureDone, decodeCaptureRequest, decodeDownload, decodeDownloadPart, decodeError,
-  decodeFrame, decodeImageData, decodeImageMeta, decodeMutation, decodeSnapshot, decodeStats,
-  decodeTabState, decodeWelcome, downloadCmdBody, encodeFrame, frameMessage, helloBody,
-  imageWantBody, inputBody, navigateBody, resyncBody, scrollBody, unframeMessage, viewportBody,
-  InputEventInit,
+  decodeCaptureDone, decodeCaptureRequest, decodeClipboard, decodeDownload, decodeDownloadPart,
+  decodeError, decodeFrame, decodeImageData, decodeImageMeta, decodeMutation, decodeSnapshot,
+  decodeStats, decodeTabState, decodeWelcome, downloadCmdBody, encodeFrame, frameMessage,
+  helloBody, imageWantBody, inputBody, navigateBody, resyncBody, scrollBody, unframeMessage,
+  viewportBody, InputEventInit,
 } from '../shared/codec.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { BUILD, CLIENT_ID } from '../shared/build.js';
@@ -426,6 +426,9 @@ function handleMessage(msg: Uint8Array): void {
       break;
     case FrameType.DownloadPart:
       ingestDownloadPart(decodeDownloadPart(frame.body));
+      break;
+    case FrameType.Clipboard:
+      post('clipboard', decodeClipboard(frame.body) as unknown as Record<string, unknown>);
       break;
     case FrameType.Error:
       post('log', { message: `server error: ${JSON.stringify(decodeError(frame.body))}` });

@@ -53,6 +53,9 @@ export enum FrameType {
   Download = 30,
   DownloadCmd = 31,
   DownloadPart = 32,
+  // A copy the page performed landside because of the reader's own input,
+  // relayed so their device's clipboard holds it too (P-008).
+  Clipboard = 33,
 }
 
 /** Why a diagnostic capture was taken. Matches the server's constants. */
@@ -392,6 +395,15 @@ export interface DownloadPart {
   error: string;
 }
 
+/**
+ * Text the landside page copied because of something the reader did (P-008).
+ * cause is the input seq that provoked it.
+ */
+export interface ClipboardRelay {
+  text: string;
+  cause: number;
+}
+
 /** Field numbers, kept next to the decoders that use them. */
 export const F = {
   frame: { type: 1, tab: 2, seq: 3, base: 4, body: 5, cause: 6 },
@@ -455,4 +467,5 @@ export const F = {
   download: { id: 1, url: 2, name: 3, total: 4, received: 5, state: 6 },
   downloadCmd: { id: 1, cmd: 2, offset: 3 },
   downloadPart: { id: 1, off: 2, data: 3, done: 4, size: 5, error: 6 },
+  clipboard: { text: 1, cause: 2 },
 } as const;

@@ -458,6 +458,9 @@ function handle(kind: string, args: Record<string, unknown>): void {
       renderTransfers();
       break;
     }
+    case 'clipboard':
+      relayClipboard(String(args.text ?? ''));
+      break;
     case 'log':
       log(String(args.message ?? ''));
       break;
@@ -543,6 +546,35 @@ function renderTransfers(): void {
   if (!el.panel.hidden && panelView === 'transfers') {
     transfers.render(el.panelBody, transferActions);
   }
+}
+
+// ------------------------------------------------------------------ clipboard
+
+/**
+ * A copy the page made landside, arriving a round trip after the click that
+ * caused it (P-008). The write is tried at once — the reader's click usually
+ * leaves a user-activation window wide enough to cover even this link's round
+ * trip — and when the browser says no, the text is not lost: the toast offers
+ * a Copy whose own click is the activation the retry needs.
+ */
+function relayClipboard(text: string): void {
+  if (!text) return;
+  const write = (): Promise<void> => navigator.clipboard.writeText(text);
+  write().then(
+    () => toast('The page copied text to your clipboard.'),
+    () => toast('The page copied text for you.', {
+      label: 'Copy',
+      run: () => {
+        write().then(
+          () => toast('Copied.'),
+          () => {
+            // Last resort: the text must not vanish with the toast.
+            log(`clipboard from the page: ${text}`);
+            toast('The browser refused the clipboard; the text is in the log.');
+          });
+      },
+    }),
+  );
 }
 
 async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {

@@ -741,6 +741,25 @@ func (b *Browser) CancelDownload(ctx context.Context, guid string) error {
 	return b.Call(ctx, "", "Browser.cancelDownload", map[string]any{"guid": guid}, nil)
 }
 
+/*
+GrantClipboard lets every origin use the async clipboard without a prompt
+(P-008). Pages need write for their Copy buttons to succeed at all — headless
+has no prompt to show, so ungranted means every writeText rejects and the
+site's own "copied!" affordance never fires — and the agent needs read to
+notice that a copy happened and relay it.
+
+Launched browsers only: permissions in an attached browser belong to whoever
+is sitting at it.
+*/
+func (b *Browser) GrantClipboard(ctx context.Context) error {
+	if b.attached {
+		return errors.New("cdp: an attached browser keeps its own permissions")
+	}
+	return b.Call(ctx, "", "Browser.grantPermissions", map[string]any{
+		"permissions": []string{"clipboardReadWrite", "clipboardSanitizedWrite"},
+	}, nil)
+}
+
 // owns reports whether a target is ours to drive. Everything in a browser we
 // launched is; in a browser we attached to, only what we opened.
 func (b *Browser) owns(targetID string) bool {

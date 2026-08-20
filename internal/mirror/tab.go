@@ -173,6 +173,10 @@ type Tab struct {
 	// keeps two frames from swapping places on the way out.
 	emitMu sync.Mutex
 
+	// clipProbe is true while a clipboard probe is pending, so a burst of
+	// clicks costs one read rather than one each. See clipboard.go.
+	clipProbe atomic.Bool
+
 	mu      sync.Mutex
 	ctxID   int64
 	frameID string

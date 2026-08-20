@@ -15,9 +15,9 @@ import { decode as cborDecode, Encoder } from 'cbor-x';
 import { decompress as zstdDecompress } from 'fzstd';
 
 import {
-  CaptureDone, CaptureRequest, Channel, Download, DownloadPart, F, Frame, FrameType, ImageMeta,
-  MirrorNode, Mutation, MutationOp, NodeKind, OpCode, Snapshot, Stats, TabState, Viewport,
-  Welcome, AdapterRecord, TabRef,
+  CaptureDone, CaptureRequest, Channel, ClipboardRelay, Download, DownloadPart, F, Frame,
+  FrameType, ImageMeta, MirrorNode, Mutation, MutationOp, NodeKind, OpCode, Snapshot, Stats,
+  TabState, Viewport, Welcome, AdapterRecord, TabRef,
 } from './protocol.js';
 
 export const CODEC_RAW = 0;
@@ -352,6 +352,14 @@ export function decodeDownload(body: unknown): Download {
     total: num(f, F.download.total),
     received: num(f, F.download.received),
     state: (str(f, F.download.state) || 'landing') as Download['state'],
+  };
+}
+
+export function decodeClipboard(body: unknown): ClipboardRelay {
+  const f = bodyFields(body);
+  return {
+    text: str(f, F.clipboard.text),
+    cause: num(f, F.clipboard.cause),
   };
 }
 

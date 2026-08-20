@@ -64,6 +64,15 @@ func (t *Tab) HandleInput(ctx context.Context, ev *protocol.InputEvent) error {
 	// know something the reader caused might have changed — and the only one,
 	// which is why it is taken whether or not the replay above succeeded.
 	t.shotSoon(shotAfterInput)
+	// The same moment answers a different question too: a click or a key is
+	// when a page's Copy affordance fires, and the only time a landside
+	// clipboard change is the reader's business (P-008).
+	if err == nil {
+		switch ev.Kind {
+		case protocol.InClick, protocol.InDblClick, protocol.InKey:
+			t.probeClipboard(ev)
+		}
+	}
 	return err
 }
 

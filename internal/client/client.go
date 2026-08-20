@@ -41,6 +41,8 @@ type Client struct {
 	// any fetch in progress, assembled from contiguous parts.
 	downloads map[string]protocol.Download
 	dlData    map[string]*dlBuffer
+	// clipboard is the last copy the server relayed (P-008).
+	clipboard protocol.Clipboard
 	adapter   []protocol.AdapterRecord
 	stats     protocol.Stats
 	sessionID string
@@ -425,12 +427,28 @@ func (c *Client) handle(f *protocol.Frame) {
 		}
 		c.mu.Unlock()
 		c.emit(Event{Kind: "downloadpart"})
+	case protocol.TypeClipboard:
+		var cb protocol.Clipboard
+		if err := f.DecodeBody(&cb); err != nil {
+			return
+		}
+		c.mu.Lock()
+		c.clipboard = cb
+		c.mu.Unlock()
+		c.emit(Event{Kind: "clipboard"})
 	case protocol.TypeError:
 		var e protocol.ErrorBody
 		_ = f.DecodeBody(&e)
 		c.log.Printf("server error: %s: %s", e.Code, e.Message)
 		c.emit(Event{Kind: "error", Err: fmt.Errorf("%s: %s", e.Code, e.Message)})
 	}
+}
+
+// Clipboard reports the last copy the server relayed, if any.
+func (c *Client) Clipboard() protocol.Clipboard {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.clipboard
 }
 
 // dlBuffer assembles one fetched download from its parts. next is the offset
