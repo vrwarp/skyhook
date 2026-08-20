@@ -446,12 +446,12 @@
     {
       "id": "P-125",
       "title": "The mirror renders every page in standards mode: a quirks-mode page loses its quirks — table cells stop refusing the page font, and the geometry cascade follows",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/host.ts",
         "internal/mirror/agent.js"
       ],
-      "notes": "found by real/hn-front's first measurement (Hacker News serves no doctype, so the landside browser renders it in quirks mode, where tables do not inherit font properties): the landside table runs at the 16px UA default while the mirror — whose host document is standards-mode by construction — inherits 13px Verdana into every cell, shifting 313 boxes and leaving the landside page 173px taller. document.compatMode is fixed at parse, so carrying the page's mode would mean rebuilding the sandbox document per navigation"
+      "notes": "the snapshot now carries the landside parser's verdict (Snapshot.quirks — document.compatMode, not doctype presence, because an archaic doctype still parses into quirks), and the host re-opens the mirror's document without the doctype when it differs: compatMode is fixed at parse, so the rebuild is the mechanism, and it rewires everything the open wiped. real/hn-front's style dimension — 53 differing nodes, every table cell's font — pins the fix at zero. The one residue is catalogued as P-130. A frame whose mode differs from its top document's still renders in the top document's mode: one plane document has one parser"
     },
     {
       "id": "P-126",
@@ -465,11 +465,12 @@
     {
       "id": "P-127",
       "title": "The isolated-world injection race can leave a navigated tab unmirrored: when ensureWorld loses to a navigation and the settle-time retries lose too, the mirror keeps a three-node about:blank document while the page renders fully landside",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/tab.go"
       ],
-      "noPage": "a CDP timing race, not reproducible by a corpus page on demand. Evidence from the thirty-article conformance sweep: bundle 00 (expectedNodes 3, agent.json started:false against a fully rendered page.html) and bundle 16 (the re-injected agent answers an empty fingerprint and serverHash 2166136261 — the bare FNV basis — while the 2068-node document it sent earlier renders plane-side); seven 'isolated world setup failed' warnings in one hour of local captures, most of which recovered on a later retry. The warn path at the ensureWorld call does not retry the world itself; an unstarted agent answering diagnostics is the signature"
+      "notes": "hardened in three places, because the race has three ways to stick: an injection that fails no longer leaves its context id stored (forgetWorld — a world without its agent answered \"__skyhook is not defined\" for ever); the navigation and load paths retry world setup with spaced attempts abandoned when the page moves on (ensureWorldRetry); and eval itself rebuilds once when Chromium says the context is gone (deadContext), because createIsolatedWorld can bind the document being replaced and the stored id dies with it — the rebuilt world binds the document that is actually there, and the fresh agent snapshots itself on arrival",
+      "noPage": "a CDP timing race, not reproducible by a corpus page on demand. Evidence from the thirty-article conformance sweep: bundle 00 (expectedNodes 3, agent.json started:false against a fully rendered page.html) and bundle 16 (the re-injected agent answers an empty fingerprint and serverHash 2166136261 — the bare FNV basis — while the 2068-node document it sent earlier renders plane-side); seven 'isolated world setup failed' warnings in one hour of local captures, most of which recovered on a later retry"
     },
     {
       "id": "P-128",
@@ -490,6 +491,15 @@
         "client/src/mirror/host.ts"
       ],
       "notes": "exposed by P-126's heal on real/wikipedia-article: with the caption borders restored, the mirrored thumbnail figure measures 262px against 260 landside — under every probed computed property agreeing, border-collapse and display:table included — and the two-pixel float difference re-wraps the lead paragraph, shifting 17 inline boxes by up to 135px. A fully static render of the same computed inputs measures identically in both nested and top-level contexts, so the leading suspect is Chromium's incremental table relayout when borders and image blobs arrive after the first pass — the same page settled to landside-equal coordinates when the heal arrived late rather than early. Deterministic across runs; the wikipedia page's geometry expectedFail pins the shape"
+    },
+    {
+      "id": "P-130",
+      "title": "A quirks-mode body stretches to the viewport minus its own margins landside; the mirrored body is an inner box, and CSS cannot state a margin-box stretch for it",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "the residue of P-125's fix: with the mirror re-parsed into quirks mode, the mirrored html restates the root's viewport stretch with min-height:100%, but the body's version of the same quirk subtracts its own margins — 709px inside a 725px viewport with default 8px margins — and no static rule can say \"fill your parent's content box minus your own margin box\" for an ordinary block. A percentage min-height on the body resolves to the full 100% in quirks and overshoots by exactly the margins. real/hn-front's geometry expectedFail pins the single-node shape; every content row inside the body measures landside-equal"
     }
   ]
 }

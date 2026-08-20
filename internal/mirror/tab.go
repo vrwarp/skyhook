@@ -571,7 +571,7 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		}
 
 		t.applyBlocklist(ctx, p.Frame.URL)
-		if err := t.ensureWorld(ctx); err != nil {
+		if err := t.ensureWorldRetry(ctx, epoch); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
 		}
 		// And again before the expensive half. A re-snapshot is the whole
@@ -684,7 +684,7 @@ func (t *Tab) onLoad() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := t.ensureWorld(ctx); err != nil {
+		if err := t.ensureWorldRetry(ctx, epoch); err != nil {
 			t.log.Warn("world setup after load failed", "tab", t.ID, "err", err)
 			return
 		}
@@ -811,6 +811,26 @@ func (t *Tab) onStyleSheetAdded(_ string, params json.RawMessage) {
 	t.mu.Unlock()
 }
 
+// ensureWorldRetry is ensureWorld against the races a navigation runs
+// (P-127): a commit event a beat ahead of the document swap, a provisional
+// document dying under the injection. Spaced tries, abandoned with the page —
+// an overtaken run's world is the overtaking run's to build.
+func (t *Tab) ensureWorldRetry(ctx context.Context, epoch uint64) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			sleepCtx(ctx, time.Duration(attempt)*250*time.Millisecond)
+			if !t.onPage(epoch) {
+				return nil
+			}
+		}
+		if err = t.ensureWorld(ctx); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 // ensureWorld creates (or reuses) the isolated world and installs the agent.
 func (t *Tab) ensureWorld(ctx context.Context) error {
 	t.mu.Lock()
@@ -864,16 +884,63 @@ func (t *Tab) ensureWorld(ctx context.Context) error {
 		"contextId":     world.ExecutionContextID,
 		"returnByValue": true,
 	}, &res); err != nil {
+		// A world without its agent is worse than no world: every later call
+		// would trust the stored id and land in a context that answers with
+		// "__skyhook is not defined" for ever (P-127). Forget it, so the next
+		// caller builds a whole one.
+		t.forgetWorld(world.ExecutionContextID)
 		return err
 	}
 	if res.ExceptionDetails != nil {
+		t.forgetWorld(world.ExecutionContextID)
 		return fmt.Errorf("mirror: agent threw: %s", res.ExceptionDetails.Text)
 	}
 	return nil
 }
 
+// forgetWorld drops a stored context id if it is still the one given —
+// a concurrent navigation may already have replaced it with a live one.
+func (t *Tab) forgetWorld(id int64) {
+	t.mu.Lock()
+	if t.ctxID == id {
+		t.ctxID = 0
+	}
+	t.mu.Unlock()
+}
+
+// deadContext recognises the two ways Chromium says an execution context is
+// gone: named after the fact, or destroyed under an evaluation in flight.
+// Either way the world was made for a document that no longer exists.
+func deadContext(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "Cannot find context with specified id") ||
+		strings.Contains(s, "Execution context was destroyed")
+}
+
 // eval runs an expression in the agent's world and returns the JSON result.
+//
+// A dead world gets one rebuild (P-127): ensureWorld can win its race with a
+// navigation and still lose — createIsolatedWorld binds the frame's *current*
+// document, and called a beat early that is the document being replaced. The
+// stored id then names a context that dies with it, and every caller that
+// trusted it failed for ever while the page rendered fully landside. The
+// retry's ensureWorld runs against the document that is actually there now,
+// and the fresh agent snapshots itself on arrival.
 func (t *Tab) eval(ctx context.Context, expr string) (json.RawMessage, error) {
+	raw, err := t.evalInWorld(ctx, expr)
+	if deadContext(err) {
+		t.mu.Lock()
+		t.ctxID = 0
+		t.mu.Unlock()
+		raw, err = t.evalInWorld(ctx, expr)
+	}
+	return raw, err
+}
+
+func (t *Tab) evalInWorld(ctx context.Context, expr string) (json.RawMessage, error) {
 	if err := t.ensureWorld(ctx); err != nil {
 		return nil, err
 	}
@@ -982,6 +1049,7 @@ type agentSnapshot struct {
 	Images    []agentImage        `json:"images"`
 	DocHeight int                 `json:"docHeight"`
 	Scoped    []agentScopedCSS    `json:"scoped"`
+	Quirks    bool                `json:"quirks"`
 }
 
 // agentScopedCSS is one shadow root's stylesheet, as the agent reports it.
@@ -1171,7 +1239,8 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 		ScrollY:  s.ScrollY,
 		// Which document this is, so that the client's acknowledgements can say
 		// which document they are about. Frame numbering restarts here.
-		Epoch: epoch,
+		Epoch:  epoch,
+		Quirks: s.Quirks,
 	}
 	for _, im := range s.Images {
 		snap.Images = append(snap.Images, protocol.ImageMeta{

@@ -2,16 +2,12 @@
   "id": "real/hn-front",
   "title": "the Hacker News front page, twelve rows",
   "covers": ["tag-soup tables", "spacer gifs", "CSS sprite arrows", "font-size keywords", "real-world markup"],
-  "gaps": ["P-119", "P-125"],
+  "gaps": ["P-119", "P-125", "P-130"],
   "waitText": "Guidelines",
   "expectedFail": {
-    "style": {
-      "gap": "P-125",
-      "reason": "the page has no doctype, so the landside render is quirks mode: tables refuse the body font there (16px Times) while the standards-mode mirror inherits 13px Verdana into every cell; the html and head rows of the same failure are P-119's root-inheritance leak"
-    },
     "geometry": {
-      "gap": "P-125",
-      "reason": "the quirks-vs-standards font difference reflows every table row; the landside page measures 173px taller"
+      "gap": "P-130",
+      "reason": "in quirks mode the landside body stretches to the viewport minus its own margins however short the page; the mirrored body is an inner box, and CSS cannot state a margin-box stretch for it"
     }
   },
   "notes": "captured from the live site through the pipeline (capture 20260820-072612), imported with bundle import -fetch-assets, trimmed to twelve rows. The markup is 90s-style table soup with width=\"0\" spacer images and nbsp-joined text — the page whose capture proved P-124. Story links point at their live URLs and are never followed: corpus pages are measured, not browsed",

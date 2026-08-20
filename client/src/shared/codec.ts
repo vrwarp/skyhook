@@ -214,6 +214,7 @@ export function decodeSnapshot(body: unknown): Snapshot {
     scrollX: num(f, F.snapshot.scrollX),
     scrollY: num(f, F.snapshot.scrollY),
     epoch: num(f, F.snapshot.epoch),
+    quirks: bool(f, F.snapshot.quirks),
     viewport: {
       w: num(vp, F.viewport.w),
       h: num(vp, F.viewport.h),

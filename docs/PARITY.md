@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-52 gaps: 27 open, 10 by-design, 14 fixed, 1 disproven.
+53 gaps: 26 open, 10 by-design, 16 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -167,11 +167,12 @@ The table below is generated from `gaps.json` and the corpus by
 | P-122 | fixed | Top-layer state does not cross: a popover the page showed, or a modal dialog, is closed in the mirror | textmisc/disclosure |
 | P-123 | fixed | In the script-disabled mirror a canvas is not a replaced element: it stretches to its container and its attribute aspect ratio scales it | media/canvas, media/canvas-restyle |
 | P-124 | fixed | The document hash disagrees across languages on non-ASCII text: the agent and patcher fold UTF-16 code units while the Go replicas fold byte-indexed runes, so a healthy mirror of any page with a multi-byte character in a text node's first 32 characters reports divergence | — |
-| P-125 | open | The mirror renders every page in standards mode: a quirks-mode page loses its quirks — table cells stop refusing the page font, and the geometry cascade follows | real/hn-front |
+| P-125 | fixed | The mirror renders every page in standards mode: a quirks-mode page loses its quirks — table cells stop refusing the page font, and the geometry cascade follows | real/hn-front |
 | P-126 | fixed | A shorthand property set with var() loses its longhands in used-CSS extraction: the CSSOM serialises them as empty strings, the wire carries “border-top-color: ;”, and the mirror's parser drops the declarations | css/var-shorthand, real/wikipedia-article |
-| P-127 | open | The isolated-world injection race can leave a navigated tab unmirrored: when ensureWorld loses to a navigation and the settle-time retries lose too, the mirror keeps a three-node about:blank document while the page renders fully landside | — a CDP timing race, not reproducible by a corpus page on demand. Evidence from the thirty-article conformance sweep: bundle 00 (expectedNodes 3, agent.json started:false against a fully rendered page.html) and bundle 16 (the re-injected agent answers an empty fingerprint and serverHash 2166136261 — the bare FNV basis — while the 2068-node document it sent earlier renders plane-side); seven 'isolated world setup failed' warnings in one hour of local captures, most of which recovered on a later retry. The warn path at the ensureWorld call does not retry the world itself; an unstarted agent answering diagnostics is the signature |
+| P-127 | fixed | The isolated-world injection race can leave a navigated tab unmirrored: when ensureWorld loses to a navigation and the settle-time retries lose too, the mirror keeps a three-node about:blank document while the page renders fully landside | — a CDP timing race, not reproducible by a corpus page on demand. Evidence from the thirty-article conformance sweep: bundle 00 (expectedNodes 3, agent.json started:false against a fully rendered page.html) and bundle 16 (the re-injected agent answers an empty fingerprint and serverHash 2166136261 — the bare FNV basis — while the 2068-node document it sent earlier renders plane-side); seven 'isolated world setup failed' warnings in one hour of local captures, most of which recovered on a later retry |
 | P-128 | fixed | The three fingerprint writers disagree at the edges: DOM nodeType against protocol kind for container roots, lowercased names against clipPath, 32 UTF-16 units against 32 runes | — |
 | P-129 | open | A collapsed-border table sizes its caption differently when its borders arrive after first layout: the mirrored figure runs 2px wide and a paragraph wrapping around the float re-wraps | real/wikipedia-article |
+| P-130 | open | A quirks-mode body stretches to the viewport minus its own margins landside; the mirrored body is an inner box, and CSS cannot state a margin-box stretch for it | real/hn-front |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

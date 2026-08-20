@@ -477,10 +477,10 @@
       if (img) {
         flags |= FLAG_IMAGE;
         pairs.push(intern('src'), intern('skyhook://img/' + img.key));
-        if (img.w) pairs.push(intern('width'), intern(String(img.w)));
-        if (img.h) pairs.push(intern('height'), intern(String(img.h)));
+        if (img.aw) pairs.push(intern('width'), intern(String(img.aw)));
+        if (img.ah) pairs.push(intern('height'), intern(String(img.ah)));
         pendingImages.push(img);
-        watchImg(el, img.w, img.h);
+        watchImg(el, img.aw, img.ah);
       }
     }
     out.flags = flags;
@@ -651,11 +651,11 @@
   function syncImg(el, id) {
     var img = describeImage(el, docBase(el));
     if (!img) return;
-    var now = img.w + 'x' + img.h;
+    var now = img.aw + 'x' + img.ah;
     if (imgShipped.get(el) === now) return;
     imgShipped.set(el, now);
-    if (img.w) pendingOps.push([3, id, intern('width'), intern(String(img.w))]);
-    if (img.h) pendingOps.push([3, id, intern('height'), intern(String(img.h))]);
+    if (img.aw) pendingOps.push([3, id, intern('width'), intern(String(img.aw))]);
+    if (img.ah) pendingOps.push([3, id, intern('height'), intern(String(img.ah))]);
   }
 
   // ------------------------------------------------------ live control state
@@ -779,13 +779,19 @@
     // it named bytes only this page's process holds — a broken image with no
     // fallback and no notice. The pipeline reads it from inside the page.
     var r = el.getBoundingClientRect();
-    var w = Math.round(r.width) || el.naturalWidth || 0;
-    var h = Math.round(r.height) || el.naturalHeight || 0;
+    // Two sizes with two jobs. The transcode target falls back to the natural
+    // size so an image serialised before layout still ships at a useful
+    // resolution; the attribute size is the rendered box and nothing else —
+    // an author's width="0" spacer resurrected to its natural pixel was a
+    // spacer visible on one half only.
+    var aw = Math.round(r.width), ah = Math.round(r.height);
+    var w = aw || el.naturalWidth || 0;
+    var h = ah || el.naturalHeight || 0;
     if (w > 4096) w = 4096;
     if (h > 4096) h = 4096;
     var key = imageKey(src, w, h);
     return {
-      n: idFor(el), url: src, w: w, h: h, key: key,
+      n: idFor(el), url: src, w: w, h: h, aw: aw, ah: ah, key: key,
       alt: el.getAttribute('alt') || '',
       pri: r.top < (globalThis.innerHeight || 900) * 1.5 && r.bottom > -200 ? 0 : 1
     };
@@ -861,8 +867,8 @@
       var img = describeImage(el, base);
       if (img) {
         out.src = 'skyhook://img/' + img.key;
-        if (img.w) out.width = String(img.w);
-        if (img.h) out.height = String(img.h);
+        if (img.aw) out.width = String(img.aw);
+        if (img.ah) out.height = String(img.ah);
         any = true;
       }
     }
@@ -3438,9 +3444,9 @@
             val = 'skyhook://img/' + img.key;
             // The size the description was made at, the way a snapshot ships
             // it — and watched, so a box that settles later is re-stated.
-            if (img.w) pendingOps.push([3, id, intern('width'), intern(String(img.w))]);
-            if (img.h) pendingOps.push([3, id, intern('height'), intern(String(img.h))]);
-            watchImg(el, img.w, img.h);
+            if (img.aw) pendingOps.push([3, id, intern('width'), intern(String(img.aw))]);
+            if (img.ah) pendingOps.push([3, id, intern('height'), intern(String(img.ah))]);
+            watchImg(el, img.aw, img.ah);
           }
         } else if (name === 'style') {
           // A background a script assigns as it scrolls arrives here rather
@@ -3751,6 +3757,10 @@
       scrollX: globalThis.scrollX | 0, scrollY: globalThis.scrollY | 0,
       vw: globalThis.innerWidth | 0, vh: globalThis.innerHeight | 0,
       dpr: globalThis.devicePixelRatio || 1,
+      // The parser's own verdict, not the doctype's presence: an archaic
+      // doctype still parses into quirks mode, and the mirror has to render
+      // under the same rules the landside page really got (P-125).
+      quirks: document.compatMode === 'BackCompat',
       images: imgs,
       docHeight: Math.max(
         document.documentElement ? document.documentElement.scrollHeight : 0,

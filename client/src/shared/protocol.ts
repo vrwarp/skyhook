@@ -193,6 +193,12 @@ export interface Snapshot {
    * about one document for a question it asked about another.
    */
   epoch?: number;
+  /**
+   * The landside parser's verdict: true when the page rendered in quirks
+   * mode. The mirror re-parses its host document to match, because quirks is
+   * a parse-time property no inserted doctype can change (P-125).
+   */
+  quirks?: boolean;
 }
 
 /** One shadow root's stylesheet. */
@@ -384,7 +390,7 @@ export const F = {
   snapshot: {
     strings: 1, nodes: 2, css: 3, url: 4, title: 5, viewport: 6,
     images: 7, scrollX: 8, scrollY: 9, docHash: 11, baseUrl: 12, scoped: 13,
-    epoch: 14,
+    epoch: 14, quirks: 15,
   },
   scopedCSS: { root: 1, rules: 2 },
   op: {

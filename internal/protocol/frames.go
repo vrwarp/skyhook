@@ -355,6 +355,11 @@ type Snapshot struct {
 	// Epoch counts the documents this tab has sent, and is echoed back in every
 	// TabAck the client makes about this one. See TabAck.Epoch.
 	Epoch uint64 `cbor:"14,keyasint,omitempty"`
+	// Quirks carries the landside parser's verdict — document.compatMode ==
+	// "BackCompat" — so the mirror can render under the same rules (P-125).
+	// The doctype node's presence is not the same fact: an archaic doctype
+	// still parses into quirks mode.
+	Quirks bool `cbor:"15,keyasint,omitempty"`
 }
 
 // ScopedCSS is one shadow root's stylesheet.

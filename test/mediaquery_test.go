@@ -189,7 +189,9 @@ func TestAnUnchosenColorSchemeIsChosenLandside(t *testing.T) {
 	css, html := colorSchemeBundle(ctx, t, h)
 	flat := strings.ReplaceAll(css, " ", "")
 
-	if !strings.Contains(flat, ":root{color-scheme:light;}") {
+	// The page's own `:root` is re-pointed at the mirrored html (the frame's
+	// root is the shell's, not the page's — see rewriteRootSelectors).
+	if !strings.Contains(flat, `[data-sky-doc="html"]{color-scheme:light;}`) {
 		t.Errorf("`color-scheme: light dark` was left for the reader to settle:\n%s",
 			cssLines(css, "color-scheme"))
 	}
@@ -265,7 +267,7 @@ func TestTheMirrorPaintsTheCanvasTheLandsidePageHad(t *testing.T) {
 	// Said about the frame's own root, which is the only element `:root` can
 	// mean on that side, and said loudly enough that a later delta cannot
 	// quietly take it back.
-	if !strings.Contains(flat, ":root{") {
+	if !strings.Contains(flat, ":root[data-sky-ground]{") {
 		t.Errorf("the canvas was not addressed to the frame's own root:\n%s",
 			cssLines(css, "background-color:rgb(13, 17, 23)"))
 	}
@@ -300,7 +302,7 @@ func TestTheCanvasCrossesAsABackgroundAndNotAColour(t *testing.T) {
 	if err := cl.WaitForText(ctx, tab, "a page on a tiled ground", budget(45*time.Second)); err != nil {
 		t.Fatalf("mirror never delivered the page: %v", err)
 	}
-	if err := waitForCSS(ctx, cl, tab, ":root{"); err != nil {
+	if err := waitForCSS(ctx, cl, tab, ":root[data-sky-ground]{"); err != nil {
 		t.Fatalf("the frame was never told what its ground is: %v", err)
 	}
 	css := strings.Join(cl.Model(tab).CSS, "\n")
@@ -376,7 +378,7 @@ func TestTheMirrorIsToldWhichSchemeThePageWasPaintedIn(t *testing.T) {
 	// A page with no stylesheet at all still gets this one rule: it is the
 	// only thing standing between the mirror and a reader's browser deciding
 	// the page would look better inverted.
-	if !strings.Contains(flat, ":root{color-scheme:onlylight!important;}") {
+	if !strings.Contains(flat, ":root[data-sky-ground]{color-scheme:onlylight!important;}") {
 		t.Errorf("nothing told the frame which scheme this page was painted in:\n%s",
 			cssLines(css, ":root"))
 	}
@@ -733,7 +735,7 @@ func TestTheReaderCanAskForTheOtherColorScheme(t *testing.T) {
 		}
 	}
 	// Including the two the page never wrote a query for.
-	if !strings.Contains(flat, ":root{color-scheme:onlydark!important;}") {
+	if !strings.Contains(flat, ":root[data-sky-ground]{color-scheme:onlydark!important;}") {
 		t.Errorf("the frame was still being told the page is light:\n%s",
 			cssLines(strings.Join(cl.Model(tab).CSS, "\n"), ":root"))
 	}

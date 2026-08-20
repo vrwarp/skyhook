@@ -149,6 +149,15 @@ img { background-repeat: no-repeat; background-size: cover; }
 html.skyhook-busy, html.skyhook-busy a[href] { cursor: progress; }
 `;
 
+/* Appended to the boot styles only when the document is in quirks mode. In
+   quirks the landside root stretches to the viewport however short the page;
+   the mirrored html is an inner box here, so the stretch is restated. The
+   body's version of the same stretch subtracts its own margins — a fact CSS
+   cannot state for an inner box — and stays a catalogued residue of P-125. */
+const QUIRKS_MIRROR_CSS = `
+html:where([data-sky-doc]) { min-height: 100%; }
+`;
+
 /**
  * Puts the mirror's document into standards mode, which it is not born in.
  *
@@ -182,14 +191,24 @@ html.skyhook-busy, html.skyhook-busy a[href] { cursor: progress; }
  * frame already inherited that same base URL from its creator.
  */
 const STANDARDS_SHELL = '<!DOCTYPE html><html><head></head><body></body></html>';
+/* The same shell with the doctype left off, for the pages that left it off
+   themselves (P-125): a page the landside browser parsed in quirks mode gets
+   its quirks back — table cells refusing the page font is a geometry cascade,
+   not a nicety — by rebuilding the mirror's document the way the original was
+   built. The snapshot carries the parser's verdict (Snapshot.quirks). */
+const QUIRKS_SHELL = '<html><head></head><body></body></html>';
 
-function forceStandardsMode(doc: Document): void {
-  if (doc.compatMode === 'CSS1Compat') return;
+/** Re-parses the document into the asked-for mode. Returns whether it was
+ *  re-opened — everything in it, listeners included, is gone when it was. */
+function setCompatMode(doc: Document, quirks: boolean): boolean {
+  const want = quirks ? 'BackCompat' : 'CSS1Compat';
+  if (doc.compatMode === want) return false;
   try {
     doc.open();
-    doc.write(STANDARDS_SHELL);
+    doc.write(quirks ? QUIRKS_SHELL : STANDARDS_SHELL);
     doc.close();
-  } catch { /* a mirror in quirks mode still beats no mirror at all */ }
+    return true;
+  } catch { return false; /* the wrong mode still beats no mirror at all */ }
 }
 
 /** What the shell needs to know to draw a context menu for a right click. */
@@ -590,9 +609,12 @@ export class MirrorHost {
     this.frame.dataset.tab = String(tab);
   }
 
-  private attach(doc: Document): void {
-    if (this.doc === doc && this.patcher) return;
-    forceStandardsMode(doc);
+  private attach(doc: Document, quirks = false): void {
+    // Re-opening wipes the document — listeners, styles, everything — so a
+    // mode change re-runs all of this on the same Document object; anything
+    // short of that early-returns.
+    const reopened = setCompatMode(doc, quirks);
+    if (this.doc === doc && this.patcher && !reopened) return;
     this.doc = doc;
     // The agent's synthesized ground rule — the page's canvas colour and
     // colour-scheme — selects :root[data-sky-ground]: this root, the frame
@@ -602,7 +624,7 @@ export class MirrorHost {
     doc.addEventListener('securitypolicyviolation', () => { this.cspViolations += 1; });
 
     const style = doc.createElement('style');
-    style.textContent = MIRROR_CSS;
+    style.textContent = quirks ? MIRROR_CSS + QUIRKS_MIRROR_CSS : MIRROR_CSS;
     doc.head.appendChild(style);
 
     this.patcher = new Patcher(doc, {
@@ -1546,6 +1568,10 @@ export class MirrorHost {
 
   applySnapshot(snap: Snapshot): void {
     if (!this.patcher) return;
+    // The snapshot knows which parsing mode the landside document really got
+    // (P-125); a mismatch rebuilds this document — and everything wired to it
+    // — before the new page is drawn into it.
+    if (this.doc) this.attach(this.doc, !!snap.quirks);
     this.setPageUrl(snap.url);
     this.echo?.release();
     // A held blur names a node in the document being replaced. Sent after this
