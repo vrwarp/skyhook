@@ -329,7 +329,14 @@ func triageFingerprints(b *Bundle, land, plane string) TriageFingerprint {
 	}
 	if ltrunc || ptrunc {
 		out.Note = "a fingerprint was truncated; absence counts are not comparable"
-		out.Comparable = false
+		return out
+	}
+	// An empty list against a populated one is not thousands of missing
+	// nodes: it is an agent that answered before it was started (the
+	// injection race, P-127), and counting it as absence would send the
+	// reader after the wrong bug.
+	if (len(lfp) == 0) != (len(pfp) == 0) {
+		out.Note = "one half answered an empty fingerprint — its agent was not started when the capture ran"
 		return out
 	}
 	out.Comparable = true
@@ -343,7 +350,7 @@ func triageFingerprints(b *Bundle, land, plane string) TriageFingerprint {
 			out.MissingPlane++
 			continue
 		}
-		if l.Kind != p.Kind || l.Value != p.Value {
+		if fingerprintsDisagree(l, p) {
 			out.Mismatched++
 		}
 	}
@@ -356,6 +363,32 @@ func triageFingerprints(b *Bundle, land, plane string) TriageFingerprint {
 		}
 	}
 	return out
+}
+
+// fingerprintsDisagree compares two fingerprint rows across the vocabulary
+// drift between their writers (P-128): the agent reports DOM nodeType,
+// lowercased names, and 32 UTF-16 units of value; the Go client reports
+// protocol kinds, names in DOM case, and 32 runes. Text against non-text is
+// the one kind distinction every writer agrees on; values compare
+// case-insensitively, and only over the shared prefix when either side sits
+// at its truncation window (an emoji makes the windows end differently).
+func fingerprintsDisagree(l, p fingerprintRow) bool {
+	if (l.Kind == 3) != (p.Kind == 3) {
+		return true
+	}
+	lv, pv := strings.ToLower(l.Value), strings.ToLower(p.Value)
+	if lv == pv {
+		return false
+	}
+	lr, pr := []rune(lv), []rune(pv)
+	if len(lr) < 31 && len(pr) < 31 {
+		return true // neither was truncated; the difference is real
+	}
+	n := len(lr)
+	if len(pr) < n {
+		n = len(pr)
+	}
+	return string(lr[:n]) != string(pr[:n])
 }
 
 func triagePixels(b *Bundle, land, plane string) (float64, bool) {
@@ -423,28 +456,54 @@ func compareDocuments(a, b []byte, na, nb normalizer, absentNote string) TriageL
 }
 
 func parseNormalized(raw []byte, norm normalizer) (*docNode, error) {
-	doc, err := html.Parse(strings.NewReader(string(raw)))
+	// The replica's HTML() closes void elements (<br></br>), and the HTML5
+	// parser resurrects a stray </br> as a second <br> — the one end tag with
+	// that rule — which would shift every following sibling and diff as a
+	// phantom insertion. Found by triaging a real capture of Hacker News.
+	text := strings.ReplaceAll(string(raw), "</br>", "")
+	doc, err := html.Parse(strings.NewReader(text))
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	root := &docNode{tag: "#doc"}
 	var walk func(*html.Node, *docNode)
 	walk = func(n *html.Node, parent *docNode) {
+		// Adjacent text nodes merge before whitespace collapse: rendering is
+		// runs of text, and the two serialisations split the runs differently
+		// — the live DOM keeps the parser's chunks (and the shards around a
+		// dropped <!-- --> separator, which React SSR emits between every two
+		// adjacent expressions), while a re-parse of the replica's HTML joins
+		// them. Found by the conformance sweep on theverge.com and fx.sh.
+		var pending strings.Builder
+		flush := func() {
+			if t := collapseText(pending.String()); t != "" {
+				parent.children = append(parent.children, &docNode{tag: "#text", text: t})
+			}
+			pending.Reset()
+		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			switch c.Type {
 			case html.TextNode:
-				if t := collapseText(c.Data); t != "" {
-					parent.children = append(parent.children, &docNode{tag: "#text", text: t})
-				}
+				pending.WriteString(c.Data)
 			case html.ElementNode:
 				dn := &docNode{tag: c.Data, attrs: map[string]string{}}
 				if norm != nil && !norm(c, dn) {
-					continue // dropped whole
+					continue // dropped whole; adjacent text still merges across it
 				}
+				flush()
 				parent.children = append(parent.children, dn)
-				walk(c, dn)
+				// A frame is opaque: its mirrored content lives in a slot, so
+				// its DOM children (fallback markup live, the stand-in's label
+				// text on the wire) and its rewritten attributes are two
+				// different machines' furniture, not the page's.
+				if dn.tag != "iframe" && dn.tag != "frame" {
+					walk(c, dn)
+				} else {
+					dn.attrs = map[string]string{}
+				}
 			}
 		}
+		flush()
 	}
 	walk(doc, root)
 	return root, nil
@@ -509,20 +568,30 @@ func normalizeLandside(n *html.Node, out *docNode) bool {
 		return false
 	}
 	for _, a := range n.Attr {
-		if agentSkipsAttr(a.Key) || emptyClass(a) {
+		if agentSkipsAttr(a.Key) {
 			continue
 		}
-		out.attrs[a.Key] = a.Val
+		setDocAttr(out, a)
 	}
 	// The live page's value/checked state is serialised as data-sky-*; the
 	// static attributes stay comparable as they are.
 	return true
 }
 
-// emptyClass matches class="", which styles nothing and is equivalent to no
-// class at all; DOM APIs (classList.toggle, className clears) leave it behind.
-func emptyClass(a html.Attribute) bool {
-	return a.Key == "class" && strings.TrimSpace(a.Val) == ""
+// setDocAttr stores one attribute, canonicalising class token lists: CSS
+// matches tokens, not strings, so "a  b " and "a b" style identically, and
+// serialisers disagree freely about the whitespace (a real page's multi-line
+// class came back single-spaced from the replica). An empty list — which
+// classList.toggle and className clears leave behind as class="" — is
+// equivalent to no class at all and stored as none.
+func setDocAttr(out *docNode, a html.Attribute) {
+	if a.Key == "class" {
+		if v := strings.Join(strings.Fields(a.Val), " "); v != "" {
+			out.attrs["class"] = v
+		}
+		return
+	}
+	out.attrs[a.Key] = a.Val
 }
 
 // normalizeExpected reduces the replica's HTML: shadow-root content (declared
@@ -540,10 +609,10 @@ func normalizeExpected(n *html.Node, out *docNode) bool {
 		return false
 	}
 	for _, a := range n.Attr {
-		if agentSkipsAttr(a.Key) || emptyClass(a) {
+		if agentSkipsAttr(a.Key) {
 			continue
 		}
-		out.attrs[a.Key] = a.Val
+		setDocAttr(out, a)
 	}
 	return true
 }
@@ -574,12 +643,9 @@ func normalizeMirror(n *html.Node, out *docNode) bool {
 			// The shell toggles its own state classes (skyhook-busy,
 			// skyhook-offline) on the mirrored root; toggling one off leaves
 			// class="" behind. Neither the class nor its residue is the page's.
-			if v := stripSkyhookClasses(a.Val); v != "" {
-				out.attrs["class"] = v
-			}
-			continue
+			a.Val = stripSkyhookClasses(a.Val)
 		}
-		out.attrs[a.Key] = a.Val
+		setDocAttr(out, a)
 	}
 	return true
 }
@@ -621,13 +687,21 @@ func agentSkipsAttr(key string) bool {
 	}
 	// Live control state and image sources are compared by the live parity
 	// suite; in a bundle they are two different moments of the same field.
+	// The other URL attributes go for a different reason: the agent
+	// absolutises them on the way out (the mirror has no base to resolve
+	// against), so the live page's relative form can never string-match the
+	// wire's — a real capture's protocol-relative form action proved it.
 	switch key {
 	case "value", "src", "href", "style", "width", "height":
 		return true
-	case "data-sky-value", "data-sky-checked", "data-sky-selected", "data-sky-box":
+	case "action", "formaction", "poster", "cite", "background", "usemap", "data":
 		return true
 	}
-	return false
+	// Every data-sky-* attribute is a wire synthetic — control state, frame
+	// boxes, the undefined-custom-element marker — written by the agent, not
+	// the page. The conformance sweep found data-sky-undefined on every page
+	// with a custom element; enumerating them was a losing game.
+	return strings.HasPrefix(key, "data-sky-")
 }
 
 // Text renders a report for a terminal.

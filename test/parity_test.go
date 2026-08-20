@@ -36,6 +36,11 @@ func TestParityMedia(t *testing.T)    { runParityGroup(t, "media") }
 func TestParityNav(t *testing.T)      { runParityGroup(t, "nav") }
 func TestParityTextMisc(t *testing.T) { runParityGroup(t, "textmisc") }
 
+// The real/ group is pages captured from the live web through the pipeline
+// and imported with `skyhookctl bundle import` — the corpus's contact with
+// markup nobody wrote to be measurable. See each manifest's attribution.
+func TestParityReal(t *testing.T) { runParityGroup(t, "real") }
+
 // TestParitySmokeFixture cross-checks the two probes themselves on the plain
 // fixture page: parse, node identity, and the dimensions that must hold on a
 // page this ordinary. The corpus tests carry the real per-page contracts;

@@ -231,6 +231,99 @@ func TestTriageNormalizesTheMirrorsOwnMachinery(t *testing.T) {
 	}
 }
 
+// Two artifacts found by triaging a real capture of Hacker News: the
+// replica's HTML() closes void elements, and the HTML5 parser resurrects a
+// stray </br> as a second <br>; and serialisers disagree about whitespace
+// inside class attributes, which CSS never sees.
+func TestTriageSerializerQuirksAreNotDivergence(t *testing.T) {
+	files, _ := consistentBundle(t)
+	files["landside/tabs/1/page.html"] = []byte(
+		`<html><body><td><table></table><br> <center><span class="yclinks  a` + "\n" +
+			`b">hello there</span></center></td></body></html>`)
+	files["landside/tabs/1/expected.html"] = []byte(
+		`<html><body><td><table></table><br></br> <center><span class="yclinks a b">hello there</span></center></td></body></html>`)
+	r := Triage(openTestBundle(t, files))
+	if leg := r.Tabs[0].AgentLeg; leg.Verdict != "clean" {
+		t.Fatalf("agent leg = %+v", leg)
+	}
+}
+
+// Findings from the thirty-article conformance sweep, each of which read as
+// divergence until the tool learned the machinery behind it: React SSR's
+// <!-- --> separators shard text runs the wire re-joins; the agent stamps
+// data-sky-undefined on not-yet-defined custom elements; and a frame's
+// children and attributes are two machines' furniture on the two sides.
+func TestTriageSweepQuirksAreNotDivergence(t *testing.T) {
+	files, _ := consistentBundle(t)
+	files["landside/tabs/1/page.html"] = []byte(
+		`<html><body><a href="/tech">See All <!-- -->Tech</a>` +
+			`<my-widget data-other="kept">payload</my-widget>` +
+			`<iframe title="embed" src="https://y.test/v">fallback text</iframe></body></html>`)
+	files["landside/tabs/1/expected.html"] = []byte(
+		`<html><body><a href="http://x.test/tech">See All Tech</a>` +
+			`<my-widget data-sky-undefined="" data-other="kept">payload</my-widget>` +
+			`<iframe allow="autoplay" data-sky-box="620x349">frame: y.test</iframe></body></html>`)
+	r := Triage(openTestBundle(t, files))
+	if leg := r.Tabs[0].AgentLeg; leg.Verdict != "clean" {
+		t.Fatalf("agent leg = %+v", leg)
+	}
+}
+
+// The fingerprint writers disagree about vocabulary at the edges (P-128):
+// nodeType against protocol kind for a shadow root, name case for SVG's
+// clipPath, and the truncation window when an emoji splits into surrogates.
+// None of that is document divergence.
+func TestTriageFingerprintToleratesWriterVocabulary(t *testing.T) {
+	files, _ := consistentBundle(t)
+	files["landside/tabs/1/fingerprint.json"] = mustJSON(t, map[string]any{
+		"truncated": false,
+		"nodes": [][]any{
+			{1, 1, "html", 0}, {2, 1, "body", 0},
+			{3, 9, "", 0},         // the agent: a sub-document is nodeType 9
+			{4, 1, "clippath", 0}, // the agent lowercases
+			{5, 3, "\U0001F4DD Variable types used by Marsag", 0}, // 32 UTF-16 units
+		},
+	})
+	files["planeside/tabs/1/fingerprint.json"] = mustJSON(t, map[string]any{
+		"truncated": false,
+		"nodes": [][]any{
+			{1, 1, "html", 0}, {2, 1, "body", 0},
+			{3, 11, "", 0},        // the Go client: protocol KindFragment
+			{4, 1, "clipPath", 0}, // DOM case
+			{5, 3, "\U0001F4DD Variable types used by Marsagl", 0}, // 32 runes
+		},
+	})
+	r := Triage(openTestBundle(t, files))
+	fp := r.Tabs[0].Fingerprint
+	if !fp.Comparable || fp.Mismatched != 0 {
+		t.Fatalf("fingerprint = %+v", fp)
+	}
+	// A short value differing is still a real disagreement.
+	if !fingerprintsDisagree(fingerprintRow{Kind: 3, Value: "abc"}, fingerprintRow{Kind: 3, Value: "abd"}) {
+		t.Fatal("a real short-text difference must still count")
+	}
+	if !fingerprintsDisagree(fingerprintRow{Kind: 3, Value: "abc"}, fingerprintRow{Kind: 1, Value: "abc"}) {
+		t.Fatal("text against non-text must still count")
+	}
+}
+
+// An empty fingerprint against a populated one is the injection race
+// (P-127), not thousands of missing nodes.
+func TestTriageEmptyFingerprintIsNotAbsence(t *testing.T) {
+	files, _ := consistentBundle(t)
+	files["landside/tabs/1/fingerprint.json"] = mustJSON(t, map[string]any{
+		"truncated": false, "nodes": [][]any{},
+	})
+	r := Triage(openTestBundle(t, files))
+	fp := r.Tabs[0].Fingerprint
+	if fp.Comparable || fp.MissingLand != 0 || !strings.Contains(fp.Note, "not started") {
+		t.Fatalf("fingerprint = %+v", fp)
+	}
+	if r.Verdict != "clean" {
+		t.Fatalf("verdict = %q; an unanswered diagnostic is not document divergence", r.Verdict)
+	}
+}
+
 func TestTriageFlagsRejectedRulesTheMirrorCouldUse(t *testing.T) {
 	files, _ := consistentBundle(t)
 	files["planeside/tabs/1/mirror.html"] = []byte(

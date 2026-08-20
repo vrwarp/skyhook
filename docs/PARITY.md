@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-46 gaps: 35 open, 10 by-design, 0 fixed, 1 disproven.
+51 gaps: 40 open, 10 by-design, 0 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -161,11 +161,16 @@ The table below is generated from `gaps.json` and the corpus by
 | P-116 | open | An external SVG sprite reference resolves to a URL the sandboxed frame can never fetch: the icon renders as nothing | images/svg-sprite |
 | P-117 | disproven | A style write onto a canvas permanently blanks its photograph until the reader touches something | media/canvas-restyle |
 | P-118 | open | The GIF tap-to-play the transcoder's comment promises does not exist in the client | — the still-frame half is P-016's page; this records the docs-versus-code drift so one of them gets fixed |
-| P-119 | open | The mirror's own :root color and font leak into pages that rely on UA defaults | css/ua-defaults |
+| P-119 | open | The mirror's own :root color and font leak into pages that rely on UA defaults | css/ua-defaults, real/hn-front, real/wikipedia-article |
 | P-120 | open | A top margin that collapses through the page's body is lost at the mirror boundary | css/margin-collapse |
 | P-121 | open | The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left | — timing-dependent by nature: the executor settles before each step so every other page measures its own gap, and a page for this needs a deliberate fast-click knob in the executor first |
 | P-122 | open | Top-layer state does not cross: a popover the page showed, or a modal dialog, is closed in the mirror | textmisc/disclosure |
 | P-123 | open | In the script-disabled mirror a canvas is not a replaced element: it stretches to its container and its attribute aspect ratio scales it | media/canvas, media/canvas-restyle |
+| P-124 | open | The document hash disagrees across languages on non-ASCII text: the agent and patcher fold UTF-16 code units while the Go replicas fold byte-indexed runes, so a healthy mirror of any page with a multi-byte character in a text node's first 32 characters reports divergence | — the corpus's structure dimension compares the agent's hash against the patcher's, and both fold UTF-16 code units, so they agree; the divergent pairing is JavaScript against Go — Model.Hash ranges over v byte-indexed (`for i, r := range v` breaks at byte 32, not unit 32, and folds the rune's low byte, not the surrogate pair's) — which no browser-to-browser page can measure. Proven by capture 20260820-072612 of the Hacker News front page: recomputing both conventions over the bundle's own fingerprint rows reproduces serverHash 1676248291 (UTF-16) and clientHash 2876902932 (Go) exactly; the U+00A0 in every "N comments" link is enough. Until Model.Hash folds UTF-16 code units, hashesAgree is false on healthy captures of most real pages, and every Go-side consumer of the hash (the capture's agreement record, skyhookctl's replica, integrity comparisons against either JS half) sees phantom divergence |
+| P-125 | open | The mirror renders every page in standards mode: a quirks-mode page loses its quirks — table cells stop refusing the page font, and the geometry cascade follows | real/hn-front |
+| P-126 | open | A shorthand property set with var() loses its longhands in used-CSS extraction: the CSSOM serialises them as empty strings, the wire carries “border-top-color: ;”, and the mirror's parser drops the declarations | real/wikipedia-article |
+| P-127 | open | The isolated-world injection race can leave a navigated tab unmirrored: when ensureWorld loses to a navigation and the settle-time retries lose too, the mirror keeps a three-node about:blank document while the page renders fully landside | — a CDP timing race, not reproducible by a corpus page on demand. Evidence from the thirty-article conformance sweep: bundle 00 (expectedNodes 3, agent.json started:false against a fully rendered page.html) and bundle 16 (the re-injected agent answers an empty fingerprint and serverHash 2166136261 — the bare FNV basis — while the 2068-node document it sent earlier renders plane-side); seven 'isolated world setup failed' warnings in one hour of local captures, most of which recovered on a later retry. The warn path at the ensureWorld call does not retry the world itself; an unstarted agent answering diagnostics is the signature |
+| P-128 | open | The three fingerprint writers disagree at the edges: DOM nodeType against protocol kind for container roots, lowercased names against clipPath, 32 UTF-16 units against 32 runes | — a diagnostic-surface inconsistency, not a rendering one — the documents agree while their descriptions differ. docs/OPERATIONS.md tells the reader to diff the two fingerprint.json files by hand, and on any page with SVG, sub-frames or emoji that diff reports phantom rows (conformance bundles 22 and 23: clippath/clipPath, kind 9/11, an emoji title cut a rune short). bundle triage compensates (fingerprintsDisagree in internal/parity/triage.go); the files themselves still disagree until the writers converge on one vocabulary |
 <!-- parity:registry:end -->
 
 ## Fixing a gap
@@ -193,6 +198,15 @@ against the client's document), the CSS leg (rejected rules held against the
 classes the mirror contains), the fingerprint cross-diff, and a replay of the
 journal checked against the recorded replica hash. Exit code 0 is clean, 1 is
 diverged, 2 is unreadable.
+
+For breadth beyond the corpus, `scripts/bundle_sweep.py` captures a whole
+list of URLs as bundles and triages the lot — a conformance run over markup
+nobody wrote to be measurable. Its first run, over every article on one
+day's Hacker News front page, is written up in
+[test/parity/sweeps/](../test/parity/sweeps/); it hardened five triage
+normalisation rules and filed two gaps. Sweep bundles contain the pages
+themselves and are never committed — the write-up and what the sweep taught
+the tools are.
 
 `import` turns a bundle's landside document into a corpus page skeleton:
 sanitised (scripts, handlers, hidden-input values, oversized `data-*`
