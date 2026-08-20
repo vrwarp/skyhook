@@ -115,11 +115,17 @@ func (t *Tab) readClipboardOnce(slot int64, attempt int) (string, bool) {
 	return res.T, true
 }
 
-// grantClipboardFor asks the browser to grant the async clipboard to a page's
+// grantClipboard asks the browser to grant the async clipboard to a page's
 // origin (P-008). The browser-wide grant made at startup is honoured unevenly
 // across Chrome builds for clipboard-read, so each origin a tab lands on is
 // granted explicitly too; once is enough per origin per tab.
-func (t *Tab) grantClipboardFor(rawURL string) {
+//
+// Inline, because ordering is the point at its main call site: granted before
+// Page.navigate, the agent's install-time baseline read finds the permission
+// already there. Granted concurrently — the first draft did — the read raced
+// the grant, lost on CI's Chrome, and the first probe after the reader's
+// click then swallowed the page's copy as its baseline instead of relaying it.
+func (t *Tab) grantClipboard(ctx context.Context, rawURL string) {
 	origin := clipOrigin(rawURL)
 	if origin == "" {
 		return
@@ -133,12 +139,18 @@ func (t *Tab) grantClipboardFor(rawURL string) {
 	if same {
 		return
 	}
+	if err := t.browser.GrantClipboardFor(ctx, origin); err != nil {
+		t.log.Debug("per-origin clipboard grant failed", "tab", t.ID, "origin", origin, "err", err)
+	}
+}
+
+// grantClipboardFor is the fire-and-forget form, for the navigation-committed
+// event where the URL is only now known (a link click, a redirect).
+func (t *Tab) grantClipboardFor(rawURL string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := t.browser.GrantClipboardFor(ctx, origin); err != nil {
-			t.log.Debug("per-origin clipboard grant failed", "tab", t.ID, "origin", origin, "err", err)
-		}
+		t.grantClipboard(ctx, rawURL)
 	}()
 }
 

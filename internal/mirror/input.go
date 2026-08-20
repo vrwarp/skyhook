@@ -771,6 +771,10 @@ func (t *Tab) Navigate(ctx context.Context, n protocol.Navigate) error {
 		return nil
 	}
 	url := normalizeURL(n.URL)
+	// Before the navigation, so the document arrives with its clipboard
+	// permission already in place and the agent's baseline read succeeds
+	// first try (P-008). See grantClipboard.
+	t.grantClipboard(ctx, url)
 	t.wantsLoading()
 	t.setLoading(true)
 	return t.sess.Do(ctx, "Page.navigate", map[string]any{"url": url}, nil)

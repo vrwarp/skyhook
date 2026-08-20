@@ -4792,13 +4792,25 @@
   // mistake what was already there for a copy the page just made (P-008). A
   // failed read leaves it unseeded, and then the first probe that can read
   // seeds instead of relaying — the invariant lives in clipProbe.
-  try {
-    if (navigator.clipboard && navigator.clipboard.readText) {
+  //
+  // Retried, because the first read can lose for reasons that pass: the
+  // per-origin permission grant lands moments around the document on some
+  // Chrome builds, and focus arrives when the tab does. A seeder that gave up
+  // after one refusal left the first probe after the reader's click to
+  // swallow the page's first copy as its baseline — the relay's own
+  // bookkeeping eating the one thing it exists to deliver.
+  (function seedClipboard(tries) {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) return;
       navigator.clipboard.readText().then(function (text) {
         if (!clipSeeded) { clipSeeded = true; clipLast = text; }
-      }, function () { /* unreadable; stay unseeded */ });
-    }
-  } catch (e) { /* no clipboard in this context */ }
+      }, function () {
+        if (tries > 0 && !clipSeeded) {
+          setTimeout(function () { seedClipboard(tries - 1); }, 700);
+        }
+      });
+    } catch (e) { /* no clipboard in this context */ }
+  })(6);
 
   function startWhenReady() {
     if (document.readyState === 'loading') {
