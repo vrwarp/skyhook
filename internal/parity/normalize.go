@@ -42,7 +42,25 @@ func skipAttr(tag, name string) bool {
 	if name == "value" && (tag == "input" || tag == "option") {
 		return true
 	}
+	// The style attribute is where the mirror paints its own work — a
+	// stand-in's measured box, an image's blurhash placeholder, a canvas's
+	// photograph — none of which the landside element wears. Whether the
+	// styling *took* is the computed-style dimension's question, which sees
+	// through the attribute to the answer.
+	if name == "style" {
+		return true
+	}
 	return false
+}
+
+// substitutedNode reports a node the patcher had to build as a stand-in — an
+// iframe or another forbidden tag rendered as an inert box. Its own computed
+// style and geometry are the mirror's deliberate invention (a scrolling div
+// is not an iframe), so those dimensions skip it; its attributes, text and
+// contents are still held to account.
+func substitutedNode(p *NodeProbe) bool {
+	_, ok := p.Attrs["data-skyhook-tag"]
+	return ok
 }
 
 var urlRef = regexp.MustCompile(`url\((?:[^)(]|\([^)(]*\))*\)`)

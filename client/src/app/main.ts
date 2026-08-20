@@ -2032,6 +2032,22 @@ function runCapture(request: CaptureRequest): void {
   })();
 }
 
+/**
+ * The parity probe, reachable from outside the app the way a capture is
+ * reachable from the server: the e2e parity suite evaluates this through CDP
+ * and holds the answer against the landside agent's own probe. Always on and
+ * read-only, the same posture as `__skyhook` landside — it reads the mirror
+ * the shell already holds, in the shell's own trust domain, and changes
+ * nothing.
+ */
+declare global {
+  interface Window { __skyhookParity?: (tab?: number) => Record<string, unknown> | null }
+}
+window.__skyhookParity = (tab?: number): Record<string, unknown> | null => {
+  const id = tab ?? tabs.active;
+  return hosts.get(id)?.parityProbe() ?? null;
+};
+
 /** An outstanding ask as the bundle's client.json records it, with how long it
  *  has been outstanding — the number that says whether the reader was waiting. */
 function waitReport(ask: Ask | undefined): Record<string, unknown> | null {

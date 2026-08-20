@@ -62,12 +62,16 @@ type NodeProbe struct {
 	ID int64 `json:"i"`
 	// Tag is the lowercased local name.
 	Tag string `json:"t"`
-	// Box is x, y, w, h in CSS pixels, relative to the border box of the
-	// node's own slot root (the documentElement of the document it lives in).
-	// Relative because each half scrolls independently and a frame's document
-	// sits at a different origin on each side; subtracting the root makes the
-	// numbers comparable, and makes scroll cancel out entirely.
+	// Box is the raw viewport rectangle: x, y, w, h in CSS pixels from
+	// getBoundingClientRect. Raw on purpose — the engine subtracts the box of
+	// the node's own document root (R below) before comparing, which cancels
+	// scroll on both halves and puts a frame's content into the frame's own
+	// coordinates, the same ones the other half measures it in.
 	Box [4]float64 `json:"b"`
+	// R is the id of the node's document root element: the page's <html>, or
+	// a mirrored sub-document's. Probes always include the roots they name,
+	// whatever the sampling stride, so the engine can resolve this.
+	R int64 `json:"r,omitempty"`
 	// Style holds the raw computed value for each entry of StyleProps, in
 	// order. Raw: normalisation happens in the engine, once, in Go, where it
 	// can be unit-tested — not twice in two dialects of JavaScript.

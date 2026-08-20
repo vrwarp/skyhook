@@ -229,6 +229,10 @@ func (c *comparison) style() *DimensionResult {
 	perProp := map[string]int{}
 	for _, id := range c.common {
 		l, p := c.land[id], c.plane[id]
+		if substitutedNode(p) {
+			// A stand-in's own styling is the mirror's, not the page's.
+			continue
+		}
 		if l.Visible != p.Visible {
 			visDiffering++
 			c.sample(d, "node %d <%s> is %s landside, %s plane-side",
@@ -270,7 +274,13 @@ func (c *comparison) geometry() *DimensionResult {
 		if !l.Visible || !p.Visible {
 			continue
 		}
-		tol := math.Max(c.tol.GeomAbsPx, c.tol.GeomRelPct/100*math.Max(l.Box[2], l.Box[3]))
+		if substitutedNode(p) {
+			// A stand-in is sized by the mirror on purpose; its contents are
+			// still measured, against their own document root.
+			continue
+		}
+		lb, pb := relBox(l, c.land), relBox(p, c.plane)
+		tol := math.Max(c.tol.GeomAbsPx, c.tol.GeomRelPct/100*math.Max(lb[2], lb[3]))
 		if c.substituted(l) {
 			// A node drawn in a substitute face is allowed to land where the
 			// substitute's metrics put it; that trade is the design
@@ -279,13 +289,13 @@ func (c *comparison) geometry() *DimensionResult {
 		}
 		dev := 0.0
 		for i := 0; i < 4; i++ {
-			dev = math.Max(dev, math.Abs(roundPx(l.Box[i])-roundPx(p.Box[i])))
+			dev = math.Max(dev, math.Abs(roundPx(lb[i])-roundPx(pb[i])))
 		}
 		if dev > tol {
 			off++
 			worst = math.Max(worst, dev)
 			c.sample(d, "node %d <%s> box %v landside, %v plane-side (off by %.0fpx, tolerance %.0f)",
-				id, l.Tag, fmtBox(l.Box), fmtBox(p.Box), dev, tol)
+				id, l.Tag, fmtBox(lb), fmtBox(pb), dev, tol)
 		}
 	}
 	d.Counts["nodesOff"] = off
@@ -425,6 +435,21 @@ func (c *comparison) interaction() *DimensionResult {
 	d.Counts["failed"] = failed
 	d.Status = status(failed == 0)
 	return d
+}
+
+// relBox expresses a node's box relative to its own document root, which
+// cancels scroll and viewport placement — the two things the halves are
+// entitled to disagree about. A probe with no resolvable root (hand-built
+// fixtures, mostly) is compared raw; real probes always carry their roots.
+func relBox(n *NodeProbe, m map[int64]*NodeProbe) [4]float64 {
+	b := n.Box
+	if n.R != 0 {
+		if root, ok := m[n.R]; ok {
+			b[0] -= root.Box[0]
+			b[1] -= root.Box[1]
+		}
+	}
+	return b
 }
 
 // --- small helpers ---

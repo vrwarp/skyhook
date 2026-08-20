@@ -852,6 +852,146 @@ export class Patcher {
     return { total: ids.length, truncated: ids.length > out.length, nodes: out };
   }
 
+  /**
+   * The computed properties the parity probe reports, in this order. One copy
+   * here, one in internal/mirror/agent.js (STYLE_PROPS), one in
+   * internal/parity/types.go (StyleProps) — the same three-implementations
+   * bargain the document hash makes. Change one, change all three, and
+   * regenerate the parity baselines.
+   */
+  private static readonly STYLE_PROPS = [
+    'display', 'position', 'float', 'visibility', 'opacity',
+    'overflow-x', 'overflow-y',
+    'color', 'background-color', 'background-image',
+    'font-family', 'font-size', 'font-weight', 'font-style', 'line-height',
+    'text-align', 'text-transform', 'text-decoration-line', 'white-space',
+    'direction',
+    'border-top-width', 'border-top-style', 'border-top-color',
+    'margin-top', 'margin-left', 'padding-top', 'padding-left',
+    'z-index', 'box-sizing', 'list-style-type',
+  ];
+
+  /**
+   * parityProbe is the plane-side half of the comparison internal/parity
+   * runs: for up to `limit` elements — plus every document root, which the
+   * others' boxes are expressed against — the attributes this document
+   * actually holds, its computed styles, box, own text and image state.
+   * The agent reports the same shape landside (its probeElement), and a
+   * difference between the two is a delivery bug by construction.
+   *
+   * `img` answers what only the host knows: whether a content hash has real
+   * bytes behind it. An <img> wearing a pending pixel or a blurhash is
+   * complete and sized as far as the DOM can tell, and reporting it as fine
+   * is how a placeholder passes for a picture.
+   */
+  parityProbe(limit = 4096, img?: {
+    hasBlob(hash: string): boolean; isMissing(hash: string): boolean;
+  }): { nodes: Record<string, unknown>[]; truncated: boolean } {
+    const ids = Array.from(this.nodes.keys())
+      .filter((id) => this.nodes.get(id)?.nodeType === 1)
+      .sort((a, b) => a - b);
+    const stride = ids.length > limit ? Math.ceil(ids.length / limit) : 1;
+    const out: Record<string, unknown>[] = [];
+    const seen = new Set<number>();
+    const push = (id: number): void => {
+      if (seen.has(id)) return;
+      const node = this.nodes.get(id);
+      if (!node || node.nodeType !== 1 || !(node as Element).isConnected) return;
+      seen.add(id);
+      out.push(this.probeElement(node as Element, id, img));
+    };
+    for (let k = 0; k < ids.length; k += stride) push(ids[k]);
+    for (let j = 0; j < out.length; j++) {
+      const root = out[j].r as number;
+      if (root && !seen.has(root)) push(root);
+    }
+    return { nodes: out, truncated: stride > 1 };
+  }
+
+  private probeElement(el: Element, id: number, img?: {
+    hasBlob(hash: string): boolean; isMissing(hash: string): boolean;
+  }): Record<string, unknown> {
+    const win = this.doc.defaultView;
+    let cs: CSSStyleDeclaration | null = null;
+    try { cs = win ? win.getComputedStyle(el) : null; } catch { /* stays null */ }
+    const style: string[] = [];
+    for (const prop of Patcher.STYLE_PROPS) {
+      style.push(cs ? String(cs.getPropertyValue(prop)) : '');
+    }
+    let rect = { left: 0, top: 0, width: 0, height: 0 };
+    try { rect = el.getBoundingClientRect(); } catch { /* keep zeros */ }
+    const display = cs?.getPropertyValue('display') ?? '';
+    const visibility = cs?.getPropertyValue('visibility') ?? '';
+    const visible = display !== 'none' && visibility !== 'hidden'
+      && rect.width > 0 && rect.height > 0;
+    let text = '';
+    for (let c = el.firstChild; c && text.length < 96; c = c.nextSibling) {
+      if (c.nodeType === Node.TEXT_NODE) text += c.nodeValue ?? '';
+    }
+    text = text.replace(/\s+/g, ' ').trim().slice(0, 24);
+    const probe: Record<string, unknown> = {
+      i: id,
+      // The name the server sent, not the name of what was built: a
+      // substituted iframe must compare as an iframe, or every stand-in
+      // would read as a tag mismatch.
+      t: this.names.get(id) ?? el.tagName?.toLowerCase() ?? '',
+      b: [rect.left, rect.top, rect.width, rect.height],
+      s: style,
+      v: visible,
+      r: this.rootIdFor(el),
+    };
+    if (text) probe.x = text;
+    const attrs: Record<string, string> = {};
+    let any = false;
+    for (const a of Array.from(el.attributes)) {
+      attrs[a.name] = a.value;
+      any = true;
+    }
+    if (any) probe.a = attrs;
+    if (el.tagName?.toUpperCase() === 'IMG') {
+      const image = el as HTMLImageElement;
+      const hash = image.dataset.skyhookImg ?? '';
+      let ok = image.complete && image.naturalWidth > 0;
+      if (hash) {
+        ok = ok && (img?.hasBlob(hash) ?? false) && !(img?.isMissing(hash) ?? false);
+      }
+      probe.g = { ok, w: image.naturalWidth | 0, h: image.naturalHeight | 0 };
+    }
+    if (cs) probe.f = String(cs.getPropertyValue('font-family'));
+    return probe;
+  }
+
+  /**
+   * The element a node's box is measured against: the root element of its own
+   * document. For the page that is the mirrored <html> sitting in the frame's
+   * body; for a mirrored sub-document it is the <html> the frame's agent
+   * serialised, found by walking up to the shadow root a frame stand-in
+   * hosts. Component shadow roots are crossed rather than stopped at, because
+   * their contents lay out in the host document's coordinates — landside and
+   * here alike.
+   */
+  private rootIdFor(el: Element): number {
+    let n: Node = el;
+    for (let depth = 0; depth < 256; depth++) {
+      const p: Node | null = n.parentNode;
+      if (!p) return 0;
+      if (p.nodeType === 11 /* DOCUMENT_FRAGMENT_NODE */) {
+        const host = (p as ShadowRoot).host;
+        if (!host) return 0;
+        if (host.getAttribute('data-skyhook-tag') === 'iframe' && n.nodeType === 1) {
+          return this.ids.get(n) ?? 0;
+        }
+        n = host;
+        continue;
+      }
+      if (p === this.doc.body || p === this.doc) {
+        return n.nodeType === 1 ? this.ids.get(n) ?? 0 : 0;
+      }
+      n = p;
+    }
+    return 0;
+  }
+
   /** What the patcher knows about itself, for a diagnostic capture. */
   diag(): Record<string, unknown> {
     return {

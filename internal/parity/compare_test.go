@@ -225,6 +225,51 @@ func TestHiddenNodesHaveNoGeometry(t *testing.T) {
 	wantStatus(t, r, DimGeometry, StatusPass)
 }
 
+func TestGeometryIsMeasuredAgainstTheDocumentRoot(t *testing.T) {
+	// The two halves place the same document at different viewport offsets —
+	// the landside page is scrolled, the mirror is not — and a node's box must
+	// compare equal because its position against its own root is equal.
+	land := side(
+		probeNode(1, "html", func(n *NodeProbe) { n.Box = [4]float64{0, -500, 1024, 2000}; n.R = 1 }),
+		probeNode(2, "p", func(n *NodeProbe) { n.Box = [4]float64{10, 100, 100, 20}; n.R = 1 }),
+	)
+	plane := side(
+		probeNode(1, "html", func(n *NodeProbe) { n.Box = [4]float64{0, 0, 1024, 2000}; n.R = 1 }),
+		probeNode(2, "p", func(n *NodeProbe) { n.Box = [4]float64{10, 600, 100, 20}; n.R = 1 }),
+	)
+	r := compare(t, land, plane, manifest(nil))
+	wantStatus(t, r, DimGeometry, StatusPass)
+
+	// And a node genuinely elsewhere against its root still fails.
+	plane2 := side(
+		probeNode(1, "html", func(n *NodeProbe) { n.Box = [4]float64{0, 0, 1024, 2000}; n.R = 1 }),
+		probeNode(2, "p", func(n *NodeProbe) { n.Box = [4]float64{10, 700, 100, 20}; n.R = 1 }),
+	)
+	r2 := compare(t, land.cloneForTest(), plane2, manifest(nil))
+	wantStatus(t, r2, DimGeometry, StatusFail)
+}
+
+func TestAStandInIsNotStyledLikeTheRealThing(t *testing.T) {
+	// The patcher builds an iframe as an inert scrolling box on purpose; its
+	// own style and box are the mirror's work, not the page's, and must not
+	// read as divergence. Its attributes still must match.
+	land := side(probeNode(1, "iframe", func(n *NodeProbe) {
+		n.Box = [4]float64{0, 0, 370, 420}
+		set(n, "display", "inline")
+		n.Attrs = map[string]string{"data-sky-box": "370x420"}
+	}))
+	plane := side(probeNode(1, "iframe", func(n *NodeProbe) {
+		n.Box = [4]float64{0, 0, 370, 800}
+		set(n, "display", "block")
+		set(n, "overflow-y", "auto")
+		n.Attrs = map[string]string{"data-sky-box": "370x420", "data-skyhook-tag": "iframe"}
+	}))
+	r := compare(t, land, plane, manifest(nil))
+	wantStatus(t, r, DimStyle, StatusPass)
+	wantStatus(t, r, DimGeometry, StatusPass)
+	wantStatus(t, r, DimAttributes, StatusPass)
+}
+
 func TestTextDisagreementFails(t *testing.T) {
 	land := side(probeNode(1, "p", func(n *NodeProbe) { n.Text = "hello" }))
 	plane := side(probeNode(1, "p", func(n *NodeProbe) { n.Text = "hell" }))
