@@ -24,7 +24,13 @@
       "status": "pass",
       "counts": {
         "failed": 0
-      }
+      },
+      "checks": [
+        {
+          "name": "the sprite's star is materialized in the mirror",
+          "pass": true
+        }
+      ]
     },
     "resources": {
       "status": "pass",

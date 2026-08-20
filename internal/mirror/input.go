@@ -58,12 +58,27 @@ func (t *Tab) HandleInput(ctx context.Context, ev *protocol.InputEvent) error {
 	t.pendingInput = ev.Seq
 	t.mu.Unlock()
 
+	// Before the replay, so the clipboard baseline is pinned on the near side
+	// of anything this input makes the page do (P-008). See clipboard.go.
+	switch ev.Kind {
+	case protocol.InClick, protocol.InDblClick, protocol.InKey:
+		t.seedClipboardBaseline(ctx, ev.Node)
+	}
 	err := t.dispatchInput(ctx, ev)
 	// A canvas repaints without touching the DOM, so no mutation will ever
 	// report that the board moved or the map panned. This is the moment we
 	// know something the reader caused might have changed — and the only one,
 	// which is why it is taken whether or not the replay above succeeded.
 	t.shotSoon(shotAfterInput)
+	// The same moment answers a different question too: a click or a key is
+	// when a page's Copy affordance fires, and the only time a landside
+	// clipboard change is the reader's business (P-008).
+	if err == nil {
+		switch ev.Kind {
+		case protocol.InClick, protocol.InDblClick, protocol.InKey:
+			t.probeClipboard(ev)
+		}
+	}
 	return err
 }
 
@@ -81,7 +96,11 @@ func (t *Tab) dispatchInput(ctx context.Context, ev *protocol.InputEvent) error 
 		_, err := t.evalInSlot(ctx, frameSlot(ev.Node), fmt.Sprintf("__skyhook.focus(%d)", ev.Node))
 		return err
 	case protocol.InBlur:
-		_, err := t.eval(ctx, "document.activeElement && document.activeElement.blur()")
+		// In the slot the node lives in, like every other input (P-102): a
+		// blur aimed at a field inside an inlined frame used to reach the top
+		// document, whose activeElement is the frame element itself.
+		_, err := t.evalInSlot(ctx, frameSlot(ev.Node),
+			"document.activeElement && document.activeElement.blur()")
 		return err
 	case protocol.InSubmit:
 		return t.submit(ctx, ev)
@@ -552,7 +571,15 @@ func (t *Tab) insertText(ctx context.Context, ev *protocol.InputEvent) error {
 	if ev.Text == "" {
 		return nil
 	}
-	if err := t.sess.Do(ctx, "Input.insertText", map[string]any{"text": ev.Text}, nil); err != nil {
+	if slot := frameSlot(ev.Node); slot != 0 {
+		// Input.insertText goes to the frame the browser considers focused,
+		// and focusing an element inside an inlined frame programmatically
+		// does not make that frame it (P-102). Splice in-world instead.
+		expr := fmt.Sprintf("__skyhook.insertText(%d,%s)", ev.Node, jsString(ev.Text))
+		if _, err := t.evalInSlot(ctx, slot, expr); err != nil {
+			return err
+		}
+	} else if err := t.sess.Do(ctx, "Input.insertText", map[string]any{"text": ev.Text}, nil); err != nil {
 		return err
 	}
 	go t.flushSoon(120 * time.Millisecond)
@@ -603,7 +630,10 @@ func (t *Tab) key(ctx context.Context, ev *protocol.InputEvent) error {
 func (t *Tab) setValue(ctx context.Context, ev *protocol.InputEvent) error {
 	expr := fmt.Sprintf("__skyhook.setValue(%d,%s,%d,%d)",
 		ev.Node, jsString(ev.Text), ev.Start, ev.End)
-	if _, err := t.eval(ctx, expr); err != nil {
+	// In the node's own slot, the way submit always was (P-102): a bare eval
+	// reached only the top agent, and a non-append edit inside an inlined
+	// frame was silently lost.
+	if _, err := t.evalInSlot(ctx, frameSlot(ev.Node), expr); err != nil {
 		return err
 	}
 	go t.flushSoon(120 * time.Millisecond)
@@ -679,7 +709,16 @@ func (t *Tab) HandleScroll(ctx context.Context, ev *protocol.ScrollEvent) error 
 	if fraction < 0 {
 		fraction = 0
 	}
-	_, err := t.eval(ctx, fmt.Sprintf("__skyhook.scrollProbe(%f)", fraction))
+	// The anchor is the exact answer and the fraction the approximate one
+	// (P-020): the client names the element at its viewport top, and putting
+	// the same element at the same offset survives the two documents being
+	// different heights — which is what makes a lazy-load sentinel fire at
+	// the right scroll instead of a viewport early or late.
+	expr := fmt.Sprintf("__skyhook.scrollProbe(%f)", fraction)
+	if ev.Anchor != 0 {
+		expr = fmt.Sprintf("__skyhook.scrollAnchor(%d,%d,%f)", ev.Anchor, ev.AnchorY, fraction)
+	}
+	_, err := t.eval(ctx, expr)
 	if err != nil {
 		return err
 	}
@@ -738,6 +777,10 @@ func (t *Tab) Navigate(ctx context.Context, n protocol.Navigate) error {
 		return nil
 	}
 	url := normalizeURL(n.URL)
+	// Before the navigation, so the document arrives with its clipboard
+	// permission already in place and the agent's baseline read succeeds
+	// first try (P-008). See grantClipboard.
+	t.grantClipboard(ctx, url)
 	t.wantsLoading()
 	t.setLoading(true)
 	return t.sess.Do(ctx, "Page.navigate", map[string]any{"url": url}, nil)

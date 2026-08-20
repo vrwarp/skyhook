@@ -65,6 +65,11 @@ type ManagerOptions struct {
 	// own and offers the reader the upgrade. Empty means no app is served, and
 	// then the question simply goes unanswered.
 	WebRoot string
+	// UploadDir is where the reader's files land on their way into a page's
+	// file input (P-007). Created and emptied at construction — staged files
+	// from a previous run belong to asks nobody holds any more — and wiped by
+	// the kill switch. Empty means uploads are off.
+	UploadDir string
 }
 
 // Manager owns the browser and the set of sessions.
@@ -88,6 +93,15 @@ type Manager struct {
 	// would fill is shared.
 	captureMu       sync.Mutex
 	lastAutoCapture time.Time
+
+	// dlMu guards the download shelf — manager property like the capture rate
+	// limit, because the disk the files land on is shared. downloads is nil
+	// until EnableDownloads has run, which is what "downloads are off" means.
+	// See downloads.go.
+	dlMu        sync.Mutex
+	downloads   map[string]*download
+	dlOrder     []string
+	downloadDir string
 }
 
 // NewManager builds the manager around an already-launched browser.
@@ -107,8 +121,27 @@ func NewManager(br *cdp.Browser, images *imgproc.Pipeline, opts ManagerOptions) 
 		sessions:  map[string]*Session{},
 		clientApp: appver.NewReader(opts.WebRoot),
 	}
+	if opts.UploadDir != "" {
+		if err := os.MkdirAll(opts.UploadDir, 0o700); err != nil {
+			opts.Logger.Warn("uploads are off: staging dir unusable", "dir", opts.UploadDir, "err", err)
+			m.opts.UploadDir = ""
+		} else {
+			emptyDir(opts.UploadDir)
+		}
+	}
 	go m.janitor()
 	return m
+}
+
+// emptyDir deletes a directory's contents, best-effort.
+func emptyDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+	}
 }
 
 // Images exposes the shared image pipeline.
@@ -197,6 +230,10 @@ func (m *Manager) Serve(conn transport.Conn) {
 		welcome.Caps = append(welcome.Caps, "zstd")
 	}
 	sess.Send(protocol.ChCtrl, protocol.TypeWelcome, 0, welcome)
+
+	// The download shelf is server state, so whatever landed while this client
+	// was away is told now rather than replayed: one frame per file.
+	m.sendDownloads(sess)
 
 	// Replay input the client queued while it was offline, before any resync,
 	// so the page state the client resyncs to already contains their typing.
@@ -344,6 +381,13 @@ func (m *Manager) WipeProfile(ctx context.Context) error {
 	}
 	if err := m.browser.Close(); err != nil {
 		m.log.Warn("browser close during wipe", "err", err)
+	}
+	// The shelf goes with the profile: its files were fetched with the same
+	// cookies the wipe exists to destroy. Staged uploads are the reader's own
+	// files and go for the same reason.
+	m.WipeDownloads()
+	if m.opts.UploadDir != "" {
+		emptyDir(m.opts.UploadDir)
 	}
 	entries, err := os.ReadDir(m.opts.ProfileDir)
 	if err != nil {

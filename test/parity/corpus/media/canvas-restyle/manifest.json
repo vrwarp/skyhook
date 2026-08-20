@@ -8,14 +8,8 @@
     {"do": "click", "target": "#restyle"},
     {"do": "waitText", "value": "restyled now", "name": "the restyle reaches the page"}
   ],
-  "expectedFail": {
-    "geometry": {
-      "gap": "P-123",
-      "reason": "with scripting off the mirror renders a canvas as its fallback content, stretched to the column width"
-    }
-  },
   "exclude": {
-    "pixels": "the canvas is most of the page and its photograph is scaled by P-123's stretch"
+    "pixels": "the canvas is most of the page; the photograph is an advisory likeness, not a pixel promise"
   },
   "notes": "P-117 claimed the photograph is lost forever to a style write; this page disproved it — restyled() re-hangs the shot from the held blob, and the resources dimension passing is the pin that keeps it that way"
 }

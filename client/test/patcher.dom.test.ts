@@ -404,6 +404,38 @@ describe('Patcher', () => {
     expect(patcher.docHash()).toBe(agentHash(snap));
   });
 
+  it('folds the cross-language vector: case, non-ASCII and surrogate pairs', () => {
+    // Shared verbatim with internal/mirror/mirror_test.go
+    // (TestHashMatchesTheJavaScriptConvention); 1767627470 is the fold the
+    // agent, this patcher and the Go replicas must all compute. clipPath
+    // pins the case unification (the wire name keeps SVG's case, every
+    // hasher lowercases);   and the emoji pin UTF-16-unit folding.
+    const snap: Snapshot = {
+      strings: [
+        'html', 'clipPath',
+        'a\u00a0b \u2014 dash',
+        '\u{1F389} party with a very long tail beyond the window',
+      ],
+      nodes: [
+        { id: 1, parent: 0, kind: NodeKind.Element, ref: 0, attrs: [], flags: 0 },
+        { id: 2, parent: 1, kind: NodeKind.Element, ref: 1, attrs: [], flags: 0 },
+        { id: 3, parent: 1, kind: NodeKind.Text, ref: 2, attrs: [], flags: 0 },
+        { id: 4, parent: 1, kind: NodeKind.Text, ref: 3, attrs: [], flags: 0 },
+      ],
+      css: [], url: 'https://example.test/', title: 'vector',
+      viewport: { w: 800, h: 600, dpr: 1, mobile: false },
+      images: [], scrollX: 0, scrollY: 0,
+    };
+    patcher.applySnapshot(snap);
+    expect(patcher.docHash()).toBe(1767627470);
+    expect(patcher.docHash()).toBe(agentHash(snap));
+    // The fingerprint reports the exact window the hash saw, cut without
+    // splitting the pair — twin of mirror.HashValueWindow.
+    const rows = patcher.fingerprint().nodes;
+    const emojiRow = rows.find((r) => r[0] === 4);
+    expect(emojiRow?.[2]).toBe('\u{1F389} party with a very long tail b');
+  });
+
   it('reflects live form values so a resync restores what was typed', () => {
     const snap = snapshot();
     snap.strings.push('data-sky-value', 'hello there');

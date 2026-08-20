@@ -11,13 +11,13 @@
       }
     },
     "geometry": {
-      "status": "pass",
+      "status": "fail",
       "counts": {
-        "nodesOff": 0
+        "nodesOff": 17
       },
       "buckets": {
         "pageHeightPct": "+0",
-        "worst": "0"
+        "worst": "\u003e64px"
       }
     },
     "interaction": {
@@ -58,13 +58,9 @@
       ]
     },
     "style": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "nodesDiffering": 4,
-        "prop:border-top-color": 4,
-        "prop:border-top-style": 2,
-        "prop:border-top-width": 2,
-        "prop:color": 2,
+        "nodesDiffering": 0,
         "visibilityDiffering": 0
       }
     },
@@ -76,10 +72,11 @@
     }
   },
   "expectedFail": {
-    "style": "P-126"
+    "geometry": "P-129"
   },
   "gaps": [
     "P-119",
-    "P-126"
+    "P-126",
+    "P-129"
   ]
 }

@@ -28,10 +28,11 @@ import {
   verdict,
 } from './upgrade.js';
 import type {
-  AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Refusal, Snapshot, Stats,
-  TabState, Viewport, Welcome,
+  AdapterRecord, CaptureDone, CaptureRequest, Download, FileAsk, ImageMeta, Mutation, Refusal,
+  Snapshot, Stats, TabState, Viewport, Welcome,
 } from '../shared/protocol.js';
 import { PROTOCOL_VERSION } from '../shared/protocol.js';
+import * as transfers from './transfers.js';
 
 const store = new Store();
 const hosts = new Map<number, MirrorHost>();
@@ -342,7 +343,7 @@ function handle(kind: string, args: Record<string, unknown>): void {
       void applySnapshot(Number(args.tab), args.snapshot as Snapshot);
       break;
     case 'mutation':
-      void applyMutation(Number(args.tab), args.mutation as Mutation, Number(args.seq));
+      void applyMutation(Number(args.tab), args.mutation as Mutation, Number(args.seq), Number(args.cause ?? 0));
       break;
     case 'tabState': {
       const st = args.state as TabState;
@@ -431,12 +432,225 @@ function handle(kind: string, args: Record<string, unknown>): void {
       }
       break;
     }
+    case 'download': {
+      const d = args.download as unknown as Download;
+      const before = transfers.ingest(d);
+      if (d.state !== before) announceTransfer(d, before);
+      renderTransfers();
+      break;
+    }
+    case 'downloadProgress':
+      transfers.progressed(String(args.id), Number(args.received));
+      renderTransfers();
+      break;
+    case 'downloadDone': {
+      const t = transfers.landed(String(args.id), args.data as Uint8Array, Number(args.size));
+      if (t) {
+        toast(`“${t.info.name}” is on this device.`,
+          { label: 'Save', run: () => saveTransfer(t.info.id) });
+      }
+      renderTransfers();
+      break;
+    }
+    case 'downloadError': {
+      const t = transfers.failed(String(args.id), String(args.error ?? ''));
+      if (t) toast(`Fetching “${t.info.name}” stopped: ${t.error}`);
+      renderTransfers();
+      break;
+    }
+    case 'clipboard':
+      relayClipboard(String(args.text ?? ''));
+      break;
+    case 'fileAsk':
+      onFileAsk(Number(args.tab), args.ask as unknown as FileAsk);
+      break;
+    case 'uploadDone':
+      toast('The file is with the page on your server.');
+      break;
     case 'log':
       log(String(args.message ?? ''));
       break;
     default:
       break;
   }
+}
+
+// ------------------------------------------------------------------ transfers
+
+/**
+ * The toasts that make a download visible without the panel being open: the
+ * landing (which is the moment the old behavior showed nothing at all), the
+ * file being ready with its price, and the failure. Each transition once.
+ */
+function announceTransfer(d: Download, before: string): void {
+  switch (d.state) {
+    case 'landing':
+      if (before === '') {
+        toast(`Downloading “${d.name}” on your server…`,
+          { label: 'Transfers', run: () => openPanel('transfers') });
+      }
+      break;
+    case 'ready': {
+      const size = transfers.fmtSize(d.total);
+      toast(size
+        ? `“${d.name}” is on your server (${size}).`
+        : `“${d.name}” is on your server.`,
+      { label: size ? `Fetch (${size})` : 'Fetch', run: () => fetchTransfer(d.id) });
+      break;
+    }
+    case 'failed':
+      toast(`“${d.name}” failed to download on the server.`);
+      break;
+    default:
+      break;
+  }
+}
+
+const transferActions: transfers.TransferActions = {
+  fetch: (id) => fetchTransfer(id),
+  stop: (id) => {
+    send('downloadStop', { id });
+    transfers.stopped(id);
+    renderTransfers();
+  },
+  discard: (id) => {
+    send('downloadDiscard', { id });
+  },
+  save: (id) => saveTransfer(id),
+};
+
+function fetchTransfer(id: string): void {
+  if (!connected) {
+    toast('Offline: fetching a file needs the link. It stays safe on the server.');
+    return;
+  }
+  transfers.fetching(id);
+  send('downloadFetch', { id });
+  renderTransfers();
+}
+
+/**
+ * Hands a fetched file to the device's own downloads, named what the origin
+ * called it. The Blob is this page's memory, so the reader is told to save
+ * rather than left assuming the shell is an archive.
+ */
+function saveTransfer(id: string): void {
+  const t = transfers.get(id);
+  if (!t?.blob) return;
+  const url = URL.createObjectURL(t.blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = t.info.name || 'download';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+/** Redraws the panel body when it is showing transfers. */
+function renderTransfers(): void {
+  if (!el.panel.hidden && panelView === 'transfers') {
+    transfers.render(el.panelBody, transferActions);
+  }
+}
+
+// -------------------------------------------------------------------- uploads
+
+/**
+ * A page asked for a file (P-007). The ask arrives a round trip after the
+ * reader's click on the mirrored input — the mirror suppressed its own
+ * picker, which led nowhere — and is answered with the shell's picker, whose
+ * files actually cross. The click's activation usually survives the round
+ * trip, so the picker opens by itself; when the browser says no, the toast's
+ * button is a fresh gesture that cannot be refused.
+ */
+let pendingFileAsk: { tab: number; ask: number } | null = null;
+let uploadInput: HTMLInputElement | null = null;
+
+function uploadPicker(): HTMLInputElement {
+  if (uploadInput) return uploadInput;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.id = 'upload-input';
+  input.hidden = true;
+  input.addEventListener('change', onPickerChange);
+  // The dialog dismissed is an answer too: the page is told it gets nothing,
+  // the way a native chooser tells it.
+  input.addEventListener('cancel', cancelFileAsk);
+  document.body.appendChild(input);
+  return (uploadInput = input);
+}
+
+function onFileAsk(tab: number, ask: FileAsk): void {
+  // A newer ask supersedes an unanswered one — the reader clicked again —
+  // and the page behind the old one sees a dismissed chooser.
+  cancelFileAsk();
+  pendingFileAsk = { tab, ask: ask.id };
+  const input = uploadPicker();
+  input.multiple = ask.multiple;
+  input.value = '';
+  input.click();
+  toast('The page asks for a file.', { label: 'Choose…', run: () => uploadPicker().click() });
+}
+
+function cancelFileAsk(): void {
+  const stale = pendingFileAsk;
+  pendingFileAsk = null;
+  if (stale) send('uploadCancel', stale);
+}
+
+/** How big is big enough to ask first. Five megabytes is minutes on the link
+ *  this client is written for. */
+const UPLOAD_CONFIRM_BYTES = 5 * 1024 * 1024;
+
+function onPickerChange(): void {
+  const ask = pendingFileAsk;
+  const files = Array.from(uploadInput?.files ?? []);
+  if (!ask) return;
+  if (!files.length) {
+    cancelFileAsk();
+    return;
+  }
+  const total = files.reduce((n, f) => n + f.size, 0);
+  if (total > UPLOAD_CONFIRM_BYTES && !window.confirm(
+    `Send ${files.length > 1 ? `${files.length} files` : `“${files[0].name}”`}`
+    + ` (${transfers.fmtSize(total)}) over the link? On a slow link this can take minutes.`)) {
+    cancelFileAsk();
+    return;
+  }
+  pendingFileAsk = null;
+  send('uploadFiles', { tab: ask.tab, ask: ask.ask, files });
+  toast(`Sending ${files.length > 1 ? `${files.length} files` : `“${files[0].name}”`}`
+    + ` (${transfers.fmtSize(total)})…`);
+}
+
+// ------------------------------------------------------------------ clipboard
+
+/**
+ * A copy the page made landside, arriving a round trip after the click that
+ * caused it (P-008). The write is tried at once — the reader's click usually
+ * leaves a user-activation window wide enough to cover even this link's round
+ * trip — and when the browser says no, the text is not lost: the toast offers
+ * a Copy whose own click is the activation the retry needs.
+ */
+function relayClipboard(text: string): void {
+  if (!text) return;
+  const write = (): Promise<void> => navigator.clipboard.writeText(text);
+  write().then(
+    () => toast('The page copied text to your clipboard.'),
+    () => toast('The page copied text for you.', {
+      label: 'Copy',
+      run: () => {
+        write().then(
+          () => toast('Copied.'),
+          () => {
+            // Last resort: the text must not vanish with the toast.
+            log(`clipboard from the page: ${text}`);
+            toast('The browser refused the clipboard; the text is in the log.');
+          });
+      },
+    }),
+  );
 }
 
 async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
@@ -452,9 +666,17 @@ async function applySnapshot(tab: number, snap: Snapshot): Promise<void> {
   if (progress.arrived(tab, snap.url)) renderProgress();
 }
 
-async function applyMutation(tab: number, m: Mutation, seq: number): Promise<void> {
+async function applyMutation(tab: number, m: Mutation, seq: number, cause = 0): Promise<void> {
   const host = await hostFor(tab);
-  host?.applyMutation(m, seq);
+  if (!host) {
+    // The one way a batch is dropped without anybody hearing: no host, so
+    // nothing applies it and nothing acknowledges it, and the server is left
+    // watching a client that has silently stopped short of a page it has
+    // already sent. Rare and always worth a line.
+    log(`no host for tab ${tab}: frame ${seq} was not applied`);
+    return;
+  }
+  host.applyMutation(m, seq, cause);
 }
 
 async function hostFor(tab: number): Promise<MirrorHost | null> {
@@ -510,8 +732,17 @@ function renderTabs(): void {
     node.dataset.tab = String(tab.id);
     // Before the title, where a favicon goes and where a browser puts this: a
     // background tab fetching a page is the case the bar over the mirror cannot
-    // show, because the mirror it would sit over is another tab's.
-    if (busy) node.appendChild(spinner());
+    // show, because the mirror it would sit over is another tab's. The icon
+    // takes the same seat once the page has one and the seat is free (P-104).
+    if (busy) {
+      node.appendChild(spinner());
+    } else if (tab.favicon?.startsWith('data:image/')) {
+      const ico = document.createElement('img');
+      ico.className = 'favicon';
+      ico.alt = '';
+      ico.src = tab.favicon;
+      node.appendChild(ico);
+    }
 
     const title = document.createElement('span');
     title.className = 'title';
@@ -1372,6 +1603,15 @@ function pageGroups(tab: number): MenuGroups {
         disabled: !url || !connected,
         run: () => openInNewTab(url),
       },
+      {
+        // The mirror is a complete local copy, print stylesheets included,
+        // so this is the reader's own dialog on their own printer at no
+        // round trip (P-110). What it cannot cover is a page calling
+        // window.print() landside: no CDP event reports that.
+        label: 'Print page…',
+        disabled: !hosts.get(tab),
+        run: () => hosts.get(tab)?.print(),
+      },
     ],
     [
       {
@@ -1419,14 +1659,24 @@ function mirrorMenu(tab: number, target: MenuTarget): MenuGroups {
 
   const image = target.image;
   if (image) {
-    groups.push([
+    const imageGroup: MenuGroups[number] = [
       { label: 'Save image', run: () => void saveImage(image, target.imageAlt ?? '') },
       {
         label: 'Copy image description',
         disabled: !target.imageAlt,
         run: () => copyText(target.imageAlt ?? ''),
       },
-    ]);
+    ];
+    if (target.imageAnim) {
+      // The still is the design; the tap is the ask (P-118). The hint is the
+      // cost, the way every entry that spends the link says so.
+      imageGroup.unshift({
+        label: 'Play animation',
+        hint: 'fetches the original',
+        run: () => hosts.get(tab)?.playAnimated(image),
+      });
+    }
+    groups.push(imageGroup);
   }
 
   const field = target.field;
@@ -1450,6 +1700,15 @@ function mirrorMenu(tab: number, target: MenuTarget): MenuGroups {
 
   groups.push(...pageGroups(tab));
   groups.push([
+    {
+      // The pointer's moves are never streamed, so hover state — a CSS
+      // dropdown, a JS mouseover menu — is asked for the same way a
+      // right-click is: once, as a choice, with the cost named (P-111).
+      label: 'Hover here',
+      hint: 'one round trip',
+      disabled: !target.node || !connected,
+      run: () => host?.sendHover(target.node),
+    },
     {
       // Some pages answer a right click with a menu of their own, which arrives
       // in the mirror as ordinary DOM. That is a round trip, so it is a choice
@@ -1544,6 +1803,14 @@ function shellMenu(): MenuGroups {
     label: 'Clear history',
     disabled: !visits.count(),
     run: () => clearHistory(),
+  }]);
+  // Files the server is holding, and the way back to one whose toast has
+  // already gone. Disabled while there is nothing: an empty list teaches less
+  // than a menu entry that comes alive when a download exists.
+  groups.push([{
+    label: 'Transfers…',
+    disabled: !transfers.any(),
+    run: () => showPanel('transfers'),
   }]);
   // Last, and always present: the one entry that works with the link down, and
   // the only way to find out that the app itself is behind the server. It says
@@ -2081,11 +2348,11 @@ function shellReport(): Record<string, unknown> {
 // read beside a page rather than instead of it, so they share the strip of
 // screen that is already the cost of not being the page.
 
-type PanelView = 'chat' | 'marks' | 'tabs';
+type PanelView = 'chat' | 'marks' | 'tabs' | 'transfers';
 let panelView: PanelView = 'chat';
 
 const PANEL_TITLES: Record<PanelView, string> = {
-  chat: 'Chat', marks: 'Saved pages', tabs: 'Tabs',
+  chat: 'Chat', marks: 'Saved pages', tabs: 'Tabs', transfers: 'Transfers',
 };
 
 /** Opens a view, or closes the panel if that view is already the one showing. */
@@ -2112,6 +2379,8 @@ function openPanel(view: PanelView): void {
   } else if (view === 'tabs') {
     el.panelBody.appendChild(tabList.root);
     renderTabList();
+  } else if (view === 'transfers') {
+    transfers.render(el.panelBody, transferActions);
   } else {
     el.panelBody.appendChild(marksPanel.root);
     marksPanel.render(bookmarks.all(), connected);

@@ -14,7 +14,7 @@
  */
 import { ImageMeta, InputKind, Mutation, MutationOp, OpCode, Snapshot } from '../shared/protocol.js';
 import {
-  EchoEngine, asEditable, caretOf, modifierMask, setCaret, setValue, valueOf,
+  EchoEngine, PICKER_INPUTS, asEditable, caretOf, modifierMask, setCaret, setValue, valueOf,
 } from './echo.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { Patcher } from './patcher.js';
@@ -36,9 +36,35 @@ const MIRROR_CSS = `
    the frame's body for the same reason. What the page's own html and body
    should look like is a question for the page and the UA, both of which know
    the answer. */
-:root { margin: 0; padding: 0; background: #fff; color: #111; }
+:root { margin: 0; padding: 0; background: #fff; }
 :root > body { margin: 0; padding: 0; }
-.skyhook-ghost { opacity: .55; font-style: italic; }
+/* The percentage-height chain, unconditionally. Landside, html { height:
+   100% } resolves against the viewport; here the mirrored html resolves
+   against this body, so the frame's own root and body must span the frame
+   for the page's chain to mean the same thing. A page that never asks for
+   a height is untouched — auto inside a definite box is still auto — and
+   the frame stays the scroller either way. Before the selector rewrite the
+   page's own html,body{height:100%} happened to land on these elements and
+   supplied the chain by accident; now it is supplied on purpose. */
+:root, :root > body { height: 100%; }
+/* No inheritable properties on the frame's own root or body: the mirrored
+   html sits inside them, and a colour or font set here pours into every
+   element the page left to inherit — landside those inherit from a pristine
+   viewport (P-119). The shell's own furniture names its colours itself. */
+/* A twentieth of a pixel of padding, because the mirrored html is not a
+   root here: landside, a child's margin collapsing through body stops at
+   the document root and offsets the content inside it; in this document
+   the same margin escaped the mirrored html and vanished into the frame,
+   and every margin-led page sat 30px higher mirrored than real (P-120).
+   Any non-zero padding blocks the collapse at exactly the boundary the
+   real root blocks it. This much rounds to zero in every measurement and
+   survives LayoutUnit quantisation; a block formatting context would do
+   the same job but contain:layout re-homes fixed-position descendants and
+   display:flow-root changes a computed value the parity probes compare.
+   :where keeps specificity at zero so a page that styles its own root
+   padding still wins. */
+html:where([data-sky-doc]) { padding-top: 0.05px; padding-bottom: 0.05px; }
+.skyhook-ghost { opacity: .55; font-style: italic; color: #111; }
 img { background-repeat: no-repeat; background-size: cover; }
 /* An iframe's inlined document, rendered into the box that stands in for it.
    Scrollable rather than clipped, which a real frame with scrolling="no" is
@@ -50,7 +76,13 @@ img { background-repeat: no-repeat; background-size: cover; }
    widget is its buttons: the reader is left looking at a captcha with no way
    to submit it and no indication anything is missing. A scrollbar is the
    honest version of the same failure, and it keeps the control reachable. */
-[data-skyhook-tag="iframe"] { display: block; overflow: auto; scrollbar-width: thin; }
+[data-skyhook-tag="iframe"] { display: block; overflow: auto; scrollbar-width: thin;
+  /* The containing block a frame's viewport provides (P-021): landside, an
+     absolutely- or fixed-positioned element inside the frame anchors to the
+     frame's own initial containing block; here the sub-document is ordinary
+     boxes, and without this its bottom-anchored toolbar anchors to the
+     bottom of the whole mirror. Layout containment re-homes both. */
+  contain: layout; }
 /* A frame whose document is on another origin. Nothing landside can read it —
    no agent runs in it and its contentDocument is closed — so the stand-in is
    empty however right its box is, and an empty box is invisible: Gmail's app
@@ -65,6 +97,23 @@ img { background-repeat: no-repeat; background-size: cover; }
   border: 1px dashed rgba(0,0,0,.18); border-radius: 3px; background: #fbfbfb;
 }
 [data-skyhook-tag="iframe"][data-sky-frame]::after {
+  content: attr(data-sky-frame) " — not mirrored";
+  font: 12px/1.4 system-ui, sans-serif; color: #767676; text-align: center;
+}
+/* Plugin containers get the same bargain (P-106): their content cannot come —
+   an object is a nested resource, an embed a plugin — but the hole they left
+   was unexplained, and everything below it sat a plugin's height too high.
+   The agent ships the box; a big enough one is labelled like an opaque frame. */
+[data-skyhook-tag="object"], [data-skyhook-tag="embed"], [data-skyhook-tag="applet"] {
+  display: inline-block; box-sizing: border-box; overflow: hidden;
+}
+[data-skyhook-tag="object"][data-sky-frame], [data-skyhook-tag="embed"][data-sky-frame],
+[data-skyhook-tag="applet"][data-sky-frame] {
+  display: inline-flex; align-items: center; justify-content: center; padding: 4px;
+  border: 1px dashed rgba(0,0,0,.18); border-radius: 3px; background: #fbfbfb;
+}
+[data-skyhook-tag="object"][data-sky-frame]::after, [data-skyhook-tag="embed"][data-sky-frame]::after,
+[data-skyhook-tag="applet"][data-sky-frame]::after {
   content: attr(data-sky-frame) " — not mirrored";
   font: 12px/1.4 system-ui, sans-serif; color: #767676; text-align: center;
 }
@@ -91,11 +140,28 @@ img { background-repeat: no-repeat; background-size: cover; }
   background: repeating-linear-gradient(45deg, #eee, #eee 8px, #e5e5e5 8px, #e5e5e5 16px);
   touch-action: none;
 }
+/* In this scripting-disabled document a canvas is not a replaced element: the
+   spec renders it as its fallback content, so it stretches to its container
+   and its attribute aspect ratio scales it — a 200x120 canvas became the full
+   column width (P-123). The patcher restates the landside intrinsic size as
+   inline custom properties, and :where keeps this at zero specificity so the
+   page's own CSS still overrides it exactly as it overrides a real canvas's
+   intrinsic size. The fallbacks are the spec's own defaults. */
+:where(canvas) { width: var(--sky-canvas-w, 300px); height: var(--sky-canvas-h, 150px); }
 /* A page on its way. The cursor is the one affordance that appears where the
    reader is already looking — on the link they just clicked — and it is the
    operating system's own word for "taken, working on it". Links only: over
    text, the selection cursor is still the true one. */
 html.skyhook-busy, html.skyhook-busy a[href] { cursor: progress; }
+`;
+
+/* Appended to the boot styles only when the document is in quirks mode. In
+   quirks the landside root stretches to the viewport however short the page;
+   the mirrored html is an inner box here, so the stretch is restated. The
+   body's version of the same stretch subtracts its own margins — a fact CSS
+   cannot state for an inner box — and stays a catalogued residue of P-125. */
+const QUIRKS_MIRROR_CSS = `
+html:where([data-sky-doc]) { min-height: 100%; }
 `;
 
 /**
@@ -131,14 +197,24 @@ html.skyhook-busy, html.skyhook-busy a[href] { cursor: progress; }
  * frame already inherited that same base URL from its creator.
  */
 const STANDARDS_SHELL = '<!DOCTYPE html><html><head></head><body></body></html>';
+/* The same shell with the doctype left off, for the pages that left it off
+   themselves (P-125): a page the landside browser parsed in quirks mode gets
+   its quirks back — table cells refusing the page font is a geometry cascade,
+   not a nicety — by rebuilding the mirror's document the way the original was
+   built. The snapshot carries the parser's verdict (Snapshot.quirks). */
+const QUIRKS_SHELL = '<html><head></head><body></body></html>';
 
-function forceStandardsMode(doc: Document): void {
-  if (doc.compatMode === 'CSS1Compat') return;
+/** Re-parses the document into the asked-for mode. Returns whether it was
+ *  re-opened — everything in it, listeners included, is gone when it was. */
+function setCompatMode(doc: Document, quirks: boolean): boolean {
+  const want = quirks ? 'BackCompat' : 'CSS1Compat';
+  if (doc.compatMode === want) return false;
   try {
     doc.open();
-    doc.write(STANDARDS_SHELL);
+    doc.write(quirks ? QUIRKS_SHELL : STANDARDS_SHELL);
     doc.close();
-  } catch { /* a mirror in quirks mode still beats no mirror at all */ }
+    return true;
+  } catch { return false; /* the wrong mode still beats no mirror at all */ }
 }
 
 /** What the shell needs to know to draw a context menu for a right click. */
@@ -157,6 +233,8 @@ export interface MenuTarget {
   /** Content hash of the image under the pointer. */
   image?: string;
   imageAlt?: string;
+  /** The still under the pointer was made from an animation (P-118). */
+  imageAnim?: boolean;
   /** Text selected in the field, or in the document if there is no field. */
   selection: string;
 }
@@ -317,6 +395,16 @@ function stripFragment(url: URL): string {
   return url.origin + url.pathname + url.search;
 }
 
+/** Whether a click here would open a file picker: the input itself, or a
+ *  label wired to one. */
+function fileControl(target: HTMLElement | null): boolean {
+  const input = target?.closest?.('input') as HTMLInputElement | null;
+  if (input?.type === 'file') return true;
+  const label = target?.closest?.('label') as HTMLLabelElement | null;
+  const control = label?.control as HTMLInputElement | null;
+  return control?.type === 'file';
+}
+
 /**
  * The element a fragment names, by the rules a browser follows: an id first,
  * then a named anchor. A fragment that names nothing here is not a fragment
@@ -393,6 +481,10 @@ export class MirrorHost {
   private echo: EchoEngine | null = null;
   private doc: Document | null = null;
   private inputSeq = 0;
+  /** The newest input the reader made whose point was to move focus. */
+  private lastFocusInputSeq = 0;
+  /** Which input provoked the mutation being applied right now, 0 if none. */
+  private applyingCause = 0;
   private lastSeq = 0;
   private pendingImages = new Map<string, HTMLImageElement[]>();
   /** Canvas and video elements waiting for the bytes of a region shot. */
@@ -491,7 +583,10 @@ export class MirrorHost {
     // capture and a test looking at a strip of them have no other way to say
     // which page is which.
     this.frame.dataset.tab = String(tab);
-    this.frame.setAttribute('sandbox', 'allow-same-origin');
+    // allow-modals is for exactly one call: the shell's own print() on this
+    // frame (P-110). No script can run in here, so nothing inside can ever
+    // open a modal — the flag only widens what the shell may ask for.
+    this.frame.setAttribute('sandbox', 'allow-same-origin allow-modals');
     this.frame.setAttribute('referrerpolicy', 'no-referrer');
     this.frame.src = 'about:blank';
     this.ready = new Promise<void>((resolve) => {
@@ -535,14 +630,22 @@ export class MirrorHost {
     this.frame.dataset.tab = String(tab);
   }
 
-  private attach(doc: Document): void {
-    if (this.doc === doc && this.patcher) return;
-    forceStandardsMode(doc);
+  private attach(doc: Document, quirks = false): void {
+    // Re-opening wipes the document — listeners, styles, everything — so a
+    // mode change re-runs all of this on the same Document object; anything
+    // short of that early-returns.
+    const reopened = setCompatMode(doc, quirks);
+    if (this.doc === doc && this.patcher && !reopened) return;
     this.doc = doc;
+    // The agent's synthesized ground rule — the page's canvas colour and
+    // colour-scheme — selects :root[data-sky-ground]: this root, the frame
+    // itself, and never the mirrored html the server re-points every other
+    // :root at (rewriteRootSelectors, css.go).
+    doc.documentElement.setAttribute('data-sky-ground', '');
     doc.addEventListener('securitypolicyviolation', () => { this.cspViolations += 1; });
 
     const style = doc.createElement('style');
-    style.textContent = MIRROR_CSS;
+    style.textContent = quirks ? MIRROR_CSS + QUIRKS_MIRROR_CSS : MIRROR_CSS;
     doc.head.appendChild(style);
 
     this.patcher = new Patcher(doc, {
@@ -553,6 +656,13 @@ export class MirrorHost {
       rewriteCSS: (rule) => this.resolveCSSImages(rule),
       onFocus: (node) => {
         if (this.echo?.ownedId) return;
+        // A focus echo provoked by an input older than the reader's latest
+        // focus-moving gesture is the past calling (P-121): mid-gesture,
+        // between one field's ownership ending and the next one's starting,
+        // it used to yank focus back to the field the reader had just left —
+        // and everything typed landed in the wrong box. A cause of zero is
+        // the page's own script moving focus, which is current by definition.
+        if (this.applyingCause && this.applyingCause < this.lastFocusInputSeq) return;
         // preventScroll matters more here than it looks: focusing an element
         // scrolls it into view by default, so a landside focus change — a click
         // landing on a control, page script focusing a search box — would throw
@@ -594,6 +704,13 @@ export class MirrorHost {
 
   private send(ev: Record<string, unknown>): void {
     this.inputSeq += 1;
+    // Where focus last moved because the reader moved it. A click's default
+    // action is a focus change, so clicks count with the explicit pair.
+    const k = ev.kind;
+    if (k === InputKind.Click || k === InputKind.DblClick || k === InputKind.Context ||
+        k === InputKind.Focus || k === InputKind.Blur) {
+      this.lastFocusInputSeq = this.inputSeq;
+    }
     this.events.input(this.tab, {
       tab: this.tab,
       seq: this.inputSeq,
@@ -820,6 +937,12 @@ export class MirrorHost {
     // never do, and lands on a cross-origin document that the patcher can no
     // longer touch, which kills the tab for the rest of the session.
     if (anchor) ev.preventDefault();
+    // A file input's default is the reader's own picker opening into a
+    // document whose value can never cross — a dead end that looks like the
+    // feature. The click still goes landside, where the real chooser is
+    // intercepted and comes back as a file ask the shell answers with a
+    // picker that actually leads somewhere (P-007).
+    if (fileControl(target)) ev.preventDefault();
     // Ctrl/⌘-click is the keyboard half of "open in a new tab", and it means
     // the same thing here. Sending it landside instead would open a tab on
     // the VPS that this side has no handle on. It goes before the bail below
@@ -1020,7 +1143,38 @@ export class MirrorHost {
       this.echo?.blur((op) => this.applyOne(op), this.pressing);
       if (held) this.heldBlur = held;
     }, true);
-    doc.addEventListener('input', (ev) => this.echo?.input(ev as InputEvent), true);
+    // The composed target, not ev.target: a field inside a mirrored
+    // sub-document lives in a shadow root, and by the time the event reaches
+    // the document it has been retargeted to name the frame's stand-in — so
+    // the echo compared the wrong element and dropped the edit (P-102).
+    doc.addEventListener('input',
+      (ev) => this.echo?.input(ev as InputEvent, this.eventTarget(ev)), true);
+    // A select's popup is native here — the reader really does choose from
+    // it — but the choice used to stay in the mirror: nothing sent it, and
+    // the landside page's own select never changed (P-101). The change event
+    // is the moment the choice is settled; multiple selects join their
+    // values the way form submission does. The same is true of every input
+    // whose value settles through a native widget — a slider's thumb, a
+    // colour swatch, a date's calendar — so those relay on change too
+    // (P-111): one frame per gesture, however long the drag. Typing fields
+    // stay the echo engine's, which owns their every keystroke.
+    doc.addEventListener('change', (ev) => {
+      const el = this.eventTarget(ev) as HTMLElement | null;
+      if (!el) return;
+      const node = this.patcher?.idOf(el) ?? 0;
+      if (!node) return;
+      if (el.tagName === 'SELECT') {
+        const sel = el as HTMLSelectElement;
+        const value = sel.multiple
+          ? Array.from(sel.selectedOptions).map((o) => o.value).join('\n')
+          : sel.value;
+        this.send({ kind: InputKind.SetValue, node, text: value });
+        return;
+      }
+      if (el.tagName === 'INPUT' && PICKER_INPUTS.has((el as HTMLInputElement).type)) {
+        this.send({ kind: InputKind.SetValue, node, text: (el as HTMLInputElement).value });
+      }
+    }, true);
     doc.addEventListener('keydown', (ev) => {
       const key = ev as KeyboardEvent;
       // Escape shuts the shell's menu before it means anything to the page.
@@ -1046,12 +1200,14 @@ export class MirrorHost {
       if (this.scrollTimer) return;
       this.scrollTimer = setTimeout(() => {
         this.scrollTimer = null;
+        const anchor = this.scrollAnchor(doc, win);
         this.events.scroll(this.tab, {
           tab: this.tab,
           x: win.scrollX,
           y: win.scrollY,
           h: win.innerHeight,
           docH: doc.documentElement.scrollHeight,
+          ...(anchor ? { anchor: anchor.id, anchorY: anchor.top } : {}),
         });
       }, 250);
     }, { passive: true });
@@ -1233,6 +1389,35 @@ export class MirrorHost {
   }
 
   /** Scrolls the mirrored document, recording the position as ours. */
+
+  /**
+   * The mirrored element whose position anchors a document scroll (P-020).
+   *
+   * A range fraction lands approximately on a page whose landside height
+   * differs — substituted fonts alone change it — and approximately is what
+   * makes IntersectionObserver-driven lazy loading fire a viewport early or
+   * late. The same element put at the same offset is exact. The mirrored
+   * roots are skipped because anchoring on html or body degrades to absolute
+   * pixels, which is the fraction's failure mode with extra steps.
+   */
+  private scrollAnchor(doc: Document, win: Window): { id: number; top: number } | null {
+    const w = win.innerWidth || 0;
+    for (const fx of [0.5, 0.15, 0.85]) {
+      let el: Element | null;
+      try {
+        el = doc.elementFromPoint(w * fx, 1);
+      } catch {
+        continue;
+      }
+      for (; el; el = el.parentElement) {
+        if (el.hasAttribute('data-sky-doc')) break;
+        const id = this.patcher?.idOf(el) ?? 0;
+        if (id) return { id, top: Math.round(el.getBoundingClientRect().top) };
+      }
+    }
+    return null;
+  }
+
   private scrollDocTo(x: number, y: number): void {
     const win = this.frame.contentWindow;
     if (!win) return;
@@ -1346,6 +1531,10 @@ export class MirrorHost {
       linkText: link?.text,
       image: hashFromImage(img),
       imageAlt: img?.getAttribute('alt') ?? undefined,
+      imageAnim: (() => {
+        const h = hashFromImage(img);
+        return h ? this.patcher?.images.get(h)?.anim : undefined;
+      })(),
       selection: this.selectionIn(field),
     };
   }
@@ -1366,6 +1555,32 @@ export class MirrorHost {
   sendContextMenu(node: number): void {
     if (!node) return;
     this.send({ kind: InputKind.Context, node, modifiers: 0 });
+  }
+
+  /**
+   * Parks the landside pointer over a node (P-111). Hover is real state on
+   * the ground — CSS :hover, JS mouseover menus — and the plane pointer's
+   * moves are never streamed, so this is how the reader asks for it: once,
+   * as a choice, at the cost of a round trip.
+   */
+  sendHover(node: number): void {
+    if (!node) return;
+    this.send({ kind: InputKind.Hover, node, modifiers: 0 });
+  }
+
+  /**
+   * Prints the mirrored document with the reader's own dialog (P-110). The
+   * mirror is a complete local copy — the page's own print stylesheets
+   * crossed with everything else — so this costs no round trip and lands on
+   * a printer the reader can actually reach, which the landside browser's
+   * never was.
+   */
+  print(): void {
+    try {
+      this.frame.contentWindow?.print();
+    } catch {
+      /* a sandbox refusal prints nothing, and there is nothing to add */
+    }
   }
 
   /**
@@ -1452,6 +1667,10 @@ export class MirrorHost {
 
   applySnapshot(snap: Snapshot): void {
     if (!this.patcher) return;
+    // The snapshot knows which parsing mode the landside document really got
+    // (P-125); a mismatch rebuilds this document — and everything wired to it
+    // — before the new page is drawn into it.
+    if (this.doc) this.attach(this.doc, !!snap.quirks);
     this.setPageUrl(snap.url);
     this.echo?.release();
     // A held blur names a node in the document being replaced. Sent after this
@@ -1507,8 +1726,9 @@ export class MirrorHost {
     this.requestPendingImages();
   }
 
-  applyMutation(m: Mutation, seq: number): void {
+  applyMutation(m: Mutation, seq: number, cause = 0): void {
     if (!this.patcher) return;
+    this.applyingCause = cause;
     // A batch this document has already had. The worker drops replays before
     // they get here, but it decides from what it has handed over and this is
     // what has actually been applied — the two differ across a reconnect, where
@@ -1526,6 +1746,7 @@ export class MirrorHost {
       return !this.echo?.defer(op, (id) => this.patcher?.nodeFor(id));
     });
     this.patcher.applyMutation({ ...m, ops }, seq);
+    this.applyingCause = 0;
     this.retireGhosts();
     this.requestPendingImages();
   }
@@ -1586,6 +1807,31 @@ export class MirrorHost {
   }
 
   /** Called when the store has bytes for a hash: show them. */
+  /**
+   * Swaps a GIF's still for its original animation (P-118).
+   *
+   * The still is the design (P-016) — an animation nobody asked for is pure
+   * byte cost — and the tap is the ask. The original travels under the
+   * still's key plus the anim suffix, on the ordinary want list, so the
+   * cross-flight cache and the pending machinery need nothing new; when the
+   * bytes land, showImage puts them on every element wearing the still.
+   */
+  playAnimated(hash: string): void {
+    if (!hash || !this.doc) return;
+    const key = hash + '@anim';
+    const imgs = Array.from(
+      this.doc.querySelectorAll(`img[data-skyhook-img="${CSS.escape(hash)}"]`),
+    ) as HTMLImageElement[];
+    if (!imgs.length) return;
+    const known = this.blobs.get(key);
+    if (known) {
+      for (const el of imgs) this.showImage(el, known);
+      return;
+    }
+    this.pendingImages.set(key, imgs);
+    this.requestImagesSoon();
+  }
+
   imageArrived(hash: string): void {
     if (!this.pendingImages.has(hash) && !this.pendingCSS.has(hash)
       && !this.pendingShots.has(hash)) return;

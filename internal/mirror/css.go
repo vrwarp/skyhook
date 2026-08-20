@@ -254,13 +254,169 @@ func dropMalformed(rules []string) []string {
 func minifyCSS(rules []string) []string {
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {
-		r = rewriteLandsideState(minifyRule(r))
+		r = rewriteRootSelectors(rewriteLandsideState(minifyRule(r)))
 		if r == "" || strings.HasSuffix(r, "{}") {
 			continue
 		}
 		out = append(out, r)
 	}
 	return out
+}
+
+/*
+rewriteRootSelectors re-points the selectors that name a document's frame.
+
+Plane-side, the page's html and body are ordinary elements inside the
+sandbox frame's own html and body, so the type selectors `html` and `body`
+match four elements instead of two, and `:root` matches only the frame's
+root — the one element it must never style. The frame's chrome staying off
+the page is half the story (the host's boot styles learned it); the page's
+rules staying off the frame is this half: a site's `body { color: #202122 }`
+matching the sandbox body poured its colour into everything the mirrored
+root inherits (P-119, measured on real pages).
+
+The patcher stamps every mirrored html and body with `data-sky-doc`, and
+the rewrite pins each selector to the stamp at unchanged specificity:
+
+	:root  →  [data-sky-doc="html"]         (0,1,0) — what :root weighed
+	html   →  html:where([data-sky-doc])    (0,0,1) — :where adds nothing
+	body   →  body:where([data-sky-doc])    (0,0,1)
+
+Only selector preludes are rewritten — a run of text ending at `{` outside
+strings, comments and parens — never declarations, so `url(body.png)` and
+`grid-template-areas: "body"` keep their words. Frame sub-documents get the
+same stamps inside their own shadow scope, so a sheet can only ever reach
+its own document's roots.
+*/
+func rewriteRootSelectors(rule string) string {
+	if !containsFold(rule, "html") && !containsFold(rule, "body") && !containsFold(rule, ":root") {
+		return rule
+	}
+	var b strings.Builder
+	b.Grow(len(rule) + 64)
+	changed := false
+	depthParen := 0
+	segStart := 0 // start of the current run, which `{` proves was a prelude
+	flushRaw := func(end int) {
+		b.WriteString(rule[segStart:end])
+	}
+	flushPrelude := func(end int) {
+		seg := rule[segStart:end]
+		// An at-rule's own prelude is not a selector: `@keyframes html` names
+		// an animation, and only what sits inside its block ever selects.
+		if t := strings.TrimLeft(seg, " \t\n"); strings.HasPrefix(t, "@") {
+			b.WriteString(seg)
+			return
+		}
+		// The agent's synthesized ground rule is the one :root that really
+		// means the frame's root — the host stamps its documentElement with
+		// data-sky-ground — and re-pointing it would paint the page's canvas
+		// colour onto the mirrored html instead of the frame behind it.
+		if strings.Contains(seg, "[data-sky-ground]") {
+			b.WriteString(seg)
+			return
+		}
+		if rewritten, ok := rewritePreludeRoots(seg); ok {
+			b.WriteString(rewritten)
+			changed = true
+		} else {
+			b.WriteString(seg)
+		}
+	}
+	for i := 0; i < len(rule); i++ {
+		switch c := rule[i]; {
+		case c == '"' || c == '\'':
+			i = scanCSSString(rule, i) - 1
+		case c == '\\' && i+1 < len(rule):
+			i++
+		case c == '(':
+			depthParen++
+		case c == ')':
+			if depthParen > 0 {
+				depthParen--
+			}
+		case c == '{' && depthParen == 0:
+			flushPrelude(i)
+			b.WriteByte('{')
+			segStart = i + 1
+		case (c == ';' || c == '}') && depthParen == 0:
+			flushRaw(i)
+			b.WriteByte(c)
+			segStart = i + 1
+		}
+	}
+	flushRaw(len(rule))
+	if !changed {
+		return rule
+	}
+	return b.String()
+}
+
+// rewritePreludeRoots rewrites one selector prelude, reporting whether
+// anything changed. Identifier boundaries keep `.body`, `#html`,
+// `[lang="html"]` (string-skipped), `bodyguard` and `:hover`-style
+// pseudo-class names out of it.
+func rewritePreludeRoots(sel string) (string, bool) {
+	var b strings.Builder
+	b.Grow(len(sel) + 48)
+	changed := false
+	for i := 0; i < len(sel); i++ {
+		c := sel[i]
+		if c == '"' || c == '\'' {
+			j := scanCSSString(sel, i)
+			b.WriteString(sel[i:j])
+			i = j - 1
+			continue
+		}
+		if c == '\\' && i+1 < len(sel) {
+			b.WriteString(sel[i : i+2])
+			i++
+			continue
+		}
+		if c == ':' && matchFold(sel, i, ":root") && !isSelectorIdent(sel, i+len(":root")) {
+			b.WriteString(`[data-sky-doc="html"]`)
+			i += len(":root") - 1
+			changed = true
+			continue
+		}
+		if (c == 'h' || c == 'H' || c == 'b' || c == 'B') && atPreludeIdent(sel, i) {
+			switch {
+			case matchFold(sel, i, "html") && !isSelectorIdent(sel, i+4):
+				b.WriteString(sel[i : i+4])
+				b.WriteString(":where([data-sky-doc])")
+				i += 3
+				changed = true
+				continue
+			case matchFold(sel, i, "body") && !isSelectorIdent(sel, i+4):
+				b.WriteString(sel[i : i+4])
+				b.WriteString(":where([data-sky-doc])")
+				i += 3
+				changed = true
+				continue
+			}
+		}
+		b.WriteByte(c)
+	}
+	if !changed {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// atPreludeIdent reports whether position i begins a freestanding type
+// selector: not the tail of a longer identifier, not a class, id, attribute
+// or pseudo-class name, not a dashed or escaped continuation.
+func atPreludeIdent(s string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	switch c := s[i-1]; {
+	case c == '.' || c == '#' || c == ':' || c == '-' || c == '_' || c == '\\' || c == '%' || c == '@':
+		return false
+	case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= 0x80:
+		return false
+	}
+	return true
 }
 
 // Selector text and the attributes that stand in for the landside answers.

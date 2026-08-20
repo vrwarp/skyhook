@@ -109,6 +109,11 @@ type Emitter interface {
 	// frames nobody requested, and doing it into a queue that is already deep
 	// delays the ones they did.
 	Backlogged() bool
+	// PopupOpened hands over a window the page opened of its own accord —
+	// window.open, or a click on target=_blank (P-109). The target exists and
+	// is loading by the time this is called; tabs are the receiver's to make,
+	// by attaching to it.
+	PopupOpened(opener uint32, targetID, url string)
 }
 
 // ImageRequest describes an image the mirror wants transcoded.
@@ -149,6 +154,10 @@ type Options struct {
 	// the reader did. This is the one setting here that spends bandwidth on a
 	// page nobody is interacting with, which is why an operator has to ask.
 	StreamEvery time.Duration
+	// UploadDir is where the reader's files land before they are handed to a
+	// page's file input (P-007). Empty means uploads are off and a page's
+	// chooser ask is logged and dropped. See upload.go.
+	UploadDir string
 }
 
 // Tab is one mirrored landside tab.
@@ -168,6 +177,18 @@ type Tab struct {
 	// keeps two frames from swapping places on the way out.
 	emitMu sync.Mutex
 
+	// clipProbe is true while a clipboard probe is pending, so a burst of
+	// clicks costs one read rather than one each; clipGranted (under mu) is
+	// the origin the async clipboard was last granted to. See clipboard.go.
+	clipProbe   atomic.Bool
+	clipGranted string
+
+	// uploads is the file-chooser asks awaiting the reader's answer, by ask
+	// id; askSeq mints the ids. See upload.go.
+	uploadMu sync.Mutex
+	uploads  map[uint32]*fileAsk
+	askSeq   atomic.Uint64
+
 	mu      sync.Mutex
 	ctxID   int64
 	frameID string
@@ -175,6 +196,8 @@ type Tab struct {
 	url     string
 	title   string
 	loading bool
+	// faviconURL is the icon the strip is already wearing; see deliverFavicon.
+	faviconURL string
 	// calledOff is set by stop and cleared by anything that starts a load the
 	// reader is waiting for. While it is set, a lifecycle event saying the page
 	// has started loading is about the load that was just called off: the CDP
@@ -283,7 +306,68 @@ func NewTab(ctx context.Context, id uint32, br *cdp.Browser, sess *cdp.Session, 
 	if err := t.install(ctx); err != nil {
 		return nil, err
 	}
+	// A window this page opens is a tab the reader is owed (P-109). The
+	// browser recognises popups by their opener at browser level — a page
+	// session's autoAttach never delivers them.
+	br.OnPopup(sess.Target, func(targetID, url string) {
+		out.PopupOpened(id, targetID, url)
+	})
+	// A font the page registers through the FontFace API has no @font-face
+	// rule to ship, and no JavaScript can read a FontFace's source back out
+	// of it. DevTools can: fontsUpdated names the URL, and the agent is told
+	// so it can synthesize the rule (P-003).
+	sess.Subscribe("CSS.fontsUpdated", t.onFontsUpdated)
 	return t, nil
+}
+
+// onFontsUpdated relays a loaded web font's source into the agent's world.
+// The agent ignores families a stylesheet already declares, so the ordinary
+// @font-face path never gets a synthesized twin.
+func (t *Tab) onFontsUpdated(_ string, params json.RawMessage) {
+	var p struct {
+		Font struct {
+			Family string `json:"fontFamily"`
+			Src    string `json:"src"`
+		} `json:"font"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return
+	}
+	fam, src := p.Font.Family, p.Font.Src
+	if fam == "" || (!strings.HasPrefix(src, "http://") && !strings.HasPrefix(src, "https://")) {
+		// An API-registered face finishes loading as a paramless update: no
+		// family, no source, just "the fonts changed". Its source is visible
+		// nowhere — see P-003's notes.
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		expr := fmt.Sprintf("__skyhook.fontFaceSeen(%s,%s)", jsString(fam), jsString(src))
+		if _, err := t.eval(ctx, expr); err != nil {
+			t.log.Debug("font face relay failed", "tab", t.ID, "family", fam, "err", err)
+		}
+	}()
+}
+
+/*
+Adopted finishes a tab whose page existed before its mirror did: a popup.
+
+The document is anywhere between first byte and fully loaded when the tab is
+attached. A document still parsing snapshots itself on DOMContentLoaded — the
+injected agent's ordinary arrival — but one that finished loading before the
+agent existed never would, so a settled document is snapshotted here, the way
+a back/forward-cache restore is.
+*/
+func (t *Tab) Adopted(ctx context.Context) {
+	if err := t.ensureWorldRetry(ctx, t.navEpoch.Load()); err != nil {
+		t.log.Warn("world setup for an adopted popup failed", "tab", t.ID, "err", err)
+		return
+	}
+	if _, err := t.eval(ctx, resnapshotIfSettled); err != nil {
+		t.log.Debug("adopted-popup snapshot check failed", "tab", t.ID, "err", err)
+	}
+	t.RefreshState(ctx)
 }
 
 func (t *Tab) install(ctx context.Context) error {
@@ -352,6 +436,13 @@ func (t *Tab) install(ctx context.Context) error {
 	}
 	go t.reconcile()
 	s.Subscribe("Page.javascriptDialogOpening", t.onDialog)
+	// File choosers are intercepted rather than shown (P-007): headless has
+	// no dialog to show, and the reader the dialog is for is on the plane.
+	if err := s.Do(ctx, "Page.setInterceptFileChooserDialog", map[string]any{"enabled": true}, nil); err != nil {
+		t.log.Debug("file chooser interception unavailable", "err", err)
+	} else {
+		s.Subscribe("Page.fileChooserOpened", t.onFileChooser)
+	}
 	s.Subscribe("Inspector.targetCrashed", func(string, json.RawMessage) {
 		t.log.Warn("tab crashed", "tab", t.ID)
 		t.emitState(protocol.TabState{Error: "renderer crashed"})
@@ -538,6 +629,10 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 	t.url = p.Frame.URL
 	t.ctxID = 0
 	t.mu.Unlock()
+	// The origin that just committed is the one whose Copy buttons the relay
+	// has to hear (P-008); the wildcard grant alone is not honoured for
+	// clipboard-read on every Chrome build.
+	t.grantClipboardFor(p.Frame.URL)
 
 	// Before anything else: the pictures of the page that has just been left
 	// are already queued and already being fetched, and on a link measured in
@@ -571,7 +666,7 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 		}
 
 		t.applyBlocklist(ctx, p.Frame.URL)
-		if err := t.ensureWorld(ctx); err != nil {
+		if err := t.ensureWorldRetry(ctx, epoch); err != nil {
 			t.log.Warn("isolated world setup failed", "tab", t.ID, "err", err)
 		}
 		// And again before the expensive half. A re-snapshot is the whole
@@ -684,7 +779,7 @@ func (t *Tab) onLoad() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := t.ensureWorld(ctx); err != nil {
+		if err := t.ensureWorldRetry(ctx, epoch); err != nil {
 			t.log.Warn("world setup after load failed", "tab", t.ID, "err", err)
 			return
 		}
@@ -811,6 +906,26 @@ func (t *Tab) onStyleSheetAdded(_ string, params json.RawMessage) {
 	t.mu.Unlock()
 }
 
+// ensureWorldRetry is ensureWorld against the races a navigation runs
+// (P-127): a commit event a beat ahead of the document swap, a provisional
+// document dying under the injection. Spaced tries, abandoned with the page —
+// an overtaken run's world is the overtaking run's to build.
+func (t *Tab) ensureWorldRetry(ctx context.Context, epoch uint64) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			sleepCtx(ctx, time.Duration(attempt)*250*time.Millisecond)
+			if !t.onPage(epoch) {
+				return nil
+			}
+		}
+		if err = t.ensureWorld(ctx); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 // ensureWorld creates (or reuses) the isolated world and installs the agent.
 func (t *Tab) ensureWorld(ctx context.Context) error {
 	t.mu.Lock()
@@ -864,16 +979,138 @@ func (t *Tab) ensureWorld(ctx context.Context) error {
 		"contextId":     world.ExecutionContextID,
 		"returnByValue": true,
 	}, &res); err != nil {
+		// A world without its agent is worse than no world: every later call
+		// would trust the stored id and land in a context that answers with
+		// "__skyhook is not defined" for ever (P-127). Forget it, so the next
+		// caller builds a whole one.
+		t.forgetWorld(world.ExecutionContextID)
 		return err
 	}
 	if res.ExceptionDetails != nil {
+		t.forgetWorld(world.ExecutionContextID)
 		return fmt.Errorf("mirror: agent threw: %s", res.ExceptionDetails.Text)
 	}
 	return nil
 }
 
+// faviconMaxBytes caps what a tab state will carry for its icon. A favicon
+// is a few hundred bytes of PNG; a site shipping a quarter-megabyte .ico gets
+// a strip row with no icon rather than a control channel with a picture in it.
+const faviconMaxBytes = 32 << 10
+
+/*
+deliverFavicon fetches the page's icon and ships it inside the tab state as a
+data URL (P-104): the FaviconID field rode the wire unset since the protocol
+was born, and the strip identified tabs by their titles alone. A favicon is
+chrome UI — the one part of a page the mirror's DOM never carries.
+
+A data URL rather than the image pipeline, deliberately. The pipeline
+sequences a page's pictures by viewport priority and delivers them keyed for
+elements in the mirror; an icon belongs to none of that, is smaller than the
+machinery it would ride, and wants to arrive with the tab state it decorates.
+
+The URL is remembered so a same-site navigation does not refetch what the
+strip is already wearing.
+*/
+func (t *Tab) deliverFavicon(url string) {
+	t.mu.Lock()
+	seen := t.faviconURL == url
+	t.mu.Unlock()
+	if seen {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	data, err := t.FetchResource(ctx, url, faviconMaxBytes)
+	if err != nil || len(data) == 0 {
+		t.log.Debug("favicon fetch failed", "tab", t.ID, "url", url, "err", err)
+		return
+	}
+	mime := faviconMime(data)
+	if mime == "" {
+		return
+	}
+	t.mu.Lock()
+	t.faviconURL = url
+	t.mu.Unlock()
+	t.emitState(protocol.TabState{
+		FaviconID: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data),
+	})
+}
+
+// faviconMime types icon bytes by their magic, and refuses what it cannot
+// name: whatever a server answered with — an HTML 404, say — must never be
+// stamped image/* and handed to the strip.
+func faviconMime(data []byte) string {
+	switch {
+	case len(data) > 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n":
+		return "image/png"
+	case len(data) > 4 && string(data[:4]) == "GIF8":
+		return "image/gif"
+	case len(data) > 4 && string(data[:4]) == "\x00\x00\x01\x00":
+		return "image/x-icon"
+	case len(data) > 3 && string(data[:3]) == "\xff\xd8\xff":
+		return "image/jpeg"
+	case len(data) > 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP":
+		return "image/webp"
+	case looksLikeSVG(data):
+		return "image/svg+xml"
+	}
+	return ""
+}
+
+func looksLikeSVG(data []byte) bool {
+	head := data
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	s := strings.TrimSpace(string(head))
+	return strings.HasPrefix(s, "<svg") || (strings.HasPrefix(s, "<?xml") && strings.Contains(s, "<svg"))
+}
+
+// forgetWorld drops a stored context id if it is still the one given —
+// a concurrent navigation may already have replaced it with a live one.
+func (t *Tab) forgetWorld(id int64) {
+	t.mu.Lock()
+	if t.ctxID == id {
+		t.ctxID = 0
+	}
+	t.mu.Unlock()
+}
+
+// deadContext recognises the two ways Chromium says an execution context is
+// gone: named after the fact, or destroyed under an evaluation in flight.
+// Either way the world was made for a document that no longer exists.
+func deadContext(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "Cannot find context with specified id") ||
+		strings.Contains(s, "Execution context was destroyed")
+}
+
 // eval runs an expression in the agent's world and returns the JSON result.
+//
+// A dead world gets one rebuild (P-127): ensureWorld can win its race with a
+// navigation and still lose — createIsolatedWorld binds the frame's *current*
+// document, and called a beat early that is the document being replaced. The
+// stored id then names a context that dies with it, and every caller that
+// trusted it failed for ever while the page rendered fully landside. The
+// retry's ensureWorld runs against the document that is actually there now,
+// and the fresh agent snapshots itself on arrival.
 func (t *Tab) eval(ctx context.Context, expr string) (json.RawMessage, error) {
+	raw, err := t.evalInWorld(ctx, expr)
+	if deadContext(err) {
+		t.mu.Lock()
+		t.ctxID = 0
+		t.mu.Unlock()
+		raw, err = t.evalInWorld(ctx, expr)
+	}
+	return raw, err
+}
+
+func (t *Tab) evalInWorld(ctx context.Context, expr string) (json.RawMessage, error) {
 	if err := t.ensureWorld(ctx); err != nil {
 		return nil, err
 	}
@@ -982,6 +1219,8 @@ type agentSnapshot struct {
 	Images    []agentImage        `json:"images"`
 	DocHeight int                 `json:"docHeight"`
 	Scoped    []agentScopedCSS    `json:"scoped"`
+	Quirks    bool                `json:"quirks"`
+	Icon      string              `json:"icon"`
 }
 
 // agentScopedCSS is one shadow root's stylesheet, as the agent reports it.
@@ -1171,7 +1410,8 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 		ScrollY:  s.ScrollY,
 		// Which document this is, so that the client's acknowledgements can say
 		// which document they are about. Frame numbering restarts here.
-		Epoch: epoch,
+		Epoch:  epoch,
+		Quirks: s.Quirks,
 	}
 	for _, im := range s.Images {
 		snap.Images = append(snap.Images, protocol.ImageMeta{
@@ -1185,6 +1425,9 @@ func (t *Tab) emitSnapshot(s *agentSnapshot) {
 	}
 	f.Seq = 0
 	t.out.EmitFrame(protocol.ChDom, f)
+	if s.Icon != "" {
+		go t.deliverFavicon(s.Icon)
+	}
 	t.requestImages(s.Images)
 	for _, req := range cssImages {
 		t.wantImage(req)
@@ -1435,10 +1678,52 @@ func (t *Tab) emitFrameMutation(f *subFrame, m *agentMutation) {
 // frame as the initiator. The image pipeline uses it so that assets are
 // fetched by the client that rendered the page, not beside it.
 func (t *Tab) FetchResource(ctx context.Context, url string, limit int) ([]byte, error) {
+	if strings.HasPrefix(url, "blob:") {
+		// A blob URL names bytes held by the page's own process; the network
+		// stack that loadNetworkResource asks has never heard of it (P-103).
+		// The page's realm is the one place it resolves, so ask there.
+		return t.fetchBlob(ctx, url, limit)
+	}
 	t.mu.Lock()
 	frame := t.frameID
 	t.mu.Unlock()
 	return t.sess.FetchResource(ctx, frame, url, limit)
+}
+
+// fetchBlob reads a blob: URL from inside the page and carries the bytes out
+// base64'd, the way rasterJS carries pixels. The agent's isolated world shares
+// the page's origin, which is the scope a blob URL is minted for.
+func (t *Tab) fetchBlob(ctx context.Context, url string, limit int) ([]byte, error) {
+	expr := fmt.Sprintf(`(async () => {
+  try {
+    const r = await fetch(%s);
+    if (!r.ok) return '!http ' + r.status;
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength > %d) return '!larger than the transcoder accepts';
+    const u8 = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < u8.length; i += 32768) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + 32768));
+    }
+    return btoa(s);
+  } catch (e) { return '!' + (e && e.message ? e.message : e); }
+})()`, jsString(url), limit)
+	raw, err := t.eval(ctx, expr)
+	if err != nil {
+		return nil, err
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("mirror: blob fetch returned no string: %w", err)
+	}
+	if strings.HasPrefix(s, "!") {
+		return nil, fmt.Errorf("mirror: blob fetch: %s", s[1:])
+	}
+	data, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("mirror: blob fetch: %w", err)
+	}
+	return data, nil
 }
 
 // rasterMaxBytes caps what is worth sending back into the browser to be read.
@@ -1667,6 +1952,8 @@ func (t *Tab) Close(ctx context.Context) error {
 	}
 	target := t.sess.Target
 	t.mu.Unlock()
+	// The page can no longer read them, so the reader's files go now.
+	t.dropAsks()
 	err := t.browser.CloseTarget(ctx, target)
 	// After the target is gone, so nothing that was still in flight arrives at
 	// a tab that has stopped listening: this drops the subscriptions installed

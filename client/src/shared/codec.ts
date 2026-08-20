@@ -15,9 +15,9 @@ import { decode as cborDecode, Encoder } from 'cbor-x';
 import { decompress as zstdDecompress } from 'fzstd';
 
 import {
-  CaptureDone, CaptureRequest, Channel, F, Frame, FrameType, ImageMeta, MirrorNode, Mutation,
-  MutationOp, NodeKind, OpCode, Snapshot, Stats, TabState, Viewport, Welcome, AdapterRecord,
-  TabRef,
+  CaptureDone, CaptureRequest, Channel, ClipboardRelay, Download, DownloadPart, F, FileAsk,
+  Frame, FrameType, ImageMeta, MirrorNode, Mutation, MutationOp, NodeKind, OpCode, Snapshot,
+  Stats, TabState, Viewport, Welcome, AdapterRecord, TabRef,
 } from './protocol.js';
 
 export const CODEC_RAW = 0;
@@ -194,6 +194,7 @@ function decodeImage(i: Fields): ImageMeta {
     alt: str(i, F.imageMeta.alt),
     box: arr<number>(i, F.imageMeta.box).map(Number),
     missing: bool(i, F.imageMeta.missing),
+    anim: bool(i, F.imageMeta.anim),
   };
 }
 
@@ -214,6 +215,7 @@ export function decodeSnapshot(body: unknown): Snapshot {
     scrollX: num(f, F.snapshot.scrollX),
     scrollY: num(f, F.snapshot.scrollY),
     epoch: num(f, F.snapshot.epoch),
+    quirks: bool(f, F.snapshot.quirks),
     viewport: {
       w: num(vp, F.viewport.w),
       h: num(vp, F.viewport.h),
@@ -338,6 +340,48 @@ export function decodeCaptureDone(body: unknown): CaptureDone {
     path: str(f, F.captureDone.path),
     bytes: num(f, F.captureDone.bytes),
     error: str(f, F.captureDone.error),
+  };
+}
+
+export function decodeDownload(body: unknown): Download {
+  const f = bodyFields(body);
+  return {
+    id: str(f, F.download.id),
+    url: str(f, F.download.url),
+    name: str(f, F.download.name),
+    total: num(f, F.download.total),
+    received: num(f, F.download.received),
+    state: (str(f, F.download.state) || 'landing') as Download['state'],
+  };
+}
+
+export function decodeClipboard(body: unknown): ClipboardRelay {
+  const f = bodyFields(body);
+  return {
+    text: str(f, F.clipboard.text),
+    cause: num(f, F.clipboard.cause),
+  };
+}
+
+export function decodeFileAsk(body: unknown): FileAsk {
+  const f = bodyFields(body);
+  return {
+    id: num(f, F.fileAsk.id),
+    node: num(f, F.fileAsk.node),
+    multiple: bool(f, F.fileAsk.multiple),
+  };
+}
+
+export function decodeDownloadPart(body: unknown): DownloadPart {
+  const f = bodyFields(body);
+  const data = f?.[F.downloadPart.data];
+  return {
+    id: str(f, F.downloadPart.id),
+    off: num(f, F.downloadPart.off),
+    data: data instanceof Uint8Array ? data : undefined,
+    done: bool(f, F.downloadPart.done),
+    size: num(f, F.downloadPart.size),
+    error: str(f, F.downloadPart.error),
   };
 }
 
@@ -477,6 +521,7 @@ export function inputBody(ev: InputEventInit): Map<number, unknown> {
 
 export function scrollBody(o: {
   tab: number; x: number; y: number; h: number; docH: number; node?: number; seq?: number;
+  anchor?: number; anchorY?: number;
 }): Map<number, unknown> {
   const m = new Map<number, unknown>();
   m.set(F.scroll.tab, safeInt(o.tab));
@@ -486,6 +531,10 @@ export function scrollBody(o: {
   if (o.docH) m.set(F.scroll.docH, safeInt(o.docH));
   if (o.node) m.set(F.scroll.node, safeInt(o.node));
   if (o.seq) m.set(F.scroll.seq, safeInt(o.seq));
+  if (o.anchor) m.set(F.scroll.anchor, safeInt(o.anchor));
+  // Zero is a real offset here — the anchor's edge exactly at the viewport
+  // top — so the anchor's presence is the gate, not the value's truthiness.
+  if (o.anchor && o.anchorY !== undefined) m.set(F.scroll.anchorY, safeInt(o.anchorY));
   return m;
 }
 
@@ -524,6 +573,33 @@ export function captureRequestBody(o: { reason: string; note?: string }): Map<nu
  * `tagUint8Array: false`, so a Uint8Array encodes as a plain CBOR byte string,
  * which is what the Go decoder expects for a `[]byte` field.
  */
+export function uploadPartBody(o: {
+  ask: number; name?: string; mime?: string; size?: number; off?: number;
+  data?: Uint8Array; last?: boolean; done?: boolean; error?: string;
+}): Map<number, unknown> {
+  const m = new Map<number, unknown>();
+  m.set(F.uploadPart.ask, safeInt(o.ask));
+  if (o.name) m.set(F.uploadPart.name, o.name);
+  if (o.mime) m.set(F.uploadPart.mime, o.mime);
+  if (o.size) m.set(F.uploadPart.size, safeInt(o.size));
+  if (o.off) m.set(F.uploadPart.off, safeInt(o.off));
+  if (o.data?.length) m.set(F.uploadPart.data, o.data);
+  if (o.last) m.set(F.uploadPart.last, true);
+  if (o.done) m.set(F.uploadPart.done, true);
+  if (o.error) m.set(F.uploadPart.error, o.error);
+  return m;
+}
+
+export function downloadCmdBody(o: {
+  id: string; cmd: 'fetch' | 'stop' | 'discard'; offset?: number;
+}): Map<number, unknown> {
+  const m = new Map<number, unknown>();
+  m.set(F.downloadCmd.id, o.id);
+  m.set(F.downloadCmd.cmd, o.cmd);
+  if (o.offset) m.set(F.downloadCmd.offset, safeInt(o.offset));
+  return m;
+}
+
 export function capturePartBody(o: {
   id: string; name?: string; data?: Uint8Array; more?: boolean; done?: boolean; error?: string;
 }): Map<number, unknown> {

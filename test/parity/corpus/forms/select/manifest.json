@@ -9,15 +9,5 @@
     {"do": "waitText", "value": "agreed: yes", "name": "a click's change reaches the page"},
     {"do": "select", "target": "#pick", "value": "b"},
     {"do": "waitText", "value": "picked: b", "within": 12, "name": "a select change reaches the page"}
-  ],
-  "expectedFail": {
-    "interaction": {
-      "gap": "P-101",
-      "reason": "setValue handles INPUT, TEXTAREA and contenteditable only; the reader sees their choice locally and the page never hears it"
-    },
-    "attributes": {
-      "gap": "P-101",
-      "reason": "the two halves end holding different selections: the reader's choice plane-side, the page's original landside"
-    }
-  }
+  ]
 }

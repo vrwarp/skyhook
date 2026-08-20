@@ -68,6 +68,13 @@ type Browser struct {
 	// attached records that the browser was already running when we arrived,
 	// which makes every destructive call somebody else's business.
 	attached bool
+	// popupWatch maps an opener target to whoever wants its popups: a page's
+	// window.open creates a target no page-session autoAttach ever delivers,
+	// so they are recognised at browser level by their opener (P-109).
+	popupMu    sync.Mutex
+	popupWatch map[string]func(targetID, url string)
+	popupsOn   sync.Once
+
 	// owned is the set of targets we created. In attached mode it is the guest
 	// list for closing and attaching: a tab that is not on it is the user's.
 	ownedMu sync.Mutex
@@ -605,6 +612,168 @@ func (b *Browser) awaitOpened(ctx context.Context, anchor string) (string, error
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
+}
+
+/*
+OnPopup asks to be told when a page target appears with this opener — a
+window.open, or a click on target=_blank (P-109).
+
+Browser level, not page level, because that is where these targets surface: a
+page session's setAutoAttach delivers the frames and workers a page spawns,
+but a popup is a top-level target and arrives only through target discovery.
+Discovery is armed on the first registration; arming replays every existing
+target, none of which can match a registry that was empty until now.
+*/
+func (b *Browser) OnPopup(opener string, fn func(targetID, url string)) {
+	b.popupMu.Lock()
+	if b.popupWatch == nil {
+		b.popupWatch = map[string]func(targetID, url string){}
+	}
+	b.popupWatch[opener] = fn
+	b.popupMu.Unlock()
+	b.popupsOn.Do(b.watchPopups)
+}
+
+// OffPopup forgets an opener. Call it when the opener's tab closes.
+func (b *Browser) OffPopup(opener string) {
+	b.popupMu.Lock()
+	delete(b.popupWatch, opener)
+	b.popupMu.Unlock()
+}
+
+func (b *Browser) watchPopups() {
+	b.On("", "Target.targetCreated", func(_ string, params json.RawMessage) {
+		var p struct {
+			TargetInfo TargetInfo `json:"targetInfo"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return
+		}
+		info := p.TargetInfo
+		if info.Type != "page" || info.OpenerID == "" {
+			return
+		}
+		b.popupMu.Lock()
+		fn := b.popupWatch[info.OpenerID]
+		b.popupMu.Unlock()
+		if fn == nil {
+			return
+		}
+		// Ours now: the popup was made by a page we drive, and closing time
+		// must treat it like anything we opened ourselves. Marking it is also
+		// the dedup — discovery can announce one target twice (the arming
+		// replay racing the live event), and twice adopted is two tabs.
+		b.ownedMu.Lock()
+		dup := b.owned[info.TargetID]
+		b.owned[info.TargetID] = true
+		b.ownedMu.Unlock()
+		if dup {
+			return
+		}
+		fn(info.TargetID, info.URL)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := b.Call(ctx, "", "Target.setDiscoverTargets", map[string]any{"discover": true}, nil); err != nil {
+		b.log.Warn("target discovery unavailable; window.open stays landside", "err", err)
+	}
+}
+
+/*
+EnableDownloads routes every download the pages trigger into dir, each file
+named by its GUID, and turns on the events that say so (P-108).
+
+Launched browsers only. In an attached browser the download behavior belongs
+to whoever is sitting at it: redirecting it would quietly move their own
+downloads into a directory they have never heard of.
+*/
+func (b *Browser) EnableDownloads(ctx context.Context, dir string) error {
+	if b.attached {
+		return errors.New("cdp: an attached browser keeps its own download settings")
+	}
+	return b.Call(ctx, "", "Browser.setDownloadBehavior", map[string]any{
+		"behavior":      "allowAndName",
+		"downloadPath":  dir,
+		"eventsEnabled": true,
+	}, nil)
+}
+
+/*
+OnDownload relays download lifecycle events. Browser level, like OnPopup,
+because that is where Chromium reports them once EnableDownloads has asked;
+progress states are "inProgress", "completed" and "canceled" verbatim.
+
+The byte counts arrive as JSON numbers and can exceed what an int carries on a
+32-bit build, so they cross as int64.
+*/
+func (b *Browser) OnDownload(
+	begin func(guid, url, name string),
+	progress func(guid string, total, received int64, state string),
+) {
+	b.On("", "Browser.downloadWillBegin", func(_ string, params json.RawMessage) {
+		var p struct {
+			GUID              string `json:"guid"`
+			URL               string `json:"url"`
+			SuggestedFilename string `json:"suggestedFilename"`
+		}
+		if json.Unmarshal(params, &p) != nil || p.GUID == "" {
+			return
+		}
+		begin(p.GUID, p.URL, p.SuggestedFilename)
+	})
+	b.On("", "Browser.downloadProgress", func(_ string, params json.RawMessage) {
+		var p struct {
+			GUID     string  `json:"guid"`
+			Total    float64 `json:"totalBytes"`
+			Received float64 `json:"receivedBytes"`
+			State    string  `json:"state"`
+		}
+		if json.Unmarshal(params, &p) != nil || p.GUID == "" {
+			return
+		}
+		progress(p.GUID, int64(p.Total), int64(p.Received), p.State)
+	})
+}
+
+// CancelDownload stops a landside download in flight. Best-effort: a download
+// that has already finished or vanished is not an error worth anybody's time.
+func (b *Browser) CancelDownload(ctx context.Context, guid string) error {
+	return b.Call(ctx, "", "Browser.cancelDownload", map[string]any{"guid": guid}, nil)
+}
+
+/*
+GrantClipboard lets every origin use the async clipboard without a prompt
+(P-008). Pages need write for their Copy buttons to succeed at all — headless
+has no prompt to show, so ungranted means every writeText rejects and the
+site's own "copied!" affordance never fires — and the agent needs read to
+notice that a copy happened and relay it.
+
+Launched browsers only: permissions in an attached browser belong to whoever
+is sitting at it.
+*/
+func (b *Browser) GrantClipboard(ctx context.Context) error {
+	if b.attached {
+		return errors.New("cdp: an attached browser keeps its own permissions")
+	}
+	return b.Call(ctx, "", "Browser.grantPermissions", map[string]any{
+		"permissions": []string{"clipboardReadWrite", "clipboardSanitizedWrite"},
+	}, nil)
+}
+
+// GrantClipboardFor grants the async clipboard to one origin. The wildcard
+// grant above is honoured unevenly across Chrome builds for clipboard-read —
+// CI's stable Chrome relays nothing under it while the page's own
+// gesture-ridden writeText works, which hides the miss — so the mirror also
+// grants each origin its tabs actually land on, the way Playwright always
+// has.
+func (b *Browser) GrantClipboardFor(ctx context.Context, origin string) error {
+	if b.attached {
+		return errors.New("cdp: an attached browser keeps its own permissions")
+	}
+	return b.Call(ctx, "", "Browser.grantPermissions", map[string]any{
+		"origin":      origin,
+		"permissions": []string{"clipboardReadWrite", "clipboardSanitizedWrite"},
+	}, nil)
 }
 
 // owns reports whether a target is ours to drive. Everything in a browser we

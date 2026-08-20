@@ -116,18 +116,18 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-51 gaps: 40 open, 10 by-design, 0 fixed, 1 disproven.
+53 gaps: 14 open, 11 by-design, 27 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
 | P-001 | open | A canvas that animates unprompted is not followed | — reader-initiated animation is pinned by test/canvas_test.go; the unprompted case is the canvasStreamEvery knob, a configuration choice rather than a parity property |
 | P-002 | open | Icon fonts ship whole, never subsetted | — a byte-cost gap, not a rendering one: whether the glyphs draw at all is fonts/icon-ligature's business |
 | P-003 | open | A font registered through the FontFace API cannot ship; its glyphs render as their ligature names | fonts/faces |
-| P-004 | open | wheel and hover are protocol surface no client sends | — needs a pointer-move vocabulary the interaction executor does not have yet; P-115's page will carry both when it grows one |
+| P-004 | open | wheel and hover are protocol surface no client sends | — hover is now sent — the mirror menu's Hover-here entry is the client's InHover (P-111) — so this entry narrows to wheel: still protocol surface no client sends, deliberately, because scroll telemetry already carries where the reader is and streaming wheel deltas would spend the link on what zoom-canvas widgets alone consume; catalogued for the executor revision that takes on drag |
 | P-005 | by-design | Password and sensitive-autocomplete values never cross the wire | forms/password |
 | P-006 | open | The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half | — both harness browsers are mice too, so the divergence cannot arise in-corpus; imported real pages carry the widened page-height band it causes |
-| P-007 | open | File upload is not implemented | — clicking a file input landside opens a native chooser nothing intercepts — the gap includes that hazard — so no safe corpus interaction exists until Page.setInterceptFileChooserDialog is wired |
-| P-008 | open | Clipboard copy executes plane-side only; cross-tab paste fidelity is absent | — clipboard access needs permissions headless CDP does not grant uniformly; the plane-side path is covered by the client's unit tests |
+| P-007 | fixed | File upload is not implemented | — |
+| P-008 | fixed | Clipboard copy executes plane-side only; cross-tab paste fidelity is absent | — |
 | P-009 | open | Find-in-page has no chrome-UI affordance | — a chrome-UI gap, not a mirror-rendering one |
 | P-010 | open | A frame is only preemptible between messages; a large snapshot owns the link while it sends | — a latency property of the scheduler, measured by the netem suite's timings rather than by parity |
 | P-011 | open | The document is delivered whole, never viewport-first | — a delivery-order property; parity measures the settled document, which is identical either way |
@@ -139,38 +139,40 @@ The table below is generated from `gaps.json` and the corpus by
 | P-017 | by-design | Canvas, WebGL and video are photographs: region shots, taken after input, never live | media/canvas |
 | P-018 | by-design | Ad and creative networks are blocked landside, so their content never exists to mirror | — |
 | P-019 | by-design | Alerts, confirms and prompts are auto-accepted landside and never shown to the reader | — |
-| P-020 | open | Landside scroll is matched by range fraction, so IntersectionObserver-driven lazy loading fires approximately | — needs a scroll-then-measure page with a tolerant contract; planned for the corpus's next round |
-| P-021 | open | A mirrored sub-document is laid out plane-side against a box, not a viewport: reader fonts, no percentage heights, fixed and sticky resolve against the wrong thing | frames/viewport-units |
+| P-020 | fixed | Landside scroll is matched by range fraction, so IntersectionObserver-driven lazy loading fires approximately | textmisc/scroll-lazyload |
+| P-021 | fixed | A mirrored sub-document is laid out plane-side against a box, not a viewport: reader fonts, no percentage heights, fixed and sticky resolve against the wrong thing | frames/viewport-units |
 | P-022 | by-design | A cross-origin frame that cannot be mirrored stays a labelled box; past the depth or count limits, so does one that could be | — |
-| P-023 | open | A cross-origin frame smaller than 64x32 gets no label at all — indistinguishable from a bug | — the missing label is a policy about one half, not a divergence between them — both probes agree about a tiny unlabelled box; recorded until the affordance floor is asserted somewhere |
-| P-101 | open | A select change never reaches the landside page except through a form submit | forms/select |
-| P-102 | open | setvalue and blur are dispatched to the top-level agent only; a non-append edit inside a mirrored cross-origin frame is silently lost | forms/frame-editing |
-| P-103 | open | A blob: image source serialises as a landside blob URL the client can never fetch: a broken image with no fallback and no Missing notice | images/blob-src |
-| P-104 | open | Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing | — a favicon is chrome UI, invisible to the mirror probes; recorded so the dead wire surface is not mistaken for a feature |
+| P-023 | by-design | A cross-origin frame smaller than 64x32 gets no label at all — indistinguishable from a bug | — settled as the design: a frame below the label floor is an ad pixel or a tracking beacon, and naming its host would put furniture on every page that carries them. The affordance floor is FRAME_LABEL_MIN_W/H in agent.js; the frame element, its box and its src still cross, so a bundle can always tell the box from a bug |
+| P-101 | fixed | A select change never reaches the landside page except through a form submit | forms/select |
+| P-102 | fixed | setvalue and blur are dispatched to the top-level agent only; a non-append edit inside a mirrored cross-origin frame is silently lost | forms/frame-editing |
+| P-103 | fixed | A blob: image source serialises as a landside blob URL the client can never fetch: a broken image with no fallback and no Missing notice | images/blob-src |
+| P-104 | fixed | Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing | — |
 | P-105 | by-design | HTML comments are never mirrored, though KindComment exists on both halves of the protocol | — |
-| P-106 | open | object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box | textmisc/object-embed |
+| P-106 | fixed | object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box | textmisc/object-embed |
 | P-107 | open | Dead wire surface: TypeIntegrity, OpImage and ScrollEvent.Visible are never produced or consumed | — wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it |
-| P-108 | open | Downloads are unhandled: a download link writes a file onto the VPS and the reader sees nothing happen | — clicking a download link landside leaves a file on the test host and no observable mirror change to assert on; needs Browser.setDownloadBehavior wiring first |
-| P-109 | open | window.open and a plain click on target=_blank open a landside tab no client tab will ever show | nav/target-blank |
-| P-110 | open | There is no print path: window.print does nothing for the reader | — printing is chrome UI the harness cannot see; that @media print sheets do not leak into the screen is pinned by css/layers-scope |
+| P-108 | fixed | Downloads are unhandled: a download link writes a file onto the VPS and the reader sees nothing happen | — |
+| P-109 | fixed | window.open and a plain click on target=_blank open a landside tab no client tab will ever show | nav/target-blank |
+| P-110 | fixed | There is no print path: window.print does nothing for the reader | — |
 | P-111 | open | mousemove-driven widgets — drag-and-drop, sliders, hover menus — have no input path | — needs a pointer-move step in the interaction executor; catalogued for the executor's next revision alongside P-004 |
 | P-112 | open | An audio element is photographed as a still control strip; no audio ever crosses | media/audio |
-| P-113 | open | DPR is never applied to image transcodes or region shots: every picture is soft on a 2x or 3x screen | — measuring softness needs a dpr-2 client viewport, a knob the runner does not have yet; at dpr 1 the transcode-to-box is correct by design |
-| P-114 | open | A prefers-color-scheme media query nested inside a plain style rule crosses with its question intact instead of being resolved landside | css/nesting-scheme |
-| P-115 | open | The shell's font-src 'self' may refuse every blob: webfont the pipeline ships | fonts/faces |
-| P-116 | open | An external SVG sprite reference resolves to a URL the sandboxed frame can never fetch: the icon renders as nothing | images/svg-sprite |
+| P-113 | fixed | DPR is never applied to image transcodes or region shots: every picture is soft on a 2x or 3x screen | — |
+| P-114 | fixed | A prefers-color-scheme media query nested inside a plain style rule crosses with its question intact instead of being resolved landside | css/nesting-scheme |
+| P-115 | fixed | The shell's font-src 'self' may refuse every blob: webfont the pipeline ships | fonts/faces |
+| P-116 | fixed | An external SVG sprite reference resolves to a URL the sandboxed frame can never fetch: the icon renders as nothing | images/svg-sprite |
 | P-117 | disproven | A style write onto a canvas permanently blanks its photograph until the reader touches something | media/canvas-restyle |
-| P-118 | open | The GIF tap-to-play the transcoder's comment promises does not exist in the client | — the still-frame half is P-016's page; this records the docs-versus-code drift so one of them gets fixed |
-| P-119 | open | The mirror's own :root color and font leak into pages that rely on UA defaults | css/ua-defaults, real/hn-front, real/wikipedia-article |
-| P-120 | open | A top margin that collapses through the page's body is lost at the mirror boundary | css/margin-collapse |
-| P-121 | open | The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left | — timing-dependent by nature: the executor settles before each step so every other page measures its own gap, and a page for this needs a deliberate fast-click knob in the executor first |
-| P-122 | open | Top-layer state does not cross: a popover the page showed, or a modal dialog, is closed in the mirror | textmisc/disclosure |
-| P-123 | open | In the script-disabled mirror a canvas is not a replaced element: it stretches to its container and its attribute aspect ratio scales it | media/canvas, media/canvas-restyle |
-| P-124 | open | The document hash disagrees across languages on non-ASCII text: the agent and patcher fold UTF-16 code units while the Go replicas fold byte-indexed runes, so a healthy mirror of any page with a multi-byte character in a text node's first 32 characters reports divergence | — the corpus's structure dimension compares the agent's hash against the patcher's, and both fold UTF-16 code units, so they agree; the divergent pairing is JavaScript against Go — Model.Hash ranges over v byte-indexed (`for i, r := range v` breaks at byte 32, not unit 32, and folds the rune's low byte, not the surrogate pair's) — which no browser-to-browser page can measure. Proven by capture 20260820-072612 of the Hacker News front page: recomputing both conventions over the bundle's own fingerprint rows reproduces serverHash 1676248291 (UTF-16) and clientHash 2876902932 (Go) exactly; the U+00A0 in every "N comments" link is enough. Until Model.Hash folds UTF-16 code units, hashesAgree is false on healthy captures of most real pages, and every Go-side consumer of the hash (the capture's agreement record, skyhookctl's replica, integrity comparisons against either JS half) sees phantom divergence |
-| P-125 | open | The mirror renders every page in standards mode: a quirks-mode page loses its quirks — table cells stop refusing the page font, and the geometry cascade follows | real/hn-front |
-| P-126 | open | A shorthand property set with var() loses its longhands in used-CSS extraction: the CSSOM serialises them as empty strings, the wire carries “border-top-color: ;”, and the mirror's parser drops the declarations | real/wikipedia-article |
-| P-127 | open | The isolated-world injection race can leave a navigated tab unmirrored: when ensureWorld loses to a navigation and the settle-time retries lose too, the mirror keeps a three-node about:blank document while the page renders fully landside | — a CDP timing race, not reproducible by a corpus page on demand. Evidence from the thirty-article conformance sweep: bundle 00 (expectedNodes 3, agent.json started:false against a fully rendered page.html) and bundle 16 (the re-injected agent answers an empty fingerprint and serverHash 2166136261 — the bare FNV basis — while the 2068-node document it sent earlier renders plane-side); seven 'isolated world setup failed' warnings in one hour of local captures, most of which recovered on a later retry. The warn path at the ensureWorld call does not retry the world itself; an unstarted agent answering diagnostics is the signature |
-| P-128 | open | The three fingerprint writers disagree at the edges: DOM nodeType against protocol kind for container roots, lowercased names against clipPath, 32 UTF-16 units against 32 runes | — a diagnostic-surface inconsistency, not a rendering one — the documents agree while their descriptions differ. docs/OPERATIONS.md tells the reader to diff the two fingerprint.json files by hand, and on any page with SVG, sub-frames or emoji that diff reports phantom rows (conformance bundles 22 and 23: clippath/clipPath, kind 9/11, an emoji title cut a rune short). bundle triage compensates (fingerprintsDisagree in internal/parity/triage.go); the files themselves still disagree until the writers converge on one vocabulary |
+| P-118 | fixed | The GIF tap-to-play the transcoder's comment promises does not exist in the client | — |
+| P-119 | fixed | The mirror's own :root color and font leak into pages that rely on UA defaults | css/ua-defaults, real/hn-front, real/wikipedia-article |
+| P-120 | fixed | A top margin that collapses through the page's body is lost at the mirror boundary | css/margin-collapse |
+| P-121 | fixed | The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left | — timing-dependent by nature: the executor settles before each step so every other page measures its own gap; the guard is exercised by every interaction page's focus traffic and the fix is pinned by the staleness comparison itself |
+| P-122 | fixed | Top-layer state does not cross: a popover the page showed, or a modal dialog, is closed in the mirror | textmisc/disclosure |
+| P-123 | fixed | In the script-disabled mirror a canvas is not a replaced element: it stretches to its container and its attribute aspect ratio scales it | media/canvas, media/canvas-restyle |
+| P-124 | fixed | The document hash disagrees across languages on non-ASCII text: the agent and patcher fold UTF-16 code units while the Go replicas fold byte-indexed runes, so a healthy mirror of any page with a multi-byte character in a text node's first 32 characters reports divergence | — |
+| P-125 | fixed | The mirror renders every page in standards mode: a quirks-mode page loses its quirks — table cells stop refusing the page font, and the geometry cascade follows | real/hn-front |
+| P-126 | fixed | A shorthand property set with var() loses its longhands in used-CSS extraction: the CSSOM serialises them as empty strings, the wire carries “border-top-color: ;”, and the mirror's parser drops the declarations | css/var-shorthand, real/wikipedia-article |
+| P-127 | fixed | The isolated-world injection race can leave a navigated tab unmirrored: when ensureWorld loses to a navigation and the settle-time retries lose too, the mirror keeps a three-node about:blank document while the page renders fully landside | — a CDP timing race, not reproducible by a corpus page on demand. Evidence from the thirty-article conformance sweep: bundle 00 (expectedNodes 3, agent.json started:false against a fully rendered page.html) and bundle 16 (the re-injected agent answers an empty fingerprint and serverHash 2166136261 — the bare FNV basis — while the 2068-node document it sent earlier renders plane-side); seven 'isolated world setup failed' warnings in one hour of local captures, most of which recovered on a later retry |
+| P-128 | fixed | The three fingerprint writers disagree at the edges: DOM nodeType against protocol kind for container roots, lowercased names against clipPath, 32 UTF-16 units against 32 runes | — |
+| P-129 | open | A collapsed-border table sizes its caption differently when its borders arrive after first layout: the mirrored figure runs 2px wide and a paragraph wrapping around the float re-wraps | real/wikipedia-article |
+| P-130 | open | A quirks-mode body stretches to the viewport minus its own margins landside; the mirrored body is an inner box, and CSS cannot state a margin-box stretch for it | real/hn-front |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

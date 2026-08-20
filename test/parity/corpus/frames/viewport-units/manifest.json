@@ -4,12 +4,6 @@
   "covers": ["iframes", "percentage heights", "frame stand-in layout"],
   "gaps": ["P-021"],
   "waitText": "filler settled",
-  "expectedFail": {
-    "geometry": {
-      "gap": "P-021",
-      "reason": "the stand-in is a box, not a viewport: the height:100% chain collapses to content height and the bottom anchor resolves against the wrong ancestor"
-    }
-  },
   "exclude": {
     "pixels": "the collapsed fill is the divergence; geometry already carries it"
   }

@@ -37,6 +37,19 @@ type Client struct {
 	epochs    map[uint32]uint64
 	images    map[string]protocol.ImageMeta
 	imageData map[string][]byte
+	// downloads is the server's shelf as announced; dlData holds the bytes of
+	// any fetch in progress, assembled from contiguous parts.
+	downloads map[string]protocol.Download
+	dlData    map[string]*dlBuffer
+	// clipboard is the last copy the server relayed (P-008).
+	clipboard protocol.Clipboard
+	// docScrolls records every document scroll op the server sent, which the
+	// model ignores; a test asserting the server did not move the reader
+	// needs the ops, not their effect.
+	docScrolls map[uint32][]protocol.Op
+	// fileAsks is every file chooser the server has intercepted, keyed by
+	// tab (P-007).
+	fileAsks  map[uint32][]protocol.FileAsk
 	adapter   []protocol.AdapterRecord
 	stats     protocol.Stats
 	sessionID string
@@ -105,6 +118,9 @@ func Attach(ctx context.Context, conn transport.Conn, opts Options) (*Client, er
 		seqs:   map[uint32]uint64{}, epochs: map[uint32]uint64{},
 		images:    map[string]protocol.ImageMeta{},
 		imageData: map[string][]byte{},
+		downloads: map[string]protocol.Download{},
+		dlData:    map[string]*dlBuffer{},
+		fileAsks:  map[uint32][]protocol.FileAsk{},
 		events:    make(chan Event, 256), closed: make(chan struct{}),
 	}
 	caps := []string{}
@@ -298,6 +314,14 @@ func (c *Client) handle(f *protocol.Frame) {
 		}
 		c.mu.Lock()
 		c.seqs[f.Tab] = f.Seq
+		for i := range mu.Ops {
+			if mu.Ops[i].Op == protocol.OpScroll && mu.Ops[i].Node == 0 {
+				if c.docScrolls == nil {
+					c.docScrolls = map[uint32][]protocol.Op{}
+				}
+				c.docScrolls[f.Tab] = append(c.docScrolls[f.Tab], mu.Ops[i])
+			}
+		}
 		c.mu.Unlock()
 		c.ack(f.Tab, f.Seq, m.Hash(), epoch)
 		c.emit(Event{Kind: "mutation", Tab: f.Tab, Seq: f.Seq})
@@ -307,6 +331,12 @@ func (c *Client) handle(f *protocol.Frame) {
 			return
 		}
 		c.mu.Lock()
+		// Merge the icon the way the real client does (tabs.applyState): most
+		// states report the one thing that changed and carry no icon, and a
+		// replace here would wear the icon only until the next loading toggle.
+		if st.FaviconID == "" {
+			st.FaviconID = c.state[f.Tab].FaviconID
+		}
 		c.state[f.Tab] = st
 		if st.Ref != "" {
 			c.opened[st.Ref] = f.Tab
@@ -373,12 +403,194 @@ func (c *Client) handle(f *protocol.Frame) {
 			c.log.Printf("capture %s written: %s (%d bytes)", done.ID, done.Path, done.Bytes)
 		}
 		c.emit(Event{Kind: "capture"})
+	case protocol.TypeDownload:
+		var d protocol.Download
+		if err := f.DecodeBody(&d); err != nil {
+			return
+		}
+		c.mu.Lock()
+		c.downloads[d.ID] = d
+		c.mu.Unlock()
+		c.emit(Event{Kind: "download"})
+	case protocol.TypeDownloadPart:
+		var p protocol.DownloadPart
+		if err := f.DecodeBody(&p); err != nil {
+			return
+		}
+		c.mu.Lock()
+		buf := c.dlData[p.ID]
+		if buf == nil {
+			buf = &dlBuffer{next: -1}
+			c.dlData[p.ID] = buf
+		}
+		switch {
+		case p.Err != "":
+			buf.err = p.Err
+		case p.Done:
+			buf.done, buf.size = true, p.Size
+		default:
+			if buf.next == -1 {
+				buf.next = p.Off // the stream starts wherever the fetch asked
+			}
+			if p.Off == buf.next {
+				buf.data = append(buf.data, p.Data...)
+				buf.next += int64(len(p.Data))
+			} else {
+				// A hole cannot be repaired by later parts; remember it as
+				// the error a test will read.
+				buf.err = fmt.Sprintf("part at %d against %d expected", p.Off, buf.next)
+			}
+		}
+		c.mu.Unlock()
+		c.emit(Event{Kind: "downloadpart"})
+	case protocol.TypeClipboard:
+		var cb protocol.Clipboard
+		if err := f.DecodeBody(&cb); err != nil {
+			return
+		}
+		c.mu.Lock()
+		c.clipboard = cb
+		c.mu.Unlock()
+		c.emit(Event{Kind: "clipboard"})
+	case protocol.TypeFileAsk:
+		var ask protocol.FileAsk
+		if err := f.DecodeBody(&ask); err != nil {
+			return
+		}
+		c.mu.Lock()
+		c.fileAsks[f.Tab] = append(c.fileAsks[f.Tab], ask)
+		c.mu.Unlock()
+		c.emit(Event{Kind: "fileask", Tab: f.Tab})
 	case protocol.TypeError:
 		var e protocol.ErrorBody
 		_ = f.DecodeBody(&e)
 		c.log.Printf("server error: %s: %s", e.Code, e.Message)
 		c.emit(Event{Kind: "error", Err: fmt.Errorf("%s: %s", e.Code, e.Message)})
 	}
+}
+
+// Clipboard reports the last copy the server relayed, if any.
+func (c *Client) Clipboard() protocol.Clipboard {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.clipboard
+}
+
+// DocScrolls reports every document scroll op the server has sent for a tab.
+func (c *Client) DocScrolls(tab uint32) []protocol.Op {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]protocol.Op, len(c.docScrolls[tab]))
+	copy(out, c.docScrolls[tab])
+	return out
+}
+
+// FileAsks reports the file choosers the server has intercepted for a tab.
+func (c *Client) FileAsks(tab uint32) []protocol.FileAsk {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]protocol.FileAsk, len(c.fileAsks[tab]))
+	copy(out, c.fileAsks[tab])
+	return out
+}
+
+// Upload answers a file ask with one file, chunked the way the real client
+// sends it, and closes the ask.
+func (c *Client) Upload(tab uint32, ask uint32, name, mime string, data []byte) error {
+	const chunk = 32 << 10
+	first := true
+	for off := 0; off < len(data) || first; off += chunk {
+		end := off + chunk
+		if end > len(data) {
+			end = len(data)
+		}
+		p := protocol.UploadPart{Ask: ask, Off: int64(off), Data: data[off:end]}
+		if first {
+			p.Name, p.Mime, p.Size = name, mime, int64(len(data))
+			first = false
+		}
+		if end == len(data) {
+			p.Last = true
+		}
+		if err := c.send(protocol.ChBulk, protocol.TypeUploadPart, tab, p); err != nil {
+			return err
+		}
+		if end == len(data) {
+			break
+		}
+	}
+	return c.send(protocol.ChBulk, protocol.TypeUploadPart, tab,
+		protocol.UploadPart{Ask: ask, Done: true})
+}
+
+// CancelUpload ends a file ask with nothing, the way a dismissed picker does.
+func (c *Client) CancelUpload(tab uint32, ask uint32) error {
+	return c.send(protocol.ChBulk, protocol.TypeUploadPart, tab,
+		protocol.UploadPart{Ask: ask, Err: "canceled"})
+}
+
+// dlBuffer assembles one fetched download from its parts. next is the offset
+// the following part must carry, -1 until the first part names where the
+// stream starts.
+type dlBuffer struct {
+	data []byte
+	next int64
+	done bool
+	size int64
+	err  string
+}
+
+// Downloads reports the server's download shelf as last announced.
+func (c *Client) Downloads() map[string]protocol.Download {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]protocol.Download, len(c.downloads))
+	for k, v := range c.downloads {
+		out[k] = v
+	}
+	return out
+}
+
+// FetchDownload asks for a download's bytes from offset onward.
+func (c *Client) FetchDownload(id string, offset int64) error {
+	return c.send(protocol.ChCtrl, protocol.TypeDownloadCmd, 0,
+		protocol.DownloadCmd{ID: id, Cmd: "fetch", Offset: offset})
+}
+
+// StopDownload ends a fetch in flight, keeping what has arrived.
+func (c *Client) StopDownload(id string) error {
+	return c.send(protocol.ChCtrl, protocol.TypeDownloadCmd, 0,
+		protocol.DownloadCmd{ID: id, Cmd: "stop"})
+}
+
+// DiscardDownload deletes a download from the server's shelf.
+func (c *Client) DiscardDownload(id string) error {
+	return c.send(protocol.ChCtrl, protocol.TypeDownloadCmd, 0,
+		protocol.DownloadCmd{ID: id, Cmd: "discard"})
+}
+
+// DownloadData reports the assembled bytes of a fetch and whether the stream
+// said it was done.
+func (c *Client) DownloadData(id string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	buf := c.dlData[id]
+	if buf == nil {
+		return nil, false
+	}
+	out := make([]byte, len(buf.data))
+	copy(out, buf.data)
+	return out, buf.done
+}
+
+// DownloadErr reports the error a fetch stream ended with, if any.
+func (c *Client) DownloadErr(id string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if buf := c.dlData[id]; buf != nil {
+		return buf.err
+	}
+	return ""
 }
 
 // Capture asks the server for a diagnostic bundle.
@@ -496,7 +708,11 @@ func (c *Client) sendCapture(req protocol.CaptureRequest, artifacts []captureArt
 }
 
 // modelFingerprint lists what the replica's hash is computed over, in the same
-// shape the agent and the browser patcher produce, so all three are diffable.
+// shape — and the same vocabulary — the agent and the browser patcher produce,
+// so all three are diffable (P-128: this writer used to keep DOM case and cut
+// at 32 runes where the others lowercase and cut at 32 UTF-16 units, and the
+// hand-diff OPERATIONS.md describes reported phantom rows on any page with
+// SVG or emoji).
 func modelFingerprint(m *mirror.Model) map[string]any {
 	nodes := make([][]any, 0, m.NodeCount())
 	// Under the replica's lock: the frame loop is still feeding it while a
@@ -510,11 +726,10 @@ func modelFingerprint(m *mirror.Model) map[string]any {
 			v = n.Text
 		case protocol.KindDoctype:
 			v = ""
+		default:
+			v = strings.ToLower(v)
 		}
-		if len([]rune(v)) > 32 {
-			v = string([]rune(v)[:32])
-		}
-		nodes = append(nodes, []any{id, n.Kind, v})
+		nodes = append(nodes, []any{id, n.Kind, mirror.HashValueWindow(v)})
 		return true
 	})
 	return map[string]any{"total": len(nodes), "truncated": false, "nodes": nodes}

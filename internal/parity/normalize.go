@@ -27,6 +27,12 @@ func skipAttr(tag, name string) bool {
 	if strings.HasPrefix(name, "data-skyhook-") {
 		return true
 	}
+	// The selector stamp on mirrored html and body elements, which the
+	// rewritten `html`/`body`/`:root` selectors aim at (rewriteRootSelectors,
+	// css.go). Plane-side furniture; the landside element never wears it.
+	if name == "data-sky-doc" {
+		return true
+	}
 	// An image's source is not comparable across the halves: landside it is
 	// the page's URL, plane-side a blob or a content hash. Whether the picture
 	// actually arrived is the resources dimension's question, answered from

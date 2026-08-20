@@ -24,11 +24,17 @@
     g.fillRect(0, 0, 120, 80);
     c.toBlob(function (blob) {
       var img = document.getElementById('made');
-      img.onload = function () {
+      var say = function (what) {
         var p = document.createElement('p');
-        p.textContent = 'blob drawn';
+        p.textContent = what;
         document.body.appendChild(p);
       };
+      img.onload = function () { say('blob drawn'); };
+      // Says which stage failed rather than going quiet. The page reaching
+      // neither line is toBlob never calling back; this line is the landside
+      // image refusing a URL its own page minted. Nothing is appended on the
+      // happy path, so the measured document is unchanged.
+      img.onerror = function () { say('blob refused'); };
       img.src = URL.createObjectURL(blob);
     });
   </script>

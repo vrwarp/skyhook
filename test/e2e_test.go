@@ -808,7 +808,12 @@ type harness struct {
 	// harness so the per-tab frame journal is exercised by the whole suite,
 	// not only by the test that opens a bundle.
 	captureDir string
-	logs       *diag.Ring
+	// downloadDir is where landside downloads land (P-108), so a test can see
+	// that a discard really deletes the bytes; uploadDir stages the reader's
+	// files on their way into a page (P-007).
+	downloadDir string
+	uploadDir   string
+	logs        *diag.Ring
 	// log is the harness's own logger, exposed so that everything a test starts
 	// — the PWA's app server as much as the landside half — writes to the one
 	// ring and carries the one test name, rather than falling back to
@@ -1428,6 +1433,108 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pixelPNG)
 	})
+	// A source with detail to lose: 240px of gradient drawn into a 60px box.
+	// What the transcoder keeps of it is how TestPicturesShipAtTheReadersDensity
+	// measures the density ceiling (P-113).
+	mux.HandleFunc("/dense.png", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(densePNG())
+	})
+	mux.HandleFunc("/loop.gif", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/gif")
+		_, _ = w.Write(loopGIF())
+	})
+	mux.HandleFunc("/loop", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Loop</title></head>
+			<body><h1>a looping picture</h1>
+			<img id="loop" src="/loop.gif" width="80" height="80" alt="loop"></body></html>`)
+	})
+	mux.HandleFunc("/dense", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Dense</title></head>
+			<body><h1>a dense picture</h1>
+			<img id="dense" src="/dense.png" width="60" height="60" alt="dense"></body></html>`)
+	})
+	// A file the origin insists is a download, and a page linking to it: what
+	// TestDownloadsLandAndCrossOnAsk clicks (P-108).
+	mux.HandleFunc("/report.bin", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="flight-report.bin"`)
+		_, _ = w.Write(reportBytes())
+	})
+	mux.HandleFunc("/dl", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Files</title></head>
+			<body><h1>files to take home</h1>
+			<a id="get" href="/report.bin">get the report</a></body></html>`)
+	})
+	// A slider whose value the page watches, and a menu that opens on JS
+	// hover: the two mousemove-widget shapes P-111 is about. The slider pins
+	// the setvalue path; the menu pins the InHover ask parking the landside
+	// pointer.
+	mux.HandleFunc("/widgets", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Widgets</title></head>
+			<body><h1>the widget page</h1>
+			<input type="range" id="vol" min="0" max="100" value="10" step="1">
+			<p id="st">volume 10</p>
+			<div id="menu">More options</div>
+			<div id="sub" hidden>the secret entry</div>
+			<script>
+			document.getElementById('vol').addEventListener('input', function () {
+			  document.getElementById('st').textContent = 'volume ' + this.value;
+			});
+			document.getElementById('menu').addEventListener('mouseover', function () {
+			  document.getElementById('sub').hidden = false;
+			});
+			</script></body></html>`)
+	})
+	// A page that wants a file: what TestAFileReachesThePagesChooser feeds
+	// (P-007). The page reads the file itself, so the status line proves the
+	// bytes really reached page JavaScript, not merely the input element.
+	mux.HandleFunc("/upload", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Upload</title></head>
+			<body><h1>send us your notes</h1>
+			<input type="file" id="pick">
+			<input type="file" id="many" multiple>
+			<p id="st">no file yet</p>
+			<script>
+			document.getElementById('pick').addEventListener('change', function () {
+			  var f = this.files[0];
+			  if (!f) { document.getElementById('st').textContent = 'no file chosen'; return; }
+			  f.text().then(function (text) {
+			    document.getElementById('st').textContent =
+			      'received ' + f.name + ' (' + f.size + ' bytes): ' + text.slice(0, 24);
+			  });
+			});
+			</script></body></html>`)
+	})
+	// A page with a Copy button of its own: what TestACopyThePageMakesReachesTheReader
+	// clicks (P-008). The status line is how the test knows the landside
+	// writeText really ran — and really succeeded.
+	mux.HandleFunc("/copy", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Copy</title></head>
+			<body><h1>the copy page</h1>
+			<button id="share">Copy the coordinates</button>
+			<p id="st">not copied yet</p>
+			<script>
+			document.getElementById('share').addEventListener('click', function () {
+			  navigator.clipboard.writeText('the coordinates are 51.5N 0.1W').then(
+			    function () { document.getElementById('st').textContent = 'copied to the clipboard'; },
+			    function (e) { document.getElementById('st').textContent = 'copy failed: ' + e.name; });
+			});
+			</script></body></html>`)
+	})
+	// The icon the agent's default falls back to when a page declares none —
+	// which the fixture pages deliberately do not, so every one of them
+	// exercises the fallback (P-104).
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pixelPNG)
+	})
 	// An inline background, which is how a page states the one picture that
 	// belongs to one element: a hero, an avatar, a card. Relative, because that
 	// is how it is written, and because the mirror frame resolves a relative
@@ -1936,9 +2043,11 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	h.images = pipe
 
 	h.captureDir = t.TempDir()
+	h.uploadDir = t.TempDir()
 	mgrOpts := session.ManagerOptions{
 		Logger: log, Token: h.token, TTL: time.Hour, RingBytes: 1 << 20,
 		Compression: true, ProfileDir: t.TempDir(), MaxTabs: 8,
+		UploadDir: h.uploadDir,
 		Capture: session.CaptureOptions{
 			Dir: h.captureDir, Keep: 10, MaxBytes: 32 << 20, ClientBytes: 8 << 20,
 			Screenshots: true, JournalBytes: 4 << 20, Wait: budget(30 * time.Second),
@@ -1950,6 +2059,13 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	}
 	h.mgr = session.NewManager(br, pipe, mgrOpts)
 	r.mgr = h.mgr
+	h.downloadDir = t.TempDir()
+	if err := h.mgr.EnableDownloads(ctx, h.downloadDir); err != nil {
+		t.Fatalf("enable downloads: %v", err)
+	}
+	if err := br.GrantClipboard(ctx); err != nil {
+		t.Fatalf("grant clipboard: %v", err)
+	}
 	t.Cleanup(func() {
 		c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()

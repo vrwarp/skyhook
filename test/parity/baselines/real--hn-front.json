@@ -13,7 +13,7 @@
     "geometry": {
       "status": "fail",
       "counts": {
-        "nodesOff": 313
+        "nodesOff": 1
       },
       "buckets": {
         "pageHeightPct": "+0",
@@ -39,7 +39,7 @@
         "substitutedTags": 0
       },
       "buckets": {
-        "fontsMissingPlane": "times new roman",
+        "fontsMissingPlane": "",
         "missingImages": "none"
       }
     },
@@ -58,15 +58,10 @@
       ]
     },
     "style": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "nodesDiffering": 55,
-        "prop:border-top-color": 2,
-        "prop:box-sizing": 1,
-        "prop:color": 2,
-        "prop:font-family": 2,
-        "prop:font-size": 54,
-        "visibilityDiffering": 1
+        "nodesDiffering": 0,
+        "visibilityDiffering": 0
       }
     },
     "text": {
@@ -77,11 +72,11 @@
     }
   },
   "expectedFail": {
-    "geometry": "P-125",
-    "style": "P-125"
+    "geometry": "P-130"
   },
   "gaps": [
     "P-119",
-    "P-125"
+    "P-125",
+    "P-130"
   ]
 }

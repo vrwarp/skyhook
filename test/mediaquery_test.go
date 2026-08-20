@@ -189,7 +189,9 @@ func TestAnUnchosenColorSchemeIsChosenLandside(t *testing.T) {
 	css, html := colorSchemeBundle(ctx, t, h)
 	flat := strings.ReplaceAll(css, " ", "")
 
-	if !strings.Contains(flat, ":root{color-scheme:light;}") {
+	// The page's own `:root` is re-pointed at the mirrored html (the frame's
+	// root is the shell's, not the page's — see rewriteRootSelectors).
+	if !strings.Contains(flat, `[data-sky-doc="html"]{color-scheme:light;}`) {
 		t.Errorf("`color-scheme: light dark` was left for the reader to settle:\n%s",
 			cssLines(css, "color-scheme"))
 	}
@@ -265,7 +267,7 @@ func TestTheMirrorPaintsTheCanvasTheLandsidePageHad(t *testing.T) {
 	// Said about the frame's own root, which is the only element `:root` can
 	// mean on that side, and said loudly enough that a later delta cannot
 	// quietly take it back.
-	if !strings.Contains(flat, ":root{") {
+	if !strings.Contains(flat, ":root[data-sky-ground]{") {
 		t.Errorf("the canvas was not addressed to the frame's own root:\n%s",
 			cssLines(css, "background-color:rgb(13, 17, 23)"))
 	}
@@ -300,7 +302,7 @@ func TestTheCanvasCrossesAsABackgroundAndNotAColour(t *testing.T) {
 	if err := cl.WaitForText(ctx, tab, "a page on a tiled ground", budget(45*time.Second)); err != nil {
 		t.Fatalf("mirror never delivered the page: %v", err)
 	}
-	if err := waitForCSS(ctx, cl, tab, ":root{"); err != nil {
+	if err := waitForCSS(ctx, cl, tab, ":root[data-sky-ground]{"); err != nil {
 		t.Fatalf("the frame was never told what its ground is: %v", err)
 	}
 	css := strings.Join(cl.Model(tab).CSS, "\n")
@@ -376,7 +378,7 @@ func TestTheMirrorIsToldWhichSchemeThePageWasPaintedIn(t *testing.T) {
 	// A page with no stylesheet at all still gets this one rule: it is the
 	// only thing standing between the mirror and a reader's browser deciding
 	// the page would look better inverted.
-	if !strings.Contains(flat, ":root{color-scheme:onlylight!important;}") {
+	if !strings.Contains(flat, ":root[data-sky-ground]{color-scheme:onlylight!important;}") {
 		t.Errorf("nothing told the frame which scheme this page was painted in:\n%s",
 			cssLines(css, ":root"))
 	}
@@ -661,8 +663,40 @@ func TestPWAMovesTheTargetMarkWithTheReader(t *testing.T) {
     })()`, &got)
 
 	if got.Marked != "note-2" {
+		// The jump is synchronous — the host's click listener moves the mark
+		// inside the dispatch — so a read right after the click cannot race
+		// it. Landing here means jumpToFragment declined, and the two ways it
+		// can decline look identical from the mark alone. So say which:
+		// whether the shell knew the page's address (it resolves the anchor
+		// against it), whether the anchor arrived absolutised, and whether the
+		// mark and the address move a moment later, which is the signature of
+		// the click having gone landside and cost the round trip this whole
+		// path exists to avoid.
+		var after struct {
+			Marked string `json:"marked"`
+			Href   string `json:"href"`
+			Bar    string `json:"bar"`
+			Notes  int    `json:"notes"`
+		}
+		time.Sleep(budget(3 * time.Second))
+		evalJSON(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const el = doc.querySelector('[data-sky-target]');
+      const a = doc.querySelector('a[href*="#note-2"]');
+      return {
+        marked: el ? el.id : '',
+        href: a ? a.getAttribute('href') : '(no link)',
+        bar: document.getElementById('urlbar').value,
+        notes: doc.querySelectorAll('[id^="note-"]').length,
+      };
+    })()`, &after)
 		t.Errorf("after the reader followed the link to note-2 the mark is on %q; "+
-			"the page's own highlight is still naming where they came from", got.Marked)
+			"the page's own highlight is still naming where they came from"+
+			"\n  three seconds later the mark is on %q and the address bar reads %q"+
+			"\n  the link the reader followed reads %q, and the document holds %d notes"+
+			"\n  (a mark that moves late, with the address moving with it, is the jump"+
+			" declining and the click going landside for a round trip)",
+			got.Marked, after.Marked, after.Bar, after.Href, after.Notes)
 	}
 }
 
@@ -733,7 +767,7 @@ func TestTheReaderCanAskForTheOtherColorScheme(t *testing.T) {
 		}
 	}
 	// Including the two the page never wrote a query for.
-	if !strings.Contains(flat, ":root{color-scheme:onlydark!important;}") {
+	if !strings.Contains(flat, ":root[data-sky-ground]{color-scheme:onlydark!important;}") {
 		t.Errorf("the frame was still being told the page is light:\n%s",
 			cssLines(strings.Join(cl.Model(tab).CSS, "\n"), ":root"))
 	}

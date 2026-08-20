@@ -21,14 +21,14 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 1
+        "failed": 0
       },
       "checks": [
         {
           "name": "colour-scheme questions are answered before they cross",
-          "pass": false
+          "pass": true
         }
       ]
     },
@@ -76,9 +76,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "interaction": "P-114"
   },
   "gaps": [
     "P-114"

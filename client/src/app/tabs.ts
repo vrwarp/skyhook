@@ -26,6 +26,8 @@ export interface TabView {
   canForward: boolean;
   /** True while the tab exists only plane-side, waiting to be named. */
   provisional: boolean;
+  /** The page's icon as a data: URL, when the server has delivered one. */
+  favicon?: string;
 }
 
 /** A command aimed at a tab, held until the tab has a real id to carry it. */
@@ -155,6 +157,7 @@ export class TabModel {
     // — a load starting, a title arriving — and carry nothing else.
     tab.url = st.url || tab.url;
     tab.title = st.title || tab.title;
+    tab.favicon = st.faviconId || tab.favicon;
     tab.loading = st.loading;
     tab.canBack = st.canBack;
     tab.canForward = st.canForward;

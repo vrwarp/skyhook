@@ -11,13 +11,13 @@
       }
     },
     "geometry": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "nodesOff": 5
+        "nodesOff": 0
       },
       "buckets": {
-        "pageHeightPct": "+22",
-        "worst": "\u003e64px"
+        "pageHeightPct": "+0",
+        "worst": "0"
       }
     },
     "interaction": {
@@ -76,9 +76,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "geometry": "P-123"
   },
   "gaps": [
     "P-117",

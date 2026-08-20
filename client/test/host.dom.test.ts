@@ -183,10 +183,16 @@ describe('MirrorHost', () => {
     const tokens = sandbox.split(/\s+/).filter(Boolean);
     // allow-same-origin is required so the patcher can reach contentDocument.
     expect(tokens).toContain('allow-same-origin');
-    // Everything else that could execute code or reach the network stays off.
+    // allow-modals is for exactly one call: the shell's print() on the frame
+    // (P-110). Every way content could open a modal — alert, confirm,
+    // beforeunload, a javascript: URL — needs script, and allow-scripts is
+    // the flag this test exists to keep off, so the grant widens only what
+    // the shell itself may ask for.
+    expect(tokens).toContain('allow-modals');
+    // Everything that could execute code or reach the network stays off.
     for (const forbidden of [
       'allow-scripts', 'allow-top-navigation', 'allow-popups', 'allow-forms',
-      'allow-modals', 'allow-downloads', 'allow-presentation',
+      'allow-downloads', 'allow-presentation',
     ]) {
       expect(tokens).not.toContain(forbidden);
     }

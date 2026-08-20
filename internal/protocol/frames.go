@@ -133,6 +133,20 @@ const (
 	TypeCapture     Type = 27 // both ways: ask for a diagnostic capture / for the client's half
 	TypeCapturePart Type = 28 // client -> server, one plane-side artifact (or a chunk of one)
 	TypeCaptureDone Type = 29 // server -> client, the bundle is written (or it failed)
+	// Downloads (P-108). A download lands on the server first — at datacenter
+	// speed, safely — and crosses the link only when the reader asks, with
+	// the size in front of them. See DESIGN.md's cost-labelled-ask grammar.
+	TypeDownload     Type = 30 // server -> client, a download's state
+	TypeDownloadCmd  Type = 31 // client -> server, fetch or discard one
+	TypeDownloadPart Type = 32 // server -> client on bulk, one chunk of the bytes
+	// A copy the page performed landside because of something the reader did,
+	// relayed so the reader's own clipboard ends up holding what the page
+	// told them it would (P-008).
+	TypeClipboard Type = 33 // server -> client
+	// File upload (P-007): a page's file chooser, intercepted landside and
+	// asked across the link; the reader's files come back the other way.
+	TypeFileAsk    Type = 34 // server -> client, the page wants files
+	TypeUploadPart Type = 35 // client -> server on bulk, one chunk of them
 )
 
 // Frame is the envelope. Body is a CBOR-encoded, type-specific payload; keeping
@@ -265,9 +279,14 @@ type TabState struct {
 	Loading    bool   `cbor:"3,keyasint,omitempty"`
 	CanBack    bool   `cbor:"4,keyasint,omitempty"`
 	CanForward bool   `cbor:"5,keyasint,omitempty"`
-	FaviconID  string `cbor:"6,keyasint,omitempty"`
-	Closed     bool   `cbor:"7,keyasint,omitempty"`
-	Error      string `cbor:"8,keyasint,omitempty"`
+	// FaviconID carries the page's icon itself, as a data: URL (P-104). An
+	// icon is a few hundred bytes that wants to arrive with the tab state it
+	// decorates, not a pipeline asset; the name is historical — the field was
+	// wired into the client before anything set it, and nothing ever assigned
+	// an id.
+	FaviconID string `cbor:"6,keyasint,omitempty"`
+	Closed    bool   `cbor:"7,keyasint,omitempty"`
+	Error     string `cbor:"8,keyasint,omitempty"`
 	// Ref echoes Navigate.Ref on the frame that announces an opened tab, and is
 	// absent on every other TabState.
 	Ref string `cbor:"9,keyasint,omitempty"`
@@ -355,6 +374,11 @@ type Snapshot struct {
 	// Epoch counts the documents this tab has sent, and is echoed back in every
 	// TabAck the client makes about this one. See TabAck.Epoch.
 	Epoch uint64 `cbor:"14,keyasint,omitempty"`
+	// Quirks carries the landside parser's verdict — document.compatMode ==
+	// "BackCompat" — so the mirror can render under the same rules (P-125).
+	// The doctype node's presence is not the same fact: an archaic doctype
+	// still parses into quirks mode.
+	Quirks bool `cbor:"15,keyasint,omitempty"`
 }
 
 // ScopedCSS is one shadow root's stylesheet.
@@ -441,6 +465,10 @@ type ImageMeta struct {
 	// bytes and lets the element fall back to its alt text, which is the thing
 	// the page's author wrote for exactly this.
 	Missing bool `cbor:"11,keyasint,omitempty"`
+	// Anim says the still was made from an animation (an animated GIF): the
+	// client offers tap-to-play, which re-requests the original under this
+	// hash plus imgproc.AnimSuffix (P-118).
+	Anim bool `cbor:"12,keyasint,omitempty"`
 }
 
 // ImageData carries the encoded bytes for a hash.
@@ -524,6 +552,104 @@ type ScrollEvent struct {
 	Node    int64   `cbor:"6,keyasint,omitempty"` // scroll container, 0 = document
 	Seq     uint64  `cbor:"7,keyasint,omitempty"`
 	Visible []int64 `cbor:"8,keyasint,omitempty"` // node ids near the viewport
+	// Anchor names the mirrored element at the top of the plane's viewport,
+	// and AnchorY where its border box sits relative to that top (P-020). A
+	// document scroll lands exactly when the same element is put at the same
+	// offset landside; the range fraction is the fallback for an anchor the
+	// landside document no longer has.
+	Anchor  int64 `cbor:"9,keyasint,omitempty"`
+	AnchorY int   `cbor:"10,keyasint,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// download bodies (P-108)
+
+// Download is one landside download's state, sent whenever it changes. The
+// announcement is the point: today's alternative was a file appearing on the
+// VPS with nobody told.
+type Download struct {
+	ID  string `cbor:"1,keyasint"`
+	URL string `cbor:"2,keyasint,omitempty"`
+	// Name is the filename the origin suggested, relayed for display and for
+	// the eventual save. The server stores the bytes under the ID.
+	Name string `cbor:"3,keyasint,omitempty"`
+	// Total is the size when known; 0 with State "landing" means the origin
+	// did not say, and the honest display counts Received instead.
+	Total    int64 `cbor:"4,keyasint,omitempty"`
+	Received int64 `cbor:"5,keyasint,omitempty"`
+	// State: "landing" (arriving on the server), "ready" (safe landside,
+	// fetchable), "failed", or "gone" (discarded or wiped).
+	State string `cbor:"6,keyasint,omitempty"`
+}
+
+// Download states.
+const (
+	DownloadLanding = "landing" // arriving on the server
+	DownloadReady   = "ready"   // safe landside, fetchable
+	DownloadFailed  = "failed"  // the landside download was cancelled or broke
+	DownloadGone    = "gone"    // discarded or wiped
+)
+
+// DownloadCmd asks for one download's bytes, for the stream to stop, or for
+// the file to be deleted.
+type DownloadCmd struct {
+	ID  string `cbor:"1,keyasint"`
+	Cmd string `cbor:"2,keyasint"` // "fetch" | "stop" | "discard"
+	// Offset resumes a fetch partway: the client says how much it already
+	// holds, and the stream starts there.
+	Offset int64 `cbor:"3,keyasint,omitempty"`
+}
+
+// DownloadPart is one chunk of a fetched download, on the bulk channel where
+// it cannot head-of-line-block a page.
+type DownloadPart struct {
+	ID   string `cbor:"1,keyasint"`
+	Off  int64  `cbor:"2,keyasint,omitempty"`
+	Data []byte `cbor:"3,keyasint,omitempty"`
+	Done bool   `cbor:"4,keyasint,omitempty"`
+	Size int64  `cbor:"5,keyasint,omitempty"`
+	Err  string `cbor:"6,keyasint,omitempty"`
+}
+
+// Clipboard is text the landside page put on its clipboard because of
+// something the reader did — a Copy button, a Ctrl+C the page handled —
+// relayed so the reader's device holds it too. Cause is the input seq that
+// provoked it, which is what makes "because of something the reader did"
+// checkable plane-side. Text is capped landside at ClipboardCap.
+type Clipboard struct {
+	Text  string `cbor:"1,keyasint"`
+	Cause uint64 `cbor:"2,keyasint,omitempty"`
+}
+
+// ClipboardCap bounds a relayed copy, in bytes. 64 kB of text is beyond any
+// coordinates, share-link or code snippet a Copy button produces; past it the
+// relay is more likely moving a document than helping a reader.
+const ClipboardCap = 64 << 10
+
+// FileAsk is a page's file chooser, intercepted landside (P-007). Node names
+// the mirrored input when the server could resolve it, so the client can read
+// its accept attribute; zero is still answerable.
+type FileAsk struct {
+	ID       uint32 `cbor:"1,keyasint"`
+	Node     int64  `cbor:"2,keyasint,omitempty"`
+	Multiple bool   `cbor:"3,keyasint,omitempty"`
+}
+
+// UploadPart is one piece of the reader's answer to a FileAsk, client to
+// server on the bulk channel. A part opening a new file carries Name (and
+// Mime/Size for display); Last closes the current file; Done closes the ask
+// and hands everything to the input. Err ends the ask with nothing — the
+// reader dismissed the picker — and the page sees a dismissed chooser.
+type UploadPart struct {
+	Ask  uint32 `cbor:"1,keyasint"`
+	Name string `cbor:"2,keyasint,omitempty"`
+	Mime string `cbor:"3,keyasint,omitempty"`
+	Size int64  `cbor:"4,keyasint,omitempty"`
+	Off  int64  `cbor:"5,keyasint,omitempty"`
+	Data []byte `cbor:"6,keyasint,omitempty"`
+	Last bool   `cbor:"7,keyasint,omitempty"`
+	Done bool   `cbor:"8,keyasint,omitempty"`
+	Err  string `cbor:"9,keyasint,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

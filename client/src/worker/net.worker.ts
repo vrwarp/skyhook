@@ -13,15 +13,16 @@
  */
 import {
   ackBody, adapterCommandBody, capturePartBody, captureRequestBody, decodeAdapterBatch,
-  decodeCaptureDone, decodeCaptureRequest, decodeError, decodeFrame, decodeImageData,
-  decodeImageMeta, decodeMutation, decodeSnapshot, decodeStats, decodeTabState, decodeWelcome,
-  encodeFrame, frameMessage, helloBody, imageWantBody, inputBody, navigateBody, resyncBody,
-  scrollBody, unframeMessage, viewportBody, InputEventInit,
+  decodeCaptureDone, decodeCaptureRequest, decodeClipboard, decodeDownload, decodeDownloadPart,
+  decodeError, decodeFileAsk, decodeFrame, decodeImageData, decodeImageMeta, decodeMutation,
+  decodeSnapshot, decodeStats, decodeTabState, decodeWelcome, downloadCmdBody, encodeFrame,
+  frameMessage, helloBody, imageWantBody, inputBody, navigateBody, resyncBody, scrollBody,
+  unframeMessage, uploadPartBody, viewportBody, InputEventInit,
 } from '../shared/codec.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { BUILD, CLIENT_ID } from '../shared/build.js';
 import {
-  Channel, CloseCode, FrameType, isFatalClose, Refusal, Viewport,
+  Channel, CloseCode, DownloadPart, FrameType, isFatalClose, Refusal, Viewport,
 } from '../shared/protocol.js';
 
 import { Transport, TransportConfig } from '../app/transport.js';
@@ -418,6 +419,23 @@ function handleMessage(msg: Uint8Array): void {
     case FrameType.CaptureDone:
       post('captureDone', decodeCaptureDone(frame.body) as unknown as Record<string, unknown>);
       break;
+    case FrameType.Download:
+      post('download', {
+        download: decodeDownload(frame.body) as unknown as Record<string, unknown>,
+      });
+      break;
+    case FrameType.DownloadPart:
+      ingestDownloadPart(decodeDownloadPart(frame.body));
+      break;
+    case FrameType.Clipboard:
+      post('clipboard', decodeClipboard(frame.body) as unknown as Record<string, unknown>);
+      break;
+    case FrameType.FileAsk:
+      post('fileAsk', {
+        tab: frame.tab,
+        ask: decodeFileAsk(frame.body) as unknown as Record<string, unknown>,
+      });
+      break;
     case FrameType.Error:
       post('log', { message: `server error: ${JSON.stringify(decodeError(frame.body))}` });
       break;
@@ -548,6 +566,115 @@ async function cachedHashes(hashes: string[]): Promise<string[]> {
   return found;
 }
 
+// ------------------------------------------------------------------ downloads
+
+/**
+ * One fetch being assembled from its parts (P-108).
+ *
+ * The chunks stay in this worker until the final part, so the shell hears
+ * about megabytes as one transferred buffer and a throttled count, not as a
+ * message per chunk. `next` is the offset the following part must carry; a
+ * part that misses it is a hole no later part can fill, and the honest answer
+ * is to stop and say so rather than hand over a file with a seam in it.
+ */
+interface DownloadFetch {
+  chunks: Uint8Array[];
+  received: number;
+  start: number;
+  next: number;
+  lastTold: number;
+}
+
+const fetches = new Map<string, DownloadFetch>();
+
+function ingestDownloadPart(p: DownloadPart): void {
+  if (p.error) {
+    fetches.delete(p.id);
+    post('downloadError', { id: p.id, error: p.error });
+    return;
+  }
+  let f = fetches.get(p.id);
+  if (!f) {
+    f = { chunks: [], received: 0, start: 0, next: -1, lastTold: 0 };
+    fetches.set(p.id, f);
+  }
+  if (p.done) {
+    const all = new Uint8Array(f.received);
+    let at = 0;
+    for (const c of f.chunks) {
+      all.set(c, at);
+      at += c.length;
+    }
+    fetches.delete(p.id);
+    post('downloadDone', { id: p.id, size: p.size, start: f.start, data: all }, [all.buffer]);
+    return;
+  }
+  if (!p.data) return;
+  if (f.next === -1) {
+    f.start = p.off;
+    f.next = p.off;
+  }
+  if (p.off !== f.next) {
+    fetches.delete(p.id);
+    post('downloadError', { id: p.id, error: 'the stream lost its place; fetch it again' });
+    return;
+  }
+  f.chunks.push(p.data);
+  f.received += p.data.length;
+  f.next += p.data.length;
+  // Progress in strides: on this link a chunk arrives about every second, and
+  // the shell needs a number to draw, not a message per frame.
+  if (f.received - f.lastTold >= 4 * CAPTURE_CHUNK) {
+    f.lastTold = f.received;
+    post('downloadProgress', { id: p.id, received: f.start + f.received });
+  }
+}
+
+// -------------------------------------------------------------------- uploads
+
+/**
+ * The reader's answer to a file ask, streamed in order (P-007).
+ *
+ * File objects cross into this worker by reference, so reading and chunking
+ * them here keeps megabytes off the main thread. Strictly sequential for the
+ * same reason capture parts are: a chunk that overtakes its predecessor
+ * reassembles into a corrupt file landside — inside a page that will upload
+ * it somewhere believing it is the reader's.
+ */
+let uploadQueue: Promise<void> = Promise.resolve();
+
+function queueUpload(tab: number, ask: number, files: File[]): void {
+  uploadQueue = uploadQueue.then(() => sendUpload(tab, ask, files)).catch((err: unknown) => {
+    post('log', { message: `upload failed: ${String(err)}` });
+    void send(Channel.Bulk, encodeFrame(FrameType.UploadPart, tab,
+      uploadPartBody({ ask, error: String(err) })));
+  });
+}
+
+async function sendUpload(tab: number, ask: number, files: File[]): Promise<void> {
+  for (const file of files) {
+    let off = 0;
+    let first = true;
+    do {
+      const slice = file.slice(off, Math.min(off + CAPTURE_CHUNK, file.size));
+      const data = new Uint8Array(await slice.arrayBuffer());
+      const last = off + data.length >= file.size;
+      await send(Channel.Bulk, encodeFrame(FrameType.UploadPart, tab, uploadPartBody({
+        ask, off, data, last,
+        name: first ? (file.name || 'file') : undefined,
+        mime: first ? file.type : undefined,
+        size: first ? file.size : undefined,
+      })));
+      first = false;
+      off += data.length;
+    } while (off < file.size);
+    post('uploadProgress', { tab, ask, name: file.name, done: true });
+  }
+  await send(Channel.Bulk, encodeFrame(FrameType.UploadPart, tab,
+    uploadPartBody({ ask, done: true })));
+  post('uploadDone', { tab, ask, count: files.length });
+}
+
 // ------------------------------------------------------- commands from the app
 
 self.addEventListener('message', (event: MessageEvent) => {
@@ -657,6 +784,32 @@ self.addEventListener('message', (event: MessageEvent) => {
       break;
     case 'capturePart':
       queueCapturePart(cmd.args as unknown as CapturePartInput);
+      break;
+    case 'downloadFetch': {
+      const id = String(cmd.args.id);
+      // Resume from whatever this worker already holds of it; the shell asks
+      // plainly and the offset arithmetic lives beside the chunks.
+      const held = fetches.get(id);
+      const offset = held ? held.start + held.received : Number(cmd.args.offset ?? 0);
+      void send(Channel.Ctrl, encodeFrame(FrameType.DownloadCmd, 0,
+        downloadCmdBody({ id, cmd: 'fetch', offset })));
+      break;
+    }
+    case 'downloadStop':
+      void send(Channel.Ctrl, encodeFrame(FrameType.DownloadCmd, 0,
+        downloadCmdBody({ id: String(cmd.args.id), cmd: 'stop' })));
+      break;
+    case 'downloadDiscard':
+      fetches.delete(String(cmd.args.id));
+      void send(Channel.Ctrl, encodeFrame(FrameType.DownloadCmd, 0,
+        downloadCmdBody({ id: String(cmd.args.id), cmd: 'discard' })));
+      break;
+    case 'uploadFiles':
+      queueUpload(Number(cmd.args.tab), Number(cmd.args.ask), cmd.args.files as File[]);
+      break;
+    case 'uploadCancel':
+      void send(Channel.Bulk, encodeFrame(FrameType.UploadPart, Number(cmd.args.tab),
+        uploadPartBody({ ask: Number(cmd.args.ask), error: 'canceled' })));
       break;
     case 'kill':
       void send(Channel.Ctrl, encodeFrame(FrameType.Kill, 0));

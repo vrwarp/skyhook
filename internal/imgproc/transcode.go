@@ -37,6 +37,9 @@ type Result struct {
 	// encodes for, which is the number an operator needs before deciding the
 	// cap is in the wrong place.
 	Squeezed bool
+	// Anim says the source was an animated GIF and this is its first frame:
+	// the client offers tap-to-play, which re-requests the original (P-118).
+	Anim bool
 }
 
 // Encoder names the output codec.
@@ -307,18 +310,21 @@ func (t *Transcoder) Transcode(ctx context.Context, src []byte, w, h int) (*Resu
 		return nil, ErrTooLarge
 	}
 	img, _, err := image.Decode(bytes.NewReader(src))
-	if err != nil {
-		if format == "gif" {
-			// Animated GIF: ship the first frame, the client offers tap-to-play
-			// which re-requests the original.
-			g, gerr := gif.DecodeAll(bytes.NewReader(src))
-			if gerr != nil || len(g.Image) == 0 {
-				return nil, err
+	anim := false
+	if format == "gif" {
+		// The whole file, to know whether it moves: the still that ships is
+		// the first frame either way, and Anim is what makes the client offer
+		// tap-to-play for the original (P-118).
+		if g, gerr := gif.DecodeAll(bytes.NewReader(src)); gerr == nil && len(g.Image) > 0 {
+			anim = len(g.Image) > 1
+			if err != nil {
+				img = g.Image[0]
+				err = nil
 			}
-			img = g.Image[0]
-		} else {
-			return nil, fmt.Errorf("imgproc: decode: %w", err)
 		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("imgproc: decode: %w", err)
 	}
 
 	target := fit(img.Bounds().Dx(), img.Bounds().Dy(), w, h)
@@ -347,7 +353,7 @@ func (t *Transcoder) Transcode(ctx context.Context, src []byte, w, h int) (*Resu
 	return &Result{
 		Data: data, Mime: mime,
 		W: outW, H: outH,
-		Blurhash: blur, Squeezed: squeezed,
+		Blurhash: blur, Squeezed: squeezed, Anim: anim,
 	}, nil
 }
 
@@ -356,6 +362,7 @@ func (r *Result) Meta(key string, node int64, priority int) protocol.ImageMeta {
 	return protocol.ImageMeta{
 		Node: node, Hash: key, W: r.W, H: r.H,
 		Blur: r.Blurhash, Mime: r.Mime, Bytes: len(r.Data), Priority: priority,
+		Anim: r.Anim,
 	}
 }
 

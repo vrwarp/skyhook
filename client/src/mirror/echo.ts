@@ -89,10 +89,12 @@ export class EchoEngine {
     for (const op of owned.deferred) apply(op);
   }
 
-  /** Called on input events in the owned element. */
-  input(ev: InputEvent): void {
+  /** Called on input events in the owned element. `target` is the composed
+   *  target when the caller has one — `ev.target` renames an event from
+   *  inside a shadow root to the host, which is never the owned field. */
+  input(ev: InputEvent, target?: EventTarget | null): void {
     const owned = this.owned;
-    if (!owned || ev.target !== owned.node) return;
+    if (!owned || (target ?? ev.target) !== owned.node) return;
     const now = valueOf(owned.node);
     const prev = owned.local;
     owned.local = now;
@@ -205,11 +207,32 @@ export function modifierMask(ev: KeyboardEvent | MouseEvent): number {
   return (ev.altKey ? 1 : 0) | (ev.ctrlKey ? 2 : 0) | (ev.metaKey ? 4 : 0) | (ev.shiftKey ? 8 : 0);
 }
 
+/**
+ * Input types whose value settles through a native widget rather than typing:
+ * a slider's thumb, a colour swatch, a date's calendar. The echo engine must
+ * not own these — owning a slider meant one whole-value frame per tick of a
+ * drag — so they relay once, on change, from the host (P-111). Checkboxes,
+ * radios and the button types are excluded for the neighbouring reason: their
+ * gesture is the click, which already replays landside, and echo ownership
+ * was sending a meaningless value frame after every toggle.
+ */
+export const PICKER_INPUTS = new Set([
+  'range', 'color', 'date', 'time', 'datetime-local', 'month', 'week',
+]);
+
+const NON_TEXT_INPUTS = new Set([
+  ...PICKER_INPUTS,
+  'checkbox', 'radio', 'file', 'button', 'submit', 'reset', 'image', 'hidden',
+]);
+
 export function asEditable(target: EventTarget | null): HTMLElement | null {
   if (!target || !(target as HTMLElement).tagName) return null;
   const el = target as HTMLElement;
   const tag = el.tagName.toUpperCase();
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return el;
+  if (tag === 'INPUT') {
+    return NON_TEXT_INPUTS.has((el as HTMLInputElement).type) ? null : el;
+  }
+  if (tag === 'TEXTAREA') return el;
   if (el.isContentEditable) return el;
   if (el.getAttribute?.('data-skyhook-editable') === '1') return el;
   return null;

@@ -52,6 +52,19 @@ const XLINK_NS = 'http://www.w3.org/1999/xlink';
  * `use`) carry no clue of their own — except across `foreignObject`, which
  * exists precisely to put HTML back inside a drawing.
  */
+/**
+ * The 32-code-unit window every fingerprint reports — what docHash folds,
+ * except a cut landing inside a surrogate pair backs off one unit: the Go
+ * writers cannot hold a lone surrogate, and the lists are only diffable if
+ * everyone cuts the same way. Twin of the agent's fingerprintWindow and
+ * mirror.HashValueWindow (model.go).
+ */
+function fingerprintWindow(v: string): string {
+  if (v.length <= 32) return v;
+  const c = v.charCodeAt(31);
+  return v.slice(0, c >= 0xd800 && c <= 0xdbff ? 31 : 32);
+}
+
 function namespaceFor(tag: string, parent: Node | undefined): string | null {
   if (tag === 'svg') return SVG_NS;
   if (tag === 'math') return MATHML_NS;
@@ -474,6 +487,15 @@ export class Patcher {
           el = this.doc.createElement(SUBSTITUTE_TAG);
         }
         if (forbidden) el.setAttribute('data-skyhook-tag', tag);
+        // The stamp the rewritten selectors aim at: plane-side the page's
+        // html and body are elements inside the frame's own, so the server
+        // re-points `html`, `body` and `:root` at [data-sky-doc]
+        // (rewriteRootSelectors, css.go) and this is the other half of that
+        // contract. Every mirrored document's roots get it — sub-frame
+        // documents too, whose sheets live in their own shadow scope.
+        if (tag === 'html' || tag === 'body') {
+          el.setAttribute('data-sky-doc', tag);
+        }
         for (let i = 0; i + 1 < n.attrs.length; i += 2) {
           this.setAttr(el, this.str(n.attrs[i]), this.str(n.attrs[i + 1]));
         }
@@ -524,6 +546,8 @@ export class Patcher {
         const style = (el as HTMLElement).style;
         style.removeProperty('width');
         style.removeProperty('height');
+      } else if (lower === 'data-sky-display') {
+        (el as HTMLElement).style.removeProperty('display');
       } else if (lower === 'data-sky-checked') {
         // These two carry properties, and a property is not unset by dropping
         // the attribute that described it. The mark going away means the page
@@ -532,6 +556,11 @@ export class Patcher {
         (el as HTMLInputElement).checked = false;
       } else if (lower === 'data-sky-selected') {
         (el as HTMLOptionElement).selected = false;
+      } else if (lower === 'data-sky-open') {
+        // The mark going away is the popover hidden or the dialog closed.
+        this.applyTopLayer(el as HTMLElement, null);
+      } else if (el.tagName === 'CANVAS' && (lower === 'width' || lower === 'height')) {
+        this.sizeCanvas(el as HTMLElement);
       }
       return;
     }
@@ -590,12 +619,137 @@ export class Patcher {
     // typed; reflect it onto the property the browser actually renders.
     if (lower === 'data-sky-value') {
       const input = el as HTMLInputElement;
+      // A file input accepts only '' — anything else throws, and an agent
+      // that ships one (they no longer do) must not be able to break the
+      // whole batch it arrived in.
+      if (input.type === 'file') {
+        if (value === '' && input.value !== '') input.value = '';
+        return;
+      }
       if ('value' in input && input.value !== value) input.value = value;
     } else if (lower === 'data-sky-checked') {
       (el as HTMLInputElement).checked = value === '1';
     } else if (lower === 'data-sky-selected') {
       (el as HTMLOptionElement).selected = value === '1';
+    } else if (lower === 'data-sky-open') {
+      this.applyTopLayer(el as HTMLElement, value);
+    } else if (lower === 'data-sky-display') {
+      this.applyDisplay(el as HTMLElement, value);
+    } else if (lower === 'data-sky-sprite') {
+      this.applySprite(el, value);
+    } else if (el.tagName === 'CANVAS' && (lower === 'width' || lower === 'height')) {
+      this.sizeCanvas(el as HTMLElement);
     }
+  }
+
+  /**
+   * Materialises an external sprite's fragment into the mirror (P-116).
+   *
+   * The agent re-points the use's reference at an id of the mirror's own and
+   * carries the fragment it fetched on the element; this builds that fragment
+   * into a hidden sprite holder under exactly that id. Scripts and
+   * foreignObject are stripped on the way in — the sandbox would refuse to
+   * run them anyway, but the mirror does not carry what it will not run. The
+   * holder is sized to nothing rather than display:none, because a browser
+   * will clone a symbol out of a hidden subtree but not every plain group.
+   */
+  private applySprite(el: Element, markup: string): void {
+    const ref = (el.getAttribute('href') ?? el.getAttributeNS(XLINK_NS, 'href') ?? '')
+      .replace(/^#/, '');
+    if (!ref || !ref.startsWith('sky-sprite-') || !markup || markup.length > 64 * 1024) return;
+    let parsed: Document;
+    try {
+      parsed = new DOMParser().parseFromString(markup, 'image/svg+xml');
+    } catch {
+      return;
+    }
+    const root = parsed.documentElement;
+    if (!root || root.tagName.toLowerCase() === 'parsererror' || root.querySelector('parsererror')) {
+      return;
+    }
+    const scrub = (n: Element): void => {
+      for (const a of Array.from(n.attributes)) {
+        if (/^on/i.test(a.name)) n.removeAttribute(a.name);
+      }
+      for (const child of Array.from(n.children)) {
+        const t = child.tagName.toLowerCase();
+        if (t === 'script' || t === 'foreignobject') {
+          child.remove();
+          continue;
+        }
+        scrub(child);
+      }
+    };
+    scrub(root);
+    const adopted = this.doc.importNode(root, true);
+    adopted.setAttribute('id', ref);
+    let holder = this.doc.querySelector('svg[data-skyhook-sprites]');
+    if (!holder) {
+      holder = this.doc.createElementNS(SVG_NS, 'svg');
+      holder.setAttribute('data-skyhook-sprites', '1');
+      holder.setAttribute('aria-hidden', 'true');
+      (holder as SVGElement).style.cssText =
+        'position:absolute;width:0;height:0;overflow:hidden';
+      // On the frame's root, not its body: a snapshot swaps the body's
+      // children out wholesale, and the holder has to outlive resyncs.
+      this.doc.documentElement?.appendChild(holder);
+    }
+    const old = this.doc.getElementById(ref);
+    if (old && old.parentNode === holder) old.remove();
+    holder.appendChild(adopted);
+  }
+
+  /** The display the landside plugin computed. `inline` becomes inline-block
+   *  because the real element was replaced — it honoured its box inline —
+   *  and the stand-in is an ordinary div that would not. */
+  private applyDisplay(el: HTMLElement, display: string): void {
+    el.style.display = display === 'inline' ? 'inline-block' : display;
+  }
+
+  /**
+   * Reproduces top-layer membership (P-122): a popover the landside page
+   * showed, or a dialog it made modal, is rendering state no ordinary
+   * attribute carries — the mirror held the same DOM with the popover closed.
+   *
+   * Deferred a microtask because the state arrives with the element's other
+   * attributes, and showPopover throws on an element that is not yet in the
+   * document; by the time the microtask runs the batch that carried it has
+   * finished building the tree. The calls throw on state that is already
+   * right, which is fine — arriving twice is not a change.
+   */
+  private applyTopLayer(el: HTMLElement, state: string | null): void {
+    queueMicrotask(() => {
+      try {
+        if (state === 'popover') el.showPopover?.();
+        else if (state === 'modal') {
+          // showModal refuses a dialog already open; the wire's `open`
+          // attribute describes the shown state this call is about to create.
+          el.removeAttribute('open');
+          (el as HTMLDialogElement).showModal?.();
+        } else {
+          if (el.popover != null) el.hidePopover?.();
+          if (el.tagName === 'DIALOG') (el as HTMLDialogElement).close?.();
+        }
+      } catch { /* already in the asked-for state, or detached again */ }
+    });
+  }
+
+  /**
+   * Restates a canvas's landside intrinsic size.
+   *
+   * In this scripting-disabled document a canvas is not a replaced element —
+   * the spec says it renders as its fallback content — so it has no intrinsic
+   * 300x150, stretches to its container, and its attribute aspect ratio
+   * scales it (P-123). The size goes into inline custom properties rather
+   * than width/height so the page's own CSS keeps beating it through the
+   * shell's zero-specificity rule, the way author CSS beats a replaced
+   * element's intrinsic size landside.
+   */
+  private sizeCanvas(el: HTMLElement): void {
+    const w = Number(el.getAttribute('width'));
+    const h = Number(el.getAttribute('height'));
+    el.style.setProperty('--sky-canvas-w', `${w > 0 ? w : 300}px`);
+    el.style.setProperty('--sky-canvas-h', `${h > 0 ? h : 150}px`);
   }
 
   /**
@@ -614,15 +768,24 @@ export class Patcher {
   private restoreOwnStyle(el: Element, live: boolean): void {
     const box = el.getAttribute('data-sky-box');
     if (box !== null) this.applyBox(el, box);
+    const disp = el.getAttribute('data-sky-display');
+    if (disp !== null) this.applyDisplay(el as HTMLElement, disp);
+    // The intrinsic-size properties live in the same inline declaration the
+    // page's write just replaced.
+    if (el.tagName === 'CANVAS') this.sizeCanvas(el as HTMLElement);
     if (live) this.hooks.onRestyled?.(el as HTMLElement);
   }
 
-  /** Sizes a stand-in from the `WxH` the agent measured landside. */
+  /** Sizes a stand-in from the `WxH` the agent measured landside. The
+   *  measurement is a border box — getBoundingClientRect — so the box is
+   *  applied as one: content-box sizing added the stand-in's own border on
+   *  top and every framed sub-document ran 2px wide (P-021). */
   private applyBox(el: Element, box: string): void {
     const [w, h] = box.split('x');
     const style = (el as HTMLElement).style;
     if (w) style.width = `${Number(w)}px`;
     if (h) style.height = `${Number(h)}px`;
+    style.boxSizing = 'border-box';
   }
 
   private forget(node: Node): void {
@@ -664,7 +827,16 @@ export class Patcher {
    * that says so lives in the shell's own stylesheet, which stops at the
    * boundary like any other document rule. Said again inside, it reaches them.
    */
-  private static readonly baseRootCSS = 'html, body { display: block; }';
+  /*
+   * The furniture every mirrored sub-document needs, adopted into its shadow
+   * root because the shell's own stylesheet cannot reach past the boundary.
+   * The padding line is the sub-document twin of the shell's margin-collapse
+   * block (P-120, P-021): a real frame's root stops a child margin escaping,
+   * and without it the margin walks out of the document into the stand-in
+   * and every margin-led frame page sits high by exactly that margin.
+   */
+  private static readonly baseRootCSS = `html, body { display: block; }
+html:where([data-sky-doc]) { padding-top: 0.05px; padding-bottom: 0.05px; }`;
 
   private adoptBaseSheet(root: ShadowRoot): void {
     const win = this.doc.defaultView as (Window & typeof globalThis) | null;
@@ -797,7 +969,11 @@ export class Patcher {
   }
 
   /** Hashes the document the way the server and the Go replica do, so the
-   *  periodic integrity check compares like with like. */
+   *  periodic integrity check compares like with like. Element names are
+   *  lowercased before folding: wire names arrive in DOM case (clipPath),
+   *  and the agent hashes tagName.toLowerCase() — folding the wire case
+   *  made this hash disagree with a healthy agent's on any page with a
+   *  camelCase SVG element (P-128's family, found unifying the writers). */
   docHash(): number {
     let h = 0x811c9dc5;
     const ids = Array.from(this.nodes.keys()).sort((a, b) => a - b);
@@ -806,7 +982,7 @@ export class Patcher {
       if (!node) continue;
       const v = node.nodeType === Node.TEXT_NODE
         ? node.nodeValue ?? ''
-        : this.names.get(id) ?? (node as Element).tagName?.toLowerCase() ?? '';
+        : (this.names.get(id) ?? (node as Element).tagName ?? '').toLowerCase();
       h ^= id & 0xff;
       h = Math.imul(h, 16777619) >>> 0;
       for (let i = 0; i < v.length && i < 32; i++) {
@@ -843,11 +1019,12 @@ export class Patcher {
       if (!node) continue;
       const v = node.nodeType === Node.TEXT_NODE
         ? node.nodeValue ?? ''
-        : this.names.get(id) ?? (node as Element).tagName?.toLowerCase() ?? '';
+        : (this.names.get(id) ?? (node as Element).tagName ?? '').toLowerCase();
       // The image flag is left out on both sides: it marks the act of queueing
       // an image for transcoding, which the plane side never does, so the two
       // could never agree on it.
-      out.push([id, node.nodeType, v.slice(0, 32), (this.flags.get(id) ?? 0) & ~NodeFlags.Image]);
+      out.push([id, node.nodeType, fingerprintWindow(v),
+        (this.flags.get(id) ?? 0) & ~NodeFlags.Image]);
     }
     return { total: ids.length, truncated: ids.length > out.length, nodes: out };
   }

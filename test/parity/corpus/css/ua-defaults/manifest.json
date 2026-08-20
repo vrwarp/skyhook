@@ -1,19 +1,15 @@
 {
   "id": "css/ua-defaults",
   "title": "a page that relies on UA defaults renders in the same colour and face on both halves",
-  "covers": ["UA defaults", "inherited color", "default fonts"],
-  "gaps": ["P-119"],
+  "covers": [
+    "UA defaults",
+    "inherited color",
+    "default fonts"
+  ],
+  "gaps": [
+    "P-119"
+  ],
   "waitText": "defaults settled",
-  "expectedFail": {
-    "style": {
-      "gap": "P-119",
-      "reason": "the mirror's own :root color and font inherit into the page: #111 sans-serif here, black serif landside"
-    },
-    "geometry": {
-      "gap": "P-119",
-      "reason": "the substituted default face has different metrics, so every box lands elsewhere"
-    }
-  },
   "exclude": {
     "pixels": "the whole page is the divergence; a score would only restate the style dimension"
   }

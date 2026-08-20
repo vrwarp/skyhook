@@ -261,6 +261,8 @@ func (t *Tab) captureClip(ctx context.Context, b shotBox) ([]byte, error) {
 	var out struct {
 		Data []byte `json:"data"`
 	}
+	// scale 1 is already the reader's density: the tab emulates their
+	// deviceScaleFactor (SetViewport), and the capture renders under it.
 	err := t.sess.Do(ctx, "Page.captureScreenshot", map[string]any{
 		"format": "png",
 		"clip": map[string]any{

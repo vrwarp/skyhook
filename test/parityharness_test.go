@@ -497,6 +497,21 @@ func settleTab(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.
 			time.Sleep(250 * time.Millisecond)
 			continue
 		}
+		// The checkpoint drains mutations that exist; it cannot drain the CSS
+		// pass the agent has merely scheduled, or the sheet-source fetch the
+		// var() shorthand repair is still waiting on — either one means the
+		// stylesheet the client holds is about to change (and with it layout,
+		// and with layout the boxes every image is re-described against).
+		var diag struct {
+			CSSPending bool `json:"cssPending"`
+		}
+		if raw, err := mt.AgentDiag(ctx); err == nil {
+			_ = json.Unmarshal(raw, &diag)
+		}
+		if diag.CSSPending {
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
 		var raw json.RawMessage
 		evalJSON(ctx, t, page, fmt.Sprintf(`window.__skyhookParity(%d)`, tab), &raw)
 		if len(raw) == 0 || string(raw) == "null" {
@@ -639,6 +654,26 @@ func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint3
 	case "settle":
 		_, _ = settleAndProbeTab(ctx, t, run.page, mt, tab, openedAt)
 		return true
+	case "assertMirrorSelector":
+		// A selector the mirror document must match — or, with a leading "!",
+		// must not. For divergences no probe dimension can see: the empty
+		// <use> box is the same size as a full one.
+		settleTab(ctx, t, run.page, mt, tab, openedAt, time.Now().Add(budget(45*time.Second)))
+		want := step.Value
+		negate := strings.HasPrefix(want, "!")
+		if negate {
+			want = want[1:]
+		}
+		var n int
+		evalJSON(ctx, t, run.page, fmt.Sprintf(`(() => {
+      const f = document.querySelector('iframe.mirror[data-tab="%d"]');
+      if (!f || !f.contentDocument) return -1;
+      return f.contentDocument.querySelectorAll(%q).length;
+    })()`, tab, want), &n)
+		if negate {
+			return n == 0
+		}
+		return n > 0
 	case "assertMirrorCSSHas", "assertMirrorCSSLacks":
 		// Give in-flight CSS a moment to land, then read the delivered rules.
 		settleTab(ctx, t, run.page, mt, tab, openedAt, time.Now().Add(budget(45*time.Second)))

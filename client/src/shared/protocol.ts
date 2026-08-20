@@ -48,6 +48,18 @@ export enum FrameType {
   Capture = 27,
   CapturePart = 28,
   CaptureDone = 29,
+  // Downloads (P-108): announced when they land on the server, fetched over
+  // the link only on the reader's explicit, size-labelled ask.
+  Download = 30,
+  DownloadCmd = 31,
+  DownloadPart = 32,
+  // A copy the page performed landside because of the reader's own input,
+  // relayed so their device's clipboard holds it too (P-008).
+  Clipboard = 33,
+  // File upload (P-007): the page's chooser, intercepted landside and asked
+  // across the link; the reader's files go back the other way on bulk.
+  FileAsk = 34,
+  UploadPart = 35,
 }
 
 /** Why a diagnostic capture was taken. Matches the server's constants. */
@@ -193,6 +205,12 @@ export interface Snapshot {
    * about one document for a question it asked about another.
    */
   epoch?: number;
+  /**
+   * The landside parser's verdict: true when the page rendered in quirks
+   * mode. The mirror re-parses its host document to match, because quirks is
+   * a parse-time property no inserted doctype can change (P-125).
+   */
+  quirks?: boolean;
 }
 
 /** One shadow root's stylesheet. */
@@ -263,6 +281,8 @@ export interface ImageMeta {
    * announce this hash again unless a resync makes the server try afresh.
    */
   missing: boolean;
+  /** The still was made from an animation; tap-to-play can ask for it. */
+  anim?: boolean;
 }
 
 export interface TabState {
@@ -355,6 +375,49 @@ export interface CaptureDone {
   error: string;
 }
 
+/**
+ * One landside download's state (P-108). "landing" while the server is still
+ * receiving it, "ready" once its bytes are fetchable, "failed" if the landside
+ * download broke, "gone" once discarded or wiped.
+ */
+export interface Download {
+  id: string;
+  url: string;
+  name: string;
+  total: number;
+  received: number;
+  state: 'landing' | 'ready' | 'failed' | 'gone';
+}
+
+/** One chunk of a fetched download, on the bulk channel. */
+export interface DownloadPart {
+  id: string;
+  off: number;
+  data?: Uint8Array;
+  done: boolean;
+  size: number;
+  error: string;
+}
+
+/**
+ * Text the landside page copied because of something the reader did (P-008).
+ * cause is the input seq that provoked it.
+ */
+export interface ClipboardRelay {
+  text: string;
+  cause: number;
+}
+
+/**
+ * A page's file chooser, intercepted landside (P-007). node names the
+ * mirrored input when the server could resolve it; zero is still answerable.
+ */
+export interface FileAsk {
+  id: number;
+  node: number;
+  multiple: boolean;
+}
+
 /** Field numbers, kept next to the decoders that use them. */
 export const F = {
   frame: { type: 1, tab: 2, seq: 3, base: 4, body: 5, cause: 6 },
@@ -384,7 +447,7 @@ export const F = {
   snapshot: {
     strings: 1, nodes: 2, css: 3, url: 4, title: 5, viewport: 6,
     images: 7, scrollX: 8, scrollY: 9, docHash: 11, baseUrl: 12, scoped: 13,
-    epoch: 14,
+    epoch: 14, quirks: 15,
   },
   scopedCSS: { root: 1, rules: 2 },
   op: {
@@ -394,7 +457,7 @@ export const F = {
   mutation: { strings: 1, ops: 2, docHash: 3, flush: 4 },
   imageMeta: {
     node: 1, hash: 2, w: 3, h: 4, blur: 5, mime: 6, bytes: 7, priority: 8, alt: 9, box: 10,
-    missing: 11,
+    missing: 11, anim: 12,
   },
   imageData: { hash: 1, mime: 2, data: 3 },
   imageWant: { hashes: 1, have: 2 },
@@ -403,7 +466,10 @@ export const F = {
     x: 8, y: 9, fields: 10, expectSeq: 11, ts: 12, start: 13, end: 14, repeat: 16,
     hold: 17, point: 18, path: 19,
   },
-  scroll: { tab: 1, x: 2, y: 3, h: 4, docH: 5, node: 6, seq: 7, visible: 8 },
+  scroll: {
+    tab: 1, x: 2, y: 3, h: 4, docH: 5, node: 6, seq: 7, visible: 8,
+    anchor: 9, anchorY: 10,
+  },
   adapterRecord: {
     adapter: 1, kind: 2, id: 3, space: 4, author: 5, text: 6, ts: 7, seq: 8, unread: 9, extra: 10,
   },
@@ -412,4 +478,10 @@ export const F = {
   captureRequest: { id: 1, reason: 2, note: 3, tabs: 4, maxBytes: 5, screenshots: 6 },
   capturePart: { id: 1, name: 2, data: 3, more: 4, done: 5, error: 6 },
   captureDone: { id: 1, path: 2, bytes: 3, error: 4 },
+  download: { id: 1, url: 2, name: 3, total: 4, received: 5, state: 6 },
+  downloadCmd: { id: 1, cmd: 2, offset: 3 },
+  downloadPart: { id: 1, off: 2, data: 3, done: 4, size: 5, error: 6 },
+  clipboard: { text: 1, cause: 2 },
+  fileAsk: { id: 1, node: 2, multiple: 3 },
+  uploadPart: { ask: 1, name: 2, mime: 3, size: 4, off: 5, data: 6, last: 7, done: 8, error: 9 },
 } as const;

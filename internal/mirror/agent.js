@@ -104,10 +104,15 @@
   // Tags never mirrored: they either carry code, or carry styling we ship
   // separately as used-CSS.
   var SKIP_TAGS = {
-    SCRIPT: 1, NOSCRIPT: 1, STYLE: 1, LINK: 1, META: 1, BASE: 1, TEMPLATE: 1,
-    OBJECT: 1, EMBED: 1, APPLET: 1
+    SCRIPT: 1, NOSCRIPT: 1, STYLE: 1, LINK: 1, META: 1, BASE: 1, TEMPLATE: 1
   };
   var CANVAS_TAGS = { CANVAS: 1, VIDEO: 1, AUDIO: 1 };
+  // Plugin containers cross as labelled boxes, the iframe bargain (P-106):
+  // their content cannot be mirrored, but dropping them whole left an
+  // unexplained hole where everything below sat a plugin's height too high.
+  // Their children are fallback content a landside page with the resource
+  // loaded never renders, so they are not descended into.
+  var PLUGIN_TAGS = { OBJECT: 1, EMBED: 1, APPLET: 1 };
   var VOID_IMAGE_TAGS = { IMG: 1, IMAGE: 1 };
   // Attributes dropped: event handlers, integrity/nonce metadata, and the
   // responsive-image machinery we replace with one server-chosen rendition.
@@ -175,15 +180,21 @@
   var boxWatch = new Map();
   var boxDirty = new Set();      // frames to re-measure before the next flush
   var boxObservers = new Map();  // window -> its ResizeObserver
+  var imgShipped = new WeakMap(); // img element -> the "WxH" the client was told
+  var topLayerShipped = new WeakMap(); // element -> the top-layer state the client holds
   var reframeTimer = null;
   var pendingOps = [];
   var pendingImages = [];
   var flushTimer = null;
   var cssTimer = null;
+  var syntheticFonts = new Map(); // family -> a synthesized @font-face (P-003)
   var emittedCSS = new Map();   // rule text -> index
   var scopedEmitted = new Map(); // shadow-root id -> its own emitted-rule set
   var cssOrder = [];
   var recoveredSheets = new Map(); // href -> constructed sheet the host supplied
+  var sheetSources = new Map();    // href -> authored text, for cssText repair
+  var sheetSourceFetches = new Map(); // href -> 'pending' | 'failed'
+  var constructedSourceTexts = typeof WeakMap === 'function' ? new WeakMap() : null;
   var blockedSheets = {};          // href -> 1, for sheets nothing can read yet
   var blockedNew = false;          // one of those is news the host has not heard
   var cssSeen = 0;                 // style rules the last pass considered
@@ -244,7 +255,7 @@
       lastText.delete(id);
       lastScroll.delete(id);
     }
-    if (node.tagName === 'IFRAME') unwatchBox(node);
+    if (node.tagName === 'IFRAME' || VOID_IMAGE_TAGS[node.tagName]) unwatchBox(node);
     liveWatch.delete(node);
     var kids = node.childNodes;
     if (kids) for (var i = 0; i < kids.length; i++) forget(kids[i]);
@@ -374,6 +385,7 @@
     var base = docBase(el);
     var flags = 0;
     var pairs = [];
+    var spriteAttr = null;
     for (var i = 0; i < attrs.length; i++) {
       var a = attrs[i];
       var name = a.name;
@@ -397,8 +409,23 @@
         // pinColorSchemes.
         value = pinColorSchemes(value);
       }
+      if ((name === 'href' || name === 'xlink:href') && tagOf(el) === 'USE') {
+        var spr = useSpriteRef(el);
+        if (spr) {
+          // Re-pointed at the copy the client will build from the carried
+          // fragment (P-116); the sprite is fetched here, where it can be.
+          // The fragment itself is appended after the loop: the client
+          // materialises it by reading the reference this rewrite sets, so
+          // the reference has to be applied first.
+          value = '#' + spr.key;
+          var sm = spriteMarkup(spr.url, spr.frag);
+          if (sm) spriteAttr = sm;
+          else requestSprite(spr.url, el);
+        }
+      }
       pairs.push(intern(name), intern(value));
     }
+    if (spriteAttr) pairs.push(intern('data-sky-sprite'), intern(spriteAttr));
     // Live form state is a property, not an attribute; without this a mirrored
     // form loses everything the user (or the page) already typed. What is
     // recorded here is also what the sweep compares against, so a page that
@@ -407,8 +434,12 @@
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
       var checked = !!el.checked;
       if (!isSensitive(el)) {
-        var value = el.value == null ? '' : String(el.value);
-        pairs.push(intern('data-sky-value'), intern(value));
+        // A file input's value is a fake local path no script may write —
+        // the plane's browser throws on anything but '' — and the filename
+        // it leaks belongs to this machine. The chosen files' story is told
+        // by the page's own DOM, so the value ships as empty (P-007).
+        var value = liveValue(el);
+        if (el.type !== 'file') pairs.push(intern('data-sky-value'), intern(value));
         watchLive(el, { value: value, checked: checked });
       }
       if (checked) pairs.push(intern('data-sky-checked'), intern('1'));
@@ -442,14 +473,35 @@
       if (host) pairs.push(intern(OPAQUE_ATTR), intern(host));
       watchBox(el, box, host);
     }
+    if (PLUGIN_TAGS[tag]) {
+      // The iframe bargain for plugin content (P-106): a labelled box the
+      // size the plugin had, instead of an unexplained hole. The computed
+      // display travels too, because the CSS that made the real object a
+      // block selects on a tag name the stand-in no longer answers to.
+      var pbox = frameBox(el);
+      var phost = pluginHost(el, pbox);
+      if (pbox !== '0x0') pairs.push(intern('data-sky-box'), intern(pbox));
+      if (phost) pairs.push(intern(OPAQUE_ATTR), intern(phost));
+      var pdisp = pluginDisplay(el);
+      if (pdisp) pairs.push(intern('data-sky-display'), intern(pdisp));
+      watchBox(el, pbox, phost);
+    }
+    var tl = topLayerState(el);
+    if (tl) {
+      // A popover shown or a dialog made modal before this element was
+      // serialised (P-122); later changes arrive through onTopLayer.
+      pairs.push(intern('data-sky-open'), intern(tl));
+      topLayerShipped.set(el, tl);
+    }
     if (VOID_IMAGE_TAGS[tag]) {
       var img = describeImage(el, base);
       if (img) {
         flags |= FLAG_IMAGE;
         pairs.push(intern('src'), intern('skyhook://img/' + img.key));
-        if (img.w) pairs.push(intern('width'), intern(String(img.w)));
-        if (img.h) pairs.push(intern('height'), intern(String(img.h)));
+        if (img.aw) pairs.push(intern('width'), intern(String(img.aw)));
+        if (img.ah) pairs.push(intern('height'), intern(String(img.ah)));
         pendingImages.push(img);
+        watchImg(el, img.aw, img.ah);
       }
     }
     out.flags = flags;
@@ -513,6 +565,30 @@
     } catch (e) { return ''; }
   }
 
+  // pluginDisplay is the display the landside plugin computed, for the
+  // stand-in to reproduce. Read once at serialisation: a plugin that changes
+  // display after that is rarer than one that never should have crossed.
+  function pluginDisplay(el) {
+    try {
+      var win = el.ownerDocument.defaultView || globalThis;
+      return String(win.getComputedStyle(el).display || '');
+    } catch (e) { return ''; }
+  }
+
+  // pluginHost is opaqueHost for a plugin container, which names its resource
+  // with `data` (object) or `src` (embed), and is opaque by nature rather
+  // than by origin.
+  function pluginHost(el, box) {
+    var wh = box.split('x');
+    if (+wh[0] < FRAME_LABEL_MIN_W || +wh[1] < FRAME_LABEL_MIN_H) return '';
+    var src = el.getAttribute('data') || el.getAttribute('src') || '';
+    if (!src) return '';
+    try {
+      var u = new URL(absolute(docBase(el), src));
+      return u.protocol === 'http:' || u.protocol === 'https:' ? u.host : '';
+    } catch (e) { return ''; }
+  }
+
   function onBoxResize(entries) {
     for (var i = 0; i < entries.length; i++) boxDirty.add(entries[i].target);
     // The size is read at flush time, not here: during a transition this runs
@@ -526,6 +602,21 @@
   function watchBox(el, box, host) {
     boxWatch.set(el, box + ' ' + host);
     boxDirty.delete(el);
+    observeResize(el);
+  }
+
+  // watchImg remembers the size an image was described at. The description is
+  // a measurement, and it is routinely taken early: an image serialised before
+  // the page's stylesheet has loaded ships the box it has *without* that CSS,
+  // and nothing in a MutationObserver ever corrects it — the border that
+  // arrives with the sheet changes layout, not the DOM. The client then holds
+  // a width= the landside page stopped rendering half a second in.
+  function watchImg(el, w, h) {
+    imgShipped.set(el, w + 'x' + h);
+    observeResize(el);
+  }
+
+  function observeResize(el) {
     var win = null;
     try { win = el.ownerDocument && el.ownerDocument.defaultView; } catch (e) { win = null; }
     if (!win || typeof win.ResizeObserver !== 'function') return;
@@ -538,8 +629,9 @@
   }
 
   function unwatchBox(el) {
-    if (!boxWatch.has(el)) return;
+    if (!boxWatch.has(el) && !imgShipped.has(el)) return;
     boxWatch.delete(el);
+    imgShipped.delete(el);
     boxDirty.delete(el);
     boxObservers.forEach(function (obs) {
       try { obs.unobserve(el); } catch (e) { /* not this one's */ }
@@ -558,8 +650,9 @@
       var el = els[i];
       var id = idOf.get(el);
       if (id === undefined || !el.isConnected) { unwatchBox(el); continue; }
+      if (imgShipped.has(el)) { syncImg(el, id); continue; }
       var box = frameBox(el);
-      var host = opaqueHost(el, box);
+      var host = PLUGIN_TAGS[el.tagName] ? pluginHost(el, box) : opaqueHost(el, box);
       var was = (boxWatch.get(el) || ' ').split(' ');
       if (was[0] === box && was[1] === host) continue;
       boxWatch.set(el, box + ' ' + host);
@@ -570,6 +663,20 @@
         pendingOps.push([3, id, intern(OPAQUE_ATTR), host ? intern(host) : -1]);
       }
     }
+  }
+
+  // syncImg re-states an image's size when the rendered box has drifted from
+  // the one it was described with. Only the attributes move: the transcode
+  // keyed to the old size is a few pixels soft at worst, which is invisible,
+  // while a wrong width= is a wrong layout for every element beside it.
+  function syncImg(el, id) {
+    var img = describeImage(el, docBase(el));
+    if (!img) return;
+    var now = img.aw + 'x' + img.ah;
+    if (imgShipped.get(el) === now) return;
+    imgShipped.set(el, now);
+    if (img.aw) pendingOps.push([3, id, intern('width'), intern(String(img.aw))]);
+    if (img.ah) pendingOps.push([3, id, intern('height'), intern(String(img.ah))]);
   }
 
   // ------------------------------------------------------ live control state
@@ -595,6 +702,15 @@
    */
 
   // watchLive records the state a control was serialised with.
+  // The value the wire may carry for a form control. A file input's is
+  // always '': its real value is a fake local path no script may write —
+  // the mirror's browser throws on anything but the empty string — and the
+  // filename in it belongs to this machine, not to the wire (P-007).
+  function liveValue(el) {
+    if (el.type === 'file') return '';
+    return el.value == null ? '' : String(el.value);
+  }
+
   function watchLive(el, state) {
     liveWatch.set(el, state);
   }
@@ -627,7 +743,7 @@
       liveWatch.delete(el);
       return false;
     }
-    var value = el.value == null ? '' : String(el.value);
+    var value = liveValue(el);
     var checked = !!el.checked;
     if (was.value !== value) {
       pendingOps.push([3, id, intern('data-sky-value'), intern(value)]);
@@ -689,15 +805,32 @@
       // Small inline images are cheaper left alone than round-tripped.
       if (src.length < 4096) return null;
     }
-    if (/^blob:/i.test(src)) return null;
+    // blob: crosses described like anything else (P-103): serialised verbatim
+    // it named bytes only this page's process holds — a broken image with no
+    // fallback and no notice. The pipeline reads it from inside the page.
     var r = el.getBoundingClientRect();
-    var w = Math.round(r.width) || el.naturalWidth || 0;
-    var h = Math.round(r.height) || el.naturalHeight || 0;
+    // Two sizes with two jobs. The transcode target falls back to the natural
+    // size so an image serialised before layout still ships at a useful
+    // resolution; the attribute size is the rendered box and nothing else —
+    // an author's width="0" spacer resurrected to its natural pixel was a
+    // spacer visible on one half only.
+    var aw = Math.round(r.width), ah = Math.round(r.height);
+    var w = aw || el.naturalWidth || 0;
+    var h = ah || el.naturalHeight || 0;
+    // The transcode ceiling is in device pixels, not CSS ones (P-113): the
+    // tab emulates the reader's density, so devicePixelRatio here is theirs,
+    // and a 2x reader gets a 2x rendition — fit() still never upscales past
+    // the source, so a 1x source costs nothing new. Folding the density into
+    // the dimensions also folds it into the key, so readers at different
+    // densities never collide in the transcode cache. Capped at 3x.
+    var dpr = globalThis.devicePixelRatio || 1;
+    if (dpr > 3) dpr = 3;
+    if (dpr > 1) { w = Math.round(w * dpr); h = Math.round(h * dpr); }
     if (w > 4096) w = 4096;
     if (h > 4096) h = 4096;
     var key = imageKey(src, w, h);
     return {
-      n: idFor(el), url: src, w: w, h: h, key: key,
+      n: idFor(el), url: src, w: w, h: h, aw: aw, ah: ah, key: key,
       alt: el.getAttribute('alt') || '',
       pri: r.top < (globalThis.innerHeight || 900) * 1.5 && r.bottom > -200 ? 0 : 1
     };
@@ -738,13 +871,23 @@
         if (shot) value = shot.text; // and the images stay unqueued
         value = pinColorSchemes(value);
       }
+      if ((name === 'href' || name === 'xlink:href') && tagOf(el) === 'USE') {
+        var spr = useSpriteRef(el);
+        if (spr) {
+          value = '#' + spr.key;
+          // Read-only twin of the serializer's branch: report the fragment
+          // when it is cached, and never start a fetch from a probe.
+          var sm = spriteMarkup(spr.url, spr.frag);
+          if (sm) { out['data-sky-sprite'] = sm; any = true; }
+        }
+      }
       out[name] = value;
       any = true;
     }
     var tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
-      if (!isSensitive(el)) {
-        out['data-sky-value'] = el.value == null ? '' : String(el.value);
+      if (!isSensitive(el) && el.type !== 'file') {
+        out['data-sky-value'] = liveValue(el);
         any = true;
       }
       if (el.checked) { out['data-sky-checked'] = '1'; any = true; }
@@ -759,12 +902,22 @@
       if (box !== '0x0') { out['data-sky-box'] = box; any = true; }
       if (host) { out[OPAQUE_ATTR] = host; any = true; }
     }
+    if (PLUGIN_TAGS[tag]) {
+      var pbox = frameBox(el);
+      var phost = pluginHost(el, pbox);
+      if (pbox !== '0x0') { out['data-sky-box'] = pbox; any = true; }
+      if (phost) { out[OPAQUE_ATTR] = phost; any = true; }
+      var pdisp = pluginDisplay(el);
+      if (pdisp) { out['data-sky-display'] = pdisp; any = true; }
+    }
+    var tl = topLayerState(el);
+    if (tl) { out['data-sky-open'] = tl; any = true; }
     if (VOID_IMAGE_TAGS[tag]) {
       var img = describeImage(el, base);
       if (img) {
         out.src = 'skyhook://img/' + img.key;
-        if (img.w) out.width = String(img.w);
-        if (img.h) out.height = String(img.h);
+        if (img.aw) out.width = String(img.aw);
+        if (img.ah) out.height = String(img.ah);
         any = true;
       }
     }
@@ -872,7 +1025,7 @@
     var n = 1;
 
     if (tag === 'HEAD') return n; // head content is replaced by used-CSS
-    if (CANVAS_TAGS[tag]) return n;
+    if (CANVAS_TAGS[tag] || PLUGIN_TAGS[tag]) return n;
 
     if (node.shadowRoot) {
       // The boundary is mirrored, not flattened away. A component's stylesheet
@@ -2167,6 +2320,221 @@
     try { return doc.baseURI || null; } catch (e) { return null; }
   }
 
+  /*
+   * cssText is lossy, and the loss ships broken styles (P-126).
+   *
+   * When a shorthand set with var() is partially overridden by a later
+   * declaration — Vector 2022's thumbnails write `border: 1px solid
+   * var(--border-color-subtle,#c8ccd1); border-bottom: 0` — Chromium's
+   * serialiser cannot reconstitute the shorthand and emits its longhands
+   * with *empty values*: `border-top-color: ;`. The CSSOM keeps no way
+   * back — getPropertyValue answers "" for shorthand and longhands alike,
+   * the typed OM serialises the same nothing — so the only true copy is the
+   * sheet's authored text, and the repair is to find this rule in it.
+   *
+   * Detection is the signature itself: an empty declaration value, which no
+   * parser produces from real CSS (an empty *custom property* value is
+   * legal and deliberately excluded). Recovery re-reads the rule from the
+   * sheet source — a <style>'s text synchronously; a <link>'s by an in-page
+   * fetch that reschedules the pass when it lands — locating it by
+   * normalised selector and ordinal, exactly the walk the CSSOM makes. A
+   * repair that cannot be validated ships the broken text it started with.
+   */
+  function hasLostShorthand(text) {
+    var i = 0, n = text.length;
+    while (i < n) {
+      var c = text.charAt(i);
+      if (c === '"' || c === "'") { i = scanSelString(text, i); continue; }
+      if (c === '\\') { i += 2; continue; }
+      if (c !== ':') { i++; continue; }
+      var p = i - 1;
+      while (p >= 0 && ' \t\n\r\f'.indexOf(text.charAt(p)) >= 0) p--;
+      var e = p;
+      while (p >= 0 && /[-A-Za-z0-9_]/.test(text.charAt(p))) p--;
+      var prop = text.slice(p + 1, e + 1);
+      if (prop && prop.slice(0, 2) !== '--') {
+        var j = i + 1;
+        while (j < n && ' \t\n\r\f'.indexOf(text.charAt(j)) >= 0) j++;
+        var v = text.charAt(j);
+        if (v === ';' || v === '}' || j >= n) return true;
+      }
+      i++;
+    }
+    return false;
+  }
+
+  function requestSheetSource(href) {
+    if (sheetSources.has(href) || sheetSourceFetches.has(href)) return;
+    sheetSourceFetches.set(href, 'pending');
+    try {
+      fetch(href, { credentials: 'include' }).then(function (r) {
+        return r && r.ok ? r.text() : null;
+      }).then(function (t) {
+        if (t) { sheetSources.set(href, t); sheetSourceFetches.set(href, 'ok'); scheduleCSS(); }
+        else { sheetSourceFetches.set(href, 'failed'); }
+      }, function () { sheetSourceFetches.set(href, 'failed'); });
+    } catch (e) { sheetSourceFetches.set(href, 'failed'); }
+  }
+
+  function sheetSourceFor(sheet) {
+    if (constructedSourceTexts) {
+      var t0 = constructedSourceTexts.get(sheet);
+      if (t0) return t0;
+    }
+    var node = null;
+    try { node = sheet.ownerNode; } catch (e) { node = null; }
+    if (node && node.tagName === 'STYLE') return node.textContent || null;
+    var href = null;
+    try { href = sheet.href; } catch (e) { href = null; }
+    if (!href) return null;
+    var t = sheetSources.get(href);
+    if (t) return t;
+    requestSheetSource(href);
+    return null;
+  }
+
+  // ruleOrdinal counts, in CSSOM order, style rules sharing this rule's
+  // selector text, so the source scan can find the same one. Style-rule
+  // children (CSS nesting) are not walked — collectRules ships them inside
+  // their parent's text, and the source scanner skips them the same way.
+  function ruleOrdinal(sheet, target, sel) {
+    var n = -1, done = false;
+    function walk(list) {
+      for (var i = 0; i < list.length && !done; i++) {
+        var r = list[i], ty = 0, kids = null;
+        try { ty = r.type; } catch (e) { ty = 0; }
+        if (ty === 1) {
+          var s = null;
+          try { s = r.selectorText; } catch (e) { s = null; }
+          if (s === sel) {
+            n++;
+            if (r === target) { done = true; return; }
+          }
+          continue;
+        }
+        try { kids = r.cssRules; } catch (e) { kids = null; }
+        if (kids) walk(kids);
+      }
+    }
+    try { walk(sheet.cssRules); } catch (e) { return -1; }
+    return done ? n : -1;
+  }
+
+  var scratchSelSheet = null;
+  var selNormCache = new Map();
+  function normalizeSelector(sel) {
+    if (!sel) return null;
+    var hit = selNormCache.get(sel);
+    if (hit !== undefined) return hit;
+    var out = null;
+    try {
+      if (!scratchSelSheet) scratchSelSheet = new CSSStyleSheet();
+      scratchSelSheet.replaceSync(sel + '{}');
+      var r = scratchSelSheet.cssRules[0];
+      out = (r && r.selectorText) || null;
+    } catch (e) { out = null; }
+    if (selNormCache.size > 4096) selNormCache.clear();
+    selNormCache.set(sel, out);
+    return out;
+  }
+
+  function findRuleBlockInSource(src, wantSel, ordinal) {
+    var found = null, count = -1;
+    function pastComment(i) {
+      var e = src.indexOf('*/', i + 2);
+      return e < 0 ? src.length : e + 2;
+    }
+    function matchBrace(i) {
+      var depth = 0;
+      for (; i < src.length; i++) {
+        var c = src.charAt(i);
+        if (c === '"' || c === "'") { i = scanSelString(src, i) - 1; continue; }
+        if (c === '\\') { i++; continue; }
+        if (c === '/' && src.charAt(i + 1) === '*') { i = pastComment(i) - 1; continue; }
+        if (c === '{') depth++;
+        else if (c === '}') { depth--; if (depth === 0) return i; }
+      }
+      return -1;
+    }
+    function scan(i, end) {
+      while (i < end && found === null) {
+        while (i < end) {
+          var w = src.charAt(i);
+          if (w === ' ' || w === '\t' || w === '\n' || w === '\r' || w === '\f') { i++; continue; }
+          if (w === '/' && src.charAt(i + 1) === '*') { i = pastComment(i); continue; }
+          break;
+        }
+        if (i >= end) return;
+        var start = i, brace = -1, term = -1;
+        for (var j = i; j < end; j++) {
+          var c = src.charAt(j);
+          if (c === '"' || c === "'") { j = scanSelString(src, j) - 1; continue; }
+          if (c === '\\') { j++; continue; }
+          if (c === '/' && src.charAt(j + 1) === '*') { j = pastComment(j) - 1; continue; }
+          if (c === '{') { brace = j; break; }
+          if (c === ';' || c === '}') { term = j; break; }
+        }
+        if (brace < 0) { i = term >= 0 ? term + 1 : end; continue; }
+        var close = matchBrace(brace);
+        if (close < 0) return;
+        var prelude = src.slice(start, brace).replace(/^\s+|\s+$/g, '');
+        if (prelude.charAt(0) === '@') {
+          // Group at-rules hold rules; the rest hold declarations, which the
+          // inner scan reads as statements and walks past harmlessly.
+          scan(brace + 1, close);
+        } else if (normalizeSelector(prelude) === wantSel) {
+          count++;
+          if (count === ordinal) { found = src.slice(brace + 1, close); return; }
+        }
+        i = close + 1;
+      }
+    }
+    scan(0, src.length);
+    return found;
+  }
+
+  // A heal is only believed when the candidate reproduces every declaration
+  // the broken serialisation still carried: the selector match alone cannot
+  // tell two same-selector rules apart, and grafting a neighbour's
+  // declarations under the right selector is a subtler bug than the one
+  // being fixed.
+  function validRepairedRule(rule, sel, block) {
+    try {
+      if (!scratchSelSheet) scratchSelSheet = new CSSStyleSheet();
+      scratchSelSheet.replaceSync(sel + '{' + block + '}');
+      if (scratchSelSheet.cssRules.length < 1) return false;
+      var cand = scratchSelSheet.cssRules[0];
+      if (cand.selectorText !== sel) return false;
+      var have = rule.style, want = cand.style;
+      for (var i = 0; i < have.length; i++) {
+        var p = have.item(i);
+        var v = have.getPropertyValue(p);
+        if (v === '') continue; // the loss being healed
+        if (want.getPropertyValue(p) !== v ||
+            want.getPropertyPriority(p) !== have.getPropertyPriority(p)) {
+          return false;
+        }
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function healedRuleText(rule) {
+    var text = rule.cssText;
+    if (!hasLostShorthand(text)) return text;
+    var sheet = null;
+    try { sheet = rule.parentStyleSheet; } catch (e) { sheet = null; }
+    if (!sheet) return text;
+    var src = sheetSourceFor(sheet);
+    if (!src) return text;
+    var sel = rule.selectorText;
+    var ord = ruleOrdinal(sheet, rule, sel);
+    if (ord < 0) return text;
+    var block = findRuleBlockInSource(src, sel, ord);
+    if (block === null || !validRepairedRule(rule, sel, block)) return text;
+    return sel + '{' + block + '}';
+  }
+
   function collectRules(doc, list, out, depth, base, seen) {
     if (!list || depth > 8) return;
     for (var i = 0; i < list.length; i++) {
@@ -2176,7 +2544,12 @@
           case 1: // style rule
             cssSeen++;
             if (selectorMatches(doc, rule.selectorText)) {
-              out.push(pinColorSchemes(absolutizeCSSURLs(rule.cssText, base)));
+              // shippedWhole rather than the two bare passes: a nested
+              // @media inside this rule's own text deserves the same
+              // landside answer a top-level one gets (P-114), and the text
+              // itself may first need its lost var() shorthands healed
+              // from the sheet source (P-126).
+              out.push(shippedWhole(healedRuleText(rule), base));
             } else {
               noteRejected(rule.selectorText);
             }
@@ -2764,7 +3137,11 @@
     if (scheme) decls.push('color-scheme:' + scheme + ' !important');
     canvasBackground(view, root, decls);
     if (!decls.length) return '';
-    return ':root{' + decls.join(';') + ';}';
+    // [data-sky-ground] marks this as the one :root that really means the
+    // frame's own root — the host stamps its documentElement with it — so
+    // the server's rewriteRootSelectors leaves it alone while re-pointing
+    // every :root the page wrote at the mirrored document (P-119).
+    return ':root[data-sky-ground]{' + decls.join(';') + ';}';
   }
 
   // The background properties that travel together. A background is a set, not
@@ -2932,6 +3309,14 @@
       cssOrder.push(rootRule);
       adds.push(rootRule);
     }
+    // Faces the page registered through the FontFace API: no stylesheet
+    // declares them, so the walk above can never find them (P-003).
+    syntheticFonts.forEach(function (text) {
+      if (emittedCSS.has(text)) return;
+      emittedCSS.set(text, 1);
+      cssOrder.push(text);
+      adds.push(text);
+    });
     return { adds: adds, scoped: scoped };
   }
 
@@ -2977,6 +3362,135 @@
     }
     scheduleFlush(false);
     return true;
+  }
+
+  // ------------------------------------------------------------- svg sprites
+
+  /*
+   * An external <use> reference names a sprite file the sandboxed mirror can
+   * never fetch: its CSP is default-src 'none', so the absolutised URL the
+   * reference becomes draws nothing at all (P-116). Browsers require these
+   * references to be same-origin, so the agent can always fetch the sprite
+   * from inside the page. The fragment the reference names is carried on the
+   * use element itself (data-sky-sprite), the reference is re-pointed at the
+   * copy the client will build, and the client materialises the symbol into
+   * a sprite holder of the mirror's own.
+   */
+  var spriteSources = new Map();  // sprite url -> its text
+  var spriteFetches = new Map();  // sprite url -> 'pending' | 'ok' | 'failed'
+  var spriteSymbols = new Map();  // url#frag -> extracted markup ('' = none)
+  var spriteWaiters = new Map();  // sprite url -> use elements awaiting it
+
+  function useSpriteRef(el) {
+    var raw = el.getAttribute('href') || el.getAttribute('xlink:href') || '';
+    if (!raw || raw.charAt(0) === '#') return null;
+    var abs = absolute(docBase(el), raw);
+    var hash = abs.indexOf('#');
+    if (hash < 0) return null;
+    var url = abs.slice(0, hash);
+    var frag = abs.slice(hash + 1);
+    if (!frag || !/^https?:/i.test(url)) return null;
+    // A reference into the document's own URL is same-document already.
+    if (url === String(location.href).split('#')[0]) return null;
+    return { url: url, frag: frag, key: spriteKey(abs) };
+  }
+
+  function spriteKey(abs) {
+    var h = 5381;
+    for (var i = 0; i < abs.length; i++) h = ((h * 33) ^ abs.charCodeAt(i)) >>> 0;
+    return 'sky-sprite-' + h.toString(36);
+  }
+
+  function spriteMarkup(url, frag) {
+    var key = url + '#' + frag;
+    if (spriteSymbols.has(key)) return spriteSymbols.get(key);
+    var text = spriteSources.get(url);
+    if (!text) return '';
+    var markup = '';
+    try {
+      var sdoc = new DOMParser().parseFromString(text, 'image/svg+xml');
+      var frel = sdoc.getElementById(frag);
+      if (frel && frel.outerHTML && frel.outerHTML.length <= 65536) markup = frel.outerHTML;
+    } catch (e) { markup = ''; }
+    spriteSymbols.set(key, markup);
+    return markup;
+  }
+
+  function requestSprite(url, el) {
+    var els = spriteWaiters.get(url);
+    if (!els) { els = []; spriteWaiters.set(url, els); }
+    if (els.indexOf(el) < 0) els.push(el);
+    if (spriteFetches.has(url)) return;
+    spriteFetches.set(url, 'pending');
+    try {
+      fetch(url, { credentials: 'include' }).then(function (r) {
+        return r && r.ok ? r.text() : null;
+      }).then(function (t) {
+        if (t) { spriteSources.set(url, t); spriteFetches.set(url, 'ok'); spriteLanded(url); }
+        else { spriteFetches.set(url, 'failed'); spriteWaiters.delete(url); }
+      }, function () { spriteFetches.set(url, 'failed'); spriteWaiters.delete(url); });
+    } catch (e) { spriteFetches.set(url, 'failed'); spriteWaiters.delete(url); }
+  }
+
+  function pendingSpriteFetches() {
+    var n = 0;
+    spriteFetches.forEach(function (v) { if (v === 'pending') n++; });
+    return n;
+  }
+
+  // spriteLanded hands each waiting use element its fragment, as an ordinary
+  // attribute op: a sprite that arrives late rides the same train as one that
+  // was cached at serialisation.
+  function spriteLanded(url) {
+    var els = spriteWaiters.get(url) || [];
+    spriteWaiters.delete(url);
+    var queued = false;
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var id = idOf.get(el);
+      if (id === undefined || !el.isConnected) continue;
+      var ref = useSpriteRef(el);
+      if (!ref || ref.url !== url) continue;
+      var markup = spriteMarkup(ref.url, ref.frag);
+      if (!markup) continue;
+      pendingOps.push([3, id, intern('data-sky-sprite'), intern(markup)]);
+      queued = true;
+    }
+    if (queued) scheduleFlush(false);
+  }
+
+  // familyHasFaceRule reports whether any readable stylesheet declares a
+  // @font-face for this family: such a face ships through the ordinary walk,
+  // and synthesizing a twin would be a second copy of the font.
+  function familyHasFaceRule(family) {
+    var want = String(family).toLowerCase().replace(/^["']|["']$/g, '');
+    var docs = [document];
+    observedDocs.forEach(function (d) { if (d !== document) docs.push(d); });
+    for (var d = 0; d < docs.length; d++) {
+      var sheets = null;
+      try { sheets = docs[d].styleSheets; } catch (e) { continue; }
+      if (!sheets) continue;
+      for (var i = 0; i < sheets.length; i++) {
+        var rules = null;
+        try { rules = sheets[i].cssRules; } catch (e) { continue; }
+        if (rules && faceRuleIn(rules, want)) return true;
+      }
+    }
+    return false;
+  }
+
+  function faceRuleIn(rules, want) {
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (r.type === 5) { // CSSRule.FONT_FACE_RULE
+        var fam = '';
+        try { fam = String(r.style.getPropertyValue('font-family')); } catch (e) { fam = ''; }
+        if (fam.toLowerCase().replace(/^["']|["']$/g, '') === want) return true;
+      } else if (r.cssRules && faceRuleIn(r.cssRules, want)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function scheduleCSS() {
@@ -3114,6 +3628,19 @@
           if (img) {
             pendingImages.push(img);
             val = 'skyhook://img/' + img.key;
+            // The size the description was made at, the way a snapshot ships
+            // it — and watched, so a box that settles later is re-stated.
+            if (img.aw) pendingOps.push([3, id, intern('width'), intern(String(img.aw))]);
+            if (img.ah) pendingOps.push([3, id, intern('height'), intern(String(img.ah))]);
+            watchImg(el, img.aw, img.ah);
+          }
+        } else if ((name === 'href' || name === 'xlink:href') && tagOf(el) === 'USE') {
+          var spr = useSpriteRef(el);
+          if (spr) {
+            val = '#' + spr.key;
+            var sm = spriteMarkup(spr.url, spr.frag);
+            if (sm) pendingOps.push([3, id, intern('data-sky-sprite'), intern(sm)]);
+            else requestSprite(spr.url, el);
           }
         } else if (name === 'style') {
           // A background a script assigns as it scrolls arrives here rather
@@ -3187,7 +3714,35 @@
       root.addEventListener('scroll', onScroll, { capture: true, passive: true });
       root.addEventListener('focusin', onFocus, { capture: true, passive: true });
       root.addEventListener('input', onInput, { capture: true, passive: true });
+      // Top-layer membership is rendering state no attribute carries (P-122):
+      // showPopover() and showModal() change what the reader sees without
+      // touching anything a MutationObserver reports. The events do not
+      // bubble, but capture reaches a non-bubbling event's target fine.
+      root.addEventListener('toggle', onTopLayer, { capture: true, passive: true });
+      root.addEventListener('close', onTopLayer, { capture: true, passive: true });
     }
+  }
+
+  // topLayerState names the top-layer membership an element holds: a shown
+  // popover, a modal dialog, or nothing. A non-modal open dialog is not here
+  // — its `open` attribute crosses like any attribute and renders in place.
+  function topLayerState(el) {
+    try { if (el.matches(':popover-open')) return 'popover'; } catch (e) { /* old engine */ }
+    try { if (el.matches(':modal')) return 'modal'; } catch (e) { /* old engine */ }
+    return '';
+  }
+
+  function onTopLayer(ev) {
+    var el = ev.target;
+    if (!el || el.nodeType !== KIND_ELEMENT) return;
+    var id = idOf.get(el);
+    if (id === undefined) return;
+    var state = topLayerState(el);
+    if ((topLayerShipped.get(el) || '') === state) return;
+    if (state) topLayerShipped.set(el, state);
+    else topLayerShipped.delete(el);
+    pendingOps.push([3, id, intern('data-sky-open'), state ? intern(state) : -1]);
+    scheduleFlush(false);
   }
 
   /*
@@ -3396,12 +3951,42 @@
       scrollX: globalThis.scrollX | 0, scrollY: globalThis.scrollY | 0,
       vw: globalThis.innerWidth | 0, vh: globalThis.innerHeight | 0,
       dpr: globalThis.devicePixelRatio || 1,
+      // The parser's own verdict, not the doctype's presence: an archaic
+      // doctype still parses into quirks mode, and the mirror has to render
+      // under the same rules the landside page really got (P-125).
+      quirks: document.compatMode === 'BackCompat',
+      icon: pageIconURL(),
       images: imgs,
       docHeight: Math.max(
         document.documentElement ? document.documentElement.scrollHeight : 0,
         document.body ? document.body.scrollHeight : 0)
     });
     pendingStrings = [];
+  }
+
+  /*
+   * pageIconURL names the page's favicon, for the tab strip (P-104). The
+   * smallest raster the page declares wins — the strip draws it at 14px, so
+   * a 16px icon beats the 512px maskable one — and a page that declares
+   * nothing gets the /favicon.ico every browser would have asked for.
+   */
+  function pageIconURL() {
+    if (!/^https?:$/.test(location.protocol)) return '';
+    var links = document.querySelectorAll('link[rel~="icon" i], link[rel="shortcut icon" i]');
+    var best = '', bestScore = -1;
+    for (var i = 0; i < links.length; i++) {
+      var href = links[i].getAttribute('href');
+      if (!href) continue;
+      var sizes = String(links[i].getAttribute('sizes') || '').toLowerCase();
+      var score = 2;
+      if (sizes.indexOf('16x16') >= 0) score = 5;
+      else if (sizes.indexOf('32x32') >= 0) score = 4;
+      else if (sizes === 'any') score = 3;
+      else if (sizes) score = 1; // declared, and declared big
+      if (score > bestScore) { bestScore = score; best = href; }
+    }
+    if (!best) best = '/favicon.ico';
+    return absolute(location.href, best);
   }
 
   function start() {
@@ -3417,12 +4002,40 @@
         if (syncTarget()) scheduleFlush(false);
       }, { passive: true });
     }
+    // Sheet sources up front, not on demand: healedRuleText needs a linked
+    // sheet's authored text the moment a lost var() shorthand shows up in
+    // the first CSS collect, and a repair that arrives as a follow-up update
+    // is a layout that changes shape once — measurably, and visibly when the
+    // shorthand was a border a paragraph wraps around. Prefetching alongside
+    // the page's own load usually wins the race; when it loses, the repair
+    // still ships as an ordinary update.
+    prefetchSheetSources();
     snapshot();
     // Late-loading webfont/CSS work and lazily-attached shadow roots settle
     // within a second or two; a follow-up CSS pass is cheaper than a resnapshot.
     setTimeout(scheduleCSS, 800);
     setTimeout(scheduleCSS, 2500);
     scheduleSweep(sweepEvery);
+  }
+
+  function pendingSheetFetches() {
+    var n = 0;
+    sheetSourceFetches.forEach(function (v) { if (v === 'pending') n++; });
+    return n;
+  }
+
+  function prefetchSheetSources() {
+    var sheets;
+    try { sheets = document.styleSheets; } catch (e) { return; }
+    for (var i = 0; i < sheets.length; i++) {
+      var href = null;
+      try { href = sheets[i].href; } catch (e) { href = null; }
+      if (!href) continue;
+      // Only sheets whose rules are readable can present a broken cssText;
+      // a cross-origin sheet throws before the question arises.
+      try { void sheets[i].cssRules; } catch (e) { continue; }
+      requestSheetSource(href);
+    }
   }
 
   // ------------------------------------------------------------- coordinates
@@ -3482,13 +4095,82 @@
     };
   }
 
+  /*
+   * The 32-code-unit window every fingerprint reports — exactly what docHash
+   * folds, except that a cut landing inside a surrogate pair backs off one
+   * unit: the Go writers cannot hold a lone surrogate in a string, and a
+   * list is only diffable if everyone cuts the same way. Twin of
+   * mirror.HashValueWindow (model.go) and the patcher's fingerprintWindow.
+   */
+  function fingerprintWindow(v) {
+    if (v.length <= 32) return v;
+    var end = 32;
+    var c = v.charCodeAt(31);
+    if (c >= 0xD800 && c <= 0xDBFF) end = 31;
+    return v.slice(0, end);
+  }
+
   // --------------------------------------------------------------- host API
+
+  // What the clipboard held last time anyone looked, so a probe can tell a
+  // fresh copy from what was already there (P-008). Unseeded until one read
+  // succeeds; the seeding read never relays, so whatever was on the OS
+  // clipboard before this document existed stays where it is. clipInputSeen
+  // marks the first replayed input: past it, only the input-boundary paths
+  // may seed — a background seeder landing after an input could seed with
+  // the very copy that input caused, and swallow it.
+  var clipLast = null;
+  var clipSeeded = false;
+  var clipInputSeen = false;
 
   var api = {
     version: 1,
     start: start,
     snapshot: function () { snapshotDone = false; started = false; start(); return true; },
     flush: function () { scheduleFlush(true); return true; },
+    /*
+     * clipProbe answers "did the page just put something new on the
+     * clipboard?" — a promise of { t: freshText } with t empty when nothing
+     * is fresh, or { e: reason } when the clipboard cannot be read at all.
+     * The host asks after replaying a click or a key, which is the only time
+     * the answer is the reader's business: a copy nobody caused is not
+     * relayed, and neither is anything predating the first successful read.
+     * The refusal's name travels because a machine that denies
+     * clipboard-read looks exactly like a timing miss otherwise; a failure
+     * never unseeds.
+     */
+    clipProbe: function () {
+      clipInputSeen = true;
+      var clip = navigator.clipboard;
+      if (!clip || !clip.readText) return Promise.resolve({ e: 'unavailable' });
+      return clip.readText().then(function (text) {
+        var fresh = clipSeeded && typeof text === 'string' &&
+          text !== '' && text !== clipLast;
+        clipSeeded = true;
+        clipLast = text;
+        return { t: fresh ? text.slice(0, 65536) : '' };
+      }, function (err) { return { e: (err && err.name) || 'rejected' }; });
+    },
+    /*
+     * clipSeed pins the relay's baseline at the input boundary: the host
+     * calls it just before replaying a click or a key, so "fresh" afterwards
+     * can only mean that input's own doing. This is what makes the baseline
+     * correct on builds where document-start reads are refused — the seeding
+     * used to happen whenever a read first succeeded, and on those builds
+     * that moment was the first probe after the click, which then swallowed
+     * the page's copy as its own baseline. Instant once seeded: one promise,
+     * no clipboard read.
+     */
+    clipSeed: function () {
+      clipInputSeen = true;
+      if (clipSeeded) return Promise.resolve(true);
+      var clip = navigator.clipboard;
+      if (!clip || !clip.readText) return Promise.resolve(false);
+      return clip.readText().then(function (text) {
+        if (!clipSeeded) { clipSeeded = true; clipLast = text; }
+        return true;
+      }, function () { return false; });
+    },
     node: function (id) { return byId.get(id) || null; },
     rect: function (id) {
       var n = byId.get(id);
@@ -3501,6 +4183,18 @@
       if (r.bottom < 0 || r.top > (globalThis.innerHeight || 0) ||
           r.right < 0 || r.left > (globalThis.innerWidth || 0)) {
         try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* older engines */ }
+        // The scroll that just happened is the host's own nudge, recorded so
+        // onScroll reports nothing — the same discipline as scrollProbe, and
+        // for the stakes see ownScroll's comment: this one echoed back as a
+        // scroll op and threw a reader to the bottom of the page they were
+        // reading, because a click on a below-the-fold element is exactly a
+        // scroll the client did not make. Ancestor scrollers too:
+        // scrollIntoView walks every scrollable box above the target.
+        ownScroll(0);
+        for (var sc = el.parentElement; sc; sc = sc.parentElement) {
+          var scid = idOf.get(sc);
+          if (scid) ownScroll(scid, sc);
+        }
         r = viewportRect(el);
       }
       return {
@@ -3614,6 +4308,63 @@
       // frame's field reports a failure that did not happen.
       return el.ownerDocument.activeElement === el;
     },
+    /*
+     * insertText types into a node from inside its own document, for the
+     * frames CDP typing cannot reach: Input.insertText goes to the
+     * browser's focused frame, and focusing an element from within an
+     * inlined frame's agent does not make that frame the focused one — so
+     * a keystroke aimed into a frame landed in the top document's body and
+     * vanished (the other half of P-102). Contenteditable goes through
+     * execCommand, which fires the input events a framework listens for;
+     * fields splice at the caret through the native setter.
+     */
+    /*
+     * fontFaceSeen is the landside browser telling the agent a web font
+     * finished loading (CSS.fontsUpdated), with the one fact JavaScript can
+     * never read back out of a FontFace: where it came from. A face the
+     * page registered through the FontFace API has no @font-face rule for
+     * the used-CSS walk to ship (P-003), so one is synthesized here and
+     * rides the ordinary pipeline — rewrite, bytes, blob resolution and
+     * all. A family a stylesheet already declares is left to that rule.
+     */
+    fontFaceSeen: function (family, src) {
+      if (!family || !src) return false;
+      if (syntheticFonts.has(family)) return true;
+      if (familyHasFaceRule(family)) return false;
+      syntheticFonts.set(family,
+        '@font-face{font-family:' + JSON.stringify(String(family)) +
+        ';src:url(' + JSON.stringify(String(src)) + ')}');
+      scheduleCSS();
+      return true;
+    },
+    insertText: function (id, text) {
+      var el = byId.get(id);
+      if (!el || !text) return false;
+      try { el.focus({ preventScroll: true }); } catch (e) { /* still typed below */ }
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        var proto = el.tagName === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        var cur = el.value || '';
+        var s = typeof el.selectionStart === 'number' ? el.selectionStart : cur.length;
+        var e2 = typeof el.selectionEnd === 'number' ? el.selectionEnd : s;
+        setter.call(el, cur.slice(0, s) + text + cur.slice(e2));
+        try { el.setSelectionRange(s + text.length, s + text.length); } catch (e) { /* number inputs */ }
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        return true;
+      }
+      if (el.isContentEditable) {
+        // execCommand reports failure by returning false, not by throwing —
+        // and it does fail, in a frame whose document does not hold the
+        // browser's focus. The fallback types the crude way: append and say so.
+        var done = false;
+        try { done = el.ownerDocument.execCommand('insertText', false, text); } catch (e) { done = false; }
+        if (done) return true;
+        el.textContent = (el.textContent || '') + text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
+        return true;
+      }
+      return false;
+    },
     setValue: function (id, value, start, end) {
       var el = byId.get(id);
       if (!el) return false;
@@ -3625,6 +4376,30 @@
           try { el.setSelectionRange(start, typeof end === 'number' ? end : start); } catch (e) { /* number inputs */ }
         }
         // Frameworks listen for input/change, not for value assignment.
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        return true;
+      }
+      if (el.tagName === 'SELECT') {
+        // The reader chose from the mirror's own popup; here the choice is
+        // applied as a value, exactly as typing is (P-101 — a select's
+        // change used to reach this page only inside a form submit). The
+        // native setter sidesteps any page-patched accessor, and a value
+        // no option answers to leaves the control unchanged, which is what
+        // the real popup would have done too. A multiple select crosses as
+        // its selected values joined with newlines, which no option value
+        // can contain.
+        if (el.multiple) {
+          var want = {};
+          var parts = String(value).split('\n');
+          for (var pi = 0; pi < parts.length; pi++) want[parts[pi]] = true;
+          for (var oi = 0; oi < el.options.length; oi++) {
+            el.options[oi].selected = !!want[el.options[oi].value];
+          }
+        } else {
+          var sel = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+          sel.call(el, value);
+        }
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         return true;
@@ -3663,6 +4438,26 @@
     // mapping is by range rather than by document height so that the top stays
     // the top and, more importantly, the bottom stays the bottom — an infinite
     // list only fetches more when the page is genuinely at its end.
+    /*
+     * scrollAnchor is the exact version of scrollProbe: put the element the
+     * reader has at their viewport top at the same offset here (P-020). The
+     * two documents differ in height — substituted fonts alone see to that —
+     * so a fraction lands a lazy-load sentinel a viewport early or late; the
+     * shared element lands it exactly. The fraction still travels, for the
+     * element a mutation has since removed.
+     */
+    scrollAnchor: function (id, anchorY, fraction) {
+      var el = byId.get(id);
+      if (el && el.getBoundingClientRect && el.isConnected) {
+        try {
+          var top = el.getBoundingClientRect().top + (globalThis.scrollY || 0);
+          globalThis.scrollTo({ top: Math.max(0, Math.round(top - anchorY)), behavior: 'instant' });
+          ownScroll(0);
+          return true;
+        } catch (e) { /* fall through to the fraction */ }
+      }
+      return api.scrollProbe(fraction);
+    },
     scrollProbe: function (fraction) {
       var h = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
       var range = Math.max(0, h - (globalThis.innerHeight || 800));
@@ -3728,6 +4523,10 @@
         var s = new CSSStyleSheet();
         s.replaceSync(text);
         recoveredSheets.set(href, s);
+        // The authored text doubles as the repair source for cssText's
+        // lost var() shorthands (healedRuleText).
+        sheetSources.set(href, text);
+        if (constructedSourceTexts) constructedSourceTexts.set(s, text);
         delete blockedSheets[href];
         scheduleCSS();
         return true;
@@ -3756,7 +4555,10 @@
         pendingOps: pendingOps.length,
         pendingImages: pendingImages.length,
         flushPending: flushTimer !== null,
-        cssPending: cssTimer !== null,
+        // Pending covers the timer and any sheet-source fetch the var()
+        // shorthand repair kicked off: either one means the stylesheet the
+        // client holds is about to change.
+        cssPending: cssTimer !== null || pendingSheetFetches() > 0 || pendingSpriteFetches() > 0,
         // What the used-CSS filter did on its last pass. A page missing its
         // styling and a page whose rules were all rejected look the same from
         // the client; these two numbers tell them apart.
@@ -3824,7 +4626,13 @@
         var isText = node.nodeType === KIND_TEXT;
         var v = isText ? (node.nodeValue || '')
           : (node.tagName ? node.tagName.toLowerCase() : '');
-        out.push([id, node.nodeType, v.slice(0, 32),
+        // An adopted sub-frame's document serialises as a fragment (the
+        // wire's KindFragment, 11); reporting its raw nodeType (9) made the
+        // three fingerprint lists disagree about the same node (P-128). The
+        // truncation backs off a split surrogate pair for the same reason:
+        // every writer must cut the same string the same way.
+        var kind = node.nodeType === 9 ? 11 : node.nodeType;
+        out.push([id, kind, fingerprintWindow(v),
           node.nodeType === KIND_ELEMENT ? flagsOf(node) : 0]);
       }
       return { total: ids.length, truncated: ids.length > out.length, nodes: out };
@@ -4004,6 +4812,32 @@
   };
 
   Object.defineProperty(globalThis, '__skyhook', { value: api, configurable: true });
+
+  // Baseline the clipboard now, so the first probe after an input cannot
+  // mistake what was already there for a copy the page just made (P-008). A
+  // failed read leaves it unseeded, and then the first probe that can read
+  // seeds instead of relaying — the invariant lives in clipProbe.
+  //
+  // Retried, because the first read can lose for reasons that pass: the
+  // per-origin permission grant lands moments around the document on some
+  // Chrome builds, and focus arrives when the tab does. A seeder that gave up
+  // after one refusal left the first probe after the reader's click to
+  // swallow the page's first copy as its baseline — the relay's own
+  // bookkeeping eating the one thing it exists to deliver.
+  (function seedClipboard(tries) {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) return;
+      navigator.clipboard.readText().then(function (text) {
+        // Never over an input's head: past the first replayed input, a late
+        // success here could be reading the very copy that input caused.
+        if (!clipSeeded && !clipInputSeen) { clipSeeded = true; clipLast = text; }
+      }, function () {
+        if (tries > 0 && !clipSeeded && !clipInputSeen) {
+          setTimeout(function () { seedClipboard(tries - 1); }, 700);
+        }
+      });
+    } catch (e) { /* no clipboard in this context */ }
+  })(6);
 
   function startWhenReady() {
     if (document.readyState === 'loading') {

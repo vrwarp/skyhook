@@ -544,6 +544,14 @@ func (m *Model) AncestorWithAttr(id int64, attr string) bool {
 
 // Hash fingerprints the replica with the same algorithm the agent uses, so a
 // mismatch means genuine divergence rather than a hashing difference.
+//
+// "Same algorithm" is a cross-language contract with sharp edges, and this
+// implementation reproduces JavaScript's exactly (P-124 was the lesson): the
+// agent folds `v.charCodeAt(i) & 0xff` for i < 32, which is the low byte of
+// each UTF-16 *code unit*, 32 of them. Iterating runes and byte offsets got
+// every ASCII page right and silently diverged on the first no-break space,
+// em dash or emoji — and healthy mirrors of most real pages reported
+// divergence.
 func (m *Model) Hash() uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -565,21 +573,67 @@ func (m *Model) Hash() uint64 {
 		}
 		h ^= uint32(id & 0xff)
 		h *= 16777619
-		for i, r := range v {
-			if i >= 32 {
-				break
-			}
-			// Element names travel in the case the DOM uses — `clipPath` is not
-			// `clippath` in SVG — but the agent's fingerprint lowercases them,
-			// and a fingerprint that disagrees resyncs the page forever.
-			if lower && r >= 'A' && r <= 'Z' {
-				r += 'a' - 'A'
-			}
-			h ^= uint32(r) & 0xff
-			h *= 16777619
-		}
+		h = foldHashValue(h, v, lower)
 	}
 	return uint64(h)
+}
+
+// foldHashValue folds a node value the way the agent and patcher do:
+// UTF-16 code units, at most 32 of them, low byte each. Element names are
+// lowercased ASCII-only — they travel in DOM case because `clipPath` is not
+// `clippath` in SVG, but every hasher lowercases before folding. (JS's
+// toLowerCase also lowers non-ASCII letters; no valid element name contains
+// an uppercase one, so the difference cannot arise from a real document.)
+// HashValueWindow clips a value to the window the document hash folds — 32
+// UTF-16 code units — for the fingerprints that report exactly what the hash
+// saw. One divergence from a literal JavaScript v.slice(0, 32): when the
+// 32nd unit would be half a surrogate pair, the cut backs off one unit
+// rather than emitting the lone surrogate, which a Go string cannot hold
+// and JSON decoders mangle. Every fingerprint writer cuts this same way.
+func HashValueWindow(v string) string {
+	units := 0
+	for i, r := range v {
+		w := 1
+		if r > 0xFFFF {
+			w = 2
+		}
+		if units+w > 32 {
+			return v[:i]
+		}
+		units += w
+	}
+	return v
+}
+
+func foldHashValue(h uint32, v string, lower bool) uint32 {
+	units := 0
+	for _, r := range v {
+		if units >= 32 {
+			break
+		}
+		if lower && r >= 'A' && r <= 'Z' {
+			r += 'a' - 'A'
+		}
+		if r > 0xFFFF {
+			// A surrogate pair: two units, folded as JavaScript sees them.
+			r -= 0x10000
+			hi, lo := 0xD800+(r>>10), 0xDC00+(r&0x3FF)
+			h ^= uint32(hi) & 0xff
+			h *= 16777619
+			units++
+			if units >= 32 {
+				break
+			}
+			h ^= uint32(lo) & 0xff
+			h *= 16777619
+			units++
+			continue
+		}
+		h ^= uint32(r) & 0xff
+		h *= 16777619
+		units++
+	}
+	return h
 }
 
 func escapeHTML(s string) string {

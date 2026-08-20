@@ -69,6 +69,12 @@ type Session struct {
 	events *EventLog
 	// capture holds the one bundle in flight, if any.
 	capture captureSlot
+
+	// dlMu guards the download fetch streams this client has asked for, keyed
+	// by download id; each entry is the cancel that "stop" pulls. The streams
+	// themselves also watch closed. See downloads.go.
+	dlMu    sync.Mutex
+	dlSends map[string]context.CancelFunc
 }
 
 type connHolder struct {
@@ -947,6 +953,87 @@ func (s *Session) OpenTab(ctx context.Context, n protocol.Navigate) (uint32, err
 	return id, nil
 }
 
+/*
+PopupOpened implements mirror.Emitter: a page opened a window of its own —
+window.open, or a click on target=_blank — and the browser attached it to the
+opener's connection, held at its first instruction (P-109).
+
+The window used to be released and forgotten: it rendered on the VPS, the
+page believed it opened, and no client tab ever showed it. Adopted, it is an
+ordinary tab that happens to arrive with its page already made — OpenTab
+without the NewPage — and the client's strip grows a row the same way it does
+for any server-announced tab. The reader is not switched to it: the shell
+keeps its own focus, and a row appearing is the honest version of a window
+opening somewhere the reader cannot see.
+*/
+func (s *Session) PopupOpened(opener uint32, targetID, url string) {
+	life, kill := context.WithCancel(context.Background())
+	s.mu.Lock()
+	id := s.nextTab
+	s.nextTab++
+	vp := s.viewport
+	ts := &tabState{
+		openURL: url,
+		ring:    NewRing(s.mgr.opts.RingBytes),
+		journal: NewJournal(s.mgr.opts.Capture.JournalBytes),
+		work:    make(chan tabJob, tabDepth),
+		life:    life,
+		kill:    kill,
+	}
+	s.tabs[id] = ts
+	s.mu.Unlock()
+	go s.tabLoop(id, ts)
+	s.events.Add("tab-open", id, map[string]any{"url": url, "opener": opener})
+
+	st := protocol.TabState{URL: url, Loading: true}
+	if url == "" {
+		st.URL = "about:blank"
+	}
+	s.Send(protocol.ChCtrl, protocol.TypeTabState, id, st)
+
+	_ = s.submit(id, tabJob{what: "open", run: func(ctx context.Context) error {
+		return s.adoptTab(ctx, id, ts, vp, targetID)
+	}})
+}
+
+// adoptTab is buildTab for a page that already exists: a popup the browser
+// recognised by its opener. The document races the attachment — it may be
+// half parsed or fully loaded by the time the mirror is installed — so the
+// tab is told it was adopted, which snapshots a document that would otherwise
+// never announce itself.
+func (s *Session) adoptTab(ctx context.Context, id uint32, ts *tabState, vp protocol.Viewport, targetID string) error {
+	sess, err := s.mgr.browser.Attach(ctx, targetID)
+	if err != nil {
+		s.openFailed(id, ts, err)
+		return err
+	}
+	t, err := mirror.NewTab(ctx, id, s.mgr.browser, sess, s, mirror.Options{
+		Viewport: vp, Logger: s.log, UserAgent: s.mgr.opts.UserAgent,
+		AcceptLanguage: s.mgr.opts.AcceptLanguage,
+		Blocked:        s.mgr.opts.Blocked,
+		StreamEvery:    s.mgr.opts.CanvasStream,
+		UploadDir:      s.mgr.opts.UploadDir,
+	})
+	if err != nil {
+		s.openFailed(id, ts, err)
+		return err
+	}
+	t.Adopted(ctx)
+
+	s.mu.Lock()
+	live := s.tabs[id] == ts
+	if live {
+		ts.tab = t
+	}
+	s.mu.Unlock()
+	if !live {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = t.Close(closeCtx)
+		cancel()
+	}
+	return nil
+}
+
 // buildTab makes the page for an already-announced tab. It runs as that tab's
 // first job, so nothing else the tab is asked to do can overtake it.
 func (s *Session) buildTab(ctx context.Context, id uint32, ts *tabState, vp protocol.Viewport, url string) error {
@@ -960,6 +1047,7 @@ func (s *Session) buildTab(ctx context.Context, id uint32, ts *tabState, vp prot
 		AcceptLanguage: s.mgr.opts.AcceptLanguage,
 		Blocked:        s.mgr.opts.Blocked,
 		StreamEvery:    s.mgr.opts.CanvasStream,
+		UploadDir:      s.mgr.opts.UploadDir,
 	})
 	if err != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1879,6 +1967,27 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return err
 		}
 		return s.CapturePart(part)
+	case protocol.TypeDownloadCmd:
+		var cmd protocol.DownloadCmd
+		if err := f.DecodeBody(&cmd); err != nil {
+			return err
+		}
+		return s.downloadCmd(cmd)
+	case protocol.TypeUploadPart:
+		var part protocol.UploadPart
+		if err := f.DecodeBody(&part); err != nil {
+			return err
+		}
+		// On the tab's own queue, like input: parts must land in order behind
+		// one another, and the Done part ends in a CDP call the connection's
+		// read loop must not wait on.
+		return s.submit(f.Tab, tabJob{what: "upload", run: func(ctx context.Context) error {
+			t, err := s.page(f.Tab)
+			if err != nil {
+				return err
+			}
+			return t.UploadPart(ctx, &part)
+		}})
 	case protocol.TypeKill:
 		return s.Kill(ctx)
 	case protocol.TypeError:

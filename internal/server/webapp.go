@@ -55,7 +55,13 @@ func (w *webapp) csp() string {
 		"script-src 'self'",
 		"style-src 'self' 'unsafe-inline'",
 		"img-src 'self' blob: data:",
-		"font-src 'self'",
+		// blob: for the same reason img-src has it: the client rebuilds a
+		// page's @font-face sources from bytes it fetched over the protocol
+		// (host.ts resolves src to object URLs), and font-src 'self' alone
+		// silently refused every one of them at render (P-115) — the
+		// stylesheet loaded, the face registered, and the glyphs drew in a
+		// substitute while the console counted violations.
+		"font-src 'self' blob:",
 		"worker-src 'self'",
 		"manifest-src 'self'",
 		// The mirror frames are same-origin about:blank documents.
