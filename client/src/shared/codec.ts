@@ -15,9 +15,9 @@ import { decode as cborDecode, Encoder } from 'cbor-x';
 import { decompress as zstdDecompress } from 'fzstd';
 
 import {
-  CaptureDone, CaptureRequest, Channel, F, Frame, FrameType, ImageMeta, MirrorNode, Mutation,
-  MutationOp, NodeKind, OpCode, Snapshot, Stats, TabState, Viewport, Welcome, AdapterRecord,
-  TabRef,
+  CaptureDone, CaptureRequest, Channel, Download, DownloadPart, F, Frame, FrameType, ImageMeta,
+  MirrorNode, Mutation, MutationOp, NodeKind, OpCode, Snapshot, Stats, TabState, Viewport,
+  Welcome, AdapterRecord, TabRef,
 } from './protocol.js';
 
 export const CODEC_RAW = 0;
@@ -343,6 +343,31 @@ export function decodeCaptureDone(body: unknown): CaptureDone {
   };
 }
 
+export function decodeDownload(body: unknown): Download {
+  const f = bodyFields(body);
+  return {
+    id: str(f, F.download.id),
+    url: str(f, F.download.url),
+    name: str(f, F.download.name),
+    total: num(f, F.download.total),
+    received: num(f, F.download.received),
+    state: (str(f, F.download.state) || 'landing') as Download['state'],
+  };
+}
+
+export function decodeDownloadPart(body: unknown): DownloadPart {
+  const f = bodyFields(body);
+  const data = f?.[F.downloadPart.data];
+  return {
+    id: str(f, F.downloadPart.id),
+    off: num(f, F.downloadPart.off),
+    data: data instanceof Uint8Array ? data : undefined,
+    done: bool(f, F.downloadPart.done),
+    size: num(f, F.downloadPart.size),
+    error: str(f, F.downloadPart.error),
+  };
+}
+
 // --------------------------------------------------------------- body builders
 
 export function helloBody(opts: {
@@ -531,6 +556,16 @@ export function captureRequestBody(o: { reason: string; note?: string }): Map<nu
  * `tagUint8Array: false`, so a Uint8Array encodes as a plain CBOR byte string,
  * which is what the Go decoder expects for a `[]byte` field.
  */
+export function downloadCmdBody(o: {
+  id: string; cmd: 'fetch' | 'stop' | 'discard'; offset?: number;
+}): Map<number, unknown> {
+  const m = new Map<number, unknown>();
+  m.set(F.downloadCmd.id, o.id);
+  m.set(F.downloadCmd.cmd, o.cmd);
+  if (o.offset) m.set(F.downloadCmd.offset, safeInt(o.offset));
+  return m;
+}
+
 export function capturePartBody(o: {
   id: string; name?: string; data?: Uint8Array; more?: boolean; done?: boolean; error?: string;
 }): Map<number, unknown> {

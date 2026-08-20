@@ -28,10 +28,11 @@ import {
   verdict,
 } from './upgrade.js';
 import type {
-  AdapterRecord, CaptureDone, CaptureRequest, ImageMeta, Mutation, Refusal, Snapshot, Stats,
-  TabState, Viewport, Welcome,
+  AdapterRecord, CaptureDone, CaptureRequest, Download, ImageMeta, Mutation, Refusal, Snapshot,
+  Stats, TabState, Viewport, Welcome,
 } from '../shared/protocol.js';
 import { PROTOCOL_VERSION } from '../shared/protocol.js';
+import * as transfers from './transfers.js';
 
 const store = new Store();
 const hosts = new Map<number, MirrorHost>();
@@ -431,11 +432,116 @@ function handle(kind: string, args: Record<string, unknown>): void {
       }
       break;
     }
+    case 'download': {
+      const d = args.download as unknown as Download;
+      const before = transfers.ingest(d);
+      if (d.state !== before) announceTransfer(d, before);
+      renderTransfers();
+      break;
+    }
+    case 'downloadProgress':
+      transfers.progressed(String(args.id), Number(args.received));
+      renderTransfers();
+      break;
+    case 'downloadDone': {
+      const t = transfers.landed(String(args.id), args.data as Uint8Array, Number(args.size));
+      if (t) {
+        toast(`“${t.info.name}” is on this device.`,
+          { label: 'Save', run: () => saveTransfer(t.info.id) });
+      }
+      renderTransfers();
+      break;
+    }
+    case 'downloadError': {
+      const t = transfers.failed(String(args.id), String(args.error ?? ''));
+      if (t) toast(`Fetching “${t.info.name}” stopped: ${t.error}`);
+      renderTransfers();
+      break;
+    }
     case 'log':
       log(String(args.message ?? ''));
       break;
     default:
       break;
+  }
+}
+
+// ------------------------------------------------------------------ transfers
+
+/**
+ * The toasts that make a download visible without the panel being open: the
+ * landing (which is the moment the old behavior showed nothing at all), the
+ * file being ready with its price, and the failure. Each transition once.
+ */
+function announceTransfer(d: Download, before: string): void {
+  switch (d.state) {
+    case 'landing':
+      if (before === '') {
+        toast(`Downloading “${d.name}” on your server…`,
+          { label: 'Transfers', run: () => openPanel('transfers') });
+      }
+      break;
+    case 'ready': {
+      const size = transfers.fmtSize(d.total);
+      toast(size
+        ? `“${d.name}” is on your server (${size}).`
+        : `“${d.name}” is on your server.`,
+      { label: size ? `Fetch (${size})` : 'Fetch', run: () => fetchTransfer(d.id) });
+      break;
+    }
+    case 'failed':
+      toast(`“${d.name}” failed to download on the server.`);
+      break;
+    default:
+      break;
+  }
+}
+
+const transferActions: transfers.TransferActions = {
+  fetch: (id) => fetchTransfer(id),
+  stop: (id) => {
+    send('downloadStop', { id });
+    transfers.stopped(id);
+    renderTransfers();
+  },
+  discard: (id) => {
+    send('downloadDiscard', { id });
+  },
+  save: (id) => saveTransfer(id),
+};
+
+function fetchTransfer(id: string): void {
+  if (!connected) {
+    toast('Offline: fetching a file needs the link. It stays safe on the server.');
+    return;
+  }
+  transfers.fetching(id);
+  send('downloadFetch', { id });
+  renderTransfers();
+}
+
+/**
+ * Hands a fetched file to the device's own downloads, named what the origin
+ * called it. The Blob is this page's memory, so the reader is told to save
+ * rather than left assuming the shell is an archive.
+ */
+function saveTransfer(id: string): void {
+  const t = transfers.get(id);
+  if (!t?.blob) return;
+  const url = URL.createObjectURL(t.blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = t.info.name || 'download';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+/** Redraws the panel body when it is showing transfers. */
+function renderTransfers(): void {
+  if (!el.panel.hidden && panelView === 'transfers') {
+    transfers.render(el.panelBody, transferActions);
   }
 }
 
@@ -1564,6 +1670,14 @@ function shellMenu(): MenuGroups {
     disabled: !visits.count(),
     run: () => clearHistory(),
   }]);
+  // Files the server is holding, and the way back to one whose toast has
+  // already gone. Disabled while there is nothing: an empty list teaches less
+  // than a menu entry that comes alive when a download exists.
+  groups.push([{
+    label: 'Transfers…',
+    disabled: !transfers.any(),
+    run: () => showPanel('transfers'),
+  }]);
   // Last, and always present: the one entry that works with the link down, and
   // the only way to find out that the app itself is behind the server. It says
   // which of the two it is in the label, because a reader who has an update
@@ -2100,11 +2214,11 @@ function shellReport(): Record<string, unknown> {
 // read beside a page rather than instead of it, so they share the strip of
 // screen that is already the cost of not being the page.
 
-type PanelView = 'chat' | 'marks' | 'tabs';
+type PanelView = 'chat' | 'marks' | 'tabs' | 'transfers';
 let panelView: PanelView = 'chat';
 
 const PANEL_TITLES: Record<PanelView, string> = {
-  chat: 'Chat', marks: 'Saved pages', tabs: 'Tabs',
+  chat: 'Chat', marks: 'Saved pages', tabs: 'Tabs', transfers: 'Transfers',
 };
 
 /** Opens a view, or closes the panel if that view is already the one showing. */
@@ -2131,6 +2245,8 @@ function openPanel(view: PanelView): void {
   } else if (view === 'tabs') {
     el.panelBody.appendChild(tabList.root);
     renderTabList();
+  } else if (view === 'transfers') {
+    transfers.render(el.panelBody, transferActions);
   } else {
     el.panelBody.appendChild(marksPanel.root);
     marksPanel.render(bookmarks.all(), connected);

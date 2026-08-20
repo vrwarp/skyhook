@@ -288,11 +288,13 @@
     {
       "id": "P-108",
       "title": "Downloads are unhandled: a download link writes a file onto the VPS and the reader sees nothing happen",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "internal/mirror/tab.go"
+        "internal/session/downloads.go",
+        "internal/cdp/browser.go",
+        "client/src/app/transfers.ts"
       ],
-      "noPage": "clicking a download link landside leaves a file on the test host and no observable mirror change to assert on; needs Browser.setDownloadBehavior wiring first"
+      "notes": "a download now lands on the server first — Browser.setDownloadBehavior allowAndName into a directory of its own, each file named by GUID — and every state change is announced to every session as TypeDownload: the shelf belongs to the user, not a tab. The bytes cross the link only on an explicit, size-labelled ask (TypeDownloadCmd fetch), chunked as TypeDownloadPart on bulk where they cannot head-of-line-block a page, resumable from any offset, stoppable mid-flight; discard deletes the landside copy and the kill switch wipes the directory. The client toasts the landing, prices the fetch, and holds the file in a Transfers panel until saved. Chrome UI is invisible to the mirror probes, so the pins are e2e: TestDownloadsLandAndCrossOnAsk (protocol, both legs, second device, resume, refusal, discard) and TestPWADownloadArrivesOnAsk (the real client end to end)"
     },
     {
       "id": "P-109",

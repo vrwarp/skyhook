@@ -253,6 +253,32 @@ body {
 
 .marks-empty { color: var(--muted); padding: 8px; margin: 0; }
 
+/* --- transfers (downloads, P-108) -------------------------------------- */
+
+.transfer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-radius: 6px;
+}
+
+.transfer + .transfer { border-top: 1px solid #1f2937; }
+.transfer-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transfer-state { color: var(--muted); font-size: 11px; }
+.transfer-actions { display: flex; gap: 12px; }
+
+.transfer-act {
+  background: transparent;
+  color: var(--accent);
+  border: 0;
+  padding: 2px 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.transfer-empty { color: var(--muted); padding: 8px; margin: 0; }
+
 .marks-foot {
   display: flex;
   align-items: center;

@@ -88,6 +88,15 @@ type Manager struct {
 	// would fill is shared.
 	captureMu       sync.Mutex
 	lastAutoCapture time.Time
+
+	// dlMu guards the download shelf — manager property like the capture rate
+	// limit, because the disk the files land on is shared. downloads is nil
+	// until EnableDownloads has run, which is what "downloads are off" means.
+	// See downloads.go.
+	dlMu        sync.Mutex
+	downloads   map[string]*download
+	dlOrder     []string
+	downloadDir string
 }
 
 // NewManager builds the manager around an already-launched browser.
@@ -197,6 +206,10 @@ func (m *Manager) Serve(conn transport.Conn) {
 		welcome.Caps = append(welcome.Caps, "zstd")
 	}
 	sess.Send(protocol.ChCtrl, protocol.TypeWelcome, 0, welcome)
+
+	// The download shelf is server state, so whatever landed while this client
+	// was away is told now rather than replayed: one frame per file.
+	m.sendDownloads(sess)
 
 	// Replay input the client queued while it was offline, before any resync,
 	// so the page state the client resyncs to already contains their typing.
@@ -345,6 +358,9 @@ func (m *Manager) WipeProfile(ctx context.Context) error {
 	if err := m.browser.Close(); err != nil {
 		m.log.Warn("browser close during wipe", "err", err)
 	}
+	// The shelf goes with the profile: its files were fetched with the same
+	// cookies the wipe exists to destroy.
+	m.WipeDownloads()
 	entries, err := os.ReadDir(m.opts.ProfileDir)
 	if err != nil {
 		return err

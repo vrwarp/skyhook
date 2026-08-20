@@ -37,6 +37,10 @@ type Client struct {
 	epochs    map[uint32]uint64
 	images    map[string]protocol.ImageMeta
 	imageData map[string][]byte
+	// downloads is the server's shelf as announced; dlData holds the bytes of
+	// any fetch in progress, assembled from contiguous parts.
+	downloads map[string]protocol.Download
+	dlData    map[string]*dlBuffer
 	adapter   []protocol.AdapterRecord
 	stats     protocol.Stats
 	sessionID string
@@ -105,6 +109,8 @@ func Attach(ctx context.Context, conn transport.Conn, opts Options) (*Client, er
 		seqs:   map[uint32]uint64{}, epochs: map[uint32]uint64{},
 		images:    map[string]protocol.ImageMeta{},
 		imageData: map[string][]byte{},
+		downloads: map[string]protocol.Download{},
+		dlData:    map[string]*dlBuffer{},
 		events:    make(chan Event, 256), closed: make(chan struct{}),
 	}
 	caps := []string{}
@@ -379,12 +385,116 @@ func (c *Client) handle(f *protocol.Frame) {
 			c.log.Printf("capture %s written: %s (%d bytes)", done.ID, done.Path, done.Bytes)
 		}
 		c.emit(Event{Kind: "capture"})
+	case protocol.TypeDownload:
+		var d protocol.Download
+		if err := f.DecodeBody(&d); err != nil {
+			return
+		}
+		c.mu.Lock()
+		c.downloads[d.ID] = d
+		c.mu.Unlock()
+		c.emit(Event{Kind: "download"})
+	case protocol.TypeDownloadPart:
+		var p protocol.DownloadPart
+		if err := f.DecodeBody(&p); err != nil {
+			return
+		}
+		c.mu.Lock()
+		buf := c.dlData[p.ID]
+		if buf == nil {
+			buf = &dlBuffer{next: -1}
+			c.dlData[p.ID] = buf
+		}
+		switch {
+		case p.Err != "":
+			buf.err = p.Err
+		case p.Done:
+			buf.done, buf.size = true, p.Size
+		default:
+			if buf.next == -1 {
+				buf.next = p.Off // the stream starts wherever the fetch asked
+			}
+			if p.Off == buf.next {
+				buf.data = append(buf.data, p.Data...)
+				buf.next += int64(len(p.Data))
+			} else {
+				// A hole cannot be repaired by later parts; remember it as
+				// the error a test will read.
+				buf.err = fmt.Sprintf("part at %d against %d expected", p.Off, buf.next)
+			}
+		}
+		c.mu.Unlock()
+		c.emit(Event{Kind: "downloadpart"})
 	case protocol.TypeError:
 		var e protocol.ErrorBody
 		_ = f.DecodeBody(&e)
 		c.log.Printf("server error: %s: %s", e.Code, e.Message)
 		c.emit(Event{Kind: "error", Err: fmt.Errorf("%s: %s", e.Code, e.Message)})
 	}
+}
+
+// dlBuffer assembles one fetched download from its parts. next is the offset
+// the following part must carry, -1 until the first part names where the
+// stream starts.
+type dlBuffer struct {
+	data []byte
+	next int64
+	done bool
+	size int64
+	err  string
+}
+
+// Downloads reports the server's download shelf as last announced.
+func (c *Client) Downloads() map[string]protocol.Download {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]protocol.Download, len(c.downloads))
+	for k, v := range c.downloads {
+		out[k] = v
+	}
+	return out
+}
+
+// FetchDownload asks for a download's bytes from offset onward.
+func (c *Client) FetchDownload(id string, offset int64) error {
+	return c.send(protocol.ChCtrl, protocol.TypeDownloadCmd, 0,
+		protocol.DownloadCmd{ID: id, Cmd: "fetch", Offset: offset})
+}
+
+// StopDownload ends a fetch in flight, keeping what has arrived.
+func (c *Client) StopDownload(id string) error {
+	return c.send(protocol.ChCtrl, protocol.TypeDownloadCmd, 0,
+		protocol.DownloadCmd{ID: id, Cmd: "stop"})
+}
+
+// DiscardDownload deletes a download from the server's shelf.
+func (c *Client) DiscardDownload(id string) error {
+	return c.send(protocol.ChCtrl, protocol.TypeDownloadCmd, 0,
+		protocol.DownloadCmd{ID: id, Cmd: "discard"})
+}
+
+// DownloadData reports the assembled bytes of a fetch and whether the stream
+// said it was done.
+func (c *Client) DownloadData(id string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	buf := c.dlData[id]
+	if buf == nil {
+		return nil, false
+	}
+	out := make([]byte, len(buf.data))
+	copy(out, buf.data)
+	return out, buf.done
+}
+
+// DownloadErr reports the error a fetch stream ended with, if any.
+func (c *Client) DownloadErr(id string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if buf := c.dlData[id]; buf != nil {
+		return buf.err
+	}
+	return ""
 }
 
 // Capture asks the server for a diagnostic bundle.

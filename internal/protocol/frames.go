@@ -133,6 +133,12 @@ const (
 	TypeCapture     Type = 27 // both ways: ask for a diagnostic capture / for the client's half
 	TypeCapturePart Type = 28 // client -> server, one plane-side artifact (or a chunk of one)
 	TypeCaptureDone Type = 29 // server -> client, the bundle is written (or it failed)
+	// Downloads (P-108). A download lands on the server first — at datacenter
+	// speed, safely — and crosses the link only when the reader asks, with
+	// the size in front of them. See DESIGN.md's cost-labelled-ask grammar.
+	TypeDownload     Type = 30 // server -> client, a download's state
+	TypeDownloadCmd  Type = 31 // client -> server, fetch or discard one
+	TypeDownloadPart Type = 32 // server -> client on bulk, one chunk of the bytes
 )
 
 // Frame is the envelope. Body is a CBOR-encoded, type-specific payload; keeping
@@ -545,6 +551,56 @@ type ScrollEvent struct {
 	// landside document no longer has.
 	Anchor  int64 `cbor:"9,keyasint,omitempty"`
 	AnchorY int   `cbor:"10,keyasint,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// download bodies (P-108)
+
+// Download is one landside download's state, sent whenever it changes. The
+// announcement is the point: today's alternative was a file appearing on the
+// VPS with nobody told.
+type Download struct {
+	ID  string `cbor:"1,keyasint"`
+	URL string `cbor:"2,keyasint,omitempty"`
+	// Name is the filename the origin suggested, relayed for display and for
+	// the eventual save. The server stores the bytes under the ID.
+	Name string `cbor:"3,keyasint,omitempty"`
+	// Total is the size when known; 0 with State "landing" means the origin
+	// did not say, and the honest display counts Received instead.
+	Total    int64 `cbor:"4,keyasint,omitempty"`
+	Received int64 `cbor:"5,keyasint,omitempty"`
+	// State: "landing" (arriving on the server), "ready" (safe landside,
+	// fetchable), "failed", or "gone" (discarded or wiped).
+	State string `cbor:"6,keyasint,omitempty"`
+}
+
+// Download states.
+const (
+	DownloadLanding = "landing" // arriving on the server
+	DownloadReady   = "ready"   // safe landside, fetchable
+	DownloadFailed  = "failed"  // the landside download was cancelled or broke
+	DownloadGone    = "gone"    // discarded or wiped
+)
+
+// DownloadCmd asks for one download's bytes, for the stream to stop, or for
+// the file to be deleted.
+type DownloadCmd struct {
+	ID  string `cbor:"1,keyasint"`
+	Cmd string `cbor:"2,keyasint"` // "fetch" | "stop" | "discard"
+	// Offset resumes a fetch partway: the client says how much it already
+	// holds, and the stream starts there.
+	Offset int64 `cbor:"3,keyasint,omitempty"`
+}
+
+// DownloadPart is one chunk of a fetched download, on the bulk channel where
+// it cannot head-of-line-block a page.
+type DownloadPart struct {
+	ID   string `cbor:"1,keyasint"`
+	Off  int64  `cbor:"2,keyasint,omitempty"`
+	Data []byte `cbor:"3,keyasint,omitempty"`
+	Done bool   `cbor:"4,keyasint,omitempty"`
+	Size int64  `cbor:"5,keyasint,omitempty"`
+	Err  string `cbor:"6,keyasint,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

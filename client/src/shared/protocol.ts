@@ -48,6 +48,11 @@ export enum FrameType {
   Capture = 27,
   CapturePart = 28,
   CaptureDone = 29,
+  // Downloads (P-108): announced when they land on the server, fetched over
+  // the link only on the reader's explicit, size-labelled ask.
+  Download = 30,
+  DownloadCmd = 31,
+  DownloadPart = 32,
 }
 
 /** Why a diagnostic capture was taken. Matches the server's constants. */
@@ -363,6 +368,30 @@ export interface CaptureDone {
   error: string;
 }
 
+/**
+ * One landside download's state (P-108). "landing" while the server is still
+ * receiving it, "ready" once its bytes are fetchable, "failed" if the landside
+ * download broke, "gone" once discarded or wiped.
+ */
+export interface Download {
+  id: string;
+  url: string;
+  name: string;
+  total: number;
+  received: number;
+  state: 'landing' | 'ready' | 'failed' | 'gone';
+}
+
+/** One chunk of a fetched download, on the bulk channel. */
+export interface DownloadPart {
+  id: string;
+  off: number;
+  data?: Uint8Array;
+  done: boolean;
+  size: number;
+  error: string;
+}
+
 /** Field numbers, kept next to the decoders that use them. */
 export const F = {
   frame: { type: 1, tab: 2, seq: 3, base: 4, body: 5, cause: 6 },
@@ -423,4 +452,7 @@ export const F = {
   captureRequest: { id: 1, reason: 2, note: 3, tabs: 4, maxBytes: 5, screenshots: 6 },
   capturePart: { id: 1, name: 2, data: 3, more: 4, done: 5, error: 6 },
   captureDone: { id: 1, path: 2, bytes: 3, error: 4 },
+  download: { id: 1, url: 2, name: 3, total: 4, received: 5, state: 6 },
+  downloadCmd: { id: 1, cmd: 2, offset: 3 },
+  downloadPart: { id: 1, off: 2, data: 3, done: 4, size: 5, error: 6 },
 } as const;

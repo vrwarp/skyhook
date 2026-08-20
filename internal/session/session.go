@@ -69,6 +69,12 @@ type Session struct {
 	events *EventLog
 	// capture holds the one bundle in flight, if any.
 	capture captureSlot
+
+	// dlMu guards the download fetch streams this client has asked for, keyed
+	// by download id; each entry is the cancel that "stop" pulls. The streams
+	// themselves also watch closed. See downloads.go.
+	dlMu    sync.Mutex
+	dlSends map[string]context.CancelFunc
 }
 
 type connHolder struct {
@@ -1959,6 +1965,12 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 			return err
 		}
 		return s.CapturePart(part)
+	case protocol.TypeDownloadCmd:
+		var cmd protocol.DownloadCmd
+		if err := f.DecodeBody(&cmd); err != nil {
+			return err
+		}
+		return s.downloadCmd(cmd)
 	case protocol.TypeKill:
 		return s.Kill(ctx)
 	case protocol.TypeError:

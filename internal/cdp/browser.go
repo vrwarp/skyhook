@@ -679,6 +679,68 @@ func (b *Browser) watchPopups() {
 	}
 }
 
+/*
+EnableDownloads routes every download the pages trigger into dir, each file
+named by its GUID, and turns on the events that say so (P-108).
+
+Launched browsers only. In an attached browser the download behavior belongs
+to whoever is sitting at it: redirecting it would quietly move their own
+downloads into a directory they have never heard of.
+*/
+func (b *Browser) EnableDownloads(ctx context.Context, dir string) error {
+	if b.attached {
+		return errors.New("cdp: an attached browser keeps its own download settings")
+	}
+	return b.Call(ctx, "", "Browser.setDownloadBehavior", map[string]any{
+		"behavior":      "allowAndName",
+		"downloadPath":  dir,
+		"eventsEnabled": true,
+	}, nil)
+}
+
+/*
+OnDownload relays download lifecycle events. Browser level, like OnPopup,
+because that is where Chromium reports them once EnableDownloads has asked;
+progress states are "inProgress", "completed" and "canceled" verbatim.
+
+The byte counts arrive as JSON numbers and can exceed what an int carries on a
+32-bit build, so they cross as int64.
+*/
+func (b *Browser) OnDownload(
+	begin func(guid, url, name string),
+	progress func(guid string, total, received int64, state string),
+) {
+	b.On("", "Browser.downloadWillBegin", func(_ string, params json.RawMessage) {
+		var p struct {
+			GUID              string `json:"guid"`
+			URL               string `json:"url"`
+			SuggestedFilename string `json:"suggestedFilename"`
+		}
+		if json.Unmarshal(params, &p) != nil || p.GUID == "" {
+			return
+		}
+		begin(p.GUID, p.URL, p.SuggestedFilename)
+	})
+	b.On("", "Browser.downloadProgress", func(_ string, params json.RawMessage) {
+		var p struct {
+			GUID     string  `json:"guid"`
+			Total    float64 `json:"totalBytes"`
+			Received float64 `json:"receivedBytes"`
+			State    string  `json:"state"`
+		}
+		if json.Unmarshal(params, &p) != nil || p.GUID == "" {
+			return
+		}
+		progress(p.GUID, int64(p.Total), int64(p.Received), p.State)
+	})
+}
+
+// CancelDownload stops a landside download in flight. Best-effort: a download
+// that has already finished or vanished is not an error worth anybody's time.
+func (b *Browser) CancelDownload(ctx context.Context, guid string) error {
+	return b.Call(ctx, "", "Browser.cancelDownload", map[string]any{"guid": guid}, nil)
+}
+
 // owns reports whether a target is ours to drive. Everything in a browser we
 // launched is; in a browser we attached to, only what we opened.
 func (b *Browser) owns(targetID string) bool {

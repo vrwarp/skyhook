@@ -808,7 +808,10 @@ type harness struct {
 	// harness so the per-tab frame journal is exercised by the whole suite,
 	// not only by the test that opens a bundle.
 	captureDir string
-	logs       *diag.Ring
+	// downloadDir is where landside downloads land (P-108), so a test can see
+	// that a discard really deletes the bytes.
+	downloadDir string
+	logs        *diag.Ring
 	// log is the harness's own logger, exposed so that everything a test starts
 	// — the PWA's app server as much as the landside half — writes to the one
 	// ring and carries the one test name, rather than falling back to
@@ -1451,6 +1454,19 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			<body><h1>a dense picture</h1>
 			<img id="dense" src="/dense.png" width="60" height="60" alt="dense"></body></html>`)
 	})
+	// A file the origin insists is a download, and a page linking to it: what
+	// TestDownloadsLandAndCrossOnAsk clicks (P-108).
+	mux.HandleFunc("/report.bin", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="flight-report.bin"`)
+		_, _ = w.Write(reportBytes())
+	})
+	mux.HandleFunc("/dl", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Files</title></head>
+			<body><h1>files to take home</h1>
+			<a id="get" href="/report.bin">get the report</a></body></html>`)
+	})
 	// The icon the agent's default falls back to when a page declares none —
 	// which the fixture pages deliberately do not, so every one of them
 	// exercises the fallback (P-104).
@@ -1980,6 +1996,10 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	}
 	h.mgr = session.NewManager(br, pipe, mgrOpts)
 	r.mgr = h.mgr
+	h.downloadDir = t.TempDir()
+	if err := h.mgr.EnableDownloads(ctx, h.downloadDir); err != nil {
+		t.Fatalf("enable downloads: %v", err)
+	}
 	t.Cleanup(func() {
 		c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
