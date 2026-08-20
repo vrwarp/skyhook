@@ -16,15 +16,17 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
-	"github.com/vrwarp/skyhook/internal/cdp"
-	"github.com/vrwarp/skyhook/internal/mirror"
 	"github.com/vrwarp/skyhook/internal/parity"
 )
+
+// One test per corpus group: a group shares a harness and a client browser,
+// and its pages run as serial subtests. See parityharness_test.go.
+
+func TestParityForms(t *testing.T) { runParityGroup(t, "forms") }
 
 // TestParitySmokeFixture cross-checks the two probes themselves on the plain
 // fixture page: parse, node identity, and the dimensions that must hold on a
@@ -63,7 +65,7 @@ func TestParitySmokeFixture(t *testing.T) {
 		t.Fatal("the session lost its tab")
 	}
 
-	land, plane := settleAndProbe(ctx, t, page, mt)
+	land, plane := settleAndProbeTab(ctx, t, page, mt, refs[0].Tab)
 
 	if len(land.Nodes) == 0 || len(plane.Nodes) == 0 {
 		t.Fatalf("empty probe: %d landside nodes, %d plane-side", len(land.Nodes), len(plane.Nodes))
@@ -89,70 +91,4 @@ func TestParitySmokeFixture(t *testing.T) {
 			t.Errorf("%s does not hold on the plain fixture: %v %v", dim, d.Counts, d.Detail)
 		}
 	}
-}
-
-/*
-settleAndProbe waits for the two halves to be showing the same instant of the
-same document, then probes both.
-
-"Same instant" is the checkpoint's job: it drains the agent's pending
-mutations, flushes them, and reports the sequence number the client would have
-to reach together with the hash of the document at exactly that point
-(internal/mirror/input.go). On top of that this waits for the plane side to
-have nothing left in flight — images, stylesheet pictures, region shots — and
-for two consecutive reads to agree, because a corpus page is static by
-authoring rule: a page that never settles here is a bug, not a flake.
-*/
-func settleAndProbe(ctx context.Context, t *testing.T, page *cdp.Session, mt *mirror.Tab) (*parity.SideProbe, *parity.SideProbe) {
-	t.Helper()
-	deadline := time.Now().Add(budget(60 * time.Second))
-	var last string
-	for time.Now().Before(deadline) {
-		cp, err := mt.Checkpoint(ctx)
-		if err != nil {
-			// A checkpoint fails when the page moves mid-walk, which is the
-			// barrier saying "not yet".
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		var raw json.RawMessage
-		evalJSON(ctx, t, page, `window.__skyhookParity()`, &raw)
-		if len(raw) == 0 || string(raw) == "null" {
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		probe, err := parity.ParseSideProbe(raw)
-		if err != nil {
-			t.Fatalf("plane probe: %v", err)
-		}
-		quiet := probe.Plane != nil &&
-			probe.Plane.PendingImages == 0 && probe.Plane.PendingCSS == 0 &&
-			probe.Plane.PendingShots == 0
-		caughtUp := probe.Seq >= cp.Seq && probe.Hash == cp.Hash
-		// Two consecutive identical quiet reads: the second read proving the
-		// first was not a moment between mutations.
-		key := fmt.Sprintf("%d/%d/%v", probe.Seq, probe.Hash, quiet)
-		if quiet && caughtUp && key == last {
-			// One more paint so geometry is post-layout on the client side.
-			evalJSON(ctx, t, page,
-				`new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))`, nil)
-			landRaw, err := mt.ParityProbe(ctx, 4096)
-			if err != nil {
-				t.Fatalf("landside probe: %v", err)
-			}
-			land, err := parity.ParseSideProbe(landRaw)
-			if err != nil {
-				t.Fatalf("landside probe: %v", err)
-			}
-			// The document may have moved while the landside probe walked it;
-			// if the hashes no longer agree, go around again.
-			if land.Hash == probe.Hash {
-				return land, probe
-			}
-		}
-		last = key
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("the two halves never settled on one document (last state %s)", last)
-	return nil, nil
 }

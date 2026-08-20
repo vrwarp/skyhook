@@ -1,0 +1,14 @@
+{
+  "id": "forms/text-inputs",
+  "title": "typing into inputs, textareas and contenteditable reaches the landside page",
+  "covers": ["input", "textarea", "contenteditable", "local echo"],
+  "waitText": "inputs settled",
+  "interactions": [
+    {"do": "type", "target": "#box", "value": "hello from the plane"},
+    {"do": "waitText", "value": "typed: hello from the plane", "name": "typing reaches the page"},
+    {"do": "type", "target": "#area", "value": "over the sea"},
+    {"do": "waitText", "value": "area: over the sea", "name": "a textarea reaches the page"},
+    {"do": "type", "target": "#pad", "value": "fly high"},
+    {"do": "waitText", "value": "pad: fly high", "name": "contenteditable reaches the page"}
+  ]
+}

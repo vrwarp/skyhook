@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>password</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+</style>
+</head>
+<body>
+  <h1>a secret</h1>
+  <p>secret settled</p>
+  <form id="login">
+    <input id="pw" type="password" autocomplete="current-password">
+  </form>
+  <!-- The page reports only the length: the landside page has the real value
+       (the reader typed it there, in effect), and the mirror must never. -->
+  <div id="len">secret length: 0</div>
+  <script>
+    document.getElementById('pw').addEventListener('input', function (e) {
+      document.getElementById('len').textContent = 'secret length: ' + e.target.value.length;
+    });
+  </script>
+</body>
+</html>

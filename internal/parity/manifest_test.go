@@ -26,7 +26,7 @@ const goodManifest = `{
     {"do": "waitText", "value": "pick settled", "within": 15},
     {"do": "select", "target": "#pick", "value": "b"},
     {"do": "waitText", "value": "picked: b", "within": 10,
-     "name": "change reaches page", "mustFail": true}
+     "name": "change reaches page"}
   ],
   "expectedFail": {"interaction": {"gap": "P-101", "reason": "select changes never reach the page"}}
 }`
@@ -64,11 +64,8 @@ func TestManifestRejections(t *testing.T) {
 			"expectedFail":{"text":{"gap":"P-001","reason":"r"}}}`, "pick one"},
 		{"unknown interaction", `{"id":"a/b","waitText":"x",
 			"interactions":[{"do":"teleport"}]}`, "teleport"},
-		{"mustFail with nothing positive before it", `{"id":"a/b","waitText":"x",
-			"interactions":[{"do":"waitText","value":"y","name":"n","mustFail":true}]}`, "dead page"},
-		{"mustFail without a name", `{"id":"a/b","waitText":"x",
-			"interactions":[{"do":"waitText","value":"ok"},
-			                {"do":"waitText","value":"y","mustFail":true}]}`, "named"},
+		{"waitText with nothing to wait for", `{"id":"a/b","waitText":"x",
+			"interactions":[{"do":"waitText","name":"n"}]}`, "needs text"},
 		{"imported content without attribution", `{"id":"real/hn","waitText":"x"}`, "attribution"},
 	}
 	for _, tc := range cases {

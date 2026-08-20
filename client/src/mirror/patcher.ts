@@ -947,6 +947,34 @@ export class Patcher {
       attrs[a.name] = a.value;
       any = true;
     }
+    // Live control state, under the attribute names both halves use for it.
+    // The landside probe reads el.value and el.checked live; here the
+    // materialised attribute can lag them — while the echo owns a field the
+    // server's attribute echo is deferred on purpose — so the live property
+    // is the honest counterpart. data-sky-value is only ever reported where
+    // the server sent one, which keeps a sensitive field absent on both
+    // halves.
+    const tagUp = el.tagName?.toUpperCase();
+    if ((tagUp === 'INPUT' || tagUp === 'TEXTAREA') && attrs['data-sky-value'] !== undefined) {
+      attrs['data-sky-value'] = String((el as HTMLInputElement).value ?? '');
+    }
+    if (tagUp === 'INPUT' && ((el as HTMLInputElement).type === 'checkbox'
+      || (el as HTMLInputElement).type === 'radio')) {
+      if ((el as HTMLInputElement).checked) {
+        attrs['data-sky-checked'] = '1';
+        any = true;
+      } else {
+        delete attrs['data-sky-checked'];
+      }
+    }
+    if (tagUp === 'OPTION') {
+      if ((el as HTMLOptionElement).selected) {
+        attrs['data-sky-selected'] = '1';
+        any = true;
+      } else {
+        delete attrs['data-sky-selected'];
+      }
+    }
     if (any) probe.a = attrs;
     if (el.tagName?.toUpperCase() === 'IMG') {
       const image = el as HTMLImageElement;

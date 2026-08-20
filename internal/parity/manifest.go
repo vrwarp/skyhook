@@ -140,27 +140,27 @@ func (t *Tolerances) Effective() Tolerances {
 //	submit    Target (a form)
 //	key       Value (a control key: Enter, Tab, Escape)
 //	scroll    Value (a document Y offset in CSS px)
-//	waitText  Value, Within — a checkpoint: the mirror must (or, with
-//	          MustFail, must not) come to contain this text
+//	waitText  Value, Within — a checkpoint: the mirror should come to
+//	          contain this text
 //	settle    re-run the settle barrier and re-measure every dimension
 //
 // Targets are "#id" or "text=visible text", resolved inside the mirror.
+//
+// A named waitText always asserts the desired behaviour, including on a page
+// that measures a gap: the check simply fails today, the manifest's
+// expectedFail entry catalogues why, and the fix arriving flips it loudly.
+// There is deliberately no way to assert that text must NOT arrive — such a
+// check would also pass on a page that is entirely dead.
 type Interaction struct {
 	Do     string `json:"do"`
 	Target string `json:"target,omitempty"`
 	Value  string `json:"value,omitempty"`
 	// Within bounds a waitText, in seconds; the runner wraps it in budget().
 	Within int `json:"within,omitempty"`
-	// Name makes this step a check in the interaction dimension. Unnamed steps
-	// that fail still fail the page — silently doing nothing is the gap class
-	// this dimension exists to catch — but named steps are the record.
+	// Name makes this step a check in the interaction dimension. An unnamed
+	// waitText is a precondition: its failure is the page never arriving, not
+	// a measurement.
 	Name string `json:"name,omitempty"`
-	// MustFail inverts a waitText: the pass is the text NOT arriving. For
-	// measuring a gap — a <select> whose change never reaches the page — where
-	// the fix arriving should flip this page loudly. Manifest validation
-	// requires a positive check somewhere before it, so a dead page cannot
-	// pass by being dead.
-	MustFail bool `json:"mustFail,omitempty"`
 }
 
 var interactionKinds = map[string]bool{
@@ -222,26 +222,13 @@ func (m *Manifest) validate() error {
 			return fmt.Errorf("parity: %s both excludes %s and expects it to fail; pick one", m.ID, dim)
 		}
 	}
-	positive := false
 	for i := range m.Interactions {
 		step := &m.Interactions[i]
 		if !interactionKinds[step.Do] {
 			return fmt.Errorf("parity: %s interaction %d: unknown kind %q", m.ID, i, step.Do)
 		}
-		if step.MustFail {
-			if step.Do != "waitText" {
-				return fmt.Errorf("parity: %s interaction %d: mustFail only applies to waitText", m.ID, i)
-			}
-			if !positive {
-				return fmt.Errorf("parity: %s interaction %d: a mustFail needs a passing waitText before it, "+
-					"or a dead page passes it by being dead", m.ID, i)
-			}
-			if step.Name == "" {
-				return fmt.Errorf("parity: %s interaction %d: a mustFail must be named; it is the measurement", m.ID, i)
-			}
-		}
-		if step.Do == "waitText" && !step.MustFail {
-			positive = true
+		if step.Do == "waitText" && step.Value == "" {
+			return fmt.Errorf("parity: %s interaction %d: waitText needs text to wait for", m.ID, i)
 		}
 	}
 	if strings.HasPrefix(m.ID, "real/") && m.Attribution == "" {

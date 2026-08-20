@@ -1,0 +1,423 @@
+{
+  "gaps": [
+    {
+      "id": "P-001",
+      "title": "A canvas that animates unprompted is not followed",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2098",
+        "internal/mirror/shot.go:47"
+      ],
+      "noPage": "reader-initiated animation is pinned by test/canvas_test.go; the unprompted case is the canvasStreamEvery knob, a configuration choice rather than a parity property"
+    },
+    {
+      "id": "P-002",
+      "title": "Icon fonts ship whole, never subsetted",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2103",
+        "internal/imgproc/transcode.go:270"
+      ],
+      "noPage": "a byte-cost gap, not a rendering one: whether the glyphs draw at all is fonts/icon-ligature's business"
+    },
+    {
+      "id": "P-003",
+      "title": "A font registered through the FontFace API cannot ship; its glyphs render as their ligature names",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2110",
+        "internal/mirror/agent.js"
+      ],
+      "noPage": "page lands with the fonts corpus group later in this change"
+    },
+    {
+      "id": "P-004",
+      "title": "wheel and hover are protocol surface no client sends",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2115",
+        "internal/mirror/input.go:90"
+      ],
+      "noPage": "needs a pointer-move vocabulary the interaction executor does not have yet; P-115's page will carry both when it grows one"
+    },
+    {
+      "id": "P-005",
+      "title": "Password and sensitive-autocomplete values never cross the wire",
+      "status": "by-design",
+      "refs": [
+        "docs/PRIOR-ART.md:53",
+        "internal/mirror/agent.js"
+      ]
+    },
+    {
+      "id": "P-006",
+      "title": "The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2120",
+        "internal/mirror/tab.go:375"
+      ],
+      "noPage": "both harness browsers are mice too, so the divergence cannot arise in-corpus; imported real pages carry the widened page-height band it causes"
+    },
+    {
+      "id": "P-007",
+      "title": "File upload is not implemented",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2128"
+      ],
+      "noPage": "clicking a file input landside opens a native chooser nothing intercepts — the gap includes that hazard — so no safe corpus interaction exists until Page.setInterceptFileChooserDialog is wired"
+    },
+    {
+      "id": "P-008",
+      "title": "Clipboard copy executes plane-side only; cross-tab paste fidelity is absent",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2128"
+      ],
+      "noPage": "clipboard access needs permissions headless CDP does not grant uniformly; the plane-side path is covered by the client's unit tests"
+    },
+    {
+      "id": "P-009",
+      "title": "Find-in-page has no chrome-UI affordance",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2132"
+      ],
+      "noPage": "a chrome-UI gap, not a mirror-rendering one"
+    },
+    {
+      "id": "P-010",
+      "title": "A frame is only preemptible between messages; a large snapshot owns the link while it sends",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2159"
+      ],
+      "noPage": "a latency property of the scheduler, measured by the netem suite's timings rather than by parity"
+    },
+    {
+      "id": "P-011",
+      "title": "The document is delivered whole, never viewport-first",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2168"
+      ],
+      "noPage": "a delivery-order property; parity measures the settled document, which is identical either way"
+    },
+    {
+      "id": "P-012",
+      "title": "A closed shadow root is invisible: such a component mirrors as its light DOM only",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:2173"
+      ],
+      "noPage": "page lands with the shadow corpus group later in this change"
+    },
+    {
+      "id": "P-013",
+      "title": "Reader-preference media features are answered plane-side, so the two halves may genuinely lay out differently",
+      "status": "by-design",
+      "refs": [
+        "docs/IMPLEMENTATION.md:3069",
+        "internal/mirror/agent.js"
+      ]
+    },
+    {
+      "id": "P-014",
+      "title": "prefers-color-scheme is settled landside; changing it re-snapshots every tab",
+      "status": "by-design",
+      "refs": [
+        "docs/IMPLEMENTATION.md:3138",
+        "internal/mirror/tab.go:401"
+      ]
+    },
+    {
+      "id": "P-015",
+      "title": "srcset and sizes are dropped; one server-chosen rendition ships",
+      "status": "by-design",
+      "refs": [
+        "internal/mirror/agent.js"
+      ]
+    },
+    {
+      "id": "P-016",
+      "title": "An animated GIF ships its first frame only",
+      "status": "by-design",
+      "refs": [
+        "internal/imgproc/transcode.go:311"
+      ]
+    },
+    {
+      "id": "P-017",
+      "title": "Canvas, WebGL and video are photographs: region shots, taken after input, never live",
+      "status": "by-design",
+      "refs": [
+        "docs/DESIGN.md:31",
+        "internal/mirror/shot.go"
+      ]
+    },
+    {
+      "id": "P-018",
+      "title": "Ad and creative networks are blocked landside, so their content never exists to mirror",
+      "status": "by-design",
+      "refs": [
+        "internal/mirror/tab.go:33"
+      ]
+    },
+    {
+      "id": "P-019",
+      "title": "Alerts, confirms and prompts are auto-accepted landside and never shown to the reader",
+      "status": "by-design",
+      "refs": [
+        "internal/mirror/tab.go:508"
+      ],
+      "notes": "deliberate today, but confirm() answering yes to everything deserves a reader-visible affordance eventually"
+    },
+    {
+      "id": "P-020",
+      "title": "Landside scroll is matched by range fraction, so IntersectionObserver-driven lazy loading fires approximately",
+      "status": "open",
+      "refs": [
+        "internal/mirror/input.go:658",
+        "internal/mirror/agent.js"
+      ],
+      "noPage": "needs a scroll-then-measure page with a tolerant contract; planned for the corpus's next round"
+    },
+    {
+      "id": "P-021",
+      "title": "A mirrored sub-document is laid out plane-side against a box, not a viewport: reader fonts, no percentage heights, fixed and sticky resolve against the wrong thing",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md:1506",
+        "client/src/mirror/host.ts"
+      ],
+      "noPage": "page lands with the frames corpus group later in this change"
+    },
+    {
+      "id": "P-022",
+      "title": "A cross-origin frame that cannot be mirrored stays a labelled box; past the depth or count limits, so does one that could be",
+      "status": "by-design",
+      "refs": [
+        "docs/IMPLEMENTATION.md:405",
+        "internal/mirror/frames.go"
+      ]
+    },
+    {
+      "id": "P-023",
+      "title": "A cross-origin frame smaller than 64x32 gets no label at all — indistinguishable from a bug",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js"
+      ],
+      "noPage": "page lands with the frames corpus group later in this change"
+    },
+    {
+      "id": "P-101",
+      "title": "A select change never reaches the landside page except through a form submit",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js",
+        "internal/mirror/input.go:603"
+      ],
+      "notes": "setValue handles INPUT, TEXTAREA and contenteditable and answers false for everything else; the echo shows the reader their choice and the page never hears it"
+    },
+    {
+      "id": "P-102",
+      "title": "setvalue and blur are dispatched to the top-level agent only; a non-append edit inside a mirrored cross-origin frame is silently lost",
+      "status": "open",
+      "refs": [
+        "internal/mirror/input.go:603",
+        "internal/mirror/frames.go:598"
+      ]
+    },
+    {
+      "id": "P-103",
+      "title": "A blob: image source serialises as a landside blob URL the client can never fetch: a broken image with no fallback and no Missing notice",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js",
+        "client/src/mirror/patcher.ts"
+      ],
+      "noPage": "page lands with the images corpus group later in this change"
+    },
+    {
+      "id": "P-104",
+      "title": "Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing",
+      "status": "open",
+      "refs": [
+        "internal/protocol/frames.go:268",
+        "client/src/shared/codec.ts"
+      ],
+      "noPage": "a favicon is chrome UI, invisible to the mirror probes; recorded so the dead wire surface is not mistaken for a feature"
+    },
+    {
+      "id": "P-105",
+      "title": "HTML comments are never mirrored, though KindComment exists on both halves of the protocol",
+      "status": "by-design",
+      "refs": [
+        "internal/mirror/agent.js",
+        "internal/protocol/frames.go:303"
+      ],
+      "notes": "renders nothing, so nothing is lost; kept as the record that the protocol claims surface neither end implements"
+    },
+    {
+      "id": "P-106",
+      "title": "object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js"
+      ],
+      "noPage": "page lands with the textmisc corpus group later in this change"
+    },
+    {
+      "id": "P-107",
+      "title": "Dead wire surface: TypeIntegrity, OpImage and ScrollEvent.Visible are never produced or consumed",
+      "status": "open",
+      "refs": [
+        "internal/protocol/frames.go:131",
+        "internal/protocol/frames.go:375",
+        "internal/protocol/frames.go:526"
+      ],
+      "noPage": "wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it"
+    },
+    {
+      "id": "P-108",
+      "title": "Downloads are unhandled: a download link writes a file onto the VPS and the reader sees nothing happen",
+      "status": "open",
+      "refs": [
+        "internal/mirror/tab.go"
+      ],
+      "noPage": "clicking a download link landside leaves a file on the test host and no observable mirror change to assert on; needs Browser.setDownloadBehavior wiring first"
+    },
+    {
+      "id": "P-109",
+      "title": "window.open and a plain click on target=_blank open a landside tab no client tab will ever show",
+      "status": "open",
+      "refs": [
+        "internal/mirror/frames.go:253",
+        "client/src/mirror/host.ts"
+      ],
+      "noPage": "page lands with the nav corpus group later in this change"
+    },
+    {
+      "id": "P-110",
+      "title": "There is no print path: window.print does nothing for the reader",
+      "status": "open",
+      "refs": [
+        "docs/IMPLEMENTATION.md"
+      ],
+      "noPage": "printing is chrome UI the harness cannot see; that @media print sheets do not leak into the screen is pinned by css/layers-scope"
+    },
+    {
+      "id": "P-111",
+      "title": "mousemove-driven widgets — drag-and-drop, sliders, hover menus — have no input path",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/host.ts",
+        "docs/IMPLEMENTATION.md:2115"
+      ],
+      "noPage": "needs a pointer-move step in the interaction executor; catalogued for the executor's next revision alongside P-004"
+    },
+    {
+      "id": "P-112",
+      "title": "An audio element is photographed as a still control strip; no audio ever crosses",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js",
+        "internal/mirror/shot.go"
+      ],
+      "noPage": "page lands with the media corpus group later in this change"
+    },
+    {
+      "id": "P-113",
+      "title": "DPR is never applied to image transcodes or region shots: every picture is soft on a 2x or 3x screen",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js",
+        "internal/mirror/shot.go:267",
+        "docs/DESIGN.md:128"
+      ],
+      "noPage": "page lands with the images corpus group later in this change"
+    },
+    {
+      "id": "P-114",
+      "title": "A prefers-color-scheme media query nested inside a plain style rule crosses with its question intact instead of being resolved landside",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js"
+      ],
+      "noPage": "page lands with the css corpus group later in this change"
+    },
+    {
+      "id": "P-115",
+      "title": "The shell's font-src 'self' may refuse every blob: webfont the pipeline ships",
+      "status": "open",
+      "refs": [
+        "internal/server/webapp.go:58",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "suspected from reading the CSP against the blob resolution; fonts/csp-blob is the verification, and its first measured run settles this entry's status",
+      "noPage": "page lands with the fonts corpus group later in this change"
+    },
+    {
+      "id": "P-116",
+      "title": "An external SVG sprite reference resolves to a URL the sandboxed frame can never fetch: the icon renders as nothing",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js",
+        "internal/server/webapp.go:54"
+      ],
+      "noPage": "page lands with the images corpus group later in this change"
+    },
+    {
+      "id": "P-117",
+      "title": "A style write onto a canvas permanently blanks its photograph until the reader touches something",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/host.ts"
+      ],
+      "noPage": "page lands with the media corpus group later in this change"
+    },
+    {
+      "id": "P-118",
+      "title": "The GIF tap-to-play the transcoder's comment promises does not exist in the client",
+      "status": "open",
+      "refs": [
+        "internal/imgproc/transcode.go:311"
+      ],
+      "noPage": "the still-frame half is P-016's page; this records the docs-versus-code drift so one of them gets fixed"
+    },
+    {
+      "id": "P-119",
+      "title": "The mirror's own :root color and font leak into pages that rely on UA defaults",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "found by the parity probes' first run: color #111 and the frame's sans-serif inherit into the mirrored page wherever the page never says otherwise, where landside shows black and the UA serif",
+      "noPage": "page lands with the css corpus group later in this change"
+    },
+    {
+      "id": "P-120",
+      "title": "A top margin that collapses through the page's body is lost at the mirror boundary",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/patcher.ts",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "found by the parity probes' first run: the fixture's h1 margin collapses through body and pushes content 21px down landside; plane-side the gap vanishes and the document is 22px shorter",
+      "noPage": "page lands with the css corpus group later in this change"
+    },
+    {
+      "id": "P-121",
+      "title": "The server's echo of the reader's own focus arrives a round trip late and yanks focus back into the field they have already left",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/host.ts",
+        "internal/mirror/input.go"
+      ],
+      "notes": "found by the interaction executor's first run: reader focuses A, the landside replay confirms it, the reader clicks B, and the confirmation for A — applied through the host's onFocus in the gap after ownership of A ends — steals focus back. On the 1.2s link this bites any reader who moves between fields within a round trip.",
+      "noPage": "timing-dependent by nature: the executor settles before each step so every other page measures its own gap, and a page for this needs a deliberate fast-click knob in the executor first"
+    }
+  ]
+}

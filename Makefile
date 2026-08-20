@@ -3,7 +3,7 @@ SHELL := /bin/bash
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test test-e2e test-slow lint client client-test fmt docker clean
+.PHONY: all build test test-e2e test-slow test-parity parity-baseline lint client client-test fmt docker clean
 
 all: build client
 
@@ -31,8 +31,12 @@ LANE_BASE ?= 21123
 # Four rather than $(LANES): nothing is shaped here, so these tests are working
 # rather than waiting and the runner's cores are the limit. At four they
 # already keep 2.66 of them busy, and oversubscribing buys little.
+#
+# -skip keeps the parity suite out: it has its own target and its own CI job,
+# and this suite's quoted timings were measured over exactly the tests that
+# remain. The set here is byte-identical to what it was before parity existed.
 test-e2e:
-	SKYHOOK_E2E=1 go test -count=1 -timeout 20m -parallel 4 -v ./test
+	SKYHOOK_E2E=1 go test -count=1 -timeout 20m -parallel 4 -skip '^TestParity' -v ./test
 
 # The link the whole project exists for: 1.2s RTT, 250 kbps, 2% loss.
 #
@@ -44,8 +48,25 @@ test-slow:
 	sudo scripts/netem.sh lanes $(LANE_BASE) $(LANES) 1200 250 2
 	SKYHOOK_E2E=1 SKYHOOK_SLOW_LINK=1 \
 		SKYHOOK_TEST_PORTS=$(LANE_BASE)-$$(( $(LANE_BASE) + $(LANES) - 1 )) \
-		go test -count=1 -timeout 25m -parallel $(LANES) -v ./test; \
+		go test -count=1 -timeout 25m -parallel $(LANES) -skip '^TestParity' -v ./test; \
 		status=$$?; sudo scripts/netem.sh down; exit $$status
+
+# The rendering-parity suite: the corpus under test/parity/corpus, measured
+# through the real client and held against the checked-in baselines. Unshaped
+# on purpose — parity is a correctness property, the settled document is the
+# same at any link speed, and the netem job runs at its measured capacity.
+# Needs a browser and client/dist, like test-e2e.
+#
+# Wall clock: measure on the first CI run and record it here.
+test-parity:
+	SKYHOOK_E2E=1 go test -count=1 -timeout 30m -parallel 4 -run '^TestParity' -v ./test
+
+# Locks in a deliberate parity change: reruns the suite writing baselines
+# instead of holding them, then regenerates the registry table in
+# docs/PARITY.md. Review the diff — the diff is the change.
+parity-baseline:
+	SKYHOOK_E2E=1 SKYHOOK_UPDATE_PARITY=1 go test -count=1 -timeout 30m -parallel 4 -run '^TestParity' -v ./test
+	SKYHOOK_UPDATE_PARITY_DOCS=1 go test -count=1 ./internal/parity -run Registry
 
 lint:
 	go vet ./...

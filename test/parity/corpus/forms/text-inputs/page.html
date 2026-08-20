@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>text inputs</title>
+<style>
+  /* Explicit ground: this page measures typing, not inherited defaults.
+     P-119 (the mirror's own :root color and font leaking into pages that rely
+     on UA defaults) has a page of its own; here the noise is switched off. */
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  #pad { min-height: 20px; border: 1px solid rgb(200, 200, 200); }
+  div { min-height: 18px; }
+</style>
+</head>
+<body>
+  <h1>text inputs</h1>
+  <p>inputs settled</p>
+  <input id="box" type="text" value="">
+  <div id="out">typed: (nothing)</div>
+  <textarea id="area" rows="2" cols="24"></textarea>
+  <div id="out2">area: (nothing)</div>
+  <div id="pad" contenteditable="true"></div>
+  <div id="out3">pad: (nothing)</div>
+  <script>
+    document.getElementById('box').addEventListener('input', function (e) {
+      document.getElementById('out').textContent = 'typed: ' + e.target.value;
+    });
+    document.getElementById('area').addEventListener('input', function (e) {
+      document.getElementById('out2').textContent = 'area: ' + e.target.value;
+    });
+    document.getElementById('pad').addEventListener('input', function (e) {
+      document.getElementById('out3').textContent = 'pad: ' + e.target.textContent;
+    });
+  </script>
+</body>
+</html>

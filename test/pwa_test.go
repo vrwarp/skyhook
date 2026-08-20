@@ -66,6 +66,14 @@ func newPWAHarness(t *testing.T) *pwaHarness {
 // which is a deploy, and the whole situation the version check exists for.
 func newPWAHarnessAt(t *testing.T, dist string) *pwaHarness {
 	t.Helper()
+	return newPWAHarnessWith(t, dist, nil)
+}
+
+// newPWAHarnessWith also lets the caller adjust the manager, the way
+// newHarnessWith does for the plain harness. The parity runner uses it to
+// raise MaxTabs: one group of corpus pages shares a client, one tab per page.
+func newPWAHarnessWith(t *testing.T, dist string, tweak func(*session.ManagerOptions)) *pwaHarness {
+	t.Helper()
 	// The browser client is what should cross the emulated link, so the app
 	// listener takes the shaped address and the base harness takes any port.
 	//
@@ -75,6 +83,9 @@ func newPWAHarnessAt(t *testing.T, dist string) *pwaHarness {
 	// make for itself.
 	h := newHarnessTweaked(t, "127.0.0.1:0", func(o *session.ManagerOptions) {
 		o.WebRoot = dist
+		if tweak != nil {
+			tweak(o)
+		}
 	})
 
 	// After newHarnessTweaked, which is where the test is marked parallel and

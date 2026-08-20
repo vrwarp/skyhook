@@ -1,0 +1,90 @@
+{
+  "page": "forms/frame-editing",
+  "dimensions": {
+    "attributes": {
+      "status": "pass",
+      "counts": {
+        "attrsExtraPlane": 0,
+        "attrsMissingPlane": 0,
+        "nodesDiffering": 0,
+        "valuesDiffering": 0
+      }
+    },
+    "geometry": {
+      "status": "pass",
+      "counts": {
+        "nodesOff": 0
+      },
+      "buckets": {
+        "pageHeightPct": "+0",
+        "worst": "0"
+      }
+    },
+    "interaction": {
+      "status": "fail",
+      "counts": {
+        "failed": 1
+      },
+      "checks": [
+        {
+          "name": "a top-level edit reaches the page",
+          "pass": true
+        },
+        {
+          "name": "an edit inside a frame reaches its page",
+          "pass": false
+        }
+      ]
+    },
+    "resources": {
+      "status": "pass",
+      "counts": {
+        "consoleErrors": 0,
+        "cspViolations": 0,
+        "fontsMustLoadMissing": 0,
+        "imgBrokenLand": 0,
+        "imgBrokenPlane": 0,
+        "missingImages": 0,
+        "pendingAtProbe": 0,
+        "substitutedTags": 1
+      },
+      "buckets": {
+        "fontsMissingPlane": ""
+      }
+    },
+    "structure": {
+      "status": "pass",
+      "counts": {
+        "missingLand": 0,
+        "missingPlane": 0,
+        "tagMismatch": 0
+      },
+      "checks": [
+        {
+          "name": "hashesAgree",
+          "pass": true
+        }
+      ]
+    },
+    "style": {
+      "status": "pass",
+      "counts": {
+        "nodesDiffering": 0,
+        "visibilityDiffering": 0
+      }
+    },
+    "text": {
+      "status": "fail",
+      "counts": {
+        "nodesDiffering": 1
+      }
+    }
+  },
+  "expectedFail": {
+    "interaction": "P-102",
+    "text": "P-102"
+  },
+  "gaps": [
+    "P-102"
+  ]
+}
