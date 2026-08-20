@@ -619,6 +619,13 @@ export class Patcher {
     // typed; reflect it onto the property the browser actually renders.
     if (lower === 'data-sky-value') {
       const input = el as HTMLInputElement;
+      // A file input accepts only '' — anything else throws, and an agent
+      // that ships one (they no longer do) must not be able to break the
+      // whole batch it arrived in.
+      if (input.type === 'file') {
+        if (value === '' && input.value !== '') input.value = '';
+        return;
+      }
       if ('value' in input && input.value !== value) input.value = value;
     } else if (lower === 'data-sky-checked') {
       (el as HTMLInputElement).checked = value === '1';

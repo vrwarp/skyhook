@@ -434,8 +434,12 @@
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
       var checked = !!el.checked;
       if (!isSensitive(el)) {
-        var value = el.value == null ? '' : String(el.value);
-        pairs.push(intern('data-sky-value'), intern(value));
+        // A file input's value is a fake local path no script may write —
+        // the plane's browser throws on anything but '' — and the filename
+        // it leaks belongs to this machine. The chosen files' story is told
+        // by the page's own DOM, so the value ships as empty (P-007).
+        var value = liveValue(el);
+        if (el.type !== 'file') pairs.push(intern('data-sky-value'), intern(value));
         watchLive(el, { value: value, checked: checked });
       }
       if (checked) pairs.push(intern('data-sky-checked'), intern('1'));
@@ -698,6 +702,15 @@
    */
 
   // watchLive records the state a control was serialised with.
+  // The value the wire may carry for a form control. A file input's is
+  // always '': its real value is a fake local path no script may write —
+  // the mirror's browser throws on anything but the empty string — and the
+  // filename in it belongs to this machine, not to the wire (P-007).
+  function liveValue(el) {
+    if (el.type === 'file') return '';
+    return el.value == null ? '' : String(el.value);
+  }
+
   function watchLive(el, state) {
     liveWatch.set(el, state);
   }
@@ -730,7 +743,7 @@
       liveWatch.delete(el);
       return false;
     }
-    var value = el.value == null ? '' : String(el.value);
+    var value = liveValue(el);
     var checked = !!el.checked;
     if (was.value !== value) {
       pendingOps.push([3, id, intern('data-sky-value'), intern(value)]);
@@ -873,8 +886,8 @@
     }
     var tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
-      if (!isSensitive(el)) {
-        out['data-sky-value'] = el.value == null ? '' : String(el.value);
+      if (!isSensitive(el) && el.type !== 'file') {
+        out['data-sky-value'] = liveValue(el);
         any = true;
       }
       if (el.checked) { out['data-sky-checked'] = '1'; any = true; }
