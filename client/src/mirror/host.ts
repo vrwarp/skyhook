@@ -36,9 +36,35 @@ const MIRROR_CSS = `
    the frame's body for the same reason. What the page's own html and body
    should look like is a question for the page and the UA, both of which know
    the answer. */
-:root { margin: 0; padding: 0; background: #fff; color: #111; }
+:root { margin: 0; padding: 0; background: #fff; }
 :root > body { margin: 0; padding: 0; }
-.skyhook-ghost { opacity: .55; font-style: italic; }
+/* The percentage-height chain, unconditionally. Landside, html { height:
+   100% } resolves against the viewport; here the mirrored html resolves
+   against this body, so the frame's own root and body must span the frame
+   for the page's chain to mean the same thing. A page that never asks for
+   a height is untouched — auto inside a definite box is still auto — and
+   the frame stays the scroller either way. Before the selector rewrite the
+   page's own html,body{height:100%} happened to land on these elements and
+   supplied the chain by accident; now it is supplied on purpose. */
+:root, :root > body { height: 100%; }
+/* No inheritable properties on the frame's own root or body: the mirrored
+   html sits inside them, and a colour or font set here pours into every
+   element the page left to inherit — landside those inherit from a pristine
+   viewport (P-119). The shell's own furniture names its colours itself. */
+/* A twentieth of a pixel of padding, because the mirrored html is not a
+   root here: landside, a child's margin collapsing through body stops at
+   the document root and offsets the content inside it; in this document
+   the same margin escaped the mirrored html and vanished into the frame,
+   and every margin-led page sat 30px higher mirrored than real (P-120).
+   Any non-zero padding blocks the collapse at exactly the boundary the
+   real root blocks it. This much rounds to zero in every measurement and
+   survives LayoutUnit quantisation; a block formatting context would do
+   the same job but contain:layout re-homes fixed-position descendants and
+   display:flow-root changes a computed value the parity probes compare.
+   :where keeps specificity at zero so a page that styles its own root
+   padding still wins. */
+html:where([data-sky-doc]) { padding-top: 0.05px; padding-bottom: 0.05px; }
+.skyhook-ghost { opacity: .55; font-style: italic; color: #111; }
 img { background-repeat: no-repeat; background-size: cover; }
 /* An iframe's inlined document, rendered into the box that stands in for it.
    Scrollable rather than clipped, which a real frame with scrolling="no" is
@@ -539,6 +565,11 @@ export class MirrorHost {
     if (this.doc === doc && this.patcher) return;
     forceStandardsMode(doc);
     this.doc = doc;
+    // The agent's synthesized ground rule — the page's canvas colour and
+    // colour-scheme — selects :root[data-sky-ground]: this root, the frame
+    // itself, and never the mirrored html the server re-points every other
+    // :root at (rewriteRootSelectors, css.go).
+    doc.documentElement.setAttribute('data-sky-ground', '');
     doc.addEventListener('securitypolicyviolation', () => { this.cspViolations += 1; });
 
     const style = doc.createElement('style');

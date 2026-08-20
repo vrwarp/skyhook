@@ -184,6 +184,9 @@
   var scopedEmitted = new Map(); // shadow-root id -> its own emitted-rule set
   var cssOrder = [];
   var recoveredSheets = new Map(); // href -> constructed sheet the host supplied
+  var sheetSources = new Map();    // href -> authored text, for cssText repair
+  var sheetSourceFetches = new Map(); // href -> 'pending' | 'failed'
+  var constructedSourceTexts = typeof WeakMap === 'function' ? new WeakMap() : null;
   var blockedSheets = {};          // href -> 1, for sheets nothing can read yet
   var blockedNew = false;          // one of those is news the host has not heard
   var cssSeen = 0;                 // style rules the last pass considered
@@ -2167,6 +2170,221 @@
     try { return doc.baseURI || null; } catch (e) { return null; }
   }
 
+  /*
+   * cssText is lossy, and the loss ships broken styles (P-126).
+   *
+   * When a shorthand set with var() is partially overridden by a later
+   * declaration — Vector 2022's thumbnails write `border: 1px solid
+   * var(--border-color-subtle,#c8ccd1); border-bottom: 0` — Chromium's
+   * serialiser cannot reconstitute the shorthand and emits its longhands
+   * with *empty values*: `border-top-color: ;`. The CSSOM keeps no way
+   * back — getPropertyValue answers "" for shorthand and longhands alike,
+   * the typed OM serialises the same nothing — so the only true copy is the
+   * sheet's authored text, and the repair is to find this rule in it.
+   *
+   * Detection is the signature itself: an empty declaration value, which no
+   * parser produces from real CSS (an empty *custom property* value is
+   * legal and deliberately excluded). Recovery re-reads the rule from the
+   * sheet source — a <style>'s text synchronously; a <link>'s by an in-page
+   * fetch that reschedules the pass when it lands — locating it by
+   * normalised selector and ordinal, exactly the walk the CSSOM makes. A
+   * repair that cannot be validated ships the broken text it started with.
+   */
+  function hasLostShorthand(text) {
+    var i = 0, n = text.length;
+    while (i < n) {
+      var c = text.charAt(i);
+      if (c === '"' || c === "'") { i = scanSelString(text, i); continue; }
+      if (c === '\\') { i += 2; continue; }
+      if (c !== ':') { i++; continue; }
+      var p = i - 1;
+      while (p >= 0 && ' \t\n\r\f'.indexOf(text.charAt(p)) >= 0) p--;
+      var e = p;
+      while (p >= 0 && /[-A-Za-z0-9_]/.test(text.charAt(p))) p--;
+      var prop = text.slice(p + 1, e + 1);
+      if (prop && prop.slice(0, 2) !== '--') {
+        var j = i + 1;
+        while (j < n && ' \t\n\r\f'.indexOf(text.charAt(j)) >= 0) j++;
+        var v = text.charAt(j);
+        if (v === ';' || v === '}' || j >= n) return true;
+      }
+      i++;
+    }
+    return false;
+  }
+
+  function requestSheetSource(href) {
+    if (sheetSources.has(href) || sheetSourceFetches.has(href)) return;
+    sheetSourceFetches.set(href, 'pending');
+    try {
+      fetch(href, { credentials: 'include' }).then(function (r) {
+        return r && r.ok ? r.text() : null;
+      }).then(function (t) {
+        if (t) { sheetSources.set(href, t); scheduleCSS(); }
+        else { sheetSourceFetches.set(href, 'failed'); }
+      }, function () { sheetSourceFetches.set(href, 'failed'); });
+    } catch (e) { sheetSourceFetches.set(href, 'failed'); }
+  }
+
+  function sheetSourceFor(sheet) {
+    if (constructedSourceTexts) {
+      var t0 = constructedSourceTexts.get(sheet);
+      if (t0) return t0;
+    }
+    var node = null;
+    try { node = sheet.ownerNode; } catch (e) { node = null; }
+    if (node && node.tagName === 'STYLE') return node.textContent || null;
+    var href = null;
+    try { href = sheet.href; } catch (e) { href = null; }
+    if (!href) return null;
+    var t = sheetSources.get(href);
+    if (t) return t;
+    requestSheetSource(href);
+    return null;
+  }
+
+  // ruleOrdinal counts, in CSSOM order, style rules sharing this rule's
+  // selector text, so the source scan can find the same one. Style-rule
+  // children (CSS nesting) are not walked — collectRules ships them inside
+  // their parent's text, and the source scanner skips them the same way.
+  function ruleOrdinal(sheet, target, sel) {
+    var n = -1, done = false;
+    function walk(list) {
+      for (var i = 0; i < list.length && !done; i++) {
+        var r = list[i], ty = 0, kids = null;
+        try { ty = r.type; } catch (e) { ty = 0; }
+        if (ty === 1) {
+          var s = null;
+          try { s = r.selectorText; } catch (e) { s = null; }
+          if (s === sel) {
+            n++;
+            if (r === target) { done = true; return; }
+          }
+          continue;
+        }
+        try { kids = r.cssRules; } catch (e) { kids = null; }
+        if (kids) walk(kids);
+      }
+    }
+    try { walk(sheet.cssRules); } catch (e) { return -1; }
+    return done ? n : -1;
+  }
+
+  var scratchSelSheet = null;
+  var selNormCache = new Map();
+  function normalizeSelector(sel) {
+    if (!sel) return null;
+    var hit = selNormCache.get(sel);
+    if (hit !== undefined) return hit;
+    var out = null;
+    try {
+      if (!scratchSelSheet) scratchSelSheet = new CSSStyleSheet();
+      scratchSelSheet.replaceSync(sel + '{}');
+      var r = scratchSelSheet.cssRules[0];
+      out = (r && r.selectorText) || null;
+    } catch (e) { out = null; }
+    if (selNormCache.size > 4096) selNormCache.clear();
+    selNormCache.set(sel, out);
+    return out;
+  }
+
+  function findRuleBlockInSource(src, wantSel, ordinal) {
+    var found = null, count = -1;
+    function pastComment(i) {
+      var e = src.indexOf('*/', i + 2);
+      return e < 0 ? src.length : e + 2;
+    }
+    function matchBrace(i) {
+      var depth = 0;
+      for (; i < src.length; i++) {
+        var c = src.charAt(i);
+        if (c === '"' || c === "'") { i = scanSelString(src, i) - 1; continue; }
+        if (c === '\\') { i++; continue; }
+        if (c === '/' && src.charAt(i + 1) === '*') { i = pastComment(i) - 1; continue; }
+        if (c === '{') depth++;
+        else if (c === '}') { depth--; if (depth === 0) return i; }
+      }
+      return -1;
+    }
+    function scan(i, end) {
+      while (i < end && found === null) {
+        while (i < end) {
+          var w = src.charAt(i);
+          if (w === ' ' || w === '\t' || w === '\n' || w === '\r' || w === '\f') { i++; continue; }
+          if (w === '/' && src.charAt(i + 1) === '*') { i = pastComment(i); continue; }
+          break;
+        }
+        if (i >= end) return;
+        var start = i, brace = -1, term = -1;
+        for (var j = i; j < end; j++) {
+          var c = src.charAt(j);
+          if (c === '"' || c === "'") { j = scanSelString(src, j) - 1; continue; }
+          if (c === '\\') { j++; continue; }
+          if (c === '/' && src.charAt(j + 1) === '*') { j = pastComment(j) - 1; continue; }
+          if (c === '{') { brace = j; break; }
+          if (c === ';' || c === '}') { term = j; break; }
+        }
+        if (brace < 0) { i = term >= 0 ? term + 1 : end; continue; }
+        var close = matchBrace(brace);
+        if (close < 0) return;
+        var prelude = src.slice(start, brace).replace(/^\s+|\s+$/g, '');
+        if (prelude.charAt(0) === '@') {
+          // Group at-rules hold rules; the rest hold declarations, which the
+          // inner scan reads as statements and walks past harmlessly.
+          scan(brace + 1, close);
+        } else if (normalizeSelector(prelude) === wantSel) {
+          count++;
+          if (count === ordinal) { found = src.slice(brace + 1, close); return; }
+        }
+        i = close + 1;
+      }
+    }
+    scan(0, src.length);
+    return found;
+  }
+
+  // A heal is only believed when the candidate reproduces every declaration
+  // the broken serialisation still carried: the selector match alone cannot
+  // tell two same-selector rules apart, and grafting a neighbour's
+  // declarations under the right selector is a subtler bug than the one
+  // being fixed.
+  function validRepairedRule(rule, sel, block) {
+    try {
+      if (!scratchSelSheet) scratchSelSheet = new CSSStyleSheet();
+      scratchSelSheet.replaceSync(sel + '{' + block + '}');
+      if (scratchSelSheet.cssRules.length < 1) return false;
+      var cand = scratchSelSheet.cssRules[0];
+      if (cand.selectorText !== sel) return false;
+      var have = rule.style, want = cand.style;
+      for (var i = 0; i < have.length; i++) {
+        var p = have.item(i);
+        var v = have.getPropertyValue(p);
+        if (v === '') continue; // the loss being healed
+        if (want.getPropertyValue(p) !== v ||
+            want.getPropertyPriority(p) !== have.getPropertyPriority(p)) {
+          return false;
+        }
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function healedRuleText(rule) {
+    var text = rule.cssText;
+    if (!hasLostShorthand(text)) return text;
+    var sheet = null;
+    try { sheet = rule.parentStyleSheet; } catch (e) { sheet = null; }
+    if (!sheet) return text;
+    var src = sheetSourceFor(sheet);
+    if (!src) return text;
+    var sel = rule.selectorText;
+    var ord = ruleOrdinal(sheet, rule, sel);
+    if (ord < 0) return text;
+    var block = findRuleBlockInSource(src, sel, ord);
+    if (block === null || !validRepairedRule(rule, sel, block)) return text;
+    return sel + '{' + block + '}';
+  }
+
   function collectRules(doc, list, out, depth, base, seen) {
     if (!list || depth > 8) return;
     for (var i = 0; i < list.length; i++) {
@@ -2176,7 +2394,12 @@
           case 1: // style rule
             cssSeen++;
             if (selectorMatches(doc, rule.selectorText)) {
-              out.push(pinColorSchemes(absolutizeCSSURLs(rule.cssText, base)));
+              // shippedWhole rather than the two bare passes: a nested
+              // @media inside this rule's own text deserves the same
+              // landside answer a top-level one gets (P-114), and the text
+              // itself may first need its lost var() shorthands healed
+              // from the sheet source (P-126).
+              out.push(shippedWhole(healedRuleText(rule), base));
             } else {
               noteRejected(rule.selectorText);
             }
@@ -2764,7 +2987,11 @@
     if (scheme) decls.push('color-scheme:' + scheme + ' !important');
     canvasBackground(view, root, decls);
     if (!decls.length) return '';
-    return ':root{' + decls.join(';') + ';}';
+    // [data-sky-ground] marks this as the one :root that really means the
+    // frame's own root — the host stamps its documentElement with it — so
+    // the server's rewriteRootSelectors leaves it alone while re-pointing
+    // every :root the page wrote at the mirrored document (P-119).
+    return ':root[data-sky-ground]{' + decls.join(';') + ';}';
   }
 
   // The background properties that travel together. A background is a set, not
@@ -3417,12 +3644,40 @@
         if (syncTarget()) scheduleFlush(false);
       }, { passive: true });
     }
+    // Sheet sources up front, not on demand: healedRuleText needs a linked
+    // sheet's authored text the moment a lost var() shorthand shows up in
+    // the first CSS collect, and a repair that arrives as a follow-up update
+    // is a layout that changes shape once — measurably, and visibly when the
+    // shorthand was a border a paragraph wraps around. Prefetching alongside
+    // the page's own load usually wins the race; when it loses, the repair
+    // still ships as an ordinary update.
+    prefetchSheetSources();
     snapshot();
     // Late-loading webfont/CSS work and lazily-attached shadow roots settle
     // within a second or two; a follow-up CSS pass is cheaper than a resnapshot.
     setTimeout(scheduleCSS, 800);
     setTimeout(scheduleCSS, 2500);
     scheduleSweep(sweepEvery);
+  }
+
+  function pendingSheetFetches() {
+    var n = 0;
+    sheetSourceFetches.forEach(function (v) { if (v === 'pending') n++; });
+    return n;
+  }
+
+  function prefetchSheetSources() {
+    var sheets;
+    try { sheets = document.styleSheets; } catch (e) { return; }
+    for (var i = 0; i < sheets.length; i++) {
+      var href = null;
+      try { href = sheets[i].href; } catch (e) { href = null; }
+      if (!href) continue;
+      // Only sheets whose rules are readable can present a broken cssText;
+      // a cross-origin sheet throws before the question arises.
+      try { void sheets[i].cssRules; } catch (e) { continue; }
+      requestSheetSource(href);
+    }
   }
 
   // ------------------------------------------------------------- coordinates
@@ -3743,6 +3998,10 @@
         var s = new CSSStyleSheet();
         s.replaceSync(text);
         recoveredSheets.set(href, s);
+        // The authored text doubles as the repair source for cssText's
+        // lost var() shorthands (healedRuleText).
+        sheetSources.set(href, text);
+        if (constructedSourceTexts) constructedSourceTexts.set(s, text);
         delete blockedSheets[href];
         scheduleCSS();
         return true;
@@ -3771,7 +4030,10 @@
         pendingOps: pendingOps.length,
         pendingImages: pendingImages.length,
         flushPending: flushTimer !== null,
-        cssPending: cssTimer !== null,
+        // Pending covers the timer and any sheet-source fetch the var()
+        // shorthand repair kicked off: either one means the stylesheet the
+        // client holds is about to change.
+        cssPending: cssTimer !== null || pendingSheetFetches() > 0,
         // What the used-CSS filter did on its last pass. A page missing its
         // styling and a page whose rules were all rejected look the same from
         // the client; these two numbers tell them apart.

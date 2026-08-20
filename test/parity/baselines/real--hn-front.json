@@ -13,7 +13,7 @@
     "geometry": {
       "status": "fail",
       "counts": {
-        "nodesOff": 313
+        "nodesOff": 12
       },
       "buckets": {
         "pageHeightPct": "+0",
@@ -39,7 +39,7 @@
         "substitutedTags": 0
       },
       "buckets": {
-        "fontsMissingPlane": "times new roman",
+        "fontsMissingPlane": "",
         "missingImages": "none"
       }
     },
@@ -60,12 +60,9 @@
     "style": {
       "status": "fail",
       "counts": {
-        "nodesDiffering": 55,
-        "prop:border-top-color": 2,
+        "nodesDiffering": 53,
         "prop:box-sizing": 1,
-        "prop:color": 2,
-        "prop:font-family": 2,
-        "prop:font-size": 54,
+        "prop:font-size": 52,
         "visibilityDiffering": 1
       }
     },

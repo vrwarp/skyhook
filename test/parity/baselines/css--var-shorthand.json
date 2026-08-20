@@ -1,5 +1,5 @@
 {
-  "page": "real/wikipedia-article",
+  "page": "css/var-shorthand",
   "dimensions": {
     "attributes": {
       "status": "pass",
@@ -11,13 +11,13 @@
       }
     },
     "geometry": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "nodesOff": 17
+        "nodesOff": 0
       },
       "buckets": {
         "pageHeightPct": "+0",
-        "worst": "\u003e64px"
+        "worst": "0"
       }
     },
     "interaction": {
@@ -32,7 +32,7 @@
         "consoleErrors": 0,
         "cspViolations": 0,
         "fontsMustLoadMissing": 0,
-        "imgBrokenLand": 2,
+        "imgBrokenLand": 0,
         "imgBrokenPlane": 0,
         "pendingAtProbe": 0,
         "shotsMissingPlane": 0,
@@ -71,12 +71,7 @@
       }
     }
   },
-  "expectedFail": {
-    "geometry": "P-129"
-  },
   "gaps": [
-    "P-119",
-    "P-126",
-    "P-129"
+    "P-126"
   ]
 }

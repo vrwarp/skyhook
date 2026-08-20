@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>a var() shorthand survives the wire</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  /* The shape that loses in CSSOM serialisation: a shorthand set with
+     var(), partially overridden by a later declaration. cssText for this
+     rule reads "border-top-color: ;" — see P-126 — so the border only
+     paints plane-side if the agent healed the rule from this sheet's own
+     source text. */
+  #card {
+    border: 2px solid var(--edge, rgb(0, 128, 0));
+    border-bottom: 0;
+    background-color: var(--ground, rgb(240, 240, 240));
+    padding: 10px;
+    width: 200px;
+  }
+</style>
+</head>
+<body>
+  <div id="card">a bordered card</div>
+  <p>var shorthand settled</p>
+</body>
+</html>

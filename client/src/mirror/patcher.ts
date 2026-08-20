@@ -487,6 +487,15 @@ export class Patcher {
           el = this.doc.createElement(SUBSTITUTE_TAG);
         }
         if (forbidden) el.setAttribute('data-skyhook-tag', tag);
+        // The stamp the rewritten selectors aim at: plane-side the page's
+        // html and body are elements inside the frame's own, so the server
+        // re-points `html`, `body` and `:root` at [data-sky-doc]
+        // (rewriteRootSelectors, css.go) and this is the other half of that
+        // contract. Every mirrored document's roots get it — sub-frame
+        // documents too, whose sheets live in their own shadow scope.
+        if (tag === 'html' || tag === 'body') {
+          el.setAttribute('data-sky-doc', tag);
+        }
         for (let i = 0; i + 1 < n.attrs.length; i += 2) {
           this.setAttr(el, this.str(n.attrs[i]), this.str(n.attrs[i + 1]));
         }

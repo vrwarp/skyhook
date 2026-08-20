@@ -1,0 +1,8 @@
+{
+  "id": "css/var-shorthand",
+  "title": "a border shorthand written against a custom property keeps its longhands",
+  "covers": ["var() shorthands", "CSSOM serialisation loss", "used-CSS healing"],
+  "gaps": ["P-126"],
+  "waitText": "var shorthand settled",
+  "notes": "the pin for P-126's fix: Chromium's cssText for the #card rule carries empty longhands, and the agent heals the rule from the style element's source; if the healing regresses, the plane-side card loses its border and the style dimension catches border-top-* at their initial values"
+}

@@ -335,10 +335,11 @@
     {
       "id": "P-114",
       "title": "A prefers-color-scheme media query nested inside a plain style rule crosses with its question intact instead of being resolved landside",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/agent.js"
-      ]
+      ],
+      "notes": "fixed: a style rule's own text now takes the same three passes a block shipped whole gets (shippedWhole in collectRules case 1), so a media query nested inside it is answered landside like its top-level twin; css/nesting-scheme's assertion pins it"
     },
     {
       "id": "P-115",
@@ -380,21 +381,21 @@
     {
       "id": "P-119",
       "title": "The mirror's own :root color and font leak into pages that rely on UA defaults",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/host.ts"
       ],
-      "notes": "found by the parity probes' first run: color #111 and the frame's sans-serif inherit into the mirrored page wherever the page never says otherwise, where landside shows black and the UA serif"
+      "notes": "fixed twice over, once in each direction: the server re-points the page's html, body and :root selectors at the data-sky-doc stamp the patcher writes on mirrored roots (rewriteRootSelectors, css.go), so page rules stop styling the frame's own elements and pouring inherited colour into the mirrored chain; and the frame's boot styles no longer set inheritable properties on its root, so the shell's chrome stops leaking downward. The agent's synthesized canvas-ground rule keeps a marker (:root[data-sky-ground]) the rewrite passes through, and the frame supplies the html,body height:100% chain deliberately that the double-match used to supply by accident. css/ua-defaults pins both directions"
     },
     {
       "id": "P-120",
       "title": "A top margin that collapses through the page's body is lost at the mirror boundary",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/patcher.ts",
         "client/src/mirror/host.ts"
       ],
-      "notes": "found by the parity probes' first run: the fixture's h1 margin collapses through body and pushes content 21px down landside; plane-side the gap vanishes and the document is 22px shorter"
+      "notes": "fixed: a twentieth of a pixel of padding on the mirrored html (the frame's boot styles) blocks parent-child margin collapse at exactly the boundary the real document root blocks it, so a child margin collapsing through body offsets content inside the mirrored root instead of escaping into the frame and vanishing. Rounds to zero in every probe; css/margin-collapse pins it"
     },
     {
       "id": "P-121",
@@ -451,11 +452,11 @@
     {
       "id": "P-126",
       "title": "A shorthand property set with var() loses its longhands in used-CSS extraction: the CSSOM serialises them as empty strings, the wire carries “border-top-color: ;”, and the mirror's parser drops the declarations",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "internal/mirror/agent.js"
       ],
-      "notes": "found by real/wikipedia-article's first measurement. Vector 2022 writes `border: 1px solid var(--border-color-subtle,#c8ccd1)` on thumbnail figures; the rule serialiser expands declarations longhand-by-longhand, and per the CSSOM spec the longhands of a var()-carrying shorthand read back as the empty string — capture 20260820-072628's expected.css holds the resulting `border-top-color: ;border-top-style: ;…` verbatim, so the mirrored figure paints no border while var()-valued longhands (background-color) survive intact. Every design-token stylesheet that writes shorthands against custom properties sheds those declarations at this step"
+      "notes": "fixed: when a rule's cssText carries the empty-declaration signature, the agent heals it from the sheet's authored source text — a <style>'s text synchronously, a linked sheet's via an in-page fetch prefetched at startup — locating the rule by normalised selector and ordinal and believing the candidate only if it reproduces every declaration the broken serialisation still carried (healedRuleText, agent.js). css/var-shorthand pins the heal; the wikipedia page's figure borders were the discovering case"
     },
     {
       "id": "P-127",
@@ -475,6 +476,16 @@
         "internal/client/client.go"
       ],
       "notes": "fixed: the writers now share one vocabulary — protocol kinds (the agent maps a sub-frame document to the wire's fragment kind), ASCII-lowercased element names (unifying also the patcher's docHash, which had folded wire-case clipPath and would have disagreed with a healthy agent), and values cut at 32 UTF-16 code units, backing off a split surrogate pair (fingerprintWindow in agent.js and patcher.ts, HashValueWindow in model.go, modelFingerprint in the Go client). bundle triage keeps its tolerant comparator for bundles written before the fix"
+    },
+    {
+      "id": "P-129",
+      "title": "A collapsed-border table sizes its caption differently when its borders arrive after first layout: the mirrored figure runs 2px wide and a paragraph wrapping around the float re-wraps",
+      "status": "open",
+      "refs": [
+        "internal/mirror/agent.js",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "exposed by P-126's heal on real/wikipedia-article: with the caption borders restored, the mirrored thumbnail figure measures 262px against 260 landside — under every probed computed property agreeing, border-collapse and display:table included — and the two-pixel float difference re-wraps the lead paragraph, shifting 17 inline boxes by up to 135px. A fully static render of the same computed inputs measures identically in both nested and top-level contexts, so the leading suspect is Chromium's incremental table relayout when borders and image blobs arrive after the first pass — the same page settled to landside-equal coordinates when the heal arrived late rather than early. Deterministic across runs; the wikipedia page's geometry expectedFail pins the shape"
     }
   ]
 }

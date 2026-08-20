@@ -246,7 +246,7 @@ func TestMinifyCSSDropsEmptyRules(t *testing.T) {
 	if len(out) != 2 {
 		t.Fatalf("expected 2 rules, got %v", out)
 	}
-	if out[0] != "body{margin:0;}" {
+	if out[0] != "body:where([data-sky-doc]){margin:0;}" {
 		t.Fatalf("minified = %q", out[0])
 	}
 }
@@ -352,8 +352,9 @@ func TestMinifyCSSPreservesMeaning(t *testing.T) {
 		{"a:hover { color: red }", "a:hover{color:red}"},
 		// Structural punctuation inside a string is text.
 		{`.a::before { content: "a; b: c" }`, `.a::before{content:"a; b: c"}`},
-		// An empty custom-property value is how a theme switches one off.
-		{":root { --light: ; --dark: initial }", ":root{--light: ;--dark:initial}"},
+		// An empty custom-property value is how a theme switches one off —
+		// and :root re-points to the mirrored document root (P-119).
+		{":root { --light: ; --dark: initial }", `[data-sky-doc="html"]{--light: ;--dark:initial}`},
 		// calc() needs the spaces around its operators.
 		{".a { width: calc(100% - 10px) }", ".a{width:calc(100% - 10px)}"},
 		{"/* lead */ .a { color: red } /* trail */", ".a{color:red}"},
@@ -361,6 +362,47 @@ func TestMinifyCSSPreservesMeaning(t *testing.T) {
 		got := minifyCSS([]string{tc.in})
 		if len(got) != 1 || got[0] != tc.want {
 			t.Errorf("minify(%q) = %v, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Plane-side the page's html and body are elements inside the frame's own,
+// so their type selectors — and :root, which can only ever be the frame —
+// re-point to the data-sky-doc stamps the patcher writes, at unchanged
+// specificity. Only selector preludes are touched: the words html and body
+// mean nothing special in a declaration, a string, a url() or an at-rule's
+// own prelude (P-119).
+func TestRewriteRootSelectors(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"html{color:red}", `html:where([data-sky-doc]){color:red}`},
+		{"body{margin:0}", `body:where([data-sky-doc]){margin:0}`},
+		{":root{--x:1}", `[data-sky-doc="html"]{--x:1}`},
+		{"html.dark body{color:red}",
+			`html:where([data-sky-doc]).dark body:where([data-sky-doc]){color:red}`},
+		{":is(html,body){margin:0}",
+			`:is(html:where([data-sky-doc]),body:where([data-sky-doc])){margin:0}`},
+		{":not(:root){x:y}", `:not([data-sky-doc="html"]){x:y}`},
+		{"@media screen{body{color:red}}",
+			`@media screen{body:where([data-sky-doc]){color:red}}`},
+		// The words, everywhere they are not a selector.
+		{".body{x:y}", ".body{x:y}"},
+		{"#html{x:y}", "#html{x:y}"},
+		{"bodyguard{x:y}", "bodyguard{x:y}"},
+		{"x-body{x:y}", "x-body{x:y}"},
+		{"html-include{x:y}", "html-include{x:y}"},
+		{`.a{background:url(body.png)}`, `.a{background:url(body.png)}`},
+		{`.a{grid-template-areas:"body html"}`, `.a{grid-template-areas:"body html"}`},
+		{`[alt="html"]{x:y}`, `[alt="html"]{x:y}`},
+		{"@keyframes html{from{opacity:0}}", "@keyframes html{from{opacity:0}}"},
+		{".a{animation-name:body}", ".a{animation-name:body}"},
+		// The agent's synthesized ground rule targets the frame's real root
+		// and passes through unrewritten.
+		{":root[data-sky-ground]{background-color:rgb(1,2,3) !important;}",
+			":root[data-sky-ground]{background-color:rgb(1,2,3) !important;}"},
+	} {
+		got := rewriteRootSelectors(tc.in)
+		if got != tc.want {
+			t.Errorf("rewriteRootSelectors(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
