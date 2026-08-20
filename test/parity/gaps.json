@@ -246,12 +246,13 @@
     {
       "id": "P-104",
       "title": "Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "internal/protocol/frames.go:268",
-        "client/src/shared/codec.ts"
+        "internal/mirror/agent.js",
+        "internal/mirror/tab.go",
+        "client/src/app/tabs.ts"
       ],
-      "noPage": "a favicon is chrome UI, invisible to the mirror probes; recorded so the dead wire surface is not mistaken for a feature"
+      "notes": "fixed in the same commit as P-109 (the chrome the page never carries): the agent names the page's icon — the smallest declared raster, or the /favicon.ico every browser would have asked for — the server fetches it landside, sniffs the magic bytes, and ships it inside TabState.FaviconID as a data URL; the strip seats it where the spinner goes. Chrome UI stays invisible to the mirror probes, so the pin is TestTheTabStateCarriesTheFavicon rather than a corpus page. The registry flip was missed in that commit and corrected after"
     },
     {
       "id": "P-105",

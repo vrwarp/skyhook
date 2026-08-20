@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-53 gaps: 19 open, 11 by-design, 22 fixed, 1 disproven.
+53 gaps: 18 open, 11 by-design, 23 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -146,7 +146,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-101 | fixed | A select change never reaches the landside page except through a form submit | forms/select |
 | P-102 | fixed | setvalue and blur are dispatched to the top-level agent only; a non-append edit inside a mirrored cross-origin frame is silently lost | forms/frame-editing |
 | P-103 | fixed | A blob: image source serialises as a landside blob URL the client can never fetch: a broken image with no fallback and no Missing notice | images/blob-src |
-| P-104 | open | Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing | — a favicon is chrome UI, invisible to the mirror probes; recorded so the dead wire surface is not mistaken for a feature |
+| P-104 | fixed | Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing | — |
 | P-105 | by-design | HTML comments are never mirrored, though KindComment exists on both halves of the protocol | — |
 | P-106 | fixed | object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box | textmisc/object-embed |
 | P-107 | open | Dead wire surface: TypeIntegrity, OpImage and ScrollEvent.Visible are never produced or consumed | — wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it |
