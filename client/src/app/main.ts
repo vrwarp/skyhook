@@ -1595,6 +1595,15 @@ function pageGroups(tab: number): MenuGroups {
         disabled: !url || !connected,
         run: () => openInNewTab(url),
       },
+      {
+        // The mirror is a complete local copy, print stylesheets included,
+        // so this is the reader's own dialog on their own printer at no
+        // round trip (P-110). What it cannot cover is a page calling
+        // window.print() landside: no CDP event reports that.
+        label: 'Print page…',
+        disabled: !hosts.get(tab),
+        run: () => hosts.get(tab)?.print(),
+      },
     ],
     [
       {
@@ -1683,6 +1692,15 @@ function mirrorMenu(tab: number, target: MenuTarget): MenuGroups {
 
   groups.push(...pageGroups(tab));
   groups.push([
+    {
+      // The pointer's moves are never streamed, so hover state — a CSS
+      // dropdown, a JS mouseover menu — is asked for the same way a
+      // right-click is: once, as a choice, with the cost named (P-111).
+      label: 'Hover here',
+      hint: 'one round trip',
+      disabled: !target.node || !connected,
+      run: () => host?.sendHover(target.node),
+    },
     {
       // Some pages answer a right click with a menu of their own, which arrives
       // in the mirror as ordinary DOM. That is a round trip, so it is a choice

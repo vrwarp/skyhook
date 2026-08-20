@@ -1469,6 +1469,27 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			<body><h1>files to take home</h1>
 			<a id="get" href="/report.bin">get the report</a></body></html>`)
 	})
+	// A slider whose value the page watches, and a menu that opens on JS
+	// hover: the two mousemove-widget shapes P-111 is about. The slider pins
+	// the setvalue path; the menu pins the InHover ask parking the landside
+	// pointer.
+	mux.HandleFunc("/widgets", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Widgets</title></head>
+			<body><h1>the widget page</h1>
+			<input type="range" id="vol" min="0" max="100" value="10" step="1">
+			<p id="st">volume 10</p>
+			<div id="menu">More options</div>
+			<div id="sub" hidden>the secret entry</div>
+			<script>
+			document.getElementById('vol').addEventListener('input', function () {
+			  document.getElementById('st').textContent = 'volume ' + this.value;
+			});
+			document.getElementById('menu').addEventListener('mouseover', function () {
+			  document.getElementById('sub').hidden = false;
+			});
+			</script></body></html>`)
+	})
 	// A page that wants a file: what TestAFileReachesThePagesChooser feeds
 	// (P-007). The page reads the file itself, so the status line proves the
 	// bytes really reached page JavaScript, not merely the input element.

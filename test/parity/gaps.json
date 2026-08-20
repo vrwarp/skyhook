@@ -36,10 +36,10 @@
       "title": "wheel and hover are protocol surface no client sends",
       "status": "open",
       "refs": [
-        "docs/IMPLEMENTATION.md:2115",
-        "internal/mirror/input.go:90"
+        "client/src/app/main.ts",
+        "internal/mirror/input.go"
       ],
-      "noPage": "needs a pointer-move vocabulary the interaction executor does not have yet; P-115's page will carry both when it grows one"
+      "noPage": "hover is now sent — the mirror menu's Hover-here entry is the client's InHover (P-111) — so this entry narrows to wheel: still protocol surface no client sends, deliberately, because scroll telemetry already carries where the reader is and streaming wheel deltas would spend the link on what zoom-canvas widgets alone consume; catalogued for the executor revision that takes on drag"
     },
     {
       "id": "P-005",
@@ -313,11 +313,12 @@
     {
       "id": "P-110",
       "title": "There is no print path: window.print does nothing for the reader",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "docs/IMPLEMENTATION.md"
+        "client/src/mirror/host.ts",
+        "client/src/app/main.ts"
       ],
-      "noPage": "printing is chrome UI the harness cannot see; that @media print sheets do not leak into the screen is pinned by css/layers-scope"
+      "notes": "the page menu's Print entry prints the mirror with the reader's own dialog: the mirror is a complete local copy, print stylesheets included, so it costs no round trip and lands on a printer the reader can actually reach, which the landside browser's never was. The frame's sandbox gains allow-modals for exactly this call — nothing inside can open a modal without script, and allow-scripts stays off; the client's sandbox conformance test pins both directions. Residue, named here so it is not rediscovered: a page calling window.print() landside is invisible — CDP has no event for it — so page-initiated print still does nothing for the reader. Pinned by TestPWAWidgetChromeAffordances"
     },
     {
       "id": "P-111",
@@ -325,9 +326,11 @@
       "status": "open",
       "refs": [
         "client/src/mirror/host.ts",
-        "docs/IMPLEMENTATION.md:2115"
+        "client/src/mirror/echo.ts",
+        "internal/mirror/input.go"
       ],
-      "noPage": "needs a pointer-move step in the interaction executor; catalogued for the executor's next revision alongside P-004"
+      "noPage": "needs a pointer-move step in the interaction executor; catalogued for the executor's next revision alongside P-004",
+      "notes": "two of the three shapes now have paths, pinned by TestSlidersAndHoverMenusReachThePage and TestPWAWidgetChromeAffordances. Sliders (and every native-picker input: color, date, time, month, week): the widget moves locally in the mirror, and the settled value relays once on change as a setvalue — the echo engine now refuses to own non-text inputs, which was also sending a whole-value frame per tick of a focused drag and a meaningless one after every checkbox toggle. Hover menus: hover is state on the ground and pointer moves are never streamed, so the context menu's Hover-here entry sends the one InHover that parks the landside pointer where CSS :hover and JS mouseover can see it. Still open for drag-and-drop: HTML5 DnD needs a gesture vocabulary (dragstart through drop) that neither the wire nor the executor has, deferred with eyes open"
     },
     {
       "id": "P-112",
@@ -336,7 +339,8 @@
       "refs": [
         "internal/mirror/agent.js",
         "internal/mirror/shot.go"
-      ]
+      ],
+      "notes": "deliberately deferred out of the product-feature round: real audio over a 250 kbps shared link is a transport project (an Opus side-channel with its own budget and preemption), not a gap fix, and the UXR consult ranked it below downloads, clipboard, upload, pointer widgets and print — every one of which loses reader data or intent today, where audio degrades to the still control strip the design already draws"
     },
     {
       "id": "P-113",

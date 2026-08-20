@@ -14,7 +14,7 @@
  */
 import { ImageMeta, InputKind, Mutation, MutationOp, OpCode, Snapshot } from '../shared/protocol.js';
 import {
-  EchoEngine, asEditable, caretOf, modifierMask, setCaret, setValue, valueOf,
+  EchoEngine, PICKER_INPUTS, asEditable, caretOf, modifierMask, setCaret, setValue, valueOf,
 } from './echo.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { Patcher } from './patcher.js';
@@ -583,7 +583,10 @@ export class MirrorHost {
     // capture and a test looking at a strip of them have no other way to say
     // which page is which.
     this.frame.dataset.tab = String(tab);
-    this.frame.setAttribute('sandbox', 'allow-same-origin');
+    // allow-modals is for exactly one call: the shell's own print() on this
+    // frame (P-110). No script can run in here, so nothing inside can ever
+    // open a modal — the flag only widens what the shell may ask for.
+    this.frame.setAttribute('sandbox', 'allow-same-origin allow-modals');
     this.frame.setAttribute('referrerpolicy', 'no-referrer');
     this.frame.src = 'about:blank';
     this.ready = new Promise<void>((resolve) => {
@@ -1150,16 +1153,27 @@ export class MirrorHost {
     // it — but the choice used to stay in the mirror: nothing sent it, and
     // the landside page's own select never changed (P-101). The change event
     // is the moment the choice is settled; multiple selects join their
-    // values the way form submission does.
+    // values the way form submission does. The same is true of every input
+    // whose value settles through a native widget — a slider's thumb, a
+    // colour swatch, a date's calendar — so those relay on change too
+    // (P-111): one frame per gesture, however long the drag. Typing fields
+    // stay the echo engine's, which owns their every keystroke.
     doc.addEventListener('change', (ev) => {
-      const el = this.eventTarget(ev) as HTMLSelectElement | null;
-      if (!el || el.tagName !== 'SELECT') return;
+      const el = this.eventTarget(ev) as HTMLElement | null;
+      if (!el) return;
       const node = this.patcher?.idOf(el) ?? 0;
       if (!node) return;
-      const value = el.multiple
-        ? Array.from(el.selectedOptions).map((o) => o.value).join('\n')
-        : el.value;
-      this.send({ kind: InputKind.SetValue, node, text: value });
+      if (el.tagName === 'SELECT') {
+        const sel = el as HTMLSelectElement;
+        const value = sel.multiple
+          ? Array.from(sel.selectedOptions).map((o) => o.value).join('\n')
+          : sel.value;
+        this.send({ kind: InputKind.SetValue, node, text: value });
+        return;
+      }
+      if (el.tagName === 'INPUT' && PICKER_INPUTS.has((el as HTMLInputElement).type)) {
+        this.send({ kind: InputKind.SetValue, node, text: (el as HTMLInputElement).value });
+      }
     }, true);
     doc.addEventListener('keydown', (ev) => {
       const key = ev as KeyboardEvent;
@@ -1541,6 +1555,32 @@ export class MirrorHost {
   sendContextMenu(node: number): void {
     if (!node) return;
     this.send({ kind: InputKind.Context, node, modifiers: 0 });
+  }
+
+  /**
+   * Parks the landside pointer over a node (P-111). Hover is real state on
+   * the ground — CSS :hover, JS mouseover menus — and the plane pointer's
+   * moves are never streamed, so this is how the reader asks for it: once,
+   * as a choice, at the cost of a round trip.
+   */
+  sendHover(node: number): void {
+    if (!node) return;
+    this.send({ kind: InputKind.Hover, node, modifiers: 0 });
+  }
+
+  /**
+   * Prints the mirrored document with the reader's own dialog (P-110). The
+   * mirror is a complete local copy — the page's own print stylesheets
+   * crossed with everything else — so this costs no round trip and lands on
+   * a printer the reader can actually reach, which the landside browser's
+   * never was.
+   */
+  print(): void {
+    try {
+      this.frame.contentWindow?.print();
+    } catch {
+      /* a sandbox refusal prints nothing, and there is nothing to add */
+    }
   }
 
   /**
