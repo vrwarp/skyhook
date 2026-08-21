@@ -4388,3 +4388,34 @@ remaining flakes on a four-core box are dominated by repeated TLS handshake
 failures, which is a lead rather than a wall. Left as a lead — it is not
 understood yet, and the honest place for it is written down rather than
 guessed at.
+
+### 62. The half of §60 that only the bad link could see
+
+§60's container scroll passed every desk and both unshaped jobs, and failed on
+the emulated link the first time CI ran it there: three minutes, a mirror still
+showing ten rows, and a server log that recorded `seq=0` throughout — no scroll,
+no mutation, no error. Nothing had happened at all.
+
+The report is throttled by 250 ms, and it read the box when the timer fired
+rather than when the reader scrolled. In that window the server's own position
+for that container can arrive — one from before the scroll, already in flight —
+and `followScroll` applies it, because it declines to move a scroller the reader
+has taken over *except* when they are sitting at the bottom of it, which is the
+one place following along is the point. A reader who has just scrolled to the
+end of a list is exactly there.
+
+So the box went back to where it had been, and the report described that: the
+page was told to stay put, the rows below were never built, and the reader
+scrolled into blank space. On a fast link the stale position has usually already
+landed before the reader moves; over 1.2 s of round trip it is still in the air.
+
+The position is taken as the reader leaves it now, and a later scroll in the
+same window replaces it rather than starting a second timer. Pinned in
+`host.dom.test.ts` rather than by a shaped run: the race is a stale op landing
+inside a throttle window, which fake timers can state exactly and a slow link
+can only make likely.
+
+The container branch of `HandleScroll` also says what it did now. Its first
+failure in CI produced a log with nothing in it, and a silent path that has just
+been given work to do is one nobody can debug — which is the same lesson as
+§61's, arriving from the other direction within the hour.

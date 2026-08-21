@@ -1703,3 +1703,99 @@ describe('an optimistic send the page did not make', () => {
     expect(composer.textContent).toBe('hello there');
   });
 });
+
+/*
+The position reported for a scrolled container is the reader's, not the one the
+server put back under them.
+
+A container's scroll is throttled: the reader scrolls, and a quarter of a second
+later the server is told where they got to. In that window the server's own idea
+of where the container sits can arrive — a position from before the scroll,
+already in flight — and followScroll applies it, because it declines to move a
+scroller the reader has taken over *except* when they are at the bottom of it,
+which is the one place following along is the point. A reader who has just
+scrolled to the end of a list is exactly there.
+
+So the box went back to where it had been, and the report then described that
+instead of the scroll: the page was told to stay where it was, the list never
+built the rows below, and the reader scrolled into blank space. Over a fast link
+the stale position has usually already landed; over 1.2 s of round trip it is
+still in flight, which is why the emulated-link job was the only one that ever
+saw it (P-134).
+*/
+describe('a container scroll over a slow link', () => {
+  function withScroller(snap: Snapshot): Snapshot {
+    const base = snap.strings.length;
+    snap.strings.push('div', 'id', 'feed');
+    snap.nodes.push({
+      id: 60, parent: 1, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2], flags: NodeFlags.ScrollDiv,
+    });
+    return snap;
+  }
+
+  /** A box with somewhere to scroll, which jsdom will not work out for itself. */
+  function sized(el: HTMLElement, top: number): void {
+    Object.defineProperty(el, 'clientHeight', { value: 200, configurable: true });
+    Object.defineProperty(el, 'scrollHeight', { value: 400, configurable: true });
+    el.scrollTop = top;
+  }
+
+  it('reports where the reader left it, not where the server put it back', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withScroller(snapshot()));
+      const doc = host.frame.contentDocument!;
+      const feed = doc.getElementById('feed')!;
+
+      // The reader scrolls to the end of what they have.
+      sized(feed, 200);
+      feed.dispatchEvent(new (doc.defaultView as unknown as typeof globalThis)
+        .Event('scroll', { bubbles: false }));
+
+      // The server's position from before that scroll arrives while the report
+      // is still waiting, and the reader is at the bottom, so it is applied.
+      host.applyMutation(scrollOp(60, 0, 0), 2);
+      expect(feed.scrollTop).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(400);
+
+      const sent = ev.scroll.mock.calls.map((c) => c[1] as Record<string, unknown>)
+        .filter((s) => s.node === 60);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].y).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports the last position of a scroll still in progress', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withScroller(snapshot()));
+      const doc = host.frame.contentDocument!;
+      const feed = doc.getElementById('feed')!;
+      const scroll = () => feed.dispatchEvent(
+        new (doc.defaultView as unknown as typeof globalThis).Event('scroll', { bubbles: false }));
+
+      // One throttle window, three positions: what the reader ends on is what
+      // the page is told, and it is told once.
+      sized(feed, 40);
+      scroll();
+      sized(feed, 120);
+      scroll();
+      sized(feed, 200);
+      scroll();
+      await vi.advanceTimersByTimeAsync(400);
+
+      const sent = ev.scroll.mock.calls.map((c) => c[1] as Record<string, unknown>)
+        .filter((s) => s.node === 60);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].y).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

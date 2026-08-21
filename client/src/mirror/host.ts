@@ -545,8 +545,11 @@ export class MirrorHost {
   /** Scrollers the reader has moved themselves. The server never moves these
    *  again unless they are pinned to the bottom. */
   private readerMoved = new WeakSet<Node>();
-  /** Per-container throttles for scroll telemetry, keyed by the element. */
-  private elementScrollTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+  /** Container scrolls waiting to be reported, keyed by the element: the
+   *  position the reader put it at, and the timer that will send it. */
+  private elementScrolls = new Map<HTMLElement, {
+    timer: ReturnType<typeof setTimeout>; x: number; y: number; h: number; docH: number;
+  }>();
   private readerMovedDoc = false;
   /** The last position this host set programmatically, per scroller. A scroll
    *  event landing on exactly this position is ours, not the reader's; the
@@ -1395,26 +1398,56 @@ export class MirrorHost {
     this.reportScrollSoon(el);
   };
 
-  /** Tells the server where a container got to, at most once per interval. */
+  /*
+   * Tells the server where a container got to, at most once per interval.
+   *
+   * The position is taken here, as the reader leaves it, and not when the timer
+   * fires. In between, the server's own idea of where this container sits can
+   * arrive and be applied: followScroll declines to move a scroller the reader
+   * has taken over *except* when they are sitting at the bottom of it, which is
+   * the one place following along is the point — and which is exactly where a
+   * reader who has just scrolled to the end of a list is. So a landside
+   * position from before the scroll would land inside the window, put the box
+   * back where it was, and this would then report that back as the reader's
+   * own. Over a fast link the stale op has usually already arrived; over the
+   * one this project exists for it is still in flight, which is why the list
+   * grew on every desk and on none of the shaped runs.
+   */
   private reportScrollSoon(el: HTMLElement): void {
-    if (this.elementScrollTimers.has(el)) return;
-    this.elementScrollTimers.set(el, setTimeout(() => {
-      this.elementScrollTimers.delete(el);
-      const id = this.patcher?.idOf(el) ?? 0;
-      if (!id) return;
-      this.events.scroll(this.tab, {
-        tab: this.tab,
-        node: id,
-        x: el.scrollLeft,
-        y: el.scrollTop,
-        // Its own range, not the document's. The landside container is a
-        // different height whenever a font was substituted, and a list that
-        // builds rows on demand is a different height for the better reason
-        // that it has more of them.
-        h: el.clientHeight,
-        docH: el.scrollHeight,
-      });
-    }, SCROLL_REPORT_MS));
+    const at = {
+      x: el.scrollLeft,
+      y: el.scrollTop,
+      // Its own range, not the document's. The landside container is a
+      // different height whenever a font was substituted, and a list that
+      // builds rows on demand is a different height for the better reason
+      // that it has more of them.
+      h: el.clientHeight,
+      docH: el.scrollHeight,
+    };
+    const pending = this.elementScrolls.get(el);
+    if (pending) {
+      // Newer position, same timer: the reader is still scrolling, and what
+      // they end on is what the page should be told.
+      Object.assign(pending, at);
+      return;
+    }
+    this.elementScrolls.set(el, {
+      ...at,
+      timer: setTimeout(() => {
+        const sample = this.elementScrolls.get(el);
+        this.elementScrolls.delete(el);
+        const id = this.patcher?.idOf(el) ?? 0;
+        if (!id || !sample) return;
+        this.events.scroll(this.tab, {
+          tab: this.tab,
+          node: id,
+          x: sample.x,
+          y: sample.y,
+          h: sample.h,
+          docH: sample.docH,
+        });
+      }, SCROLL_REPORT_MS),
+    });
   }
 
   // ------------------------------------------------------------------ scroll

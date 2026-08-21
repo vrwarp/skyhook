@@ -690,6 +690,12 @@ func (t *Tab) HandleScroll(ctx context.Context, ev *protocol.ScrollEvent) error 
 	// last shot covered is no longer the rectangle the reader is looking at.
 	defer t.shotSoon(shotAfterInput)
 	if ev.Node != 0 {
+		// Said out loud, because the whole of this path is silent otherwise and
+		// its first failure in CI was three minutes of a log that recorded
+		// nothing at all — no scroll, no mutation, no error — which is not
+		// evidence of anything (P-134).
+		t.log.Debug("a container the reader scrolled", "tab", t.ID,
+			"node", ev.Node, "y", ev.Y, "of", ev.DocH)
 		_, err := t.evalInSlot(ctx, frameSlot(ev.Node),
 			fmt.Sprintf("__skyhook.scrollTo(%d,%d,%d)", ev.Node, ev.X, ev.Y))
 		return err
