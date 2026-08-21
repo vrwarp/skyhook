@@ -1127,65 +1127,80 @@ func TestALateStartedLoadingDoesNotUndoAStop(t *testing.T) {
 }
 
 /*
-A tab does not lend one page's history to another.
+A tab does not keep a history answer the reader has navigated past.
 
-Where a tab is is known the instant a navigation commits; what is behind it
-costs a round trip into the browser. Everything emitted in between — the frame
-that says a load started, the one a snapshot brings, a title changing — used to
-carry the new address stamped with the previous page's flags, and the reader's
-shell believes that frame until the next one arrives.
+Every navigation asks the browser what its history looks like, and so does the
+tail of the navigation before it — the load event, the settle, a refresh. Those
+overlap, and the stale question is the one whose answer arrives last. Landing
+last, it used to win, leaving canBack and canForward describing the page before
+this one until the next navigation asked again.
 
-Which way it is wrong decides what it costs. A tab that has just reached the
-start of its history, still claiming a page behind it, makes the shell answer
-the next back gesture itself: the gesture is spent, nothing moves, and nothing
-tells the reader it was heard. That is what left
-TestTheBrowsersOwnBackAndForwardDriveTheTab failing over the shaped link, where
-the gap between the commit and the answer is seconds rather than a millisecond.
+Which way that is wrong decides what it costs. A tab at the start of its
+history still saying "you can go back" makes the shell answer the reader's back
+gesture instead of letting it through: the gesture is spent, nothing moves, and
+nothing says it was heard. That is what left
+TestTheBrowsersOwnBackAndForwardDriveTheTab failing over the emulated link,
+where the two questions are seconds apart rather than milliseconds.
 */
-func TestHistoryFlagsWaitForThePageTheyWereMeasuredOn(t *testing.T) {
+func TestAHistoryAnswerTheReaderNavigatedPastIsDropped(t *testing.T) {
 	sink := &stateSink{}
 	tab := &Tab{out: sink}
 
-	// A tab nobody has asked the browser about yet. It has an address and no
-	// grounds for a claim about what is behind it.
-	tab.url = "https://example.test/one"
-	tab.emitState(protocol.TabState{})
-	if st, ok := sink.last(); !ok || st.CanBack || st.CanForward {
-		t.Fatalf("a tab with no history read yet claimed one: %+v", st)
+	// Two entries, sitting on the second: somewhere to go back to.
+	asked := tab.navEpoch.Load()
+	if !tab.applyHistory(asked, 1, 2) {
+		t.Fatal("an answer about the page the tab is on was refused")
+	}
+	tab.emitState(protocol.TabState{URL: "https://example.test/two"})
+	if st, ok := sink.last(); !ok || !st.CanBack || st.CanForward {
+		t.Fatalf("the measured flags did not reach the frame: %+v", st)
 	}
 
-	// The round trip lands: two entries, sitting on the second.
-	tab.histURL = "https://example.test/one"
-	tab.canBack = true
-	tab.emitState(protocol.TabState{})
-	if st, _ := sink.last(); !st.CanBack {
-		t.Error("a frame about the very page the flags were read on lost them")
+	// The reader goes back to the first entry, and that navigation reads the
+	// history for itself.
+	tab.pageCommitted()
+	now := tab.navEpoch.Load()
+	if now == asked {
+		t.Fatal("a commit did not move the nav epoch; nothing can tell the two pages apart")
+	}
+	if !tab.applyHistory(now, 0, 2) {
+		t.Fatal("the new page's own answer was refused")
 	}
 
-	// A navigation commits. The URL changes at once; the flags are still the
-	// previous page's until the browser is asked again.
-	tab.url = "https://example.test/two"
-	tab.emitState(protocol.TabState{})
-	if st, _ := sink.last(); st.CanBack {
-		t.Error("the new page borrowed the previous page's history")
+	// And the previous page's question, still in flight, is answered. It says
+	// what was true when it was asked, and must not be believed now.
+	if tab.applyHistory(asked, 1, 2) {
+		t.Error("an answer about the page the reader left was accepted")
 	}
-
-	// The answer for the new page arrives, and says the opposite.
-	tab.histURL = "https://example.test/two"
-	tab.canBack = false
-	tab.canForward = true
-	tab.emitState(protocol.TabState{})
-	if st, _ := sink.last(); st.CanBack || !st.CanForward {
-		t.Errorf("the measured flags did not reach the frame: back=%v forward=%v",
-			st.CanBack, st.CanForward)
-	}
-
-	// A frame that carries its own URL is judged on that URL, not on where the
-	// tab has since moved to: a snapshot of the page just left must not pick up
-	// the flags of the page just arrived at.
 	tab.emitState(protocol.TabState{URL: "https://example.test/one"})
-	if st, _ := sink.last(); st.CanForward {
-		t.Error("a frame about an older page took the current page's flags")
+	st, _ := sink.last()
+	if st.CanBack {
+		t.Error("a tab at the start of its history says the reader can still go back")
+	}
+	if !st.CanForward {
+		t.Error("a tab with a page ahead of it says there is nothing forward")
+	}
+}
+
+// The other half of the same fault: the browser announces a commit before its
+// own history list records it, so an answer read at that moment is about the
+// page just left. It is checked rather than believed.
+func TestAHistoryReadIsCheckedAgainstThePageTheTabIsOn(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		entry     string
+		tab       string
+		describes bool
+	}{
+		{"the same page", "https://example.test/one", "https://example.test/one", true},
+		{"the page before it", "about:blank", "https://example.test/one", false},
+		{"a tab that has never been anywhere", "about:blank", "", true},
+		{"a history with no current entry", "", "https://example.test/one", true},
+	} {
+		if got := historyDescribes(c.entry, c.tab); got != c.describes {
+			t.Errorf("%s: entry %q against tab %q = %v, want %v",
+				c.name, c.entry, c.tab, got, c.describes)
+		}
 	}
 }
 

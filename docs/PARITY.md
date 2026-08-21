@@ -173,7 +173,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-128 | fixed | The three fingerprint writers disagree at the edges: DOM nodeType against protocol kind for container roots, lowercased names against clipPath, 32 UTF-16 units against 32 runes | — |
 | P-129 | open | A collapsed-border table sizes its caption differently when its borders arrive after first layout: the mirrored figure runs 2px wide and a paragraph wrapping around the float re-wraps | real/wikipedia-article |
 | P-130 | open | A quirks-mode body stretches to the viewport minus its own margins landside; the mirrored body is an inner box, and CSS cannot state a margin-box stretch for it | real/hn-front |
-| P-131 | fixed | A tab's history flags described the page it had just left: the back gesture at the start of a history was answered by the shell and vanished | — |
+| P-131 | fixed | A tab's cached history flags described the page it had left: the back gesture at the start of a history was answered by the shell and vanished | — |
 <!-- parity:registry:end -->
 
 ## Fixing a gap
