@@ -325,14 +325,53 @@ func Launch(ctx context.Context, opts BrowserOptions) (*Browser, error) {
 	return b, nil
 }
 
+/*
+Complaints a headless Chromium makes about the machine it is on, every time it
+starts, on every machine this runs on.
+
+None of them is ever the answer to anything: there is no system bus in a
+container and the browser does not need one, there is no GPU and it falls back,
+and the push-messaging endpoint it registers against is not ours. What they are
+is *volume* — a browser writes dozens of these in its first second, and the
+diagnostic ring is a fixed number of records shared with everything the mirror
+has to say. In the e2e harness, where every test starts its own browser, that
+had taken over: a failing test's dump came out 93% dbus, and the ten records
+describing the mirror were the ones that had been pushed out of the ring.
+
+Matched on the message rather than the severity, because the browser calls all
+of them ERROR and some genuine ones are ERROR too. Anything unrecognised still
+goes through at DEBUG.
+*/
+var chromiumNoise = []string{
+	"Failed to connect to the bus",
+	"Failed to call method: org.freedesktop.DBus",
+	"ContextResult::kTransientFailure",
+	"Exiting GPU process due to errors during initialization",
+	"Registration response error message: DEPRECATED_ENDPOINT",
+}
+
+// worthLogging reports whether a line the browser wrote says anything.
+func worthLogging(line string) bool {
+	for _, noise := range chromiumNoise {
+		if strings.Contains(line, noise) {
+			return false
+		}
+	}
+	return true
+}
+
 func drainStderr(r interface{ Read([]byte) (int, error) }, log *slog.Logger) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			line := strings.TrimSpace(string(buf[:n]))
-			if line != "" {
-				log.Debug("chromium", "msg", line)
+			// A read can carry several lines, and a burst of noise can carry
+			// one real line with it. Split so the real one survives.
+			for _, line := range strings.Split(string(buf[:n]), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" && worthLogging(line) {
+					log.Debug("chromium", "msg", line)
+				}
 			}
 		}
 		if err != nil {

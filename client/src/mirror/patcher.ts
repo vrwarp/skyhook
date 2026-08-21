@@ -573,6 +573,11 @@ export class Patcher {
         // unticked the box or moved off the option, and the control has to
         // follow — otherwise the mirror shows a tick landside stopped drawing.
         (el as HTMLInputElement).checked = false;
+      } else if (lower === 'data-sky-indeterminate') {
+        // The same, for the state that has no attribute of its own at all: a
+        // box that has stopped being half-ticked is one the reader has to see
+        // resolve.
+        (el as HTMLInputElement).indeterminate = false;
       } else if (lower === 'data-sky-selected') {
         (el as HTMLOptionElement).selected = false;
       } else if (lower === 'data-sky-open') {
@@ -648,6 +653,10 @@ export class Patcher {
       if ('value' in input && input.value !== value) input.value = value;
     } else if (lower === 'data-sky-checked') {
       (el as HTMLInputElement).checked = value === '1';
+    } else if (lower === 'data-sky-indeterminate') {
+      // A checkbox's third state reflects no attribute, so it arrives as one
+      // and is put back on the property that draws it.
+      (el as HTMLInputElement).indeterminate = value === '1';
     } else if (lower === 'data-sky-selected') {
       (el as HTMLOptionElement).selected = value === '1';
     } else if (lower === 'data-sky-open') {
@@ -1168,6 +1177,12 @@ html:where([data-sky-doc]) { padding-top: 0.05px; padding-bottom: 0.05px; }`;
         any = true;
       } else {
         delete attrs['data-sky-checked'];
+      }
+      if ((el as HTMLInputElement).indeterminate) {
+        attrs['data-sky-indeterminate'] = '1';
+        any = true;
+      } else {
+        delete attrs['data-sky-indeterminate'];
       }
     }
     if (tagUp === 'OPTION') {

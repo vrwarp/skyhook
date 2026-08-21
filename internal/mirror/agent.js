@@ -541,9 +541,16 @@
         // by the page's own DOM, so the value ships as empty (P-007).
         var value = liveValue(el);
         if (el.type !== 'file') pairs.push(intern('data-sky-value'), intern(value));
-        watchLive(el, { value: value, checked: checked });
+        watchLive(el, { value: value, checked: checked, indeterminate: !!el.indeterminate });
       }
       if (checked) pairs.push(intern('data-sky-checked'), intern('1'));
+      // The third state of a checkbox, which is a property and nothing else:
+      // no attribute reflects it, so a serializer sees a box that is merely
+      // unchecked. Every "select all" over a partly-selected list is one —
+      // a mail app's message list, a file manager, any table with a header
+      // tick — and the reader was shown the wrong answer to "is this on?"
+      // (P-135).
+      if (el.indeterminate) pairs.push(intern('data-sky-indeterminate'), intern('1'));
     } else if (tag === 'OPTION') {
       var selected = !!el.selected;
       if (selected) pairs.push(intern('data-sky-selected'), intern('1'));
@@ -906,7 +913,12 @@
       pendingOps.push([3, id, intern('data-sky-checked'), checked ? intern('1') : -1]);
       changed = true;
     }
-    liveWatch.set(el, { value: value, checked: checked });
+    var mixed = !!el.indeterminate;
+    if (was.indeterminate !== mixed) {
+      pendingOps.push([3, id, intern('data-sky-indeterminate'), mixed ? intern('1') : -1]);
+      changed = true;
+    }
+    liveWatch.set(el, { value: value, checked: checked, indeterminate: mixed });
     return changed;
   }
 
@@ -1047,6 +1059,7 @@
         any = true;
       }
       if (el.checked) { out['data-sky-checked'] = '1'; any = true; }
+      if (el.indeterminate) { out['data-sky-indeterminate'] = '1'; any = true; }
     } else if (tag === 'OPTION') {
       if (el.selected) { out['data-sky-selected'] = '1'; any = true; }
     }

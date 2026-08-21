@@ -109,6 +109,16 @@ func TestPWAScrollingAMirroredContainerReachesThePage(t *testing.T) {
     })()`, h.site.URL+"/lazy-scroller"), nil)
 	waitFor(ctx, t, page, mirrorText+`.includes('row 10')`,
 		budget(60*time.Second), "the mirrored list")
+	// A reader cannot scroll a box that does not scroll yet, and neither may
+	// this: the rows arrive as DOM and the rule that gives the box its height
+	// and its overflow arrives as CSS, and under load the two are not the same
+	// moment. Scrolling in between sets scrollTop on a box with nowhere to go,
+	// which fires no event, reports nothing, and looks exactly like the bug.
+	waitFor(ctx, t, page, `(() => {
+      const box = document.querySelector('iframe.mirror').contentDocument
+        .getElementById('box');
+      return !!box && box.scrollHeight > box.clientHeight;
+    })()`, budget(30*time.Second), "the mirrored list to be scrollable")
 
 	// The reader scrolls their copy to the end of it, which is all they can do.
 	evalJSON(ctx, t, page, `(() => {

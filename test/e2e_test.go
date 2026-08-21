@@ -1619,6 +1619,24 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			seen.observe(box.lastElementChild);
 			</script></body></html>`)
 	})
+	// A checkbox in its third state, which is a property and no attribute: the
+	// header tick of a partly-selected list, which every mail app, file manager
+	// and table with a select-all has.
+	mux.HandleFunc("/tristate", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Tri-state</title></head>
+			<body><h1>a box that is neither on nor off</h1>
+			<input type="checkbox" id="all">
+			<button id="resolve">resolve</button>
+			<script>
+			var all = document.getElementById('all');
+			all.indeterminate = true;
+			document.getElementById('resolve').addEventListener('click', function () {
+			  all.indeterminate = false;
+			  all.checked = true;
+			});
+			</script></body></html>`)
+	})
 	// A list pinned to its newest entry before anyone is watching, which is
 	// what a chat conversation is. The scroll happens while the page parses —
 	// before the agent's own scroll listener exists — so the only way the
