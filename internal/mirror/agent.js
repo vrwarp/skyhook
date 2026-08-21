@@ -203,6 +203,10 @@
   var fontsWanted = {};            // family -> 1, for fonts nothing can substitute
   var lastText = new Map();     // id -> last text we reported
   var lastScroll = new Map();
+  // [id, x, y] for containers already scrolled when a snapshot is taken. Set
+  // to an array for the length of the walk and null the rest of the time, so
+  // that the mutation path — which shares serializeAttrs — collects nothing.
+  var scrolled = null;
   var awaitingUpgrade = new Set(); // ids of custom elements not yet defined
   var markedTarget = null;         // the element currently wearing TARGET_ATTR
   var sweepTimer = null;
@@ -294,6 +298,94 @@
     }
     if (t === 'TEXTAREA' || t === 'SELECT') return true;
     return el.isContentEditable === true;
+  }
+
+  /*
+   * caretPoint resolves a character offset inside an editing host to the
+   * (text node, offset) pair a Range is built from, counting through the
+   * host's text nodes the way the client counted when it measured the offset.
+   *
+   * An offset past the end lands after the last character, which is what a
+   * caret at the end of a field means and what an offset measured against a
+   * value this host has not been given yet decays to.
+   */
+  function caretPoint(el, offset) {
+    var walk = el.ownerDocument.createTreeWalker(el, 4 /* SHOW_TEXT */);
+    var seen = 0, node, last = null, lastLen = 0;
+    while ((node = walk.nextNode())) {
+      var len = node.nodeValue ? node.nodeValue.length : 0;
+      if (seen + len >= offset) return { node: node, offset: offset - seen };
+      seen += len;
+      last = node; lastLen = len;
+    }
+    if (last) return { node: last, offset: lastLen };
+    return { node: el, offset: el.childNodes.length };
+  }
+
+  /*
+   * placeCaret puts the selection back where the client says it is.
+   *
+   * Assigning textContent destroys every text node the selection could point
+   * into, and Blink answers that by collapsing the selection to the start of
+   * the editing host. Nothing complains: the text is right, the field looks
+   * right, and the next keystroke goes in at the front. A reader who typed
+   * "the test message has gone through!" with one Backspace in the middle of
+   * it sent "e through!the test message has gon" — the ten characters after
+   * the correction, then the twenty-four before it (P-129).
+   *
+   * The input and textarea branches of setValue never had this bug, because
+   * setSelectionRange is the only way to put a caret in a field and they
+   * always called it. A contenteditable's caret is the document's selection,
+   * which is easy to lose by accident and has to be restored on purpose.
+   */
+  function placeCaret(el, start, end) {
+    var doc = el.ownerDocument;
+    var view = doc.defaultView;
+    var sel = view && view.getSelection ? view.getSelection() : null;
+    if (!sel) return;
+    var text = el.textContent || '';
+    var a = Math.max(0, Math.min(start | 0, text.length));
+    var b = Math.max(a, Math.min(typeof end === 'number' ? end | 0 : a, text.length));
+    var from = caretPoint(el, a);
+    var to = b === a ? from : caretPoint(el, b);
+    try {
+      var range = doc.createRange();
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) { /* a detached or hidden host: the caret is nobody's business */ }
+  }
+
+  /*
+   * caretOffset is placeCaret's inverse: where the selection sits inside this
+   * editing host, counted in characters. A selection somewhere else — or none
+   * at all — reads as the end of the text, which is where typing goes when
+   * nothing better is known.
+   */
+  function caretOffset(el) {
+    var doc = el.ownerDocument;
+    var view = doc.defaultView;
+    var sel = view && view.getSelection ? view.getSelection() : null;
+    var text = el.textContent || '';
+    if (!sel || sel.rangeCount === 0) return text.length;
+    var range;
+    try { range = sel.getRangeAt(0); } catch (e) { return text.length; }
+    if (!range || !el.contains(range.startContainer)) return text.length;
+    if (range.startContainer === el) {
+      var upto = 0;
+      for (var i = 0; i < range.startOffset && i < el.childNodes.length; i++) {
+        upto += (el.childNodes[i].textContent || '').length;
+      }
+      return upto;
+    }
+    var walk = doc.createTreeWalker(el, 4 /* SHOW_TEXT */);
+    var seen = 0, node;
+    while ((node = walk.nextNode())) {
+      if (node === range.startContainer) return seen + range.startOffset;
+      seen += node.nodeValue ? node.nodeValue.length : 0;
+    }
+    return text.length;
   }
 
   function isScrollable(el) {
@@ -461,6 +553,17 @@
     // answering a question the mirror's address cannot. See syncTarget.
     if (el === markedTarget) pairs.push(intern(TARGET_ATTR), intern(''));
     flags |= flagsOf(el);
+    // A container the page has already scrolled says so here, because a
+    // snapshot is the only chance it gets. onScroll reports a container when
+    // it moves, and a container that was already where it belongs before this
+    // document was built never moves again — so a conversation pinned to its
+    // newest message arrived at the top and stayed there, with the message the
+    // reader had just sent below the fold and nothing able to bring it back
+    // (P-130).
+    if (scrolled && (flags & FLAG_SCROLL) && (el.scrollTop || el.scrollLeft)) {
+      var sid = idOf.get(el) || 0;
+      if (sid) scrolled.push([sid, el.scrollLeft | 0, el.scrollTop | 0]);
+    }
     if (tag === 'IFRAME') {
       // The client cannot materialise an iframe — it would be a browsing
       // context, and the whole point is that nothing plane-side fetches
@@ -2572,7 +2675,7 @@
             // file the way it ships any other url() in a stylesheet.
             var fam = firstFamily(rule.style && rule.style.fontFamily);
             if (fam && fontsWanted[fam]) {
-              out.push(absolutizeCSSURLs(rule.cssText, base));
+              out.push(withIconNames(absolutizeCSSURLs(rule.cssText, base), fam));
             } else {
               noteRejected('@font-face ' + (fam || '?'));
             }
@@ -2974,8 +3077,39 @@
     return first.toLowerCase();
   }
 
+  /*
+   * The shape of an icon name: the whole text run, lowercase letters, digits
+   * and underscores, nothing else.
+   *
+   * This is what a ligature icon font is drawn from — "mark_chat_unread" is
+   * both the markup and the glyph — and the point of recognising it is that
+   * the server can then ship only the icons a page draws instead of the whole
+   * family. Ordinary words match too, which costs a handful of glyphs in the
+   * subset and nothing else; the family check below is what keeps prose out.
+   */
+  var ICON_NAME_RE = /^[a-z0-9_]{2,48}$/;
+
+  // How many icon names one family's subset is built from. A page has dozens;
+  // this is the point past which something is wrong and the whole font is the
+  // better answer.
+  var FONT_TEXT_MAX = 512;
+
+  // And how many computed styles the icon hunt is allowed to read. The same
+  // budget FONT_SCAN_HITS is: reading a computed style forces style resolution,
+  // and a lowercase one-word text node is not rare enough on a page of prose to
+  // let this run unbounded. Generous, because the icons in a toolbar are behind
+  // however much text happens to be serialised before them.
+  var FONT_ICON_LOOKS = 2000;
+
   function fontsWithoutSubstitute(docs) {
     var want = {};
+    // Which families are drawn from ligatures, before the walk rather than
+    // after it: the walk needs the answer to know whose icon names it is
+    // collecting.
+    var liga = {};
+    for (var l = 0; l < docs.length; l++) ligatureFamilies(docs[l], liga);
+    for (var lf in liga) want[lf] = 1;
+
     for (var d = 0; d < docs.length; d++) {
       var doc = docs[d];
       var root = doc.body || doc.documentElement || doc;
@@ -2983,12 +3117,22 @@
       try {
         walker = doc.createTreeWalker(root, 4 /* SHOW_TEXT */);
       } catch (e) { continue; }
-      var nodes = 0, hits = 0, n;
-      while (hits < FONT_SCAN_HITS && nodes++ < FONT_SCAN_NODES) {
+      var nodes = 0, hits = 0, looks = 0, n;
+      // Either budget still unspent keeps the walk going: a page with sixty
+      // private-use icons would otherwise stop before it reached the ligature
+      // ones, and a page with neither stops at the first of the two anyway.
+      while (nodes++ < FONT_SCAN_NODES &&
+             (hits < FONT_SCAN_HITS || looks < FONT_ICON_LOOKS)) {
         try { n = walker.nextNode(); } catch (e) { break; }
         if (!n) break;
-        if (!n.nodeValue || !PUA_RE.test(n.nodeValue)) continue;
-        hits++;
+        var value = n.nodeValue;
+        if (!value) continue;
+        var pua = PUA_RE.test(value);
+        var name = pua ? '' : value.trim();
+        var iconish = !pua && ICON_NAME_RE.test(name) && looks < FONT_ICON_LOOKS;
+        if (!pua && !iconish) continue;
+        if (pua && hits >= FONT_SCAN_HITS) continue;
+        if (iconish) looks++;
         var el = n.parentElement;
         if (!el) continue;
         // From the element's own window: these documents include the inlined
@@ -2997,12 +3141,67 @@
         var view = doc.defaultView || globalThis;
         var fam = '';
         try { fam = firstFamily(view.getComputedStyle(el).fontFamily); } catch (e) { fam = ''; }
-        if (fam) want[fam] = 1;
+        if (!fam) continue;
+        if (pua) {
+          hits++;
+          want[fam] = 1;
+          continue;
+        }
+        // An icon name only counts against a family already known to draw
+        // ligatures. Every other lowercase word on the page resolves to some
+        // prose family and is dropped here.
+        if (liga[fam]) noteIconName(fam, name);
       }
-      ligatureFamilies(doc, want);
     }
     return want;
   }
+
+  /*
+   * The icon names each family draws, which is what a subset is cut to.
+   *
+   * Kept across snapshots on purpose. A page that renders its toolbar, then
+   * opens a menu with six more icons in it, asks for a font that covers both:
+   * dropping the earlier names would cut a subset that no longer draws the
+   * toolbar. The set only grows, so a key built from it only changes when
+   * there is genuinely something new to draw.
+   */
+  var fontsText = {};
+
+  function noteIconName(family, name) {
+    var set = fontsText[family];
+    if (!set) { set = fontsText[family] = {}; }
+    if (!set[name] && Object.keys(set).length < FONT_TEXT_MAX) set[name] = 1;
+  }
+
+  // iconNamesFor lists a family's icon names in a fixed order, so that the same
+  // page asking twice produces the same string and so the same cache key.
+  function iconNamesFor(family) {
+    var set = fontsText[family];
+    if (!set) return '';
+    return Object.keys(set).sort().join(' ');
+  }
+
+  /*
+   * withIconNames writes a family's icon names into the @font-face rule that
+   * ships its file.
+   *
+   * The server is what decides a font is too big to send, and what it needs to
+   * cut a subset instead is the list of icons the page draws — which only this
+   * side can see, because it is a fact about the document rather than about
+   * the file. The rule that names the file is where that list belongs: it
+   * travels the path the file travels, it is re-sent whenever the sheet is
+   * re-collected, and nothing else has to grow a field for it.
+   *
+   * The descriptor is stripped again before the rule reaches the client, which
+   * never has any use for it. See fontIconNames in css.go.
+   */
+  function withIconNames(text, family) {
+    var names = iconNamesFor(family);
+    if (!names || text.charAt(text.length - 1) !== '}') return text;
+    return text.slice(0, -1) + ';' + ICON_NAMES_DESC + ':"' + names + '"}';
+  }
+
+  var ICON_NAMES_DESC = '-sky-icons';
 
   /*
    * One entry of a font-feature-settings list: a tag, optionally followed by
@@ -3903,6 +4102,11 @@
     lastInfo = { url: location.href, title: document.title || '' };
 
     var rows = [];
+    // Collected by serializeAttrs while this walk runs, and by nothing else:
+    // a mutation's inserts go through the same function, and a container that
+    // arrives already scrolled is reported by onScroll when the page scrolls
+    // it, not by the insert that built it.
+    scrolled = [];
     if (SLOT) {
       /*
        * An attached frame mirrors itself into a root of its own, exactly as an
@@ -3957,10 +4161,12 @@
       quirks: document.compatMode === 'BackCompat',
       icon: pageIconURL(),
       images: imgs,
+      scrolls: scrolled || [],
       docHeight: Math.max(
         document.documentElement ? document.documentElement.scrollHeight : 0,
         document.body ? document.body.scrollHeight : 0)
     });
+    scrolled = null;
     pendingStrings = [];
   }
 
@@ -4359,7 +4565,13 @@
         var done = false;
         try { done = el.ownerDocument.execCommand('insertText', false, text); } catch (e) { done = false; }
         if (done) return true;
-        el.textContent = (el.textContent || '') + text;
+        // Spliced at the caret rather than appended, for the same reason
+        // setValue puts the caret back: the reader's caret is not always at
+        // the end, and typing that ignores it rewrites the sentence.
+        var at = caretOffset(el);
+        var was = el.textContent || '';
+        el.textContent = was.slice(0, at) + text + was.slice(at);
+        placeCaret(el, at + text.length, at + text.length);
         el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
         return true;
       }
@@ -4406,6 +4618,11 @@
       }
       if (el.isContentEditable) {
         el.textContent = value;
+        // The caret the client measured, put back before anything else can be
+        // typed. Without this every keystroke after a Backspace lands at the
+        // front of the message (P-129).
+        placeCaret(el, typeof start === 'number' ? start : value.length,
+          typeof end === 'number' ? end : start);
         el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
         return true;
       }

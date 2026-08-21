@@ -216,6 +216,11 @@ export function decodeSnapshot(body: unknown): Snapshot {
     scrollY: num(f, F.snapshot.scrollY),
     epoch: num(f, F.snapshot.epoch),
     quirks: bool(f, F.snapshot.quirks),
+    scrolls: arr<Fields>(f, F.snapshot.scrolls).map((sc) => ({
+      node: num(sc, F.nodeScroll.node),
+      x: num(sc, F.nodeScroll.x),
+      y: num(sc, F.nodeScroll.y),
+    })),
     viewport: {
       w: num(vp, F.viewport.w),
       h: num(vp, F.viewport.h),

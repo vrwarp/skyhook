@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf16"
 )
@@ -852,6 +853,12 @@ func rewriteCSSImages(rules []string, base string, maxDim int) ([]string, []Imag
 		baseURL = nil
 	}
 	for i, r := range rules {
+		// The icon names the agent wrote into an @font-face, which say what a
+		// subset of this font would have to draw. Taken off the rule before it
+		// is rewritten, so the client is never handed a descriptor meant for
+		// the server.
+		var icons []string
+		r, icons = fontIconNames(r)
 		out[i] = replaceCSSURLs(r, func(raw string) string {
 			raw = strings.TrimSpace(raw)
 			// A fragment names something in the document — an SVG gradient, a
@@ -871,11 +878,20 @@ func rewriteCSSImages(rules []string, base string, maxDim int) ([]string, []Imag
 			if abs == "" {
 				return ""
 			}
+			// A font's key folds in the icons it is being asked to draw, so a
+			// subset is cached as itself: the same page on the next flight
+			// hits it, and a page that has since found six more icons misses
+			// it and gets a font that covers them. Nothing plane-side computes
+			// a key for a stylesheet's url, so only this side has to agree.
 			key := ImageKey(abs, maxDim, 0)
+			if len(icons) > 0 {
+				key = fontKey(abs, icons)
+			}
 			if !seen[key] {
 				seen[key] = true
 				reqs = append(reqs, ImageRequest{
 					Key: key, URL: abs, W: maxDim, H: 0, Priority: 1, Referer: base,
+					Text: icons,
 				})
 			}
 			return fmt.Sprintf("url(skyhook://img/%s)", key)
@@ -939,6 +955,70 @@ func resolveAgainst(base *url.URL, ref string) string {
 // the two sides agree on cache identity without an extra round trip.
 func ImageKey(rawURL string, w, h int) string {
 	return fnv1a32(fmt.Sprintf("%s|%dx%d", rawURL, w, h))
+}
+
+/*
+iconNamesDesc is the descriptor the agent writes a family's icon names into.
+Twin of ICON_NAMES_DESC in agent.js.
+
+Not a custom property, though it looks like the place for one. A `--name` that
+nothing reads is exactly what stripUnusedVars exists to remove, and it removed
+this — silently, one pass before the code that reads it, so the font went on
+being refused and nothing said why. A vendor-prefixed descriptor is left alone
+by every pass between the two ends of this.
+*/
+const iconNamesDesc = "-sky-icons"
+
+/*
+fontIconNames takes the icon-name descriptor off an @font-face rule and returns
+the rule without it, alongside the names.
+
+A rule with no descriptor comes back untouched, which is every rule on the web:
+this is a thing the agent writes for the server to read, and the split happens
+here so that no rule the client is ever handed carries it.
+*/
+func fontIconNames(rule string) (string, []string) {
+	at := strings.Index(rule, iconNamesDesc)
+	if at < 0 {
+		return rule, nil
+	}
+	open := strings.Index(rule[at:], `"`)
+	if open < 0 {
+		return rule, nil
+	}
+	open += at
+	close := strings.Index(rule[open+1:], `"`)
+	if close < 0 {
+		return rule, nil
+	}
+	close += open + 1
+	names := strings.Fields(rule[open+1 : close])
+	// Back over the separator the agent wrote in front of the descriptor, so
+	// that removing it cannot leave a stray semicolon behind.
+	start := at
+	for start > 0 && (rule[start-1] == ';' || rule[start-1] == ' ') {
+		start--
+	}
+	end := close + 1
+	for end < len(rule) && (rule[end] == ';' || rule[end] == ' ') {
+		end++
+	}
+	return rule[:start] + rule[end:], names
+}
+
+/*
+fontKey names a font by its address and by what it is being asked to draw.
+
+Two pages using the same icon font draw different icons out of it, and a subset
+cut for one is the wrong file for the other — so the set has to be part of the
+key or the cache would serve a Chat toolbar to a page that wanted a calendar.
+The names are sorted before they are hashed because a set has no order and a
+key must have one.
+*/
+func fontKey(rawURL string, icons []string) string {
+	sorted := append([]string(nil), icons...)
+	sort.Strings(sorted)
+	return fnv1a32(rawURL + "|icons|" + strings.Join(sorted, " "))
 }
 
 // fnv1a32 hashes a string the way the agent does: over UTF-16 code units, low

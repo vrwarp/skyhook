@@ -3947,3 +3947,177 @@ Two things this still has not seen: a space with several people in it, and Chat
 inside Gmail, which is where `Config.URL` points. The selectors changed here are
 all about the inner Chat app rather than the shell around it, so they should
 carry, but nothing here proves it.
+
+### 55. The sentence the mirror rearranged
+
+A reader typed "the test message has gone through!" into Google Chat and Chat
+sent "e through!the test message has gon". Not a dropped keystroke and not a
+garbled one: every character arrived, and the sentence was assembled in the
+wrong order — the ten characters after a Backspace, then the twenty-four
+before it. The archive that keeps a copy is append-only, and so is the other
+person's screen.
+
+The input trace in the bundle names the moment exactly:
+
+```
+01:43:14.011  key       Backspace
+01:43:14.013  setvalue  «24 chars»
+01:43:14.118  text      «1 char»   ×10
+01:43:15.202  key       Enter
+```
+
+The echo engine turns any edit that shortens the field into a whole-value set
+carrying the caret ([echo.ts](../client/src/mirror/echo.ts)), which is right:
+a deletion cannot be expressed as an insertion, and the caret is the only thing
+that says where the next one goes. The client had the sentence right and sent
+the caret with it. Landside, `setValue`'s contenteditable branch assigned
+`textContent` and stopped:
+
+```js
+if (el.isContentEditable) {
+  el.textContent = value;          // start and end never read
+  el.dispatchEvent(new InputEvent('input', …));
+  return true;
+}
+```
+
+Assigning `textContent` destroys the text node the selection points into, and
+Blink answers a destroyed selection by collapsing it to the start of the
+editing host. `insertText` then does exactly what it is told — `execCommand`
+inserts at the caret — and the caret is at offset zero. Ten characters went in
+in order, at the front.
+
+The input and textarea branches four lines above never had this bug, and the
+reason is worth keeping: `setSelectionRange` is the only way to put a caret in
+a field, so they always called it. A contenteditable's caret is the document's
+selection, which is lost by accident and has to be restored on purpose.
+`placeCaret` does that, mapping the client's character offsets onto the text
+nodes with a `Range` the way `caretOf` measured them; `caretOffset` is its
+inverse, and `insertText`'s fallback path — the one for a frame that does not
+hold the browser's focus, which used to append blindly — splices at it now.
+
+`TestTypingAfterAValueSetGoesWhereTheCaretIs` asserts both halves against a
+contenteditable that reports its own contents: a caret left at the end, which
+is the reported bug, and a caret left in the middle, which is the same code
+path being asked a question that "the end" would answer by accident. Reverting
+the fix turns it red with "said[ passedthe test]", which is the reader's
+failure in miniature.
+
+### 56. The conversation that would not come back to the bottom
+
+The same capture's second complaint: the chat frame did not scroll. It
+scrolled fine. The conversation was a scroller with 706px of content in a
+642px box and a `scrollTop` of zero — parked at its oldest message, with the
+one the reader had just sent 64px below the fold and nothing able to reach it.
+
+A container's scroll position crosses as an op, and the op is emitted from a
+`scroll` event listener. That covers every container the page moves while the
+client is watching, and nothing at all about one that was already where it
+belonged: a chat list pins itself to its newest entry as it builds, before the
+agent's listener exists, and then never scrolls again. `FLAG_SCROLL` was
+computed for exactly these elements and shipped in their node flags, where the
+client read it only to report it back in a capture.
+
+Which made this a property of resyncs rather than of pages. The server had
+resynced by snapshot twenty seconds before the bundle was taken; the client
+rebuilt the document from nothing, every scroller came up at the top, and the
+landside page — which had not moved — had nothing to say about it. A reader who
+scrolls back down never sees it again, which is why it reads as "sometimes the
+chat frame doesn't work".
+
+`Snapshot.Scrolls` carries `(node, x, y)` for the containers already scrolled
+when the walk ran. The agent collects them in `serializeAttrs`, where the flag
+is computed anyway, into an array that exists only for the length of a snapshot
+— the mutation path shares that function, and a container that arrives already
+scrolled inside an insert is reported by the scroll listener that is by then
+watching it. The client offers each to `PatcherHooks.onScroll`, the same hook a
+live op takes, so `followScroll`'s rules about who owns a scroller are written
+once and apply to both.
+
+`TestAScrolledContainerArrivesWhereThePageLeftIt` drives the real client in a
+real browser, because the assertion is about a rendered box: `scrollTop` means
+nothing in a model that was never laid out, and it was a model agreeing with the
+server that hid this in the first place. The conformance fixture carries a
+`scrolls` entry too — the position has exactly one chance to cross, and a key
+that stopped lining up between Go and TypeScript would take a conversation's
+newest message off the screen and change nothing else.
+
+### 57. Cutting the icon font down to the icons
+
+§56's capture had one more thing in it, and the first reading of it was wrong.
+The 4.9 MB Google Symbols face was refused at the transcoder's cap — `font is
+4888276 bytes: source image too large` — and that looked like the reason Chat's
+markup carries words like `checkmark_chat_unread`. It is not: those words are
+how a ligature icon font is written, the glyph is drawn at the ligature, and
+Chat declares a second, 7 KB subset face for the same family that arrived
+perfectly well. §49's withholding dropped the broken face, the small one won,
+and every icon on that page rendered. Nothing was wrong.
+
+What is wrong is the page that has no second face. Served an icon family whose
+only file is over the cap, the mirror renders the names:
+
+```
+mirrored text: "a page whose icon font is too big to send  mark_chat_unreadstar"
+```
+
+which is not what the cap's own comment promises — "over the cap the page keeps
+its empty boxes, which is what it had before". A toolbar of words is worse than
+an empty toolbar, and both are worse than the icons.
+
+So the font is cut instead. The lever nothing else here has is that a font's
+bytes are its outlines: there is no quality to give up, but there are glyphs to
+leave out, and a page draws about thirty icons out of a family that carries
+thousands. Three things make that cheap:
+
+- **The variable tables are the file.** Decompressed, Google Symbols is 13.1 MB,
+  and 11.4 MB of it is `gvar` — the deltas for every weight and fill of every
+  icon. Dropping the axes leaves the default instance, which is what the page
+  renders anyway, and takes 87% off before a single glyph is considered.
+- **Glyph ids stay where they are.** A ligature is a GSUB rule about glyph ids;
+  renumbering means rewriting GSUB, `cmap`, `hmtx` and anything else that names
+  one, and the Go font library that reads woff2 says `TODO: GDEF, GPOS, GSUB`
+  about its own subsetter. Emptying an unwanted glyph's outline instead leaves
+  every table still correct and costs the two bytes of its `loca` entry. Worse
+  compression, far less to get wrong.
+- **The names are already in the markup.** `mark_chat_unread` is the text of
+  the element that draws the icon, so what to keep is a fact the landside half
+  can read off the document.
+
+That last fact has to cross, and the rule that names the file is what carries
+it: the agent appends a `-sky-icons` descriptor listing the family's icon
+names, and `fontIconNames` takes it off again before the rule goes anywhere
+near the client. It is deliberately *not* a `--custom-property`, which is what
+it was first — `stripUnusedVars` removes custom properties nothing reads, one
+pass before the code that reads this one, and the font went on being refused
+with nothing in any log to say why.
+
+Together: 4,888,276 bytes of woff2 to 283,012 bytes of sfnt for the fourteen
+icons a Chat toolbar draws, and Chromium renders them. The result is a plain
+TrueType file rather than a woff2 — there is no Brotli encoder here — which was
+measured before it was relied on: the same page renders identically with the
+page's own rule still claiming `format("woff2")`, because browsers sniff the
+bytes.
+
+**The subset is cut once.** `fontKey` hashes the address together with the
+sorted icon names, so the pipeline's existing cache does the rest: the same
+page on the next flight hits `Submit`'s metadata check and never fetches the
+font, let alone decompresses and rebuilds it; a page that has since found six
+more icons misses on a different key and gets a font that covers them; and two
+pages sharing an icon font cannot be served each other's cut.
+`TestAFontIsFetchedOncePerSetOfIcons` counts fetches rather than subsets on
+purpose — a cache hit means the bytes never left the origin, so nothing
+downstream of the fetch can have run.
+
+What this does not do: CFF fonts, whose outlines live in a charstring index
+this does not touch; contextual ligatures (GSUB type 6), which an icon font has
+no use for; and weights other than the default, which is the axis dropped with
+`gvar`. All three refuse rather than guess, and refusing is what every font
+over the cap did before.
+
+`internal/imgproc/testdata/symbols-subset.woff2` is the fixture both suites cut
+from — Chat's own 7 KB subset face, lifted out of the capture, 67 ligatures in
+GSUB and Apache 2.0 like the icons it draws. The e2e test pads it past the cap
+and asserts on what the browser drew: a ligature icon is one glyph an em wide,
+and the same name in any other font is as wide as its letters. A model that
+never shaped text cannot tell those apart, which is exactly how this stayed
+invisible.
