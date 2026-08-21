@@ -273,7 +273,7 @@ func (c *Client) handle(f *protocol.Frame) {
 		c.epochs[f.Tab] = s.Epoch
 		want := make([]string, 0, len(s.Images))
 		for _, im := range s.Images {
-			c.images[im.Hash] = im
+			c.images[im.Hash] = mergeImageMeta(c.images[im.Hash], im)
 			if _, ok := c.imageData[im.Hash]; !ok {
 				want = append(want, im.Hash)
 			}
@@ -349,7 +349,7 @@ func (c *Client) handle(f *protocol.Frame) {
 			return
 		}
 		c.mu.Lock()
-		c.images[im.Hash] = im
+		c.images[im.Hash] = mergeImageMeta(c.images[im.Hash], im)
 		c.mu.Unlock()
 		c.emit(Event{Kind: "image", Tab: f.Tab})
 	case protocol.TypeImageData:
@@ -890,6 +890,62 @@ func (c *Client) WantImages(tab uint32, hashes []string) error {
 }
 
 // Images reports known image metadata.
+/*
+mergeImageMeta folds a new frame about a key into what is already known about
+it, because most frames about an image are not describing it.
+
+An ImageMeta is two different messages sharing a body. One describes an asset —
+its size, its type, its blurhash, the alt text of the element that referenced
+it — and comes from the snapshot that named it or the transcode that made it.
+The other is a verdict: `{Hash, Missing: true}`, sent from the several places
+that can conclude the bytes are not coming, none of which ever learned anything
+else about the key. Taking the second wholesale erases the first.
+
+Which the mirror's own client already knows: it fills an element's alt in from
+the meta only when the element has none, because the alt it renders came with
+the element. This side kept the table instead, replaced it entry for entry, and
+so lost the description the moment a verdict landed on top of it — a race the
+emulated link wins whenever a re-snapshot re-asks for a key the pipeline has
+already given up on, since the re-asking and the re-submission are concurrent
+and either can answer last.
+
+So a field the frame does not carry is left alone. Missing is the exception in
+both directions: it is the whole of what a verdict says, and a later
+description — a re-snapshot, or the bytes arriving after all — is the key
+getting its second chance and has to be able to clear it.
+*/
+func mergeImageMeta(known, in protocol.ImageMeta) protocol.ImageMeta {
+	out := in
+	if out.Node == 0 {
+		out.Node = known.Node
+	}
+	if out.W == 0 {
+		out.W = known.W
+	}
+	if out.H == 0 {
+		out.H = known.H
+	}
+	if out.Blur == "" {
+		out.Blur = known.Blur
+	}
+	if out.Mime == "" {
+		out.Mime = known.Mime
+	}
+	if out.Bytes == 0 {
+		out.Bytes = known.Bytes
+	}
+	if out.Alt == "" {
+		out.Alt = known.Alt
+	}
+	if out.Box == nil {
+		out.Box = known.Box
+	}
+	if !out.Anim {
+		out.Anim = known.Anim
+	}
+	return out
+}
+
 func (c *Client) Images() map[string]protocol.ImageMeta {
 	c.mu.Lock()
 	defer c.mu.Unlock()

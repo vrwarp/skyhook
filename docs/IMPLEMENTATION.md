@@ -4513,3 +4513,38 @@ now. And the second: §58 was a correct fix to a real bug that did not fix the
 reported failure, because the mechanism had two ends and the reproduction only
 ever showed the symptom. A green shaped job was taken as the fix landing rather
 than as one of two paths closing.
+
+### 65. Two messages sharing a body
+
+`protocol.ImageMeta` says two unrelated things depending on who sent it. One is
+a *description* — size, type, blurhash, and the alt text of the element that
+referenced the asset — and comes from the snapshot that named the key or the
+transcode that made it. The other is a *verdict*: `{Hash, Missing: true}`, sent
+from the four places in the pipeline that can conclude the bytes are not
+coming. None of those ever learned anything else about the key. Only
+`abandon` holds a `Request` at all, and only for the tab that asked.
+
+`internal/client` kept a table of these and replaced it entry for entry, so a
+verdict landing on a described key erased the description — including the alt
+text, which is the whole of what is left to show. `answerIfStranded` fires
+whenever a client's `ImageWant` reaches a key that is neither done nor in
+flight, which over the emulated link is any key the pipeline gave up on before
+the want arrived. That is
+`TestAnImageThatCannotBeFetchedIsReportedRatherThanLeftPending` failing on the
+shaped job, on the one thing it asserts about the alt.
+
+The mirror's own client never had this, and the reason is worth keeping: it
+fills an element's alt in from the meta only when the element has none, because
+the alt it renders came with the element. `meta.Alt` is a restatement, not the
+source. The table on this side had no such second copy, and no rule about
+partial frames either.
+
+So it folds now instead of replacing: a field the frame does not carry is left
+alone. `Missing` is the exception in both directions — it is the whole of what a
+verdict says, and a later description (a re-snapshot, or the bytes arriving
+after all) is the key getting its second chance and has to be able to clear it.
+
+This is the same rule §58 and §64 are about, three frame types along: a partial
+frame must not blank the fields it does not carry, and every place that keeps a
+table of them has to say so. `TabState` says it in a comment on the struct
+fields; `ImageMeta` now says it on the fold.
