@@ -1127,6 +1127,69 @@ func TestALateStartedLoadingDoesNotUndoAStop(t *testing.T) {
 }
 
 /*
+A tab does not lend one page's history to another.
+
+Where a tab is is known the instant a navigation commits; what is behind it
+costs a round trip into the browser. Everything emitted in between — the frame
+that says a load started, the one a snapshot brings, a title changing — used to
+carry the new address stamped with the previous page's flags, and the reader's
+shell believes that frame until the next one arrives.
+
+Which way it is wrong decides what it costs. A tab that has just reached the
+start of its history, still claiming a page behind it, makes the shell answer
+the next back gesture itself: the gesture is spent, nothing moves, and nothing
+tells the reader it was heard. That is what left
+TestTheBrowsersOwnBackAndForwardDriveTheTab failing over the shaped link, where
+the gap between the commit and the answer is seconds rather than a millisecond.
+*/
+func TestHistoryFlagsWaitForThePageTheyWereMeasuredOn(t *testing.T) {
+	sink := &stateSink{}
+	tab := &Tab{out: sink}
+
+	// A tab nobody has asked the browser about yet. It has an address and no
+	// grounds for a claim about what is behind it.
+	tab.url = "https://example.test/one"
+	tab.emitState(protocol.TabState{})
+	if st, ok := sink.last(); !ok || st.CanBack || st.CanForward {
+		t.Fatalf("a tab with no history read yet claimed one: %+v", st)
+	}
+
+	// The round trip lands: two entries, sitting on the second.
+	tab.histURL = "https://example.test/one"
+	tab.canBack = true
+	tab.emitState(protocol.TabState{})
+	if st, _ := sink.last(); !st.CanBack {
+		t.Error("a frame about the very page the flags were read on lost them")
+	}
+
+	// A navigation commits. The URL changes at once; the flags are still the
+	// previous page's until the browser is asked again.
+	tab.url = "https://example.test/two"
+	tab.emitState(protocol.TabState{})
+	if st, _ := sink.last(); st.CanBack {
+		t.Error("the new page borrowed the previous page's history")
+	}
+
+	// The answer for the new page arrives, and says the opposite.
+	tab.histURL = "https://example.test/two"
+	tab.canBack = false
+	tab.canForward = true
+	tab.emitState(protocol.TabState{})
+	if st, _ := sink.last(); st.CanBack || !st.CanForward {
+		t.Errorf("the measured flags did not reach the frame: back=%v forward=%v",
+			st.CanBack, st.CanForward)
+	}
+
+	// A frame that carries its own URL is judged on that URL, not on where the
+	// tab has since moved to: a snapshot of the page just left must not pick up
+	// the flags of the page just arrived at.
+	tab.emitState(protocol.TabState{URL: "https://example.test/one"})
+	if st, _ := sink.last(); st.CanForward {
+		t.Error("a frame about an older page took the current page's flags")
+	}
+}
+
+/*
 A press is not stretched by the distance to the browser.
 
 The reader's hold is a measurement of what their finger did, and the mirror's

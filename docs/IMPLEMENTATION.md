@@ -2103,13 +2103,13 @@ prose below is the explanation and [PARITY.md](PARITY.md) is the ledger:
   animation the reader started is followed until it settles, but a clock or an
   idle game loop needs `canvasStreamEvery` turned on, and that spends the link
   on a page nobody is touching.
-- **Icon fonts are shipped whole, not subsetted.** §23: a family the page draws
-  private-use codepoints in, or asks for ligatures in (§48), crosses the link
-  entire, capped at 1 MB, because subsetting it to the codepoints actually used
-  needs a font subsetter and there is none here. The cost is paid once and
-  cached across flights, but a page using six glyphs of a large family pays for
-  all of them. `hb-subset` when present, degrading to this when not, is the
-  obvious next step and would follow the pattern `avifenc`/`cwebp` already set.
+- **A font over the cap is cut only when its icons can be named.** §57: a family
+  refused at the 1 MB cap is subset to the ligature names the page's own markup
+  draws, which covers the icon fonts this was written for. A family drawn in
+  private-use codepoints instead (§23), a CFF font, or one whose icons are
+  wanted at a weight other than the default still crosses whole or not at all —
+  and under the cap nothing is cut, so a page using six glyphs of a 900 KB
+  family still pays for all of them.
 - **An icon font registered through the FontFace API cannot be shipped at all.**
   §48: a family added with `document.fonts.add(new FontFace(…))` appears in no
   stylesheet, and `FontFace` exposes no `src`, so there is no url() to rewrite
@@ -4121,3 +4121,60 @@ and asserts on what the browser drew: a ligature icon is one glyph an em wide,
 and the same name in any other font is as wide as its letters. A model that
 never shaped text cannot tell those apart, which is exactly how this stayed
 invisible.
+
+### 58. The back gesture the shell answered for a page it had already left
+
+CI's shaped-link job failed on a test that had passed for weeks:
+
+```
+--- FAIL: TestTheBrowsersOwnBackAndForwardDriveTheTab
+    navigation_test.go:261: the back gesture at the start of the tab's history
+        was not let through: the shell answered it instead, or re-armed the
+        trap under it
+```
+
+The diff it failed on had touched neither history nor navigation, and the test
+reproduced on no local run at any width. That combination — a test that only
+fails on the slow, loaded runner — is usually a race the fast machine hides,
+and it was.
+
+The mirror's back button is drawn from two fields on `TabState`. `CanBack` and
+`CanForward` are read out of the browser with `Page.getNavigationHistory`,
+which is a round trip; `URL` is set the instant `Page.frameNavigated` arrives,
+which is free. Both are stamped onto every state frame the tab emits, and the
+frames in between the two moments — the one that says a load started, the one a
+snapshot brings, the one a title change produces — took the new page's address
+and the previous page's history.
+
+That is a lie the reader's shell believes until the next frame corrects it, and
+which way it is wrong decides what it costs. The test walks the tab to the
+start of its history and then makes one more back gesture, which the shell must
+*let through* to the browser so the mirror can re-arm its `skyhook:here`
+sentinel under it. A tab that still claims a page behind it makes the shell
+answer the gesture itself: the gesture is spent, nothing moves, the trap stays
+unarmed, and nothing tells the reader anything happened. Landside the window
+where that is possible is under a millisecond. Over 1.2 s RTT with eight
+browsers on the box it is seconds, which is why the runner found it and the
+laptop did not.
+
+One wrong theory got as far as an experiment first — that the browser's history
+list lagged the commit, so `syncHistory` itself read the previous page. Logging
+the entry URL against `Page.frameNavigated`'s across the whole e2e suite at
+`-parallel 8` turned up zero mismatches. The list is not late; only the reading
+of it is, and the reading is what the frames were borrowing.
+
+So `syncHistory` now records *which page* it counted the entries against, and
+`historyFlagsFor` gates the flags on it: same page, flags cross; anything else
+— including the moment before any history has ever been read — reports no
+history in either direction. "I don't know yet" and "there is nothing behind
+you" produce the same frame, and that is the safe collision to make. Saying
+nothing is behind a page that has something behind it greys a button out for a
+beat and lets a gesture through to the browser, which is the case the sentinel
+already exists to handle and which self-corrects the moment the round trip
+lands. Saying something is behind a page that has nothing swallows the gesture
+with no way back.
+
+`TestHistoryFlagsWaitForThePageTheyWereMeasuredOn` pins it as a unit test on
+`emitState` — the flags move only when the URL they were measured on does —
+because the e2e version of this assertion is exactly the one that needed a
+2% loss link before it would fail.

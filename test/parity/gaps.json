@@ -13,12 +13,13 @@
     {
       "id": "P-002",
       "title": "Icon fonts ship whole, never subsetted",
-      "status": "open",
+      "status": "fixed",
       "refs": [
-        "docs/IMPLEMENTATION.md:2103",
-        "internal/imgproc/transcode.go:270"
+        "internal/imgproc/fontsubset.go",
+        "internal/mirror/css.go"
       ],
-      "noPage": "a byte-cost gap, not a rendering one: whether the glyphs draw at all is fonts/icon-ligature's business"
+      "noPage": "a byte-cost gap, not a rendering one: whether the glyphs draw at all is fonts/icon-ligature's business",
+      "notes": "fixed: a family refused at the transcoder's cap is cut down to the icons the page actually draws rather than dropped. The agent reads the ligature names off the markup that draws them and appends them to the @font-face rule as a -sky-icons descriptor (a descriptor and not a --custom-property, because stripUnusedVars removes custom properties nothing reads one pass earlier); SubsetFont drops the variable tables — gvar alone is 87% of Google Symbols — and blanks the outlines of every glyph no named ligature reaches, keeping glyph ids where they are so GSUB, cmap and hmtx cross unrewritten. 4,888,276 bytes of woff2 becomes 283,012 bytes of sfnt for a Chat toolbar's fourteen icons. fontKey hashes the address with the sorted names, so the pipeline's existing cache cuts each subset once and a page that has since found another icon misses on a different key. CFF outlines, contextual ligatures and non-default weights still refuse, and refusing is what every font over the cap did before"
     },
     {
       "id": "P-003",
@@ -518,6 +519,15 @@
         "client/src/mirror/host.ts"
       ],
       "notes": "the residue of P-125's fix: with the mirror re-parsed into quirks mode, the mirrored html restates the root's viewport stretch with min-height:100%, but the body's version of the same quirk subtracts its own margins — 709px inside a 725px viewport with default 8px margins — and no static rule can say \"fill your parent's content box minus your own margin box\" for an ordinary block. A percentage min-height on the body resolves to the full 100% in quirks and overshoots by exactly the margins. real/hn-front's geometry expectedFail pins the single-node shape; every content row inside the body measures landside-equal"
+    },
+    {
+      "id": "P-131",
+      "title": "A tab's history flags described the page it had just left: the back gesture at the start of a history was answered by the shell and vanished",
+      "status": "fixed",
+      "refs": [
+        "internal/mirror/tab.go"
+      ],
+      "notes": "a tab's URL is known the instant a navigation commits; what is behind it costs a Page.getNavigationHistory round trip, and every state frame emitted in the gap — the load starting, the snapshot arriving, a title changing — carried the new address stamped with the previous page's canBack/canForward. Landside that window is a millisecond; over the shaped link it is seconds, and a tab that had just reached the start of its history went on saying a page was behind it, so the shell answered the reader's back gesture itself and nothing moved. Fixed by recording the URL the flags were measured on and gating them on it: a frame that cannot vouch for a history reports none, which lets the gesture through to the trap that already handles it. TestHistoryFlagsWaitForThePageTheyWereMeasuredOn pins it; the failure it explains is TestTheBrowsersOwnBackAndForwardDriveTheTab over the emulated link"
     }
   ]
 }

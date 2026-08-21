@@ -116,12 +116,12 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-53 gaps: 14 open, 11 by-design, 27 fixed, 1 disproven.
+54 gaps: 13 open, 11 by-design, 29 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
 | P-001 | open | A canvas that animates unprompted is not followed | — reader-initiated animation is pinned by test/canvas_test.go; the unprompted case is the canvasStreamEvery knob, a configuration choice rather than a parity property |
-| P-002 | open | Icon fonts ship whole, never subsetted | — a byte-cost gap, not a rendering one: whether the glyphs draw at all is fonts/icon-ligature's business |
+| P-002 | fixed | Icon fonts ship whole, never subsetted | — a byte-cost gap, not a rendering one: whether the glyphs draw at all is fonts/icon-ligature's business |
 | P-003 | open | A font registered through the FontFace API cannot ship; its glyphs render as their ligature names | fonts/faces |
 | P-004 | open | wheel and hover are protocol surface no client sends | — hover is now sent — the mirror menu's Hover-here entry is the client's InHover (P-111) — so this entry narrows to wheel: still protocol surface no client sends, deliberately, because scroll telemetry already carries where the reader is and streaming wheel deltas would spend the link on what zoom-canvas widgets alone consume; catalogued for the executor revision that takes on drag |
 | P-005 | by-design | Password and sensitive-autocomplete values never cross the wire | forms/password |
@@ -173,6 +173,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-128 | fixed | The three fingerprint writers disagree at the edges: DOM nodeType against protocol kind for container roots, lowercased names against clipPath, 32 UTF-16 units against 32 runes | — |
 | P-129 | open | A collapsed-border table sizes its caption differently when its borders arrive after first layout: the mirrored figure runs 2px wide and a paragraph wrapping around the float re-wraps | real/wikipedia-article |
 | P-130 | open | A quirks-mode body stretches to the viewport minus its own margins landside; the mirrored body is an inner box, and CSS cannot state a margin-box stretch for it | real/hn-front |
+| P-131 | fixed | A tab's history flags described the page it had just left: the back gesture at the start of a history was answered by the shell and vanished | — |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

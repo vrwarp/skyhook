@@ -223,6 +223,20 @@ type Tab struct {
 	// button for the rest of the session.
 	canBack    bool
 	canForward bool
+	// histURL is the page canBack and canForward were measured on.
+	//
+	// The flags cost a round trip into the browser to read; the URL costs
+	// nothing and is set the instant a navigation commits. So between those two
+	// moments the tab knows where it is and not what is behind it, and every
+	// state frame emitted in the gap — a load starting, a snapshot arriving, a
+	// title changing — carried the new page's address stamped with the old
+	// page's history. On a landside link that window is a millisecond; on this
+	// one it is seconds, and a reader whose tab has just reached the start of
+	// its history was told it could still go back (P-131).
+	//
+	// Keeping the URL the flags were measured on is what lets emitState tell a
+	// frame it can vouch for from one it cannot.
+	histURL string
 	// chunks reassembles the split messages of each agent, keyed by session:
 	// two agents number their chunks from one, and mixing them builds a message
 	// out of halves of two documents.
@@ -1841,6 +1855,37 @@ func (t *Tab) requestImages(imgs []agentImage) {
 	}
 }
 
+/*
+historyFlagsFor decides whether a state frame about `frameURL` may carry the
+history flags measured on `measuredURL`.
+
+It may when they are the same page, and it may not otherwise — which sounds
+like a technicality and is the difference between a back gesture working and
+disappearing. A tab's URL is known the instant a navigation commits; what is
+behind it costs a round trip into the browser to find out. Everything emitted
+in between — the frame that says a load started, the one a snapshot brings, a
+title changing — used to carry the new address stamped with the previous page's
+history, and on this link that frame is what the reader's shell believes for
+the next second or two.
+
+The wrong direction is the expensive one. A tab that has just reached the start
+of its history, still saying "you can go back", makes the shell answer the next
+back gesture instead of letting it through: the gesture is spent, nothing moves,
+and there is nothing to tell the reader it was heard. Saying "no history" while
+the truth is on its way costs a back button greyed out for a beat, and a gesture
+in that window is let through — which is the case the trap already exists to
+handle, and which recovers as soon as the flags arrive.
+
+Not knowing is therefore reported as nothing behind and nothing ahead: no
+history is the state a frame that cannot vouch for one should describe.
+*/
+func historyFlagsFor(frameURL, measuredURL string, back, forward bool) (bool, bool) {
+	if measuredURL == "" || frameURL != measuredURL {
+		return false, false
+	}
+	return back, forward
+}
+
 func (t *Tab) emitState(st protocol.TabState) {
 	t.mu.Lock()
 	if st.URL == "" {
@@ -1850,8 +1895,7 @@ func (t *Tab) emitState(st protocol.TabState) {
 		st.Title = t.title
 	}
 	st.Loading = t.loading || st.Loading
-	st.CanBack = t.canBack
-	st.CanForward = t.canForward
+	st.CanBack, st.CanForward = historyFlagsFor(st.URL, t.histURL, t.canBack, t.canForward)
 	t.mu.Unlock()
 	f, err := protocol.NewFrame(protocol.TypeTabState, t.ID, st)
 	if err != nil {
@@ -1875,12 +1919,20 @@ func (t *Tab) syncHistory(ctx context.Context) (url, title string) {
 	if err := t.sess.Do(ctx, "Page.getNavigationHistory", nil, &hist); err != nil {
 		return "", ""
 	}
+	var at string
+	if hist.CurrentIndex >= 0 && hist.CurrentIndex < len(hist.Entries) {
+		at = hist.Entries[hist.CurrentIndex].URL
+	}
 	t.mu.Lock()
 	t.canBack = hist.CurrentIndex > 0
 	t.canForward = hist.CurrentIndex < len(hist.Entries)-1
+	// Which page they describe, so a frame about some other page does not
+	// borrow them. The browser's own answer rather than t.url: this is the
+	// entry the indices were counted against.
+	t.histURL = at
 	t.mu.Unlock()
-	if hist.CurrentIndex >= 0 && hist.CurrentIndex < len(hist.Entries) {
-		return hist.Entries[hist.CurrentIndex].URL, hist.Entries[hist.CurrentIndex].Title
+	if at != "" {
+		return at, hist.Entries[hist.CurrentIndex].Title
 	}
 	return "", ""
 }
