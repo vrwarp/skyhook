@@ -128,8 +128,19 @@ func TestPWAScrollingAMirroredContainerReachesThePage(t *testing.T) {
       return true;
     })()`, nil)
 
-	// The page has to build what is under them. Nothing plane-side can invent
-	// a row: the mirror only ever has what the page made.
-	waitFor(ctx, t, page, mirrorText+`.includes('row 20')`, budget(60*time.Second),
-		"the page to build the rows below the reader")
+	// The server has to hear about it. That is the half this test is for: the
+	// landside half — a container position making the page build the rows below
+	// it — is TestScrollingAContainerBuildsTheRowsBelowIt's, and asserting it
+	// again here means asking a 250 kbps link to deliver a page load, a scroll,
+	// a round trip and ten new rows inside one budget. It did, on every desk
+	// and on the unshaped job, and did not on the shaped one — where the log
+	// showed the scroll had never arrived at all, which is this assertion,
+	// three minutes later and without the sentence that says so.
+	deadline := time.Now().Add(budget(60 * time.Second))
+	for !strings.Contains(string(h.logs.Text()), "a container the reader scrolled") {
+		if time.Now().After(deadline) {
+			t.Fatal("the reader scrolled a container and the server never heard about it")
+		}
+		time.Sleep(budget(200 * time.Millisecond))
+	}
 }
