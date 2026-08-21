@@ -822,6 +822,15 @@ func (c *Client) Scroll(tab uint32, x, y, h, docH int) error {
 	})
 }
 
+// ScrollNode reports where the reader has a scroll container, rather than the
+// document. The range travels with it for the same reason it does for a
+// document: what the reader has may be shorter than what the page has.
+func (c *Client) ScrollNode(tab uint32, node int64, x, y, h, docH int) error {
+	return c.send(protocol.ChTelemetry, protocol.TypeScroll, tab, protocol.ScrollEvent{
+		Tab: tab, Node: node, X: x, Y: y, H: h, DocH: docH,
+	})
+}
+
 // Kill triggers the landside kill switch: session torn down, profile wiped.
 func (c *Client) Kill() error {
 	return c.send(protocol.ChCtrl, protocol.TypeKill, 0, nil)
