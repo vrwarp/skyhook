@@ -104,6 +104,10 @@ func TestContentSecurityPolicyIsNarrow(t *testing.T) {
 		// The single permitted connection is the mirror transport.
 		"https://vps.example.com:4433",
 		"wss://vps.example.com:4434",
+		// Both the fonts this side rebuilds from protocol bytes and the ones a
+		// page inlines in its own stylesheet. Neither fails loudly: the face
+		// registers, the ligature fires, and the glyph draws nothing (P-133).
+		"font-src 'self' blob: data:",
 	} {
 		if !strings.Contains(csp, want) {
 			t.Errorf("CSP missing %q\ngot: %s", want, csp)

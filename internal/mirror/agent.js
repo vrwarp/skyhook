@@ -523,7 +523,16 @@
     // recorded here is also what the sweep compares against, so a page that
     // changes any of it later is a difference rather than a re-send.
     var tag = el.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && isLiveEditable(el)) {
+      // An editing host. Its text mirrors as DOM like anything else; this is
+      // the copy the client compares against while it owns the field and is
+      // holding those mutations aside.
+      var hostText = liveValue(el);
+      if (hostText.length <= LIVE_TEXT_MAX) {
+        pairs.push(intern('data-sky-value'), intern(hostText));
+        watchLive(el, { value: hostText, checked: false });
+      }
+    } else if (tag === 'INPUT' || tag === 'TEXTAREA') {
       var checked = !!el.checked;
       if (!isSensitive(el)) {
         // A file input's value is a fake local path no script may write —
@@ -809,9 +818,44 @@
   // always '': its real value is a fake local path no script may write —
   // the mirror's browser throws on anything but the empty string — and the
   // filename in it belongs to this machine, not to the wire (P-007).
+  /*
+   * LIVE_TEXT_MAX bounds the text of an editing host that is worth watching.
+   *
+   * A watched field reports its whole text whenever it changes — which is what
+   * an input and a textarea have always done, and what makes the report worth
+   * anything: the client compares it against its own copy. A chat composer
+   * holds a sentence and that is cheap. A document editor's editing host holds
+   * the document, and re-sending all of it would spend the link on what the
+   * reader can already see. Past the bound the field stops being watched: the
+   * client keeps its own text, which is what every editing host did before
+   * this existed, and loses only the correction.
+   */
+  var LIVE_TEXT_MAX = 8192;
+
+  /*
+   * isLiveEditable reports whether an element's text is state the client has
+   * to be told about separately from the DOM.
+   *
+   * For an input or a textarea that is the whole of it: the value is a
+   * property, invisible to a serializer, and without it a mirrored form loses
+   * what was typed. An editing host is the odd one — its text *is* DOM and
+   * arrives as mutations like any other — but while the client owns the field
+   * those mutations are held aside on purpose, and the value is then the only
+   * thing that can tell the client the page rewrote what it typed: an emoji
+   * for a smiley, a mention for an @name, an Enter the page kept for its own
+   * autocomplete instead of sending (P-132).
+   */
+  function isLiveEditable(el) {
+    var tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+    var mode = el.contentEditable;
+    return mode === 'true' || mode === 'plaintext-only';
+  }
+
   function liveValue(el) {
     if (el.type === 'file') return '';
-    return el.value == null ? '' : String(el.value);
+    if (el.value == null) return String(el.textContent == null ? '' : el.textContent);
+    return String(el.value);
   }
 
   function watchLive(el, state) {
@@ -848,6 +892,12 @@
     }
     var value = liveValue(el);
     var checked = !!el.checked;
+    // An editing host that has grown past what is worth re-sending on every
+    // change. See LIVE_TEXT_MAX: the client keeps its own text from here on.
+    if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && value.length > LIVE_TEXT_MAX) {
+      liveWatch.delete(el);
+      return false;
+    }
     if (was.value !== value) {
       pendingOps.push([3, id, intern('data-sky-value'), intern(value)]);
       changed = true;
@@ -988,7 +1038,10 @@
       any = true;
     }
     var tag = el.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && isLiveEditable(el)) {
+      var hostText = liveValue(el);
+      if (hostText.length <= LIVE_TEXT_MAX) { out['data-sky-value'] = hostText; any = true; }
+    } else if (tag === 'INPUT' || tag === 'TEXTAREA') {
       if (!isSensitive(el) && el.type !== 'file') {
         out['data-sky-value'] = liveValue(el);
         any = true;

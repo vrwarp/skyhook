@@ -61,7 +61,15 @@ func (w *webapp) csp() string {
 		// silently refused every one of them at render (P-115) — the
 		// stylesheet loaded, the face registered, and the glyphs drew in a
 		// substitute while the console counted violations.
-		"font-src 'self' blob:",
+		//
+		// data: for the half of that P-115 missed. A page may inline a face in
+		// its own stylesheet, and an icon font is exactly the size that invites
+		// it: Google Chat ships the subset that draws its toolbar as a
+		// data:font/ttf URI, and nothing this side rewrites it, so it arrived
+		// as itself and was refused as itself. The failure is silent in the
+		// same way — the ligature fires, the glyph draws nothing, and the
+		// reader sees a gap where an icon goes (P-133).
+		"font-src 'self' blob: data:",
 		"worker-src 'self'",
 		"manifest-src 'self'",
 		// The mirror frames are same-origin about:blank documents.

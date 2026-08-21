@@ -1580,3 +1580,126 @@ describe('nearestList', () => {
     expect(nearestList(composer)?.id).toBe('log');
   });
 });
+
+/*
+Where a message goes when the page keeps the Enter for itself.
+
+The ghost is a message drawn before anything can confirm it, and until now
+nothing could ever take it back: it retires when the real message turns up, and
+a message that never went left a bubble that reads as sent for the rest of the
+session. The reader then types the next one into a composer they believe is
+empty, and the page appends it to the first.
+
+That is not a hypothetical. Google Chat keeps Enter for its own emoji
+autocomplete — `:/` becomes an emoji, nothing is sent — and "the icons are
+still missing :/" and "message" arrived in the transcript as one line (P-132).
+A mention picker, a slash-command menu and a validation error all keep it too,
+and none of them say so. What they all leave behind is text in the composer,
+which is the whole signal: a chat composer that still holds text did not send.
+*/
+describe('an optimistic send the page did not make', () => {
+  /** The fixture: a transcript to send into, and a composer to type in. */
+  function withComposer(snap: Snapshot): Snapshot {
+    const base = snap.strings.length;
+    snap.strings.push('div', 'contenteditable', 'true', 'data-sky-value', '');
+    snap.nodes.push({
+      id: 40, parent: 1, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2, base + 3, base + 4], flags: NodeFlags.Editable,
+    });
+    return snap;
+  }
+
+  /** One attribute op, as the agent sends a field's live text. */
+  function valueOp(node: number, value: string): Mutation {
+    return {
+      strings: ['data-sky-value', value], docHash: 0, flush: false,
+      ops: [{
+        op: OpCode.Attr, node, parent: 0, before: 0, ref: -1, ref2: -1,
+        nodes: [], off: 0, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+      }],
+    };
+  }
+
+  /** Types into the composer the way the reader does: locally, then told. */
+  function type(host: MirrorHost, text: string): HTMLElement {
+    const doc = host.frame.contentDocument!;
+    const view = doc.defaultView as unknown as typeof globalThis;
+    const composer = doc.querySelector<HTMLElement>('[contenteditable]')!;
+    composer.dispatchEvent(new view.FocusEvent('focusin', { bubbles: true }));
+    composer.textContent = text;
+    composer.dispatchEvent(new view.InputEvent('input', { bubbles: true }));
+    return composer;
+  }
+
+  function pressEnter(composer: HTMLElement): void {
+    const view = composer.ownerDocument.defaultView as unknown as typeof globalThis;
+    composer.dispatchEvent(new view.KeyboardEvent('keydown', {
+      key: 'Enter', bubbles: true, cancelable: true,
+    }));
+  }
+
+  /** Resolves the refs of a batch's own strings, which join the table on top. */
+  function refs(m: Mutation, base: number): Mutation {
+    m.ops[0].ref = base;
+    m.ops[0].ref2 = base + 1;
+    return m;
+  }
+
+  it('takes the ghost back when the composer still holds the text', async () => {
+    const { host } = await mount();
+    const snap = withComposer(snapshot());
+    const base = snap.strings.length;
+    host.applySnapshot(snap);
+    const doc = host.frame.contentDocument!;
+
+    const composer = type(host, 'the icons are still missing :/');
+    pressEnter(composer);
+    expect(doc.querySelectorAll('[data-skyhook-ghost]')).toHaveLength(1);
+    expect(composer.textContent).toBe('');
+
+    // The page's answer: the Enter went to its emoji autocomplete, the smiley
+    // is an emoji now, and the message is still sitting in the composer.
+    host.applyMutation(refs(valueOp(40, 'the icons are still missing 🫤'), base), 3);
+
+    expect(doc.querySelectorAll('[data-skyhook-ghost]')).toHaveLength(0);
+    expect(composer.textContent).toBe('the icons are still missing 🫤');
+  });
+
+  it('leaves the ghost alone when the composer comes back empty', async () => {
+    const { host } = await mount();
+    const snap = withComposer(snapshot());
+    const base = snap.strings.length;
+    host.applySnapshot(snap);
+    const doc = host.frame.contentDocument!;
+
+    const composer = type(host, 'this one went');
+    pressEnter(composer);
+    host.applyMutation(refs(valueOp(40, ''), base), 3);
+
+    // An empty composer is the page saying it took the message. The ghost
+    // stands until the real one arrives to retire it.
+    expect(doc.querySelectorAll('[data-skyhook-ghost]')).toHaveLength(1);
+  });
+
+  /*
+   * The echo the reader has already typed past.
+   *
+   * Every keystroke is replayed landside, so the field's text comes back as
+   * the reader types — and over this link it comes back several keystrokes
+   * late. Taking a late echo as truth would put the field back to what it held
+   * a second ago and lose everything since, which is the one thing local echo
+   * exists to prevent. A mutation says which input provoked it, and that is
+   * what tells the two apart.
+   */
+  it('ignores a value echoed from an edit the reader has typed past', async () => {
+    const { host } = await mount();
+    const snap = withComposer(snapshot());
+    const base = snap.strings.length;
+    host.applySnapshot(snap);
+
+    const composer = type(host, 'hello there');
+    // Caused by the very first thing the reader did, long since typed past.
+    host.applyMutation(refs(valueOp(40, 'hel'), base), 3, 1);
+    expect(composer.textContent).toBe('hello there');
+  });
+});
