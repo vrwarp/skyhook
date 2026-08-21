@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"html"
@@ -22,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -601,6 +603,29 @@ func utilityCSSPage() string {
 // it here. A real typeface would test the same code paths and put a binary in
 // the repository to do it.
 var fakeFont = append([]byte("wOF2"), make([]byte, 256)...)
+
+/*
+bigIconFont is a real ligature icon font, padded past the transcoder's cap.
+
+The cap is a byte count, so making a font too big to send is a matter of making
+it bigger — and the padding goes on a font that really draws, because the thing
+under test is whether the icons arrive. It is Google Symbols as Chat's own
+stylesheet inlines it: 7 KB, 67 ligatures, the same file internal/imgproc tests
+its subsetter against.
+
+A woff2 records its own length, and the decoder checks it, so the padding is
+only a font at all once that field agrees with it again.
+*/
+func bigIconFont() []byte {
+	src, err := os.ReadFile(filepath.Join(
+		"..", "internal", "imgproc", "testdata", "symbols-subset.woff2"))
+	if err != nil {
+		panic("read the icon font fixture: " + err.Error())
+	}
+	out := append(append([]byte(nil), src...), make([]byte, 1<<20)...)
+	binary.BigEndian.PutUint32(out[8:], uint32(len(out)))
+	return out
+}
 
 // heroRGB is the colour of the AVIF hero and of nothing else in the fixtures,
 // so finding it in the delivered pixels proves those pixels came from a format
@@ -1526,6 +1551,26 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			}
 			feed.scrollTop = feed.scrollHeight;
 			</script></body></html>`)
+	})
+	// A real ligature icon font, served as an icon font is: the family drawn
+	// from names in the markup, one face, and nothing smaller behind it. The
+	// handler pads the file past the transcoder's cap so the only way it can
+	// reach the reader is subset — which is Google Chat's 4.9 MB Google Symbols
+	// in miniature.
+	mux.HandleFunc("/icon-font", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Icons</title>
+			<style>
+			@font-face { font-family: 'Sky Symbols'; src: url(/sky-symbols.woff2) format('woff2'); }
+			.icon { font-family: 'Sky Symbols'; font-feature-settings: "liga"; font-size: 48px }
+			</style></head>
+			<body><h1>a page whose icons are a font</h1>
+			<nav><i class="icon">star</i><i class="icon">home</i><i class="icon">send</i></nav>
+			</body></html>`)
+	})
+	mux.HandleFunc("/sky-symbols.woff2", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "font/woff2")
+		_, _ = w.Write(bigIconFont())
 	})
 	// A page that wants a file: what TestAFileReachesThePagesChooser feeds
 	// (P-007). The page reads the file itself, so the status line proves the

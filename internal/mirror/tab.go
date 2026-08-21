@@ -129,6 +129,10 @@ type ImageRequest struct {
 	Src []byte
 	// Box places a region shot inside its element; see protocol.ImageMeta.Box.
 	Box []int
+	// Text is what a font is being asked to draw: the icon names the document
+	// renders in this family. Empty for everything that is not a font, and for
+	// a font the agent found no icon names for.
+	Text []string
 	// Epoch is the document this asset was named by; see Tab.NavEpoch. Stamped
 	// by wantImage so that nothing has to remember to, and read by the pipeline
 	// to tell work still worth doing from work for a page that is gone.

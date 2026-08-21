@@ -42,6 +42,10 @@ type Request struct {
 	Raw bool
 	// Box places a region shot inside its element; see protocol.ImageMeta.Box.
 	Box []int
+	// Text is what a font is being asked to draw — the icon names the document
+	// renders in this family — and is the cut a subset is made to. Empty for
+	// everything that is not a font.
+	Text []string
 	// Epoch names the page this asset was named by. The pipeline never reads
 	// it; it hands it back to Relevance, which is the only thing here that
 	// knows what a page is. Zero means unstamped, and unstamped is never stale.
@@ -531,6 +535,9 @@ func (p *Pipeline) process(req Request) {
 	if errors.Is(err, ErrNoDecoder) {
 		res, err = p.rasterize(ctx, req, src, err)
 	}
+	if errors.Is(err, ErrTooLarge) {
+		res, err = p.subsetFont(req, src, err)
+	}
 	if err != nil {
 		// A region shot has no URL to name it; the key is all there is to say
 		// which image failed.
@@ -738,6 +745,42 @@ func (p *Pipeline) abandon(req Request, cause error) {
 // rasterizer, and a browser that cannot decode it either, should both still say
 // which format was the problem — that is the sentence in the log that tells an
 // operator whether to expect this on every page of that site or only this one.
+/*
+subsetFont is the last thing tried for a font the cap refused.
+
+Every other asset here answers "too large" by being re-encoded smaller. A font
+has nothing to re-encode — the bytes are outlines — so the only lever is
+shipping fewer of them, and the only thing that knows which ones a page needs
+is the page. Request.Text carries that: the icon names the document draws in
+this family, written into the @font-face by the agent and taken off it by the
+server (see fontIconNames in mirror/css.go).
+
+A refusal that is not a font, or a font nothing said what to draw with, comes
+straight back out as the refusal it was — which is what happened to every font
+over the cap before this existed.
+*/
+func (p *Pipeline) subsetFont(req Request, src []byte, cause error) (*Result, error) {
+	if len(req.Text) == 0 || SniffFont(src) == "" {
+		return nil, cause
+	}
+	small, err := SubsetFont(src, req.Text)
+	if err != nil {
+		p.log.Debug("a font could not be subset", "url", req.URL, "err", err)
+		return nil, cause
+	}
+	if len(small) > fontMaxBytes {
+		p.log.Debug("a font is over the cap even subset",
+			"url", req.URL, "was", len(src), "now", len(small), "icons", len(req.Text))
+		return nil, cause
+	}
+	// Worth a line at INFO: this is the difference between a toolbar and a
+	// column of words, and the ratio is the number an operator would want if
+	// the cap ever needs re-thinking.
+	p.log.Info("font subset to the icons the page draws",
+		"url", req.URL, "was", len(src), "now", len(small), "icons", len(req.Text))
+	return &Result{Data: small, Mime: "font/ttf"}, nil
+}
+
 func (p *Pipeline) rasterize(ctx context.Context, req Request, src []byte, cause error) (*Result, error) {
 	if p.raster == nil {
 		return nil, cause

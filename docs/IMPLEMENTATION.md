@@ -4041,3 +4041,83 @@ server that hid this in the first place. The conformance fixture carries a
 `scrolls` entry too — the position has exactly one chance to cross, and a key
 that stopped lining up between Go and TypeScript would take a conversation's
 newest message off the screen and change nothing else.
+
+### 57. Cutting the icon font down to the icons
+
+§56's capture had one more thing in it, and the first reading of it was wrong.
+The 4.9 MB Google Symbols face was refused at the transcoder's cap — `font is
+4888276 bytes: source image too large` — and that looked like the reason Chat's
+markup carries words like `checkmark_chat_unread`. It is not: those words are
+how a ligature icon font is written, the glyph is drawn at the ligature, and
+Chat declares a second, 7 KB subset face for the same family that arrived
+perfectly well. §49's withholding dropped the broken face, the small one won,
+and every icon on that page rendered. Nothing was wrong.
+
+What is wrong is the page that has no second face. Served an icon family whose
+only file is over the cap, the mirror renders the names:
+
+```
+mirrored text: "a page whose icon font is too big to send  mark_chat_unreadstar"
+```
+
+which is not what the cap's own comment promises — "over the cap the page keeps
+its empty boxes, which is what it had before". A toolbar of words is worse than
+an empty toolbar, and both are worse than the icons.
+
+So the font is cut instead. The lever nothing else here has is that a font's
+bytes are its outlines: there is no quality to give up, but there are glyphs to
+leave out, and a page draws about thirty icons out of a family that carries
+thousands. Three things make that cheap:
+
+- **The variable tables are the file.** Decompressed, Google Symbols is 13.1 MB,
+  and 11.4 MB of it is `gvar` — the deltas for every weight and fill of every
+  icon. Dropping the axes leaves the default instance, which is what the page
+  renders anyway, and takes 87% off before a single glyph is considered.
+- **Glyph ids stay where they are.** A ligature is a GSUB rule about glyph ids;
+  renumbering means rewriting GSUB, `cmap`, `hmtx` and anything else that names
+  one, and the Go font library that reads woff2 says `TODO: GDEF, GPOS, GSUB`
+  about its own subsetter. Emptying an unwanted glyph's outline instead leaves
+  every table still correct and costs the two bytes of its `loca` entry. Worse
+  compression, far less to get wrong.
+- **The names are already in the markup.** `mark_chat_unread` is the text of
+  the element that draws the icon, so what to keep is a fact the landside half
+  can read off the document.
+
+That last fact has to cross, and the rule that names the file is what carries
+it: the agent appends a `-sky-icons` descriptor listing the family's icon
+names, and `fontIconNames` takes it off again before the rule goes anywhere
+near the client. It is deliberately *not* a `--custom-property`, which is what
+it was first — `stripUnusedVars` removes custom properties nothing reads, one
+pass before the code that reads this one, and the font went on being refused
+with nothing in any log to say why.
+
+Together: 4,888,276 bytes of woff2 to 283,012 bytes of sfnt for the fourteen
+icons a Chat toolbar draws, and Chromium renders them. The result is a plain
+TrueType file rather than a woff2 — there is no Brotli encoder here — which was
+measured before it was relied on: the same page renders identically with the
+page's own rule still claiming `format("woff2")`, because browsers sniff the
+bytes.
+
+**The subset is cut once.** `fontKey` hashes the address together with the
+sorted icon names, so the pipeline's existing cache does the rest: the same
+page on the next flight hits `Submit`'s metadata check and never fetches the
+font, let alone decompresses and rebuilds it; a page that has since found six
+more icons misses on a different key and gets a font that covers them; and two
+pages sharing an icon font cannot be served each other's cut.
+`TestAFontIsFetchedOncePerSetOfIcons` counts fetches rather than subsets on
+purpose — a cache hit means the bytes never left the origin, so nothing
+downstream of the fetch can have run.
+
+What this does not do: CFF fonts, whose outlines live in a charstring index
+this does not touch; contextual ligatures (GSUB type 6), which an icon font has
+no use for; and weights other than the default, which is the axis dropped with
+`gvar`. All three refuse rather than guess, and refusing is what every font
+over the cap did before.
+
+`internal/imgproc/testdata/symbols-subset.woff2` is the fixture both suites cut
+from — Chat's own 7 KB subset face, lifted out of the capture, 67 ligatures in
+GSUB and Apache 2.0 like the icons it draws. The e2e test pads it past the cap
+and asserts on what the browser drew: a ligature icon is one glyph an em wide,
+and the same name in any other font is as wide as its letters. A model that
+never shaped text cannot tell those apart, which is exactly how this stayed
+invisible.

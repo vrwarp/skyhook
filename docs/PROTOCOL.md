@@ -272,11 +272,29 @@ exactly that:
   the word `mark_chat_unread`. Everything else takes the reader's own font.
   They reach the channel the ordinary way — an `@font-face` `src` is a `url()`
   in a stylesheet like any background image — and pass through the transcoder
-  untouched, since there is no smaller version of a font to make. A font over
-  the 1 MB cap is refused, and the client withholds the `@font-face` rather
-  than pointing it at the placeholder every other unresolved reference gets: a
-  face whose `src` loads is a face, so a placeholder would shadow whichever
-  faces of that family did arrive.
+  untouched, because there is no smaller version of a font to encode.
+
+  There is a smaller version to *cut*, though, and a font over the 1 MB cap is
+  cut before it is refused. The agent writes the icon names the document draws
+  in that family into the rule as a `-sky-icons` descriptor; the server takes
+  the descriptor off before the rule goes any further, and hands the names to
+  the subsetter, which keeps those glyphs and empties every other outline.
+  Glyph ids are left where they were, so `GSUB` and `cmap` cross unrewritten —
+  and the variable-font tables go, which on an icon font is most of the file.
+  Google Symbols is 4.9 MB whole and about 280 KB cut this way. The result is
+  an sfnt rather than a woff2; browsers sniff the bytes and ignore the stale
+  `format()` hint.
+
+  A font's cache key folds in the names it was cut to, so a subset is cached as
+  itself: the same page hits it on the next flight without fetching the font
+  again, and a page that has since found another icon misses and gets a font
+  that covers it.
+
+  A font that still will not fit — a CFF outline format, or one whose icons are
+  most of it — is refused as before, and the client withholds the `@font-face`
+  rather than pointing it at the placeholder every other unresolved reference
+  gets: a face whose `src` loads is a face, so a placeholder would shadow
+  whichever faces of that family did arrive.
 
 ### Adapters
 
