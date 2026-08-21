@@ -4455,3 +4455,61 @@ visible on the emulated link, where the gap between what the reader does and
 what the server has is wide enough to put a whole document replacement inside
 it: the honest test for this is fake timers stating the race exactly, which is
 now what pins it.
+
+### 64. The address bar arriving before the buttons beside it
+
+§58 fixed the tab's cached history flags describing the page it had left, and
+the shaped job went green. The *unshaped* job then failed the same test, the
+same way — `TestTheBrowsersOwnBackAndForwardDriveTheTab`, the back gesture at
+the start of a tab's history answered by the shell instead of let through — and
+the fix was in the wrong half of the mechanism.
+
+A commit moves two things that have to travel together. The address arrives
+with the event: `Page.frameNavigated` carries the URL, and the tab has it the
+moment the browser speaks. What the browser thinks of the tab's history has to
+be *asked for*, which is a round trip. The commit's own frame waits for the
+answer and sends both, deliberately and with a comment saying why.
+
+But the commit's frame is not the only one. The new page's snapshot arrives,
+its loading stops, its favicon lands, and each of those calls `emitState` —
+which filled a missing URL in from `t.url` and stamped every frame with the
+cached `canBack`. Any frame emitted inside that window shipped the new address
+with the previous page's history.
+
+Going back to the first page of a tab is where that lands, because
+`about:blank` stops loading in less time than one CDP round trip. The client
+was told "you are on about:blank" and "you can still go back" in the same
+frame. It drew the empty address bar and the start page — which is exactly what
+the test waits for — and, believing the tab still had somewhere to go, answered
+the reader's next back gesture rather than letting it through to the browser.
+The gesture is spent, nothing moves, and the trap that guards the session is
+left unarmed: the same reader-visible fault as §58, arriving through a frame
+§58 never looked at.
+
+§58's retry loop widened the window rather than opening it — up to five 20 ms
+waits before the flags land — which is why the unshaped job started failing
+where the shaped one had just been fixed.
+
+So a frame emitted in that window now says nothing about where the tab is. The
+URL goes out empty, which the client already reads as "unchanged", and the
+flags beside it are the ones the client is holding — they cannot have moved,
+because the only thing that writes them is a read for the page the tab is
+actually on. The commit's frame, a round trip later, moves both together, and
+is stamped as the one entitled to: stamped there rather than at the read, so
+that a read the browser could not answer still lets the address bar move. A
+stuck address bar is a worse failure than a history flag one page out.
+
+The commit and the URL also move under one lock now. They did not, and the
+window between them was a clipboard grant wide — another round trip to the
+browser, during which a frame would have seen the new address beside the old
+epoch and thought the pair agreed.
+
+Two things worth naming. The failure evidence was `trap="skyhook:here"`,
+`canBack: false`, three entries — and that is *identical* for the two faults it
+could have been (the shell answering the gesture, or the shell letting it
+through and re-arming the trap underneath). Only the order of the `popstate`s
+tells them apart, and it is gone by the time anything asks; the test records it
+now. And the second: §58 was a correct fix to a real bug that did not fix the
+reported failure, because the mechanism had two ends and the reproduction only
+ever showed the symptom. A green shaped job was taken as the fix landing rather
+than as one of two paths closing.

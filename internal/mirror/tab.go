@@ -223,6 +223,11 @@ type Tab struct {
 	// button for the rest of the session.
 	canBack    bool
 	canForward bool
+	// histEpoch says which page canBack and canForward were measured for. A
+	// commit moves the tab's URL immediately and its history flags a round
+	// trip later, so between the two the pair disagrees, and this is what says
+	// so. See emitState.
+	histEpoch uint64
 	// chunks reassembles the split messages of each agent, keyed by session:
 	// two agents number their chunks from one, and mixing them builds a message
 	// out of halves of two documents.
@@ -628,20 +633,15 @@ func (t *Tab) onFrameNavigated(_ string, params json.RawMessage) {
 	if p.Frame.ParentID != "" {
 		return // subframe; the agent flattens same-origin frames itself
 	}
-	t.mu.Lock()
-	t.frameID = p.Frame.ID
-	t.url = p.Frame.URL
-	t.ctxID = 0
-	t.mu.Unlock()
+	// Before anything else: the pictures of the page that has just been left
+	// are already queued and already being fetched, and on a link measured in
+	// hundreds of kbps they are minutes of it. See §51.
+	epoch := t.pageCommitted(p.Frame.ID, p.Frame.URL)
+
 	// The origin that just committed is the one whose Copy buttons the relay
 	// has to hear (P-008); the wildcard grant alone is not honoured for
 	// clipboard-read on every Chrome build.
 	t.grantClipboardFor(p.Frame.URL)
-
-	// Before anything else: the pictures of the page that has just been left
-	// are already queued and already being fetched, and on a link measured in
-	// hundreds of kbps they are minutes of it. See §51.
-	epoch := t.pageCommitted()
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -697,9 +697,20 @@ and none of what a navigation otherwise involves: everything else there is a
 round trip to the browser, and this is the one part that has to happen before
 any of them. What is queued for the page just left is queued now, being fetched
 now, and shipping down the link now.
+
+The address and the epoch move under one lock because emitState reads them
+together and the pair is what it reasons about: a frame that saw the new URL
+beside the old epoch would think the history flags beside it had been measured
+for this page, and ship the previous page's. The window between the two used to
+be a clipboard grant wide — a round trip to the browser.
 */
-func (t *Tab) pageCommitted() uint64 {
+func (t *Tab) pageCommitted(frameID, url string) uint64 {
+	t.mu.Lock()
+	t.frameID = frameID
+	t.url = url
+	t.ctxID = 0
 	epoch := t.navEpoch.Add(1)
+	t.mu.Unlock()
 	t.out.PageChanged(t.ID, epoch)
 	return epoch
 }
@@ -741,6 +752,16 @@ func (t *Tab) announceCommit(epoch uint64, url string) bool {
 			"tab", t.ID, "epoch", epoch, "url", url)
 		return false
 	}
+	t.mu.Lock()
+	// This is the frame the history read was held for, and the only one
+	// entitled to move the address bar onto this page: everything emitted
+	// between the commit and here has been saying nothing about where the tab
+	// is, waiting for exactly this. Stamped here rather than in applyHistory
+	// so that a read the browser could not answer — a CDP error, a tab going
+	// away — leaves the address bar moving anyway; a stuck address bar is a
+	// worse failure than a history flag that is one page out.
+	t.histEpoch = epoch
+	t.mu.Unlock()
 	t.emitState(protocol.TabState{URL: url, Loading: true})
 	return true
 }
@@ -1841,9 +1862,38 @@ func (t *Tab) requestImages(imgs []agentImage) {
 	}
 }
 
+/*
+emitState sends a tab state, and holds back the one part of it that a frame
+emitted at the wrong moment would get wrong.
+
+A commit moves the tab's URL at once and its history flags a round trip later:
+onFrameNavigated has the new address the instant the browser announces it, and
+what the browser thinks of the tab's history has to be asked for. Between those
+two, anything else that emits — the new page's snapshot arriving, about:blank
+stopping loading, a favicon — picks the new URL up out of t.url and stamps it
+with flags measured for the page before it.
+
+Which is a lie the client acts on. A tab going back to the first page of its
+history sends "you are on about:blank" with "you can still go back": the shell
+draws the empty address bar and the start page, believes the tab has somewhere
+to go, and answers the reader's next back gesture instead of letting it through
+to the browser. The gesture is spent, nothing moves, the trap that guards the
+session is left unarmed, and nothing tells the reader it was heard — the same
+fault P-131 fixed from the other end, arriving through a different frame. It
+was TestTheBrowsersOwnBackAndForwardDriveTheTab failing on the *unshaped* job,
+where about:blank stops loading in less time than one CDP round trip (P-137).
+
+So a frame emitted in that window says nothing about where the tab is. The URL
+goes out empty, which the client reads as "unchanged", and the flags beside it
+are the ones the client already holds — they cannot have moved, because the
+only thing that writes them is a read for the page the tab is actually on. The
+commit's own frame, a round trip later, moves both together.
+*/
 func (t *Tab) emitState(st protocol.TabState) {
 	t.mu.Lock()
-	if st.URL == "" {
+	if t.histEpoch != t.navEpoch.Load() {
+		st.URL = ""
+	} else if st.URL == "" {
 		st.URL = t.url
 	}
 	if st.Title == "" {
@@ -1952,6 +2002,7 @@ func (t *Tab) applyHistory(epoch uint64, index, entries int) bool {
 	}
 	t.canBack = index > 0
 	t.canForward = index < entries-1
+	t.histEpoch = epoch
 	return true
 }
 
