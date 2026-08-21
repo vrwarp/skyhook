@@ -1530,6 +1530,57 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			});
 			</script></body></html>`)
 	})
+	// A chat page that keeps Enter for itself.
+	//
+	// Google Chat's composer does this with its emoji autocomplete: type `:/`
+	// and the Enter that would have sent the message is spent turning it into
+	// an emoji instead. A mention picker and a slash-command menu keep it the
+	// same way. Nothing about the page says so — the only trace is that the
+	// composer still has text in it afterwards (P-132).
+	mux.HandleFunc("/keeps-enter", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Keeps Enter</title></head>
+			<body><h1>a page that answers Enter itself</h1>
+			<ul id="log" role="list"><li>an earlier message</li></ul>
+			<div id="box" contenteditable="true"></div>
+			<script>
+			document.getElementById('box').addEventListener('keydown', function (ev) {
+			  if (ev.key !== 'Enter') return;
+			  ev.preventDefault();
+			  var i = this.textContent.indexOf(':/');
+			  if (i >= 0) {
+			    // The autocomplete eats this one. Nothing is sent.
+			    this.textContent = this.textContent.replace(':/', '\u{1FAE4}');
+			    return;
+			  }
+			  var li = document.createElement('li');
+			  li.textContent = this.textContent;
+			  document.getElementById('log').appendChild(li);
+			  this.textContent = '';
+			});
+			</script></body></html>`)
+	})
+	// An editing host holding more than a message: a document, which is the
+	// case the watch's bound exists for. The page rewrites it on Enter the way
+	// /keeps-enter does, so the only thing separating the two is the size.
+	mux.HandleFunc("/big-editor", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Big editor</title></head>
+			<body><h1>a document, not a message</h1>
+			<div id="box" contenteditable="true"></div>
+			<script>
+			var box = document.getElementById('box');
+			var line = 'the quick brown fox jumps over the lazy dog. ';
+			var text = '';
+			while (text.length < 9000) text += line;
+			box.textContent = text;
+			box.addEventListener('keydown', function (ev) {
+			  if (ev.key !== 'Enter') return;
+			  ev.preventDefault();
+			  this.textContent = 'rewritten by the page';
+			});
+			</script></body></html>`)
+	})
 	// A list pinned to its newest entry before anyone is watching, which is
 	// what a chat conversation is. The scroll happens while the page parses —
 	// before the agent's own scroll listener exists — so the only way the

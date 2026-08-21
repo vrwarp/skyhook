@@ -4197,3 +4197,95 @@ the reader's tap, which holds while the two trips are alike and stops holding
 on a box running eight browsers. That test is now a `newSerialHarness` test,
 which is what this repository already says to do with an assertion that
 measures the machine rather than the link.
+
+### 59. Two messages, one bubble, and the channel that had never carried anything
+
+A reader's capture, with a note on it:
+
+> two of my messages got combined in the end: "the icons are still missing :/"
+> and "message". also the icons are still missing.
+
+Both are in the bundle, and neither is where it looks.
+
+**What happened to the messages.** The landside screenshot shows what Google
+Chat actually received:
+
+```
+the icons are still missing 🫤 message
+```
+
+The `:/` is an emoji. Chat's composer has an emoji autocomplete, and the Enter
+that would have sent the message was spent choosing U+1FAE4 instead — which the
+server log confirms from the other side, fetching
+`notoemoji/17.0/1fae4/512.webp` 0.57 s after the Enter was replayed. Nothing was
+sent. Eleven seconds later the reader typed "message" and pressed Enter again,
+and the page sent what the composer had held all along.
+
+That is Chat's own behaviour, and a reader sitting in front of Chat would see
+the popup and know. What made it silent here is ours, in three parts, each of
+which had to be found separately because each looked correct:
+
+- **The ghost has no failure path.** On Enter the client draws the message
+  optimistically, clears its own copy of the composer, and sends the key
+  (`echo.ts`). `retireGhosts` removes the bubble when the real message turns up.
+  Nothing removes it when the message never went, so it reads as sent for the
+  rest of the session, over a composer the reader has been told is empty.
+
+- **A contenteditable never reported its text.** The agent watched `INPUT`,
+  `TEXTAREA` and `OPTION`, and `liveValue` read `el.value` — which is
+  `undefined` on an editing host. So the composer that every modern chat app is
+  built from shipped no `data-sky-value`, while the page's real changes to that
+  subtree were held aside on purpose, because the echo engine owns it. The one
+  moment the page rewrites what the reader typed is the one moment nothing could
+  tell them.
+
+- **And the channel had never carried anything.** `reconcileAttr` read
+  `op.str`, which is the field a *title* op carries; an attribute op puts its
+  name and value in `ref` and `ref2`, as references into the intern table.
+  `op.str` is empty on every attribute op ever sent, so the reconciliation path
+  had never once run — for a contenteditable, or for an `<input>`, or for
+  anything. It also never checked *which* attribute had changed, so had it
+  worked it would have offered a class change as the field's text.
+
+The fix is those three, plus the thing the third one exposes. An editing host is
+watched like a field, bounded by `LIVE_TEXT_MAX` so a document editor does not
+ship its document on every change. `reconcileAttr` resolves the value from the
+intern table — after the batch is applied, since a batch's own strings join the
+table on the way in — and only for `data-sky-value`. A composer that comes back
+non-empty after a ghosted send is the page saying the send did not happen, so
+the ghost is taken back and the text put where the reader can see it.
+
+And because that channel now carries something, it can also lie: every keystroke
+is replayed landside, so the field's text comes back as the reader types, and
+over this link it comes back several keystrokes late. Taking a late echo as
+truth would put the field back to what it held a second ago and lose everything
+since — the one thing local echo exists to prevent. A mutation says which input
+provoked it, and an echo older than the reader's newest edit is dropped on that
+basis, the same way §-49's focus handling already reasons about `applyingCause`.
+
+One thing tried and removed: the agent first reported an editing host's text
+only when the change was not an append, on the theory that typing explains an
+append and the client typed it. It cost a dropped signal on the first try —
+every string starts with the empty one, so a composer going from empty straight
+to rewritten reads as an append — and measuring it afterwards showed the whole
+rule was worth 18 bytes out of 2,642, because the live sweep already coalesces.
+A watched editing host now reports on change, like the textarea it is standing
+in for.
+
+**What happened to the icons**, and why the capture disagreed with the reader.
+`planeside/tabs/1/state.json` says `cspViolations: 50`. The policy was
+`font-src 'self' blob:` — blob: added when §-48's fonts were refused, nothing for
+the faces a page inlines in its own stylesheet. An icon font is exactly the size
+that invites inlining, and Chat ships the subset that draws its toolbar and the
+Starred shortcut as a `data:font/ttf` URI. It was refused as itself: the face
+registers, the ligature fires, the glyph draws nothing.
+
+The reader asked the sharpest question in the whole exchange — why the capture's
+own screenshot showed the Starred icon they could not see. Because the plane-side
+screenshot is not a photograph of their frame: `capture.ts` re-renders the frozen
+markup inside an `<svg><foreignObject>` loaded as a `data:` image and draws it to
+a canvas, in the shell's document, where the mirror frame's policy does not
+apply. The picture drew the icon the reader was being refused. `capture.ts`'s own
+comment warns about exactly this inversion — "a capture that disagrees with the
+reader is read as the reader being wrong" — and here it hid a real bug rather
+than inventing one. `img-src` has had `data:` all along; `font-src` now does too.

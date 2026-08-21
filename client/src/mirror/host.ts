@@ -483,6 +483,8 @@ export class MirrorHost {
   private inputSeq = 0;
   /** The newest input the reader made whose point was to move focus. */
   private lastFocusInputSeq = 0;
+  /** The newest input the reader made that changed the text of a field. */
+  private lastEditInputSeq = 0;
   /** Which input provoked the mutation being applied right now, 0 if none. */
   private applyingCause = 0;
   private lastSeq = 0;
@@ -710,6 +712,13 @@ export class MirrorHost {
     if (k === InputKind.Click || k === InputKind.DblClick || k === InputKind.Context ||
         k === InputKind.Focus || k === InputKind.Blur) {
       this.lastFocusInputSeq = this.inputSeq;
+    }
+    // And the newest edit, for the same kind of reason: the server echoes a
+    // field's text back, and an echo of a keystroke the reader has already
+    // typed past describes the field as it was, not as it is.
+    if (k === InputKind.Key || k === InputKind.Text || k === InputKind.SetValue ||
+        k === InputKind.Paste) {
+      this.lastEditInputSeq = this.inputSeq;
     }
     this.events.input(this.tab, {
       tab: this.tab,
@@ -1741,11 +1750,17 @@ export class MirrorHost {
     // and re-inserting a node the document already has reuses its id. Cheaper
     // to refuse the batch than to detect the damage later.
     if (seq > 0 && seq <= this.lastSeq) return;
+    // What the server says the owned field now holds. Set aside rather than
+    // read here: the value is a reference into the intern table, and this
+    // batch's own strings do not join that table until the patcher applies it.
+    const owned = this.echo?.ownedId ?? 0;
+    const echoed: MutationOp[] = [];
     const ops = m.ops.filter((op) => {
-      if (op.op === OpCode.Attr) this.reconcileAttr(op);
+      if (op.op === OpCode.Attr && owned && op.node === owned) echoed.push(op);
       return !this.echo?.defer(op, (id) => this.patcher?.nodeFor(id));
     });
     this.patcher.applyMutation({ ...m, ops }, seq);
+    for (const op of echoed) this.reconcileAttr(op);
     this.applyingCause = 0;
     this.retireGhosts();
     this.requestPendingImages();
@@ -2152,13 +2167,33 @@ export class MirrorHost {
     }, 120);
   }
 
+  /*
+   * Reads the server's copy of the owned field's text, and decides what it is
+   * evidence of.
+   *
+   * Two things, and they are different. The text itself is authority — the
+   * page rewrote what the reader typed, and the reader has to see it. And a
+   * field that is *not empty* is the verdict on a message the reader believes
+   * they sent: a chat composer that still holds text did not send it.
+   */
   private reconcileAttr(op: MutationOp): void {
     const owned = this.echo?.ownedId ?? 0;
     if (!owned || op.node !== owned) return;
     const node = this.patcher?.nodeFor(op.node) as HTMLElement | undefined;
     if (!node) return;
-    const server = op.str || undefined;
-    if (server !== undefined && server !== valueOf(node)) this.echo?.reconcile(op.node, server);
+    // An attribute op names what it changed; only one of them is the field's
+    // text. This used to read op.str, which is the field a *title* op carries
+    // and is empty on every attribute op ever sent — so nothing was ever
+    // reconciled, for any field, and the class changes a page makes while the
+    // reader types were being offered as its value (P-132).
+    if (this.patcher?.stringAt(op.ref) !== 'data-sky-value') return;
+    const server = op.ref2 < 0 ? '' : this.patcher.stringAt(op.ref2);
+    // An echo of an edit the reader has already typed past. Taking it as truth
+    // would put the field back several keystrokes and lose them, which is the
+    // one thing local echo exists to prevent.
+    if (this.applyingCause && this.applyingCause < this.lastEditInputSeq) return;
+    if (server !== '') this.ghostsWereNotSent();
+    if (server !== valueOf(node)) this.echo?.reconcile(op.node, server);
   }
 
   // --------------------------------------------------------------- optimistic
@@ -2172,6 +2207,34 @@ export class MirrorHost {
     ghost.textContent = text;
     list.appendChild(ghost);
     return true;
+  }
+
+  /*
+   * Takes back the optimistic messages, because the composer still holds text.
+   *
+   * A ghost says "this is sent" a round trip before anything can confirm it,
+   * and nothing ever said otherwise: `retireGhosts` removes one when the real
+   * message turns up, and a message that never went simply left a bubble that
+   * reads as sent for the rest of the session. The reader then types the next
+   * message into a composer they believe is empty and the page appends it to
+   * the first — which is how "the icons are still missing :/" and "message"
+   * arrived as one line (P-132).
+   *
+   * A composer with text in it after a send is the page saying the send did
+   * not happen. Chat kept that Enter for its own emoji autocomplete, turning
+   * `:/` into an emoji; a mention picker, a slash-command menu or a validation
+   * error all keep it too. None of them tell us why, and none need to: the
+   * text is still there, so the message is not gone.
+   *
+   * Wrong in the harmless direction when a page leaves a draft behind after
+   * sending — the ghost goes early and the real message arrives to replace it,
+   * which is a flicker. The other way round is a lie that persists.
+   */
+  private ghostsWereNotSent(): void {
+    if (!this.doc) return;
+    for (const el of Array.from(this.doc.querySelectorAll('[data-skyhook-ghost]'))) {
+      el.remove();
+    }
   }
 
   private retireGhosts(): void {

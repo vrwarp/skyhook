@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-54 gaps: 13 open, 11 by-design, 29 fixed, 1 disproven.
+56 gaps: 13 open, 11 by-design, 31 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -174,6 +174,8 @@ The table below is generated from `gaps.json` and the corpus by
 | P-129 | open | A collapsed-border table sizes its caption differently when its borders arrive after first layout: the mirrored figure runs 2px wide and a paragraph wrapping around the float re-wraps | real/wikipedia-article |
 | P-130 | open | A quirks-mode body stretches to the viewport minus its own margins landside; the mirrored body is an inner box, and CSS cannot state a margin-box stretch for it | real/hn-front |
 | P-131 | fixed | A tab's cached history flags described the page it had left: the back gesture at the start of a history was answered by the shell and vanished | — |
+| P-132 | fixed | A message the page never sent was drawn as sent, and the next one was typed into a composer that still held it | — |
+| P-133 | fixed | A font the page inlines as a data: URI is refused by the shell's CSP: the ligature fires and the glyph draws nothing | — |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

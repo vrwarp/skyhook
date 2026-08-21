@@ -528,6 +528,25 @@
         "internal/mirror/tab.go"
       ],
       "notes": "canBack/canForward are read with Page.getNavigationHistory and cached, and the cache described the previous page — not for a moment but until the next navigation asked again. Two mechanisms: a navigation's tail (the load event, the settle, a refresh) goes on asking about the page the reader has left and its answer lands last, and the browser announces a commit before its own history records it — a tab that had just committed the index answered with a single entry, about:blank. A tab at the start of its history still saying a page was behind it made the shell answer the reader's back gesture instead of letting it through, leaving the skyhook:here sentinel unarmed with nothing to say the gesture was heard. Fixed by stamping each read with the nav epoch it was asked under and dropping an answer a commit has overtaken (applyHistory), and by re-asking while the browser's current entry still names a page the tab is not on (historyDescribes, five tries 20ms apart, all landside). An earlier fix that blanked the flags for any frame it could not vouch for was wrong in the other direction and broke the ordinary back gesture; both directions being wrong is what says the choice was never between them. Pinned by TestAHistoryAnswerTheReaderNavigatedPastIsDropped and TestAHistoryReadIsCheckedAgainstThePageTheTabIsOn; the failure it explains is TestTheBrowsersOwnBackAndForwardDriveTheTab over the emulated link"
+    },
+    {
+      "id": "P-132",
+      "title": "A message the page never sent was drawn as sent, and the next one was typed into a composer that still held it",
+      "status": "fixed",
+      "refs": [
+        "internal/mirror/agent.js",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "two of a reader's Google Chat messages arrived as one bubble — \"the icons are still missing :/\" and \"message\" — because Chat's emoji autocomplete kept the Enter for itself, turning `:/` into U+1FAE4 and sending nothing (the landside capture shows the emoji in the bubble, and the server fetched notoemoji/1fae4 0.57s after the Enter). Three things of ours made that silent. The echo engine clears the composer and draws an optimistic ghost on Enter with no failure path, so a send that never happened left a bubble reading as sent for the rest of the session. The agent watched only INPUT, TEXTAREA and OPTION for a live value, and liveValue read el.value — undefined on a contenteditable — so the composer every modern chat app uses never reported its text, while the real DOM changes to it were deferred because the echo owns the subtree. And reconcileAttr read op.str, which is the field a *title* op carries and is empty on every attribute op ever sent, so nothing was ever reconciled for any field. Fixed: an editing host is watched like a field (bounded at LIVE_TEXT_MAX so a document editor does not ship its document), reconcileAttr resolves the value from the intern table and only for data-sky-value, an echo caused by an edit the reader has already typed past is ignored, and a composer that comes back non-empty after a ghosted send takes the ghost back. Pinned by TestAComposerReportsWhatThePageWroteIntoIt, TestADocumentSizedEditorIsNotReportedOnEveryChange, TestPWAAnOptimisticMessageIsTakenBackWhenThePageKeepsIt and three cases in client/test/host.dom.test.ts"
+    },
+    {
+      "id": "P-133",
+      "title": "A font the page inlines as a data: URI is refused by the shell's CSP: the ligature fires and the glyph draws nothing",
+      "status": "fixed",
+      "refs": [
+        "internal/server/webapp.go"
+      ],
+      "notes": "font-src was 'self' blob: — blob: for the faces the client rebuilds from protocol bytes (P-115) — and nothing for the ones a page inlines in its own stylesheet. An icon font is exactly the size that invites inlining: Google Chat ships the subset that draws its toolbar and its Starred shortcut as a data:font/ttf URI, nothing this side rewrites it, and it was refused as itself. Silent in the same way P-115 was — the face registers, the ligature fires, the glyph draws nothing — and a reader's capture counted 50 securitypolicyviolations while its own screenshot showed the icons, because capture.ts rasterises through an <svg><foreignObject> in the shell's document where the mirror frame's policy does not apply. Fixed by adding data: to font-src, as img-src has had all along"
     }
   ]
 }

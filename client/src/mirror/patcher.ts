@@ -186,6 +186,17 @@ export class Patcher {
     return this.nodes.get(id);
   }
 
+  /**
+   * The text an op's `ref`/`ref2` names, for a caller outside the patcher.
+   *
+   * Only meaningful once the mutation carrying it has been applied: a batch's
+   * own strings join the table at the top of applyMutation, and a ref into
+   * them resolves to nothing before that.
+   */
+  stringAt(ref: number): string {
+    return this.str(ref);
+  }
+
   private str(ref: number): string {
     if (ref < 0 || ref >= this.strings.length) return '';
     return this.strings[ref];
@@ -1142,6 +1153,13 @@ html:where([data-sky-doc]) { padding-top: 0.05px; padding-bottom: 0.05px; }`;
     const tagUp = el.tagName?.toUpperCase();
     if ((tagUp === 'INPUT' || tagUp === 'TEXTAREA') && attrs['data-sky-value'] !== undefined) {
       attrs['data-sky-value'] = String((el as HTMLInputElement).value ?? '');
+    } else if (attrs['data-sky-value'] !== undefined) {
+      // An editing host reports the same way, and lags for one more reason
+      // besides: the agent sends its text only when the page changes it in a
+      // way the reader's typing does not explain, so the attribute is older
+      // than the field by design. The text is the honest counterpart on both
+      // halves.
+      attrs['data-sky-value'] = el.textContent ?? '';
     }
     if (tagUp === 'INPUT' && ((el as HTMLInputElement).type === 'checkbox'
       || (el as HTMLInputElement).type === 'radio')) {
