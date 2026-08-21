@@ -556,6 +556,25 @@
         "client/src/mirror/host.ts"
       ],
       "notes": "a reader scrolling Google Chat's emoji picker watched it show blank space. The picker builds the cells it needs and no more, so the mirror had the 112 that happened to exist and scrolling past them found nothing — and the server log has not one line for the twenty-five seconds of scrolling before the capture. Everything the answer needed was already built: ScrollEvent.Node, HandleScroll's container branch, the agent's scrollTo(id,x,y), and P-118's container positions in the snapshot. What was missing was at the plane-side end — onElementScroll noticed a container being scrolled, recorded that the reader had taken it over so a server scroll would not move them, and told the server nothing. The document's own scroll had been reported since the beginning; a container's never was, which made the landside branch dead surface in the same way wheel is. Fixed by reporting a scrolled container the way the document is reported, throttled per element on the same 250ms. Pinned by TestPWAScrollingAMirroredContainerReachesThePage, which fails without it, and by TestScrollingAContainerBuildsTheRowsBelowIt for the landside half that had never been reached"
+    },
+    {
+      "id": "P-135",
+      "title": "A checkbox's third state never crossed: indeterminate is a property with no attribute, so a half-ticked box mirrored as empty",
+      "status": "fixed",
+      "refs": [
+        "internal/mirror/agent.js",
+        "client/src/mirror/patcher.ts"
+      ],
+      "notes": "found by audit rather than by a reader — the same shape as P-132's composer text, one control along. The agent watched INPUT/TEXTAREA value and checked and OPTION selected; indeterminate reflects no attribute at all, so a serializer that walks attributes sees a box that is merely unchecked. The pattern is the header tick of a partly-selected list — a mail app's message list, a file manager, any table with a select-all — and the reader was shown the wrong answer to the only question that box asks. It now travels as data-sky-indeterminate beside data-sky-checked, on all four surfaces that carry live state: the serializer, the sweep, the parity probe's read-only twin, and the patcher (including the removal path, since dropping the attribute has to unset the property). Pinned by TestAHalfTickedBoxCrossesAsHalfTicked"
+    },
+    {
+      "id": "P-136",
+      "title": "A failing e2e test's log dump was 93% Chromium's complaints about the machine, so the records describing the mirror had been pushed out of the ring",
+      "status": "fixed",
+      "refs": [
+        "internal/cdp/browser.go"
+      ],
+      "notes": "a headless Chromium writes dozens of lines about the absent system bus and the absent GPU in its first second, on every machine this runs on, and drainStderr logged all of them at DEBUG. The diagnostic ring is 500 records shared with everything the mirror has to say, and in the e2e harness — where every test starts its own browser — the browser had taken it over: a failing test's dump came out 93% dbus, with ten records of mirror left in it. That is the first thing CLAUDE.md tells you to read when a test fails, and it had stopped being worth reading. The known-worthless lines are dropped at the drain now, matched on message rather than severity because the browser calls all of them ERROR and some real ones are ERROR too, and a read carrying several lines is split so a real line does not go out with the noise. The fix paid for itself immediately: with dbus gone, the dumps of the remaining local flakes are dominated by repeated TLS handshake failures, which is a lead rather than a wall. Pinned by TestTheBrowsersComplaintsAboutTheMachineAreNotLogged"
     }
   ]
 }

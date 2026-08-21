@@ -123,3 +123,44 @@ func TestAStaleActivePortIsClearedBeforeLaunch(t *testing.T) {
 			"it would reach whatever holds that port now, or nothing at all")
 	}
 }
+
+/*
+The browser's opinion of the machine is not the log.
+
+A headless Chromium writes dozens of lines about the absent system bus and the
+absent GPU in its first second, on every machine this runs on, and none of them
+has ever been the answer to anything. The diagnostic ring is a fixed number of
+records; in the e2e harness, where every test starts a browser, those lines had
+taken it over — a failing test's dump came out 93% dbus, and what the mirror
+had said was gone.
+
+What must survive is everything else, including a real line that arrived in the
+same read as the noise.
+*/
+func TestTheBrowsersComplaintsAboutTheMachineAreNotLogged(t *testing.T) {
+	for _, line := range []string{
+		"[41:69:0821/074808.455593:ERROR:dbus/bus.cc:405] Failed to connect to the bus: " +
+			"Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory",
+		"[41:41:0821/074809.561190:ERROR:dbus/object_proxy.cc:572] Failed to call method: " +
+			"org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus",
+		"[82:82:0821/074809.323125:ERROR:.../viz_main_impl.cc:190] Exiting GPU process due " +
+			"to errors during initialization",
+		"[139:156:0821/074809.862741:ERROR:command_buffer_proxy_impl.cc:285] " +
+			"ContextResult::kTransientFailure: Failed to send GpuControl.CreateCommandBuffer.",
+		"[41:72:0821/074811.824383:ERROR:registration_request.cc:291] Registration response " +
+			"error message: DEPRECATED_ENDPOINT",
+	} {
+		if worthLogging(line) {
+			t.Errorf("a line the browser writes on every start was kept:\n  %s", line)
+		}
+	}
+	for _, line := range []string{
+		"DevTools listening on ws://127.0.0.1:40332/devtools/browser/75b68566",
+		"[1:1:ERROR:renderer_host.cc:99] Renderer process crashed",
+		"Fatal error: out of memory",
+	} {
+		if !worthLogging(line) {
+			t.Errorf("a line worth reading was dropped:\n  %s", line)
+		}
+	}
+}

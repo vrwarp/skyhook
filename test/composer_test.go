@@ -190,6 +190,17 @@ func TestPWAAnOptimisticMessageIsTakenBackWhenThePageKeepsIt(t *testing.T) {
 
 	// Typed the way a reader types: into the client's own copy, which answers
 	// instantly and tells the server afterwards.
+	// A reader cannot type into a composer the client has not finished
+	// mirroring, and neither may this: the client owns an editable only once
+	// the patcher has marked it one, and the ghost needs the transcript it
+	// goes into. Typing on the h1's arrival raced both under load.
+	waitFor(ctx, t, page, `(() => {
+      const doc = document.querySelector('iframe.mirror').contentDocument;
+      const box = doc && doc.getElementById('box');
+      return !!(box && box.getAttribute('data-skyhook-editable') === '1'
+        && doc.getElementById('log'));
+    })()`, budget(30*time.Second), "the composer to be an editable with a transcript beside it")
+
 	typeAndSend := func(text string) {
 		t.Helper()
 		evalJSON(ctx, t, page, fmt.Sprintf(`(() => {
@@ -212,7 +223,19 @@ func TestPWAAnOptimisticMessageIsTakenBackWhenThePageKeepsIt(t *testing.T) {
 	var drawn int
 	evalJSON(ctx, t, page, ghosts, &drawn)
 	if drawn != 1 {
-		t.Fatalf("the message was not echoed for the reader: %d ghosts", drawn)
+		// Say what the client believed, so a repeat of this is self-diagnosing
+		// rather than a number with no story.
+		var why string
+		evalJSON(ctx, t, page, `(() => {
+          const doc = document.querySelector('iframe.mirror').contentDocument;
+          const box = doc.getElementById('box');
+          return JSON.stringify({
+            editable: box && box.getAttribute('data-skyhook-editable'),
+            text: box && box.textContent,
+            log: !!doc.getElementById('log'),
+          });
+        })()`, &why)
+		t.Fatalf("the message was not echoed for the reader: %d ghosts; %s", drawn, why)
 	}
 
 	// The page's answer arrives: its autocomplete took the Enter, the smiley is

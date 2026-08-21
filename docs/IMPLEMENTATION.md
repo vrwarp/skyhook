@@ -4329,3 +4329,62 @@ One parity run failed during verification and its log was not kept; it has not
 recurred in five runs since, including a repeat of the back-to-back conditions
 it happened under. It is recorded here because an unexplained failure that is
 not written down is one nobody will recognise the second time.
+
+### 61. Auditing for the shape of the last three bugs
+
+Three bugs in a row had the same shape: a mechanism built on one side of the
+link that the other side never reached. The composer's text had a channel
+nothing ever wrote to (§59). A scrolled container had a landside handler
+nothing ever called (§60). Rather than wait for a fourth reader to find the
+next one, the wire was walked end to end asking, of every field and every
+entry point, *who writes this and who reads it*.
+
+What that turned up, in order of what it costs a reader:
+
+- **A checkbox's third state never crossed.** `indeterminate` is a property
+  with no attribute behind it, so the serializer — which walks attributes —
+  saw a box that was merely unchecked. That is the header tick of every
+  partly-selected list there is, and the reader was shown the wrong answer to
+  the only question it asks. Fixed, on all four surfaces that carry live state:
+  the serializer, the sweep, the parity probe's read-only twin, and the
+  patcher, including the removal path, because dropping an attribute does not
+  unset a property (P-135).
+
+- **`ImageWant.Have` is filled by the client and read by nobody.** Its comment
+  says "already cached, do not send". The client only sends the frame when it
+  is *also* asking for something, so a reader whose cross-flight cache holds
+  every picture on a page says nothing at all, and a new session re-ships all
+  of them. The ledger that stops this within a session — `imgSent` — starts
+  empty on the next one. Left as a gap rather than fixed: telling the server
+  what a warm cache holds without spending the link enumerating hashes is a
+  design question, not an oversight.
+
+- **`Op.Drop` is declared and written by nobody.** The field is `OpStyle`'s
+  "rule indices to drop", and the client does not read it either, so a page
+  that removes a rule from a constructed stylesheet leaves the mirror wearing
+  it. Both ends absent means this is unbuilt rather than half-built, which is
+  the better of the two.
+
+- **`InSelect` is a deliberate no-op** — selection is native in the mirror —
+  and so is `wheel`. The registry entry that catalogues this names `wheel` and
+  `hover`, and `hover` has since been implemented (P-111); it should say
+  `select`.
+
+- **`__skyhook.node` and `__skyhook.stats`** have no caller. `diag` supersedes
+  the second. Dead helpers, not dead features.
+
+The audit also found the reason the last one was so slow to find. A failing
+e2e test prints its own server log, and that log had become 93% Chromium's
+opinion of the machine: dozens of lines about the absent system bus and the
+absent GPU, written in the browser's first second, in a ring of 500 records
+shared with everything the mirror has to say. The first thing this repository
+tells you to read when a test fails had stopped being worth reading. Those
+lines are dropped at the drain now (P-136), matched on message rather than
+severity, because the browser calls all of them ERROR and some real ones are
+ERROR too.
+
+That paid for itself within the hour: with the dbus gone, the dumps of the
+remaining flakes on a four-core box are dominated by repeated TLS handshake
+failures, which is a lead rather than a wall. Left as a lead — it is not
+understood yet, and the honest place for it is written down rather than
+guessed at.
