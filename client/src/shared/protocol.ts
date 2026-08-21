@@ -211,12 +211,26 @@ export interface Snapshot {
    * a parse-time property no inserted doctype can change (P-125).
    */
   quirks?: boolean;
+  /**
+   * Containers the page had already scrolled when this document was
+   * serialised. A scroll op reports a container when it moves; one that was
+   * already where it belonged never moves again, so without these a rebuilt
+   * document shows every inner scroller at the top.
+   */
+  scrolls?: NodeScroll[];
 }
 
 /** One shadow root's stylesheet. */
 export interface ScopedCSS {
   root: number;
   rules: string[];
+}
+
+/** One container's scroll position. */
+export interface NodeScroll {
+  node: number;
+  x: number;
+  y: number;
 }
 
 export interface MutationOp {
@@ -447,9 +461,10 @@ export const F = {
   snapshot: {
     strings: 1, nodes: 2, css: 3, url: 4, title: 5, viewport: 6,
     images: 7, scrollX: 8, scrollY: 9, docHash: 11, baseUrl: 12, scoped: 13,
-    epoch: 14, quirks: 15,
+    epoch: 14, quirks: 15, scrolls: 16,
   },
   scopedCSS: { root: 1, rules: 2 },
+  nodeScroll: { node: 1, x: 2, y: 3 },
   op: {
     op: 1, node: 2, parent: 3, before: 4, ref: 5, ref2: 6, nodes: 7,
     off: 8, del: 9, add: 10, drop: 11, image: 12, x: 13, y: 14, str: 15,

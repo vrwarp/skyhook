@@ -84,6 +84,10 @@ describe('cross-language conformance', () => {
     expect(snap.strings).toContain('hello world');
     expect(snap.css).toContain('body{margin:0}');
     expect(snap.images[0].blur).toBe('LEHV6nWB2yk8pyo0adR*.7kCMdnj');
+    // A container the page had already scrolled. The only chance its position
+    // gets to cross is here, so a key that stopped lining up would take a
+    // conversation's newest message off the reader's screen and nothing else.
+    expect(snap.scrolls).toEqual([{ node: 2, x: 0, y: 240 }]);
   });
 
   it.runIf(available)('decodes a compressed mutation batch', () => {

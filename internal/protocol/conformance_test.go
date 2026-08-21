@@ -58,6 +58,7 @@ func buildFixtures(t *testing.T) map[string]string {
 			Blur: "LEHV6nWB2yk8pyo0adR*.7kCMdnj", Mime: "image/avif", Bytes: 812,
 		}},
 		ScrollY: 120,
+		Scrolls: []protocol.NodeScroll{{Node: 2, Y: 240}},
 	}
 	f, err := protocol.NewFrame(protocol.TypeSnapshot, 1, snap)
 	if err != nil {

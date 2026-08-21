@@ -379,6 +379,19 @@ type Snapshot struct {
 	// The doctype node's presence is not the same fact: an archaic doctype
 	// still parses into quirks mode.
 	Quirks bool `cbor:"15,keyasint,omitempty"`
+	// Scrolls carries the containers the page had already scrolled when this
+	// document was serialised. OpScroll reports a container when it moves, and
+	// one that was where it belonged before the snapshot never moves again —
+	// so without this a resync parks every inner scroller at the top and
+	// nothing ever puts it back.
+	Scrolls []NodeScroll `cbor:"16,keyasint,omitempty"`
+}
+
+// NodeScroll is one container's scroll position.
+type NodeScroll struct {
+	Node int64 `cbor:"1,keyasint"`
+	X    int   `cbor:"2,keyasint,omitempty"`
+	Y    int   `cbor:"3,keyasint,omitempty"`
 }
 
 // ScopedCSS is one shadow root's stylesheet.

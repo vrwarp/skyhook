@@ -1490,6 +1490,43 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			});
 			</script></body></html>`)
 	})
+	// A chat composer's shape: a contenteditable, and a line reporting what the
+	// page itself thinks is in it. The report is the point — it is the page's
+	// own reading of its editing host, which is what a real composer sends.
+	mux.HandleFunc("/composer", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Composer</title></head>
+			<body><h1>the composer page</h1>
+			<div id="box" contenteditable="true"></div>
+			<p id="said">said[]</p>
+			<script>
+			document.getElementById('box').addEventListener('input', function () {
+			  document.getElementById('said').textContent = 'said[' + this.textContent + ']';
+			});
+			</script></body></html>`)
+	})
+	// A list pinned to its newest entry before anyone is watching, which is
+	// what a chat conversation is. The scroll happens while the page parses —
+	// before the agent's own scroll listener exists — so the only way the
+	// position can cross is in the snapshot.
+	mux.HandleFunc("/pinned", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Pinned</title>
+			<style>#feed { height: 120px; overflow-y: scroll; border: 1px solid #333 }
+			#feed p { margin: 0; height: 40px }</style></head>
+			<body><h1>the pinned list</h1>
+			<div id="feed"></div>
+			<script>
+			var feed = document.getElementById('feed');
+			for (var i = 1; i <= 40; i++) {
+			  var p = document.createElement('p');
+			  p.id = 'line' + i;
+			  p.textContent = 'line ' + i;
+			  feed.appendChild(p);
+			}
+			feed.scrollTop = feed.scrollHeight;
+			</script></body></html>`)
+	})
 	// A page that wants a file: what TestAFileReachesThePagesChooser feeds
 	// (P-007). The page reads the file itself, so the status line proves the
 	// bytes really reached page JavaScript, not merely the input element.

@@ -251,6 +251,14 @@ export class Patcher {
     for (const sc of snap.scoped ?? []) this.setScopedCSS(sc.root, sc.rules);
     this.doc.title = snap.title || this.doc.title;
     this.flushOrphans();
+    // Containers the page had already scrolled, through the same hook a live
+    // scroll op takes, so the host's rules about who owns a scroller apply to
+    // both. Last, because a scroll position means nothing until the content
+    // that overflows is in the document.
+    for (const sc of snap.scrolls ?? []) {
+      const node = this.nodes.get(sc.node);
+      if (node) this.hooks.onScroll?.(node, sc.x, sc.y);
+    }
     this.hooks.onApplied?.(0);
   }
 

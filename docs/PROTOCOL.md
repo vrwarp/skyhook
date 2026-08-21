@@ -98,6 +98,11 @@ can store and replay frames without re-encoding them.
 - `images` — `(node, hash, w, h, blurhash)`; the hash is also the client's
   cross-flight cache key, so a warm client can render an image it was never
   sent.
+- `scrolls` — `(node, x, y)` for containers the page had already scrolled. The
+  `scroll` op reports a container when it moves, and one that was where it
+  belonged before the document was serialised never moves again: without this a
+  resync parks every inner scroller at the top, which puts a chat conversation
+  back at its oldest message with no event coming to correct it.
 
 **Mutation** is a batch of ops, emitted every 100 ms landside or flushed
 immediately when the batch was caused by user input:

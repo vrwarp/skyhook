@@ -110,6 +110,40 @@ describe('Patcher', () => {
     expect(document.body.children.length).toBe(1);
   });
 
+  /*
+   * A container the snapshot says was already scrolled is offered to the host
+   * through the hook a live scroll op takes, so the rules about who owns a
+   * scroller are written once. Offered last, too: a scroll position means
+   * nothing until the content that overflows is in the document.
+   *
+   * Without this a resync parked every inner scroller at the top and left it
+   * there — a Google Chat conversation came back with the message the reader
+   * had just sent below the fold, and no scroll event was ever going to fire
+   * landside to correct it.
+   */
+  it('offers the scroll positions a snapshot carries', () => {
+    const seen: [string, number, number][] = [];
+    const p = new Patcher(document, {
+      onScroll: (node, x, y) => {
+        seen.push([(node as Element)?.localName ?? '?', x, y]);
+        expect(document.querySelector('ul')).not.toBeNull();
+      },
+    });
+    const snap = snapshot();
+    snap.scrolls = [{ node: 2, x: 0, y: 240 }];
+    p.applySnapshot(snap);
+    expect(seen).toEqual([['ul', 0, 240]]);
+  });
+
+  it('ignores a snapshot scroll for a node it does not have', () => {
+    const seen: number[] = [];
+    const p = new Patcher(document, { onScroll: (_n, _x, y) => seen.push(y) });
+    const snap = snapshot();
+    snap.scrolls = [{ node: 999, x: 0, y: 240 }];
+    p.applySnapshot(snap);
+    expect(seen).toEqual([]);
+  });
+
   it('applies a move without rebuilding the subtree', () => {
     patcher.applySnapshot(snapshot());
     const before = document.querySelectorAll('li').length;

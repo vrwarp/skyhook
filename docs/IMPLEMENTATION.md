@@ -3947,3 +3947,97 @@ Two things this still has not seen: a space with several people in it, and Chat
 inside Gmail, which is where `Config.URL` points. The selectors changed here are
 all about the inner Chat app rather than the shell around it, so they should
 carry, but nothing here proves it.
+
+### 55. The sentence the mirror rearranged
+
+A reader typed "the test message has gone through!" into Google Chat and Chat
+sent "e through!the test message has gon". Not a dropped keystroke and not a
+garbled one: every character arrived, and the sentence was assembled in the
+wrong order — the ten characters after a Backspace, then the twenty-four
+before it. The archive that keeps a copy is append-only, and so is the other
+person's screen.
+
+The input trace in the bundle names the moment exactly:
+
+```
+01:43:14.011  key       Backspace
+01:43:14.013  setvalue  «24 chars»
+01:43:14.118  text      «1 char»   ×10
+01:43:15.202  key       Enter
+```
+
+The echo engine turns any edit that shortens the field into a whole-value set
+carrying the caret ([echo.ts](../client/src/mirror/echo.ts)), which is right:
+a deletion cannot be expressed as an insertion, and the caret is the only thing
+that says where the next one goes. The client had the sentence right and sent
+the caret with it. Landside, `setValue`'s contenteditable branch assigned
+`textContent` and stopped:
+
+```js
+if (el.isContentEditable) {
+  el.textContent = value;          // start and end never read
+  el.dispatchEvent(new InputEvent('input', …));
+  return true;
+}
+```
+
+Assigning `textContent` destroys the text node the selection points into, and
+Blink answers a destroyed selection by collapsing it to the start of the
+editing host. `insertText` then does exactly what it is told — `execCommand`
+inserts at the caret — and the caret is at offset zero. Ten characters went in
+in order, at the front.
+
+The input and textarea branches four lines above never had this bug, and the
+reason is worth keeping: `setSelectionRange` is the only way to put a caret in
+a field, so they always called it. A contenteditable's caret is the document's
+selection, which is lost by accident and has to be restored on purpose.
+`placeCaret` does that, mapping the client's character offsets onto the text
+nodes with a `Range` the way `caretOf` measured them; `caretOffset` is its
+inverse, and `insertText`'s fallback path — the one for a frame that does not
+hold the browser's focus, which used to append blindly — splices at it now.
+
+`TestTypingAfterAValueSetGoesWhereTheCaretIs` asserts both halves against a
+contenteditable that reports its own contents: a caret left at the end, which
+is the reported bug, and a caret left in the middle, which is the same code
+path being asked a question that "the end" would answer by accident. Reverting
+the fix turns it red with "said[ passedthe test]", which is the reader's
+failure in miniature.
+
+### 56. The conversation that would not come back to the bottom
+
+The same capture's second complaint: the chat frame did not scroll. It
+scrolled fine. The conversation was a scroller with 706px of content in a
+642px box and a `scrollTop` of zero — parked at its oldest message, with the
+one the reader had just sent 64px below the fold and nothing able to reach it.
+
+A container's scroll position crosses as an op, and the op is emitted from a
+`scroll` event listener. That covers every container the page moves while the
+client is watching, and nothing at all about one that was already where it
+belonged: a chat list pins itself to its newest entry as it builds, before the
+agent's listener exists, and then never scrolls again. `FLAG_SCROLL` was
+computed for exactly these elements and shipped in their node flags, where the
+client read it only to report it back in a capture.
+
+Which made this a property of resyncs rather than of pages. The server had
+resynced by snapshot twenty seconds before the bundle was taken; the client
+rebuilt the document from nothing, every scroller came up at the top, and the
+landside page — which had not moved — had nothing to say about it. A reader who
+scrolls back down never sees it again, which is why it reads as "sometimes the
+chat frame doesn't work".
+
+`Snapshot.Scrolls` carries `(node, x, y)` for the containers already scrolled
+when the walk ran. The agent collects them in `serializeAttrs`, where the flag
+is computed anyway, into an array that exists only for the length of a snapshot
+— the mutation path shares that function, and a container that arrives already
+scrolled inside an insert is reported by the scroll listener that is by then
+watching it. The client offers each to `PatcherHooks.onScroll`, the same hook a
+live op takes, so `followScroll`'s rules about who owns a scroller are written
+once and apply to both.
+
+`TestAScrolledContainerArrivesWhereThePageLeftIt` drives the real client in a
+real browser, because the assertion is about a rendered box: `scrollTop` means
+nothing in a model that was never laid out, and it was a model agreeing with the
+server that hid this in the first place. The conformance fixture carries a
+`scrolls` entry too — the position has exactly one chance to cross, and a key
+that stopped lining up between Go and TypeScript would take a conversation's
+newest message off the screen and change nothing else.
