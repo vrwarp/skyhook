@@ -4419,3 +4419,39 @@ The container branch of `HandleScroll` also says what it did now. Its first
 failure in CI produced a log with nothing in it, and a silent path that has just
 been given work to do is one nobody can debug — which is the same lesson as
 §61's, arriving from the other direction within the hour.
+
+### 63. The same window, the other half of it
+
+§62 fixed the throttle window by taking the reader's *position* as they left
+it. The shaped job failed again on the next run, the same way and for the
+sibling reason: the report still looked the *node* up when the timer fired.
+
+A document the server replaces inside that quarter of a second — a resync, a
+navigation — rebuilds the patcher's map, and the element the reader scrolled
+stops having an id at all. `idOf` returned 0, and the report gave up without a
+word. That is the whole of why the failing job's log recorded nothing: no
+scroll, no mutation, no error, `seq=0` for three minutes. The frame was never
+sent, and nothing said so.
+
+It was caught by instrumenting the two moments and running the loaded set until
+it broke:
+
+```
+ZZscrollevent top=200 id=8
+ZZreport id=0 y=200
+```
+
+Eight at the scroll, zero a quarter of a second later. The id is taken with the
+position now, at the moment the reader scrolls, and the current id is preferred
+only if there still is one.
+
+Three things this cost, worth naming because they are the lesson rather than
+the bug. The first fix carried the reasoning to the position and not to the id
+sitting two lines away, which is what happens when a fix is aimed at a
+symptom's shape instead of its cause. The second is that a silent give-up —
+`if (!id) return` — is indistinguishable from a feature that was never called,
+and this path had two of them. And the third is that both were only ever
+visible on the emulated link, where the gap between what the reader does and
+what the server has is wide enough to put a whole document replacement inside
+it: the honest test for this is fake timers stating the race exactly, which is
+now what pins it.

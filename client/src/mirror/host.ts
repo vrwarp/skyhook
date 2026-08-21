@@ -548,7 +548,8 @@ export class MirrorHost {
   /** Container scrolls waiting to be reported, keyed by the element: the
    *  position the reader put it at, and the timer that will send it. */
   private elementScrolls = new Map<HTMLElement, {
-    timer: ReturnType<typeof setTimeout>; x: number; y: number; h: number; docH: number;
+    timer: ReturnType<typeof setTimeout>;
+    id: number; x: number; y: number; h: number; docH: number;
   }>();
   private readerMovedDoc = false;
   /** The last position this host set programmatically, per scroller. A scroll
@@ -1415,6 +1416,14 @@ export class MirrorHost {
    */
   private reportScrollSoon(el: HTMLElement): void {
     const at = {
+      // Which node this is, taken now for the same reason the position is:
+      // a document the server replaces inside the window — a resync, a
+      // navigation — rebuilds the patcher's map, and the element the reader
+      // scrolled stops having an id at all. The report then gave up without a
+      // word, and the reader's scroll was never sent: seen as id=8 at the
+      // scroll and id=0 a quarter of a second later, which is the whole of why
+      // the shaped job failed and no desk ever did.
+      id: this.patcher?.idOf(el) ?? 0,
       x: el.scrollLeft,
       y: el.scrollTop,
       // Its own range, not the document's. The landside container is a
@@ -1436,8 +1445,12 @@ export class MirrorHost {
       timer: setTimeout(() => {
         const sample = this.elementScrolls.get(el);
         this.elementScrolls.delete(el);
-        const id = this.patcher?.idOf(el) ?? 0;
-        if (!id || !sample) return;
+        if (!sample) return;
+        // The node as it is now, or as it was when the reader scrolled it. The
+        // second is not a fallback so much as the answer: what they scrolled is
+        // what the page should be told about.
+        const id = this.patcher?.idOf(el) || sample.id;
+        if (!id) return;
         this.events.scroll(this.tab, {
           tab: this.tab,
           node: id,

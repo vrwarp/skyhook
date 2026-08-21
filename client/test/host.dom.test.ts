@@ -1770,6 +1770,42 @@ describe('a container scroll over a slow link', () => {
     }
   });
 
+  /*
+   * The other half of the same window: the node, not the position.
+   *
+   * A snapshot inside the throttle window rebuilds the patcher's map, and the
+   * element the reader scrolled stops having an id — so the report found no
+   * node to name and gave up without a word. Watched live it reads id=8 at the
+   * scroll and id=0 a quarter of a second later, which is why the shaped job
+   * failed with a server log that recorded nothing at all: the frame was never
+   * sent (P-134).
+   */
+  it('reports the node the reader scrolled, even once the document has moved on', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withScroller(snapshot()));
+      const doc = host.frame.contentDocument!;
+      const feed = doc.getElementById('feed')!;
+
+      sized(feed, 200);
+      feed.dispatchEvent(new (doc.defaultView as unknown as typeof globalThis)
+        .Event('scroll', { bubbles: false }));
+
+      // A resync lands before the report does, and the tree it built has no
+      // room for the element the reader was holding.
+      host.applySnapshot(snapshot());
+      await vi.advanceTimersByTimeAsync(400);
+
+      const sent = ev.scroll.mock.calls.map((c) => c[1] as Record<string, unknown>)
+        .filter((s) => s.node === 60);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].y).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports the last position of a scroll still in progress', async () => {
     vi.useFakeTimers();
     try {
