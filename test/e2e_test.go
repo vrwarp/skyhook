@@ -3528,10 +3528,20 @@ func TestUserAgentOverrideCarriesMatchingClientHints(t *testing.T) {
 	}
 }
 
-// A click is replayed into the landside page with the reader's own timing and
-// aim, not with numbers the server made up. The page measures what it received.
+/*
+A click is replayed into the landside page with the reader's own timing and
+aim, not with numbers the server made up. The page measures what it received.
+
+Serial, because half of what it asserts is a wall-clock measurement of this
+machine. The hold the page sees is bracketed by two trips into the browser, and
+pressHold takes the first one off so the second does not lengthen the reader's
+tap — an estimate that holds when the two trips are alike and stops holding on
+a box running eight browsers, where CI measured a 210 ms tap at 356 ms and read
+the runner as a regression. What that upper bound is for is the press that was
+not compensated at all; the machine has to be quiet for it to mean that.
+*/
 func TestClickCarriesTheReadersOwnPointerData(t *testing.T) {
-	h := newHarness(t)
+	h := newSerialHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
 	defer cancel()
 	cl := h.connect(ctx, "")

@@ -4133,48 +4133,67 @@ CI's shaped-link job failed on a test that had passed for weeks:
         trap under it
 ```
 
-The diff it failed on had touched neither history nor navigation, and the test
+The diff it failed on had touched neither history nor navigation, and it
 reproduced on no local run at any width. That combination — a test that only
 fails on the slow, loaded runner — is usually a race the fast machine hides,
 and it was.
 
-The mirror's back button is drawn from two fields on `TabState`. `CanBack` and
-`CanForward` are read out of the browser with `Page.getNavigationHistory`,
-which is a round trip; `URL` is set the instant `Page.frameNavigated` arrives,
-which is free. Both are stamped onto every state frame the tab emits, and the
-frames in between the two moments — the one that says a load started, the one a
-snapshot brings, the one a title change produces — took the new page's address
-and the previous page's history.
+The mirror's back button is drawn from `TabState.CanBack` and `CanForward`,
+which are read out of the browser with `Page.getNavigationHistory` and cached on
+the tab, because most state frames are partial and a frame that left them out
+would read as "there is no history". The cache was describing the page before
+the one the tab was on — not for a moment, but until the next navigation asked
+again.
 
-That is a lie the reader's shell believes until the next frame corrects it, and
-which way it is wrong decides what it costs. The test walks the tab to the
-start of its history and then makes one more back gesture, which the shell must
-*let through* to the browser so the mirror can re-arm its `skyhook:here`
-sentinel under it. A tab that still claims a page behind it makes the shell
-answer the gesture itself: the gesture is spent, nothing moves, the trap stays
-unarmed, and nothing tells the reader anything happened. Landside the window
-where that is possible is under a millisecond. Over 1.2 s RTT with eight
-browsers on the box it is seconds, which is why the runner found it and the
-laptop did not.
+That is a lie the reader's shell believes, and which way it is wrong decides
+what it costs. The test walks the tab to the start of its history and makes one
+more back gesture, which the shell must *let through* to the browser so the
+mirror can re-arm its `skyhook:here` sentinel under it. A tab still claiming a
+page behind it makes the shell answer the gesture itself: the gesture is spent,
+nothing moves, the trap stays unarmed, and nothing tells the reader anything
+happened.
 
-One wrong theory got as far as an experiment first — that the browser's history
-list lagged the commit, so `syncHistory` itself read the previous page. Logging
-the entry URL against `Page.frameNavigated`'s across the whole e2e suite at
-`-parallel 8` turned up zero mismatches. The list is not late; only the reading
-of it is, and the reading is what the frames were borrowing.
+**The first fix was wrong, and CI said so within the hour.** It recorded which
+page the flags had been measured on and blanked them for any frame about
+another — "I don't know" reported as "no history", on the reasoning that a
+gesture let through is the case the sentinel already handles. It made the
+shaped job green and broke the ordinary one: `goHistory` declines a gesture it
+cannot answer, so a tab whose flags had not arrived yet dropped the reader's
+back button on the *first* page of every session. One assertion earlier in the
+same test caught it. Both directions are wrong, which is what says the choice
+was never between them.
 
-So `syncHistory` now records *which page* it counted the entries against, and
-`historyFlagsFor` gates the flags on it: same page, flags cross; anything else
-— including the moment before any history has ever been read — reports no
-history in either direction. "I don't know yet" and "there is nothing behind
-you" produce the same frame, and that is the safe collision to make. Saying
-nothing is behind a page that has something behind it greys a button out for a
-beat and lets a gesture through to the browser, which is the case the sentinel
-already exists to handle and which self-corrects the moment the round trip
-lands. Saying something is behind a page that has nothing swallows the gesture
-with no way back.
+The mechanism, found by logging every `emitState` and every history read
+against the URL each was about:
 
-`TestHistoryFlagsWaitForThePageTheyWereMeasuredOn` pins it as a unit test on
-`emitState` — the flags move only when the URL they were measured on does —
-because the e2e version of this assertion is exactly the one that needed a
-2% loss link before it would fail.
+- **A navigation's tail keeps asking after the reader has left.** The commit
+  asks, and so do the load event, the settle, and any client refresh — for the
+  *previous* page, since they were started under it. Those overlap, the stale
+  question is answered last, and landing last it won. Nothing corrected it until
+  the next navigation.
+- **The browser announces a commit before its own history records it.** A tab
+  that had just committed the index answered `Page.getNavigationHistory` with a
+  single entry, `about:blank`. The commit's own question, asked at the right
+  moment about the right page, still came back about the page before.
+
+So the answer is stamped and checked rather than trusted. `applyHistory` takes
+the nav epoch the read was asked under and drops an answer a commit has
+overtaken, and `syncHistory` re-asks — up to five times, 20 ms apart, all of it
+landside where nothing is waiting — while the browser's current entry still
+names a page the tab is not on. Both are cheap: the retry did not fire once
+across a full e2e run on a quiet box, and the epoch check is a comparison.
+
+One theory got an experiment and lost first: that the history list lagged the
+commit *by itself*, which a probe across the whole suite at `-parallel 8`
+refuted with zero mismatches — before a later run showed the lag plainly. A
+probe that finds nothing means the race did not happen that time, and treating
+it as proof of a mechanism's absence is how the first fix came to be aimed at
+the wrong half.
+
+The same CI run reported a 210 ms tap measured at 356 ms by
+`TestClickCarriesTheReadersOwnPointerData`. `pressHold` (§49) takes the press
+dispatch's own round trip off the sleep so the release trip does not lengthen
+the reader's tap, which holds while the two trips are alike and stops holding
+on a box running eight browsers. That test is now a `newSerialHarness` test,
+which is what this repository already says to do with an assertion that
+measures the machine rather than the link.

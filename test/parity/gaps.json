@@ -522,12 +522,12 @@
     },
     {
       "id": "P-131",
-      "title": "A tab's history flags described the page it had just left: the back gesture at the start of a history was answered by the shell and vanished",
+      "title": "A tab's cached history flags described the page it had left: the back gesture at the start of a history was answered by the shell and vanished",
       "status": "fixed",
       "refs": [
         "internal/mirror/tab.go"
       ],
-      "notes": "a tab's URL is known the instant a navigation commits; what is behind it costs a Page.getNavigationHistory round trip, and every state frame emitted in the gap — the load starting, the snapshot arriving, a title changing — carried the new address stamped with the previous page's canBack/canForward. Landside that window is a millisecond; over the shaped link it is seconds, and a tab that had just reached the start of its history went on saying a page was behind it, so the shell answered the reader's back gesture itself and nothing moved. Fixed by recording the URL the flags were measured on and gating them on it: a frame that cannot vouch for a history reports none, which lets the gesture through to the trap that already handles it. TestHistoryFlagsWaitForThePageTheyWereMeasuredOn pins it; the failure it explains is TestTheBrowsersOwnBackAndForwardDriveTheTab over the emulated link"
+      "notes": "canBack/canForward are read with Page.getNavigationHistory and cached, and the cache described the previous page — not for a moment but until the next navigation asked again. Two mechanisms: a navigation's tail (the load event, the settle, a refresh) goes on asking about the page the reader has left and its answer lands last, and the browser announces a commit before its own history records it — a tab that had just committed the index answered with a single entry, about:blank. A tab at the start of its history still saying a page was behind it made the shell answer the reader's back gesture instead of letting it through, leaving the skyhook:here sentinel unarmed with nothing to say the gesture was heard. Fixed by stamping each read with the nav epoch it was asked under and dropping an answer a commit has overtaken (applyHistory), and by re-asking while the browser's current entry still names a page the tab is not on (historyDescribes, five tries 20ms apart, all landside). An earlier fix that blanked the flags for any frame it could not vouch for was wrong in the other direction and broke the ordinary back gesture; both directions being wrong is what says the choice was never between them. Pinned by TestAHistoryAnswerTheReaderNavigatedPastIsDropped and TestAHistoryReadIsCheckedAgainstThePageTheTabIsOn; the failure it explains is TestTheBrowsersOwnBackAndForwardDriveTheTab over the emulated link"
     }
   ]
 }

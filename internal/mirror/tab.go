@@ -223,20 +223,6 @@ type Tab struct {
 	// button for the rest of the session.
 	canBack    bool
 	canForward bool
-	// histURL is the page canBack and canForward were measured on.
-	//
-	// The flags cost a round trip into the browser to read; the URL costs
-	// nothing and is set the instant a navigation commits. So between those two
-	// moments the tab knows where it is and not what is behind it, and every
-	// state frame emitted in the gap — a load starting, a snapshot arriving, a
-	// title changing — carried the new page's address stamped with the old
-	// page's history. On a landside link that window is a millisecond; on this
-	// one it is seconds, and a reader whose tab has just reached the start of
-	// its history was told it could still go back (P-131).
-	//
-	// Keeping the URL the flags were measured on is what lets emitState tell a
-	// frame it can vouch for from one it cannot.
-	histURL string
 	// chunks reassembles the split messages of each agent, keyed by session:
 	// two agents number their chunks from one, and mixing them builds a message
 	// out of halves of two documents.
@@ -1855,37 +1841,6 @@ func (t *Tab) requestImages(imgs []agentImage) {
 	}
 }
 
-/*
-historyFlagsFor decides whether a state frame about `frameURL` may carry the
-history flags measured on `measuredURL`.
-
-It may when they are the same page, and it may not otherwise — which sounds
-like a technicality and is the difference between a back gesture working and
-disappearing. A tab's URL is known the instant a navigation commits; what is
-behind it costs a round trip into the browser to find out. Everything emitted
-in between — the frame that says a load started, the one a snapshot brings, a
-title changing — used to carry the new address stamped with the previous page's
-history, and on this link that frame is what the reader's shell believes for
-the next second or two.
-
-The wrong direction is the expensive one. A tab that has just reached the start
-of its history, still saying "you can go back", makes the shell answer the next
-back gesture instead of letting it through: the gesture is spent, nothing moves,
-and there is nothing to tell the reader it was heard. Saying "no history" while
-the truth is on its way costs a back button greyed out for a beat, and a gesture
-in that window is let through — which is the case the trap already exists to
-handle, and which recovers as soon as the flags arrive.
-
-Not knowing is therefore reported as nothing behind and nothing ahead: no
-history is the state a frame that cannot vouch for one should describe.
-*/
-func historyFlagsFor(frameURL, measuredURL string, back, forward bool) (bool, bool) {
-	if measuredURL == "" || frameURL != measuredURL {
-		return false, false
-	}
-	return back, forward
-}
-
 func (t *Tab) emitState(st protocol.TabState) {
 	t.mu.Lock()
 	if st.URL == "" {
@@ -1895,7 +1850,8 @@ func (t *Tab) emitState(st protocol.TabState) {
 		st.Title = t.title
 	}
 	st.Loading = t.loading || st.Loading
-	st.CanBack, st.CanForward = historyFlagsFor(st.URL, t.histURL, t.canBack, t.canForward)
+	st.CanBack = t.canBack
+	st.CanForward = t.canForward
 	t.mu.Unlock()
 	f, err := protocol.NewFrame(protocol.TypeTabState, t.ID, st)
 	if err != nil {
@@ -1904,37 +1860,119 @@ func (t *Tab) emitState(st protocol.TabState) {
 	t.out.EmitFrame(protocol.ChCtrl, f)
 }
 
+/*
+How long the browser is given to record a navigation it has already announced.
+
+Page.frameNavigated says a page has committed; Page.getNavigationHistory can
+still be describing the one before it when asked immediately afterwards, and
+has been seen to — a tab that had just committed the index answered with a
+single entry, about:blank. Both calls are landside, on the same machine as the
+browser, so this budget is spent where nothing is waiting on it. Exhausting it
+means taking the browser's answer as given, which is what every version of this
+did before the check existed.
+*/
+const (
+	historyReadTries = 5
+	historyReadWait  = 20 * time.Millisecond
+)
+
 // syncHistory asks the browser where the tab sits in its own history and caches
 // the answer. It emits nothing: callers that want the client told use
 // RefreshState, and callers that are about to emit for their own reasons — a
 // navigation announcing its URL — want the cache correct before they do.
 func (t *Tab) syncHistory(ctx context.Context) (url, title string) {
-	var hist struct {
-		CurrentIndex int `json:"currentIndex"`
-		Entries      []struct {
-			URL   string `json:"url"`
-			Title string `json:"title"`
-		} `json:"entries"`
+	// Which page the answer will be about, settled before it is asked for.
+	// See applyHistory.
+	epoch := t.navEpoch.Load()
+	for try := 0; ; try++ {
+		var hist struct {
+			CurrentIndex int `json:"currentIndex"`
+			Entries      []struct {
+				URL   string `json:"url"`
+				Title string `json:"title"`
+			} `json:"entries"`
+		}
+		if err := t.sess.Do(ctx, "Page.getNavigationHistory", nil, &hist); err != nil {
+			return "", ""
+		}
+		var at, name string
+		if hist.CurrentIndex >= 0 && hist.CurrentIndex < len(hist.Entries) {
+			at, name = hist.Entries[hist.CurrentIndex].URL, hist.Entries[hist.CurrentIndex].Title
+		}
+		if !t.atPage(at) && try < historyReadTries {
+			// The list is still describing the page before this one. Asking
+			// again costs a landside round trip; believing it costs the
+			// reader's next back gesture.
+			t.log.Debug("the history list has not caught up with the commit",
+				"tab", t.ID, "entry", at, "try", try)
+			select {
+			case <-ctx.Done():
+				return "", ""
+			case <-time.After(historyReadWait):
+			}
+			continue
+		}
+		if !t.applyHistory(epoch, hist.CurrentIndex, len(hist.Entries)) {
+			return "", ""
+		}
+		return at, name
 	}
-	if err := t.sess.Do(ctx, "Page.getNavigationHistory", nil, &hist); err != nil {
-		return "", ""
-	}
-	var at string
-	if hist.CurrentIndex >= 0 && hist.CurrentIndex < len(hist.Entries) {
-		at = hist.Entries[hist.CurrentIndex].URL
-	}
+}
+
+/*
+applyHistory caches what the browser said about the tab's history, and reports
+whether the answer was still the tab's to keep.
+
+Every navigation asks this question when it commits, and so does the tail of
+the navigation before it: the load event, the settle, a client asking for a
+refresh. Those overlap, and the stale question is the one whose answer arrives
+last. Landing last, it used to win — leaving canBack and canForward describing
+the page before this one, with nothing to correct them until the next
+navigation asked again, and every state frame in between carrying it.
+
+Which way that is wrong decides what it costs. A tab that has just reached the
+start of its history, still carrying the previous page's "you can go back",
+makes the shell answer the reader's next back gesture instead of letting it
+through to the browser: the gesture is spent, nothing moves, the trap that
+guards the session is left unarmed, and nothing tells the reader it was heard.
+That is what left TestTheBrowsersOwnBackAndForwardDriveTheTab failing over the
+emulated link, where a navigation's tail and the next navigation are seconds
+apart rather than milliseconds (P-131).
+
+The nav epoch tells the two apart: it changes at every commit, before that
+commit asks its own question, so an answer stamped with an older one is about a
+page the tab has left. Dropping it loses nothing — the commit that overtook it
+is asking for itself.
+*/
+func (t *Tab) applyHistory(epoch uint64, index, entries int) bool {
 	t.mu.Lock()
-	t.canBack = hist.CurrentIndex > 0
-	t.canForward = hist.CurrentIndex < len(hist.Entries)-1
-	// Which page they describe, so a frame about some other page does not
-	// borrow them. The browser's own answer rather than t.url: this is the
-	// entry the indices were counted against.
-	t.histURL = at
-	t.mu.Unlock()
-	if at != "" {
-		return at, hist.Entries[hist.CurrentIndex].Title
+	defer t.mu.Unlock()
+	if t.navEpoch.Load() != epoch {
+		return false
 	}
-	return "", ""
+	t.canBack = index > 0
+	t.canForward = index < entries-1
+	return true
+}
+
+// atPage reports whether a history entry describes the page the tab is on.
+func (t *Tab) atPage(entry string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return historyDescribes(entry, t.url)
+}
+
+/*
+historyDescribes reports whether the browser's current history entry is about
+the page the tab has committed to.
+
+An empty on either side is nothing to check against rather than a disagreement:
+a tab that has never navigated has no URL to compare, and a history with no
+current entry — which is what a tab reports before its first navigation — is
+not describing some other page, it is describing nothing.
+*/
+func historyDescribes(entryURL, tabURL string) bool {
+	return entryURL == "" || tabURL == "" || entryURL == tabURL
 }
 
 // RefreshState tells the client where the tab is: its URL and title, and
