@@ -547,6 +547,15 @@
         "internal/server/webapp.go"
       ],
       "notes": "font-src was 'self' blob: — blob: for the faces the client rebuilds from protocol bytes (P-115) — and nothing for the ones a page inlines in its own stylesheet. An icon font is exactly the size that invites inlining: Google Chat ships the subset that draws its toolbar and its Starred shortcut as a data:font/ttf URI, nothing this side rewrites it, and it was refused as itself. Silent in the same way P-115 was — the face registers, the ligature fires, the glyph draws nothing — and a reader's capture counted 50 securitypolicyviolations while its own screenshot showed the icons, because capture.ts rasterises through an <svg><foreignObject> in the shell's document where the mirror frame's policy does not apply. Fixed by adding data: to font-src, as img-src has had all along"
+    },
+    {
+      "id": "P-134",
+      "title": "Scrolling a container plane-side never reached the page: a list that builds its rows on demand never built any more",
+      "status": "fixed",
+      "refs": [
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "a reader scrolling Google Chat's emoji picker watched it show blank space. The picker builds the cells it needs and no more, so the mirror had the 112 that happened to exist and scrolling past them found nothing — and the server log has not one line for the twenty-five seconds of scrolling before the capture. Everything the answer needed was already built: ScrollEvent.Node, HandleScroll's container branch, the agent's scrollTo(id,x,y), and P-118's container positions in the snapshot. What was missing was at the plane-side end — onElementScroll noticed a container being scrolled, recorded that the reader had taken it over so a server scroll would not move them, and told the server nothing. The document's own scroll had been reported since the beginning; a container's never was, which made the landside branch dead surface in the same way wheel is. Fixed by reporting a scrolled container the way the document is reported, throttled per element on the same 250ms. Pinned by TestPWAScrollingAMirroredContainerReachesThePage, which fails without it, and by TestScrollingAContainerBuildsTheRowsBelowIt for the landside half that had never been reached"
     }
   ]
 }

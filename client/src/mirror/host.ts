@@ -196,6 +196,17 @@ html:where([data-sky-doc]) { min-height: 100%; }
  * than `about:blank`; nothing resolves differently, because an about:blank
  * frame already inherited that same base URL from its creator.
  */
+/*
+How long scroll telemetry waits before saying where the reader got to.
+
+A scroll position is only interesting until the next one, and this one is read
+landside to drive lazy loading rather than to move anything the reader sees. The
+document and every scrolled container share the interval, and each container
+throttles separately: a reader scrolling one list is not a reason to go quiet
+about another.
+*/
+const SCROLL_REPORT_MS = 250;
+
 const STANDARDS_SHELL = '<!DOCTYPE html><html><head></head><body></body></html>';
 /* The same shell with the doctype left off, for the pages that left it off
    themselves (P-125): a page the landside browser parsed in quirks mode gets
@@ -534,6 +545,8 @@ export class MirrorHost {
   /** Scrollers the reader has moved themselves. The server never moves these
    *  again unless they are pinned to the bottom. */
   private readerMoved = new WeakSet<Node>();
+  /** Per-container throttles for scroll telemetry, keyed by the element. */
+  private elementScrollTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
   private readerMovedDoc = false;
   /** The last position this host set programmatically, per scroller. A scroll
    *  event landing on exactly this position is ours, not the reader's; the
@@ -1218,7 +1231,7 @@ export class MirrorHost {
           docH: doc.documentElement.scrollHeight,
           ...(anchor ? { anchor: anchor.id, anchorY: anchor.top } : {}),
         });
-      }, 250);
+      }, SCROLL_REPORT_MS);
     }, { passive: true });
 
     // Scroll events do not bubble, but they do reach a capturing listener on
@@ -1349,6 +1362,24 @@ export class MirrorHost {
     }
   }
 
+  /*
+   * A container the reader has scrolled, reported the way the document is.
+   *
+   * This used to note that the reader had taken the scroller over and stop
+   * there, so a scrolled container was known plane-side and nowhere else. The
+   * landside page went on believing its own list was where it left it, which
+   * for a list that renders what is on screen and nothing else means the rows
+   * the reader scrolled to were never built: Google Chat's emoji picker mirrors
+   * the hundred-odd cells that happen to be rendered, and scrolling it shows
+   * blank space for ever (P-134). Every part of the answer already existed —
+   * ScrollEvent.Node, HandleScroll's container branch, the agent's scrollTo —
+   * with nothing at this end to send.
+   *
+   * Throttled per element and on the same 250 ms as the document, because a
+   * scroll is only interesting until the next one. The dismissal is not
+   * throttled: a menu anchored to a node that has just moved is pointing at
+   * the wrong thing now, not in a quarter of a second.
+   */
   private onElementScroll = (ev: Event): void => {
     const doc = this.frame?.contentDocument;
     const target = this.eventTarget(ev) as Node | null;
@@ -1361,7 +1392,30 @@ export class MirrorHost {
     this.events.dismiss(this.tab);
     const mine = this.adopted.get(el);
     if (!mine || mine.x !== el.scrollLeft || mine.y !== el.scrollTop) this.readerMoved.add(el);
+    this.reportScrollSoon(el);
   };
+
+  /** Tells the server where a container got to, at most once per interval. */
+  private reportScrollSoon(el: HTMLElement): void {
+    if (this.elementScrollTimers.has(el)) return;
+    this.elementScrollTimers.set(el, setTimeout(() => {
+      this.elementScrollTimers.delete(el);
+      const id = this.patcher?.idOf(el) ?? 0;
+      if (!id) return;
+      this.events.scroll(this.tab, {
+        tab: this.tab,
+        node: id,
+        x: el.scrollLeft,
+        y: el.scrollTop,
+        // Its own range, not the document's. The landside container is a
+        // different height whenever a font was substituted, and a list that
+        // builds rows on demand is a different height for the better reason
+        // that it has more of them.
+        h: el.clientHeight,
+        docH: el.scrollHeight,
+      });
+    }, SCROLL_REPORT_MS));
+  }
 
   // ------------------------------------------------------------------ scroll
 

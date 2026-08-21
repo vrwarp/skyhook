@@ -4289,3 +4289,43 @@ apply. The picture drew the icon the reader was being refused. `capture.ts`'s ow
 comment warns about exactly this inversion — "a capture that disagrees with the
 reader is read as the reader being wrong" — and here it hid a real bug rather
 than inventing one. `img-src` has had `data:` all along; `font-src` now does too.
+
+### 60. The half of the scroll conversation that was never spoken
+
+A reader's note on a capture: *"emojis aren't loading as i scroll"*.
+
+Google Chat's emoji picker builds the cells it needs and no more, so the mirror
+had the 112 that happened to exist. Scrolling past them found blank space. The
+server log is the whole diagnosis: between the click that opened the picker and
+the capture twenty-five seconds later, during which the reader was scrolling, it
+records nothing at all. Not a scroll, not an image, nothing.
+
+Every part of the answer was already built. `ScrollEvent` has a `Node` field,
+`HandleScroll` has a branch for it, the agent has `scrollTo(id, x, y)`, and §56
+put container positions into the snapshot so a resync could restore them. What
+was missing was at the plane-side end, in `onElementScroll`: it noticed the
+container being scrolled, dismissed any open menu, recorded that the reader had
+taken this scroller over so a server-driven scroll would not move them — and
+sent nothing. The document's own scroll had been reported since the beginning.
+A container's never was, which left the landside branch dead surface in the
+same way `wheel` is: written, correct, and never once reached.
+
+So a scrolled container is now reported the way the document is, throttled per
+element on the same 250 ms, carrying its own height and scroll height rather
+than the document's.
+
+Two things were tried and dropped, both for the same reason. The first was
+teaching `scrollTo` to treat the end of the reader's range as the end of the
+container's, on the theory that a list which builds rows on demand is taller
+landside than in the mirror. The second was the flush nudge the document's own
+handler does near its end, so an `IntersectionObserver` fires on a page nobody
+is painting. Neither could be made to matter: with the fixture rewritten to
+watch a sentinel the way a real list does, the plain absolute position grows the
+list, twice over, with nothing else added. Both would have been reasoning
+shipped as code, and the shape of this bug is a warning about that — a whole
+landside mechanism, carefully built, that nothing ever called.
+
+One parity run failed during verification and its log was not kept; it has not
+recurred in five runs since, including a repeat of the back-to-back conditions
+it happened under. It is recorded here because an unexplained failure that is
+not written down is one nobody will recognise the second time.

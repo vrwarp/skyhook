@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-56 gaps: 13 open, 11 by-design, 31 fixed, 1 disproven.
+57 gaps: 13 open, 11 by-design, 32 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -176,6 +176,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-131 | fixed | A tab's cached history flags described the page it had left: the back gesture at the start of a history was answered by the shell and vanished | — |
 | P-132 | fixed | A message the page never sent was drawn as sent, and the next one was typed into a composer that still held it | — |
 | P-133 | fixed | A font the page inlines as a data: URI is refused by the shell's CSP: the ligature fires and the glyph draws nothing | — |
+| P-134 | fixed | Scrolling a container plane-side never reached the page: a list that builds its rows on demand never built any more | — |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

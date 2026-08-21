@@ -1581,6 +1581,44 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			});
 			</script></body></html>`)
 	})
+	// A scroller that builds its rows when they are needed, which is what
+	// every long list in a real app is: an emoji picker, a message history, a
+	// contact list. Only what has been built can be mirrored, so scrolling the
+	// mirrored copy has to reach this page or the reader scrolls into blank
+	// space for ever.
+	mux.HandleFunc("/lazy-scroller", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Lazy scroller</title>
+			<style>#box { height: 200px; overflow-y: scroll; border: 1px solid #333 }
+			#box p { margin: 0; height: 40px }</style></head>
+			<body><h1>a list that builds itself</h1>
+			<div id="box"></div>
+			<script>
+			var box = document.getElementById('box');
+			var made = 0;
+			function grow(n) {
+			  for (var i = 0; i < n; i++) {
+			    made++;
+			    var p = document.createElement('p');
+			    p.id = 'row' + made;
+			    p.textContent = 'row ' + made;
+			    box.appendChild(p);
+			  }
+			}
+			grow(10);
+			// The sentinel, watched the way a real list watches one: an
+			// observer on the last row, rooted in the scroller.
+			var seen = new IntersectionObserver(function (entries) {
+			  for (var i = 0; i < entries.length; i++) {
+			    if (!entries[i].isIntersecting) continue;
+			    seen.unobserve(entries[i].target);
+			    grow(10);
+			    seen.observe(box.lastElementChild);
+			  }
+			}, { root: box });
+			seen.observe(box.lastElementChild);
+			</script></body></html>`)
+	})
 	// A list pinned to its newest entry before anyone is watching, which is
 	// what a chat conversation is. The scroll happens while the page parses —
 	// before the agent's own scroll listener exists — so the only way the
