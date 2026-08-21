@@ -222,6 +222,30 @@ func TestTheBrowsersOwnBackAndForwardDriveTheTab(t *testing.T) {
 	// on the entry behind, where a second press leaves for real. Nothing the
 	// reader can see has moved.
 	trap := `((history.state || {}).skyhook || '')`
+	// Watch what the shell's history actually does, because the two ways this
+	// can fail leave the same evidence behind. A gesture the shell answered
+	// and one the shell let through and then re-armed under both end with the
+	// trap in the middle and the same number of entries; only the order of the
+	// pops tells them apart, and it is gone by the time anything asks. What CI
+	// caught was the first — the shell answering a gesture it should have let
+	// through, because the tab state that moved the address bar onto
+	// about:blank was still carrying the previous page's "you can go back"
+	// (P-137) — and the failure could not say so.
+	evalJSON(ctx, t, page, `(() => {
+      window.__trapLog = [];
+      addEventListener('popstate', (ev) => {
+        window.__trapLog.push('pop:' + ((ev.state || {}).skyhook || '(none)')
+          + '@' + history.length);
+      });
+      // And when the shell changes its mind about the tab having a page behind
+      // it, because that is the only thing that re-arms the trap: syncToolbar
+      // claims the gestures again the moment canBack turns true.
+      const back = document.getElementById('back');
+      new MutationObserver(() => {
+        window.__trapLog.push('canBack:' + !back.disabled);
+      }).observe(back, { attributes: true, attributeFilter: ['disabled'] });
+      return true;
+    })()`, nil)
 	evalJSON(ctx, t, page, `history.back(), true`, nil)
 	// Reported rather than merely waited for: what decides this is whether the
 	// shell believes the tab can still go back, and that belief is a whole
@@ -258,8 +282,14 @@ func TestTheBrowsersOwnBackAndForwardDriveTheTab(t *testing.T) {
 		}
 	}
 	if !let {
-		t.Fatal("the back gesture at the start of the tab's history was not let through:" +
-			" the shell answered it instead, or re-armed the trap under it")
+		var pops []string
+		evalJSON(ctx, t, page, `window.__trapLog || []`, &pops)
+		t.Fatalf("the back gesture at the start of the tab's history was not let through:"+
+			" the shell answered it instead, or re-armed the trap under it"+
+			"\n  what the shell did, in order: %v"+
+			"\n  (a pop to skyhook:back and nothing after it is the gesture being"+
+			" answered; a pop to back followed by one to here is the trap re-armed"+
+			" under it, and the canBack that let that happen is in the same list)", pops)
 	}
 	alive("a back at the start of the tab's history")
 

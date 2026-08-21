@@ -1158,7 +1158,7 @@ func TestAHistoryAnswerTheReaderNavigatedPastIsDropped(t *testing.T) {
 
 	// The reader goes back to the first entry, and that navigation reads the
 	// history for itself.
-	tab.pageCommitted()
+	tab.pageCommitted("f", "https://example.test/one")
 	now := tab.navEpoch.Load()
 	if now == asked {
 		t.Fatal("a commit did not move the nav epoch; nothing can tell the two pages apart")
@@ -1174,6 +1174,73 @@ func TestAHistoryAnswerTheReaderNavigatedPastIsDropped(t *testing.T) {
 	}
 	tab.emitState(protocol.TabState{URL: "https://example.test/one"})
 	st, _ := sink.last()
+	if st.CanBack {
+		t.Error("a tab at the start of its history says the reader can still go back")
+	}
+	if !st.CanForward {
+		t.Error("a tab with a page ahead of it says there is nothing forward")
+	}
+}
+
+/*
+And the third half of it: the frame that is not the commit's.
+
+A commit moves the tab's URL at once — onFrameNavigated has it the moment the
+browser speaks — and its history flags a round trip later, because those have to
+be asked for. The commit's own frame waits for the answer and carries both. But
+it is not the only thing emitting: the new page's snapshot arrives, its loading
+stops, its favicon lands, and every one of those picks the new URL up out of
+t.url and stamps it with the flags of the page before.
+
+Going back to the first page of a tab's history is where that is worst, because
+about:blank stops loading in less time than a CDP round trip takes. The client
+is told "you are on about:blank" and "you can still go back" in the same frame,
+draws the empty address bar and the start page, and answers the reader's next
+back gesture instead of letting it through to the browser — spending a gesture
+that was the reader trying to leave, and leaving the trap that guards the
+session unarmed. That is the unshaped job's
+TestTheBrowsersOwnBackAndForwardDriveTheTab (P-137).
+*/
+func TestAFrameEmittedBeforeTheHistoryReadSaysNothingAboutWhereTheTabIs(t *testing.T) {
+	sink := &stateSink{}
+	tab := &Tab{ID: 1, out: sink, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	// Two entries, sitting on the second: the reader has somewhere to go back
+	// to, and has been told so.
+	second := tab.pageCommitted("f", "https://example.test/two")
+	if !tab.applyHistory(second, 1, 2) {
+		t.Fatal("an answer about the page the tab is on was refused")
+	}
+	if !tab.announceCommit(second, "https://example.test/two") {
+		t.Fatal("the page the tab is on was not announced")
+	}
+	if st, _ := sink.last(); st.URL != "https://example.test/two" || !st.CanBack {
+		t.Fatalf("the commit's own frame did not carry the page and its history: %+v", st)
+	}
+
+	// Back to the first entry. The commit lands; the read behind it has not
+	// answered yet, and about:blank has already stopped loading.
+	first := tab.pageCommitted("f", "https://example.test/one")
+	tab.setLoading(false)
+	st, _ := sink.last()
+	if st.URL != "" {
+		t.Errorf("a frame emitted before the history read moved the address bar to %q", st.URL)
+	}
+	if !st.CanBack {
+		t.Error("it moved the back button instead, to a value nothing had measured")
+	}
+
+	// The answer arrives, and the commit's frame moves both together.
+	if !tab.applyHistory(first, 0, 2) {
+		t.Fatal("the new page's own answer was refused")
+	}
+	if !tab.announceCommit(first, "https://example.test/one") {
+		t.Fatal("the page the tab is on was not announced")
+	}
+	st, _ = sink.last()
+	if st.URL != "https://example.test/one" {
+		t.Errorf("the commit says the tab is on %q, want the first page", st.URL)
+	}
 	if st.CanBack {
 		t.Error("a tab at the start of its history says the reader can still go back")
 	}
@@ -1246,7 +1313,7 @@ func TestACommitStampsWhatThePageAsksFor(t *testing.T) {
 	sink := &stateSink{}
 	tab := &Tab{ID: 3, out: sink}
 
-	tab.pageCommitted()
+	tab.pageCommitted("f", "https://example.test/one")
 	tab.wantImage(ImageRequest{Key: "first"})
 	tab.wantImage(ImageRequest{Key: "second"})
 	if got := tab.NavEpoch(); got != 1 {
@@ -1258,7 +1325,7 @@ func TestACommitStampsWhatThePageAsksFor(t *testing.T) {
 	tab.docEpoch.Add(1)
 	tab.wantImage(ImageRequest{Key: "third"})
 
-	tab.pageCommitted()
+	tab.pageCommitted("f", "https://example.test/two")
 	tab.wantImage(ImageRequest{Key: "fourth"})
 
 	want := []uint64{1, 1, 1, 2}
@@ -1305,8 +1372,8 @@ func TestAnOvertakenNavigationSaysNothing(t *testing.T) {
 	sink := &stateSink{}
 	tab := &Tab{ID: 1, out: sink, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
-	first := tab.pageCommitted()
-	second := tab.pageCommitted()
+	first := tab.pageCommitted("f", "https://example.test/one")
+	second := tab.pageCommitted("f", "https://example.test/two")
 
 	// The first commit's run, finishing after the second's.
 	if tab.announceCommit(first, "https://example.test/one") {
@@ -1326,7 +1393,7 @@ func TestAnOvertakenNavigationSaysNothing(t *testing.T) {
 
 	// And once more, in the order a quiet reader produces: the run for the page
 	// they are on is never the one dropped.
-	third := tab.pageCommitted()
+	third := tab.pageCommitted("f", "https://example.test/three")
 	if !tab.announceCommit(third, "https://example.test/three") {
 		t.Fatal("an uncontested navigation was dropped")
 	}

@@ -4419,3 +4419,97 @@ The container branch of `HandleScroll` also says what it did now. Its first
 failure in CI produced a log with nothing in it, and a silent path that has just
 been given work to do is one nobody can debug — which is the same lesson as
 §61's, arriving from the other direction within the hour.
+
+### 63. The same window, the other half of it
+
+§62 fixed the throttle window by taking the reader's *position* as they left
+it. The shaped job failed again on the next run, the same way and for the
+sibling reason: the report still looked the *node* up when the timer fired.
+
+A document the server replaces inside that quarter of a second — a resync, a
+navigation — rebuilds the patcher's map, and the element the reader scrolled
+stops having an id at all. `idOf` returned 0, and the report gave up without a
+word. That is the whole of why the failing job's log recorded nothing: no
+scroll, no mutation, no error, `seq=0` for three minutes. The frame was never
+sent, and nothing said so.
+
+It was caught by instrumenting the two moments and running the loaded set until
+it broke:
+
+```
+ZZscrollevent top=200 id=8
+ZZreport id=0 y=200
+```
+
+Eight at the scroll, zero a quarter of a second later. The id is taken with the
+position now, at the moment the reader scrolls, and the current id is preferred
+only if there still is one.
+
+Three things this cost, worth naming because they are the lesson rather than
+the bug. The first fix carried the reasoning to the position and not to the id
+sitting two lines away, which is what happens when a fix is aimed at a
+symptom's shape instead of its cause. The second is that a silent give-up —
+`if (!id) return` — is indistinguishable from a feature that was never called,
+and this path had two of them. And the third is that both were only ever
+visible on the emulated link, where the gap between what the reader does and
+what the server has is wide enough to put a whole document replacement inside
+it: the honest test for this is fake timers stating the race exactly, which is
+now what pins it.
+
+### 64. The address bar arriving before the buttons beside it
+
+§58 fixed the tab's cached history flags describing the page it had left, and
+the shaped job went green. The *unshaped* job then failed the same test, the
+same way — `TestTheBrowsersOwnBackAndForwardDriveTheTab`, the back gesture at
+the start of a tab's history answered by the shell instead of let through — and
+the fix was in the wrong half of the mechanism.
+
+A commit moves two things that have to travel together. The address arrives
+with the event: `Page.frameNavigated` carries the URL, and the tab has it the
+moment the browser speaks. What the browser thinks of the tab's history has to
+be *asked for*, which is a round trip. The commit's own frame waits for the
+answer and sends both, deliberately and with a comment saying why.
+
+But the commit's frame is not the only one. The new page's snapshot arrives,
+its loading stops, its favicon lands, and each of those calls `emitState` —
+which filled a missing URL in from `t.url` and stamped every frame with the
+cached `canBack`. Any frame emitted inside that window shipped the new address
+with the previous page's history.
+
+Going back to the first page of a tab is where that lands, because
+`about:blank` stops loading in less time than one CDP round trip. The client
+was told "you are on about:blank" and "you can still go back" in the same
+frame. It drew the empty address bar and the start page — which is exactly what
+the test waits for — and, believing the tab still had somewhere to go, answered
+the reader's next back gesture rather than letting it through to the browser.
+The gesture is spent, nothing moves, and the trap that guards the session is
+left unarmed: the same reader-visible fault as §58, arriving through a frame
+§58 never looked at.
+
+§58's retry loop widened the window rather than opening it — up to five 20 ms
+waits before the flags land — which is why the unshaped job started failing
+where the shaped one had just been fixed.
+
+So a frame emitted in that window now says nothing about where the tab is. The
+URL goes out empty, which the client already reads as "unchanged", and the
+flags beside it are the ones the client is holding — they cannot have moved,
+because the only thing that writes them is a read for the page the tab is
+actually on. The commit's frame, a round trip later, moves both together, and
+is stamped as the one entitled to: stamped there rather than at the read, so
+that a read the browser could not answer still lets the address bar move. A
+stuck address bar is a worse failure than a history flag one page out.
+
+The commit and the URL also move under one lock now. They did not, and the
+window between them was a clipboard grant wide — another round trip to the
+browser, during which a frame would have seen the new address beside the old
+epoch and thought the pair agreed.
+
+Two things worth naming. The failure evidence was `trap="skyhook:here"`,
+`canBack: false`, three entries — and that is *identical* for the two faults it
+could have been (the shell answering the gesture, or the shell letting it
+through and re-arming the trap underneath). Only the order of the `popstate`s
+tells them apart, and it is gone by the time anything asks; the test records it
+now. And the second: §58 was a correct fix to a real bug that did not fix the
+reported failure, because the mechanism had two ends and the reproduction only
+ever showed the symptom. A green shaped job was taken as the fix landing rather
+than as one of two paths closing.

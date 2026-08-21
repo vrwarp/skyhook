@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-59 gaps: 13 open, 11 by-design, 34 fixed, 1 disproven.
+60 gaps: 13 open, 11 by-design, 35 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -179,6 +179,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-134 | fixed | Scrolling a container plane-side never reached the page: a list that builds its rows on demand never built any more | — |
 | P-135 | fixed | A checkbox's third state never crossed: indeterminate is a property with no attribute, so a half-ticked box mirrored as empty | — |
 | P-136 | fixed | A failing e2e test's log dump was 93% Chromium's complaints about the machine, so the records describing the mirror had been pushed out of the ring | — |
+| P-137 | fixed | A frame emitted between a commit and its history read moved the address bar onto the new page with the old page's back button | — |
 <!-- parity:registry:end -->
 
 ## Fixing a gap
