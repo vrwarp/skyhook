@@ -153,9 +153,11 @@ jobs:
         # owns a Chromium and the PWA ones own two, so four at a time is about
         # what the box will carry.
         #
-        # -skip keeps the parity suite in its own job below; the set run here
-        # is byte-identical to what it was before parity existed, so the 20m
-        # budget still covers exactly what it was measured over.
+        # -skip keeps the parity suite in its own job below. The set run here
+        # is no longer the one that number was measured over: the gap-fix
+        # campaign added twelve tests, the feature pins among them. Re-measured
+        # at 2m08s on this runner (main at 9292c0c, run 32430097193 attempt 2),
+        # so the 20m budget is a very wide margin rather than a close fit.
         run: |
           set -o pipefail
           go test -count=1 -timeout 20m -parallel 4 -skip '^TestParity' -v ./test 2>&1 | tee /tmp/e2e.log

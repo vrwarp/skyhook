@@ -2048,6 +2048,23 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		Logger: log, Token: h.token, TTL: time.Hour, RingBytes: 1 << 20,
 		Compression: true, ProfileDir: t.TempDir(), MaxTabs: 8,
 		UploadDir: h.uploadDir,
+		// A test's patience has to outlast the repair it is waiting on.
+		//
+		// When a tab goes quiet — a frame the client never applies, a document
+		// that never arrives — the server notices by integrity check and
+		// resyncs, and that takes stuckChecks (2) ticks. At the 30s default
+		// that is a minute, which is exactly what the longest waits here
+		// allow: the test gives up in the same breath as the repair fires, so
+		// one late frame on a loaded runner is a red suite rather than a page
+		// that arrived a moment late. Four different tests were seen failing
+		// that way, once each, none reproducible on a quiet box.
+		//
+		// Ten seconds puts the repair around twenty, comfortably inside every
+		// wait, so these tests measure the recovery instead of racing it. It
+		// costs landside checkpoints and not one byte on the wire: the check
+		// reads the acknowledgements the client already sends. Tests that
+		// want it faster still say so themselves (busy_test, checkpoint_test).
+		IntegrityInterval: 10 * time.Second,
 		Capture: session.CaptureOptions{
 			Dir: h.captureDir, Keep: 10, MaxBytes: 32 << 20, ClientBytes: 8 << 20,
 			Screenshots: true, JournalBytes: 4 << 20, Wait: budget(30 * time.Second),
