@@ -1244,6 +1244,15 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Second</title></head>
 			<body><h1>the second page</h1></body></html>`)
 	})
+	// A page that says which time it was served. One page looks exactly like
+	// the same page again from the reader's end, so this is what a reload can
+	// be asserted against at all — see TestPWAAPullDownReloadsThePage.
+	var served atomic.Int32
+	mux.HandleFunc("/served", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><title>Served</title></head>
+			<body><h1>this page was served %d times</h1></body></html>`, served.Add(1))
+	})
 	mux.HandleFunc("/ticker", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, tickerPage)

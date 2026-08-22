@@ -475,6 +475,59 @@ body {
   .spin { animation: none; }
 }
 
+/* --- pull to reload ---------------------------------------------------------
+ *
+ * Raised by a finger dragging down from the top of a mirrored page, which is
+ * where a phone browser keeps reload and where this shell's toolbar has no
+ * room for it. Drawn here rather than in the frame because everything in the
+ * frame is the page: a capture uploads that document and the parity suite
+ * measures it against the landside original, and neither is owed furniture of
+ * ours.
+ *
+ * It is not animated. Every pixel it moves is a pixel the finger moved, at
+ * half the rate — the resistance is the message — so there is nothing here for
+ * a reduced-motion rule to turn off. Transformed from a fixed point rather
+ * than laid out, because a transform is what the compositor can follow a
+ * finger with. */
+#pull {
+  position: fixed;
+  top: var(--chrome-h);
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transform: translate(-50%, 0);
+  padding: 7px 13px;
+  border: 1px solid #374151;
+  border-radius: 999px;
+  background: #0b1220;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+  /* A gesture in the page is not a gesture on this. It exists to be looked at
+     while the finger that raised it is still moving. */
+  pointer-events: none;
+}
+
+#pull[hidden] { display: none; }
+
+/* The glyph is the reload button's own, turning as the pull goes on: half a
+   turn by the point where letting go does something, which is the affordance
+   every phone browser draws and the only part of this that is a picture rather
+   than a word. */
+#pull-glyph { display: block; font-size: 15px; line-height: 1; }
+
+/* Far enough down to mean it. The accent is what the rest of the chrome uses
+   for "this is live and it is yours". */
+#pull.armed { color: var(--accent); border-color: var(--accent); }
+
+/* Letting go would do nothing, and the label says which nothing. Warn rather
+   than bad: the reader has not broken anything, and neither of the two reasons
+   is going to last. */
+#pull.refused { color: var(--warn); border-color: var(--warn); }
+
 /* --- context menu --------------------------------------------------------- */
 
 /* Drawn by the shell, never by the frame: no script runs there, and the frame
@@ -745,7 +798,10 @@ body {
   /* Back, forward and reload go with the strip. Nothing is lost: the system
      back gesture is already caught and spent on the tab's own history (see
      main.ts), and all three are in the ⋯ menu, which is one tap from here and
-     one tap the reader is not making on every page. */
+     one tap the reader is not making on every page. Reload is also on the
+     gesture a phone keeps it on — a pull down from the top of the page, which
+     raises #pull below — because a menu is the wrong place for the one control
+     whose job is "that did not work, do it again". */
   #back, #forward, #reload, #marks, #chat { display: none; }
 
   /* Except while it is a stop button. The argument for hiding reload is that it
