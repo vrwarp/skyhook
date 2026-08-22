@@ -63,6 +63,21 @@
     <div id="progress" role="progressbar" aria-label="Loading the page" hidden><span></span></div>
     <div id="status" role="status" hidden></div>
 
+    <!-- The phone's reload, which is not on the phone's toolbar. A finger
+         dragging down from the top of the page raises this; letting go far
+         enough down spends it. It says what it will do while the finger is
+         still there, including when the answer is that it will do nothing —
+         offline, or already loading — because a gesture that silently does
+         nothing is indistinguishable from one the client never heard.
+
+         aria-hidden because it is feedback for a drag: it is only ever on
+         screen while a finger is on the glass moving it, and a live region
+         announcing itself once per touchmove is not an affordance. -->
+    <div id="pull" hidden aria-hidden="true">
+      <span id="pull-glyph">&#8635;</span>
+      <span id="pull-label">Pull to reload</span>
+    </div>
+
     <aside id="panel" hidden>
       <div id="panel-header">
         <strong id="panel-title">Chat</strong>

@@ -1668,6 +1668,9 @@ what is on screen:
   forward and reload go with it: the system back gesture is already caught and
   spent on the tab's own history ([§14](#14-the-browsers-own-back-and-forward-drive-the-tab-not-the-shell)),
   and all three are in the ⋯ menu, one tap away and not a tap made on every page.
+  Reload came back out of that menu in
+  [§66](#66-the-reload-gesture-the-phone-shell-was-refusing-to-the-browser) —
+  not onto the toolbar, but onto the gesture a phone already keeps it on.
 - **The tabs become a list** behind a count in the toolbar, the way every phone
   browser has done it for fifteen years. The count spins when a tab that is not
   on screen is still fetching, which with the strip gone is the only thing that
@@ -4548,3 +4551,96 @@ This is the same rule §58 and §64 are about, three frame types along: a partia
 frame must not blank the fields it does not carry, and every place that keeps a
 table of them has to say so. `TabState` says it in a comment on the struct
 fields; `ImageMeta` now says it on the fold.
+
+### 66. The reload gesture the phone shell was refusing to the browser
+
+The compact chrome (§27) drops back, forward and reload from the toolbar and
+puts all three in the ⋯ menu. Two of those are the right trade — the system's
+own back gesture is already caught and spent on the tab's history (§14), and
+forward is rare — and the third is not. Reload is what a reader reaches for
+when a page arrived wrong, and on this link a page that arrived wrong is
+minutes of waiting about to be spent again. It is the one control whose whole
+job is *that did not work, do it again*, and it was two taps deep in a menu.
+
+Every phone browser has bound reload to the same gesture for fifteen years, and
+this shell had that gesture and gave it to nobody. Not by oversight, either:
+the shell takes it away from the browser on purpose, because what Chrome does
+with a pull at the top of the page is reload *the app*, and reloading the app
+throws away every tab and every page already paid seconds for.
+`body { overscroll-behavior: none }` has said exactly that, in a comment, since
+the phone shell was written. So the phone reader had no reload button on screen
+and a reload gesture whose only implementation was its suppression.
+
+It is answered now, in three pieces: the mirror host measures the drag, because
+it is the only code with the frame's document to listen to; `client/src/app/pull.ts`
+says what a drag that far means; and the shell draws an indicator over the
+frame and, on the release, spends it on `reloadTab`.
+
+**Touch events, and not the pointer events everything else here uses.** The
+input capture is built on pointer events for a measured reason (§27's own
+note): they are one stream for a mouse, a finger and a pen, and they arrive
+while the gesture is happening. But the same note records what the browser does
+with a gesture it has decided is a scroll — one `pointermove` arrives and the
+rest is delivered as a `pointercancel`, which is why a canvas has to declare
+`touch-action: none` to be pannable at all. A pull down at the top of a page is
+by definition a gesture the browser has already called a scroll. There is no
+pull to be measured on that stream, and `TestPWAAFingerPansACanvas` asserts the
+`pointercancel` that says so. Touch events keep coming for the whole of a
+gesture the browser has claimed, which is why every pull-to-refresh ever
+written is built on them.
+
+**All four listeners are passive, and nothing calls `preventDefault`.** The
+page is already at its top when a pull begins, so the browser has nothing left
+to scroll and the drag costs it nothing to deliver. A non-passive `touchmove`
+on the mirror document is the usual way to write this, and it would put the
+main thread in front of every scroll in the mirror to buy a gesture that does
+not need it. What would have been the browser's own answer to the overscroll —
+the elastic stretch, drawn under the shell's indicator — is refused in CSS
+instead: `overscroll-behavior: none` on the mirror frame's own root, which is
+the frame's `:root` and not the page's `html`, so no page element's computed
+style changes and the parity baselines do not move.
+
+**Most of the work is deciding which gestures are not this one.** Four
+questions are asked when the finger lands, and any "no" means the gesture can
+never become a pull however it goes on to move: is this one finger, is the page
+already at its top, is the finger on a canvas (which pans instead of
+scrolling), and is anything between the finger and the document itself scrolled
+down. The last is scroll chaining, asked as `scrollTop` up the composed path: a
+drag inside a scrolled menu belongs to that menu until the menu is back at its
+own top, and taking it for a reload takes the page out from under a reader who
+was only looking at a list. Two more end a gesture already under way — the
+finger going up or sideways, and a second finger arriving.
+
+A fifth was found by asking what else a downward drag over the mirror already
+means. On a phone the panel is a sheet over the page, and touching the page is
+how the reader puts it away; a drag that does that is spent, and must not also
+ask for the page again. The host already calls the shell's `dismiss` hook on
+every press and had been discarding its answer, and the answer was wrong
+anyway: `dismiss` reported only whether a *menu* had been open, so a press that
+closed a sheet was reported as having dismissed nothing — which also meant
+Escape with a sheet open closed the sheet and went on to reach the page. It
+reports both halves now, and a pull whose press was spent this way is never
+claimed. The question is asked at the claim rather than at the press, because a
+finger produces two event streams and this must not depend on which of them the
+browser delivers first.
+
+**A release that will do nothing says so before it happens.** Offline, the
+worker drops a navigate frame and no page is coming; busy, one already is, and
+asking again throws away every byte of it that has landed. Both are invisible
+from inside the gesture, so the indicator carries words: it never offers
+"Release to reload" when it would not honour it, and says which of the two
+reasons it is while the finger is still down. A pull that quietly did nothing
+is indistinguishable from a pull the client never heard, and the reader's next
+move after one of those is to make it again, harder.
+
+The indicator is the shell's own furniture and is drawn over the frame rather
+than inside it. Nothing this side paints may end up in the mirrored document:
+that document is what a capture uploads, what the parity suite measures against
+the landside page, and what the reader is being told is the page (§11e).
+
+`TestPWAAPullDownReloadsThePage` drives the whole of it from the reader's end —
+a real touchscreen emulated in the plane-side browser, real touch events at the
+glass, the shell arming, and an origin that counts its own servings so that a
+second arrival of the same page is visible at all. It also asserts the pull
+that stops short: a 30-pixel drag raises the indicator, does not arm it, and
+does not spend the link.

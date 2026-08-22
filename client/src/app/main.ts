@@ -5,7 +5,7 @@
  * No framework. The whole client is a patcher and an input serialiser; a
  * runtime would be more bytes than the mirror protocol it exists to carry.
  */
-import { MirrorHost, type MenuTarget, type MirrorFreeze } from '../mirror/host.js';
+import { MirrorHost, type MenuTarget, type MirrorFreeze, type PullState } from '../mirror/host.js';
 import { IMAGE_CACHE, imageCacheKey } from '../shared/caches.js';
 import { closeMenu, menuIsOpen, showMenu, type MenuGroups, type MenuItem } from './menu.js';
 import { pairingFromFragment, transportUrls } from './pairing.js';
@@ -32,6 +32,7 @@ import type {
   Snapshot, Stats, TabState, Viewport, Welcome,
 } from '../shared/protocol.js';
 import { PROTOCOL_VERSION } from '../shared/protocol.js';
+import * as pull from './pull.js';
 import * as transfers from './transfers.js';
 
 const store = new Store();
@@ -137,6 +138,9 @@ const el = {
   frames: byId<HTMLDivElement>('frames'),
   progress: byId<HTMLDivElement>('progress'),
   status: byId<HTMLDivElement>('status'),
+  pull: byId<HTMLDivElement>('pull'),
+  pullGlyph: byId<HTMLSpanElement>('pull-glyph'),
+  pullLabel: byId<HTMLSpanElement>('pull-label'),
   panel: byId<HTMLElement>('panel'),
   panelTitle: byId<HTMLElement>('panel-title'),
   panelBody: byId<HTMLDivElement>('panel-body'),
@@ -694,8 +698,15 @@ async function hostFor(tab: number): Promise<MirrorHost | null> {
     openLink: (_t, url) => openInNewTab(url),
     navigating: (t, url) => asking(t, 'Loading', url),
     menu: (t, target) => showMenu(target.x, target.y, mirrorMenu(t, target)),
+    pull: (t, state) => pulling(t, state),
     dismiss: () => {
-      const was = menuIsOpen();
+      // Both halves are reported, because what the caller does with the answer
+      // is stop the gesture there rather than also spending it on the page —
+      // and a sheet is the thing most often in front of the page when one
+      // arrives. Saying only the menu had it meant a press that closed a sheet
+      // went on to reach the page as well, and Escape with a sheet open
+      // reached the page too.
+      const was = menuIsOpen() || (isPhone() && !el.panel.hidden);
       closeMenu();
       // A sheet covers the page rather than sitting beside it, so touching the
       // page is how a phone says "not that, this". Reaching the × in the far
@@ -921,6 +932,10 @@ function layout(): void {
   for (const [id, host] of hosts) {
     host.frame.style.display = id === tabs.active ? 'block' : 'none';
   }
+  // Whatever frame a pull was being made in is not the frame on screen now.
+  // The gesture ends with the finger; this is for the ways a frame goes away
+  // under one — the tab closed, another tab selected from the sheet.
+  hidePull();
 }
 
 function hostOf(url: string): string {
@@ -1131,6 +1146,63 @@ function recordArrival(tab: TabView, before: string): void {
     return;
   }
   visits.record(tab.url, tab.title, takeTyped(tab.id, isBlank(before)));
+}
+
+/*
+ * ------------------------------------------------------------- pull to reload
+ *
+ * The phone's reload button is in the ⋯ menu, and a page that arrived wrong is
+ * minutes of this link to fetch again, so reload is not a control to bury. A
+ * finger dragging down from the top of the page is where every phone browser
+ * has kept it for fifteen years. The mirror host measures the drag (its own
+ * pull-to-reload section) and app/pull.ts says what the measurement means;
+ * this draws it and, on the release, spends it.
+ *
+ * The indicator is the shell's own furniture and is drawn over the frame
+ * rather than inside it. Nothing this side paints may end up in the mirrored
+ * document: it is what a capture uploads, what the parity suite measures
+ * against the landside page, and what the reader is being told is the page.
+ */
+
+/** Draws where the pull has got to, and reloads when the reader lets go far
+ *  enough down. */
+function pulling(tab: number, state: PullState): void {
+  if (tab !== tabs.active) return;
+  const refusal = pullRefusal(tab);
+  if (state.released) {
+    hidePull();
+    if (pull.fires(state.distance, refusal)) reloadTab(tab);
+    return;
+  }
+  const at = pull.indicator(state.distance, refusal);
+  el.pull.hidden = false;
+  el.pull.classList.toggle('armed', at.armed);
+  el.pull.classList.toggle('refused', at.refused);
+  el.pull.style.transform = `translate(-50%, ${at.travel}px)`;
+  el.pullGlyph.style.transform = `rotate(${at.turn}deg)`;
+  el.pullLabel.textContent = at.label;
+}
+
+/**
+ * Why letting go would not reload this tab, or null if it would.
+ *
+ * Asked on every move rather than once, because both answers can change while
+ * the finger is still down — the link comes back, the page the reader was
+ * waiting for arrives — and the label is what stops a reader spending a
+ * gesture on a refusal they cannot see.
+ */
+function pullRefusal(tab: number): pull.Refusal | null {
+  if (!connected) return 'offline';
+  if (isBusy(tab)) return 'busy';
+  return null;
+}
+
+function hidePull(): void {
+  if (el.pull.hidden) return;
+  el.pull.hidden = true;
+  el.pull.classList.remove('armed', 'refused');
+  el.pull.style.transform = '';
+  el.pullGlyph.style.transform = '';
 }
 
 /** Reloads a tab, from wherever the gesture came from. */

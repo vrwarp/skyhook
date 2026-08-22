@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MirrorHost, nearestList, type MenuTarget } from '../src/mirror/host.js';
+import { MirrorHost, nearestList, type MenuTarget, type PullState } from '../src/mirror/host.js';
 import { imageCacheKey } from '../src/shared/caches.js';
 import {
   NodeFlags, NodeKind, OpCode, type ImageMeta, type Mutation, type Snapshot,
@@ -78,6 +78,7 @@ function events() {
     openLink: vi.fn(),
     navigating: vi.fn(),
     menu: vi.fn(),
+    pull: vi.fn(),
     dismiss: vi.fn(() => false),
   };
 }
@@ -1833,5 +1834,179 @@ describe('a container scroll over a slow link', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/*
+Pull to reload, measured the way a phone actually reports the gesture.
+
+The client's reload button is not on the phone's toolbar — it is in the ⋯ menu,
+and a page that arrived wrong costs minutes of this link to fetch again — so
+the gesture every phone browser binds it to is the one that has to work. The
+measuring is here because this is the only code with the frame's document to
+listen to; what the numbers mean is app/pull.ts.
+
+Touch events and not pointer events, and the tests are written on touch events
+for the same reason the code is: a pull down at the top of a page is a gesture
+the browser has already decided is a scroll, and the note beside the pointer
+wiring says what it does with those — one `pointermove`, then a `pointercancel`
+and nothing after it. There is no pull to be measured on that stream.
+
+What each of these is really asking is which gestures are *not* this one. A
+reader scrolling a menu, panning a map, swiping a carousel or taking a pull
+back has not asked for a page, and on this link a page asked for by accident is
+the expensive mistake.
+*/
+describe('a pull down from the top of a page', () => {
+  type Point = { clientX: number; clientY: number };
+
+  /** Fingers on the glass. jsdom builds its TouchList out of whatever it is
+   *  handed, and the gesture reads two fields of each. */
+  function fingers(points: Point[]): Touch[] {
+    return points as unknown as Touch[];
+  }
+
+  function touch(host: MirrorHost, target: Element, kind: string, points: Point[]): void {
+    const win = host.frame.contentDocument!.defaultView!;
+    target.dispatchEvent(new win.TouchEvent(kind, { bubbles: true, touches: fingers(points) }));
+  }
+
+  /** A finger down at the top of the page and dragged straight down, in the
+   *  steps one actually travels in. */
+  function pullDown(host: MirrorHost, target: Element, by: number): void {
+    touch(host, target, 'touchstart', [{ clientX: 60, clientY: 20 }]);
+    for (let i = 1; i <= 4; i++) {
+      touch(host, target, 'touchmove', [{ clientX: 60, clientY: 20 + (by * i) / 4 }]);
+    }
+    touch(host, target, 'touchend', []);
+  }
+
+  /** Where the fixture's list sits, which is somewhere a finger can land. */
+  async function mounted(): Promise<{
+    host: MirrorHost; ev: ReturnType<typeof events>; page: Element;
+  }> {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    return { host, ev, page: host.frame.contentDocument!.getElementById('log')! };
+  }
+
+  function states(ev: ReturnType<typeof events>): PullState[] {
+    return ev.pull.mock.calls.map((c) => c[1] as PullState);
+  }
+
+  it('reports the drag as it happens and the distance it ended at', async () => {
+    const { host, ev, page } = await mounted();
+    pullDown(host, page, 100);
+
+    const seen = states(ev);
+    // The shell draws from these: a pull nobody hears about until the finger
+    // leaves is a gesture with no affordance, which is the same as no gesture.
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen.slice(0, -1).every((s) => !s.released)).toBe(true);
+    expect(seen.map((s) => s.distance)).toEqual([25, 50, 75, 100, 100]);
+    expect(seen[seen.length - 1].released).toBe(true);
+  });
+
+  it('says nothing at all for a finger that barely moved', async () => {
+    const { host, ev, page } = await mounted();
+    // A tap with a shaky thumb behind it. Below the slop there is no gesture,
+    // and the shell is never given an indicator to put away.
+    pullDown(host, page, 4);
+    expect(ev.pull).not.toHaveBeenCalled();
+  });
+
+  it('leaves a sideways swipe to the page', async () => {
+    const { host, ev, page } = await mounted();
+    touch(host, page, 'touchstart', [{ clientX: 200, clientY: 20 }]);
+    for (let i = 1; i <= 4; i++) {
+      touch(host, page, 'touchmove', [{ clientX: 200 - i * 30, clientY: 20 + i * 2 }]);
+    }
+    touch(host, page, 'touchend', []);
+
+    expect(ev.pull).not.toHaveBeenCalled();
+  });
+
+  it('gives the gesture up when the finger goes back up, and does not take it again', async () => {
+    const { host, ev, page } = await mounted();
+    touch(host, page, 'touchstart', [{ clientX: 60, clientY: 100 }]);
+    touch(host, page, 'touchmove', [{ clientX: 60, clientY: 180 }]);
+    // Back past where it started: the reader has changed their mind and is
+    // scrolling on down the page.
+    touch(host, page, 'touchmove', [{ clientX: 60, clientY: 60 }]);
+    // And down again, which is a scroll in progress and not a second pull.
+    touch(host, page, 'touchmove', [{ clientX: 60, clientY: 200 }]);
+    touch(host, page, 'touchend', []);
+
+    const seen = states(ev);
+    expect(seen[seen.length - 1]).toEqual({ distance: 0, released: true });
+    expect(seen.filter((s) => s.released)).toHaveLength(1);
+  });
+
+  it('reports nothing when the page is not at its top', async () => {
+    const { host, ev, page } = await mounted();
+    const win = host.frame.contentDocument!.defaultView!;
+    Object.defineProperty(win, 'scrollY', { value: 320, configurable: true });
+
+    pullDown(host, page, 100);
+    expect(ev.pull).not.toHaveBeenCalled();
+  });
+
+  it('leaves the drag to a list that has been scrolled', async () => {
+    const { host, ev, page } = await mounted();
+    // Scroll chaining: a drag inside a scrolled menu belongs to the menu until
+    // the menu is back at its own top. Stealing it for a reload takes the page
+    // out from under a reader who was only looking at a list.
+    const list = page.parentElement!;
+    list.scrollTop = 90;
+
+    pullDown(host, page, 100);
+    expect(ev.pull).not.toHaveBeenCalled();
+  });
+
+  it('leaves a canvas to the pan it is already claimed by', async () => {
+    const { host, ev } = await mountWithCanvas();
+    const canvas = host.frame.contentDocument!.querySelector('canvas')!;
+
+    pullDown(host, canvas, 100);
+    expect(ev.pull).not.toHaveBeenCalled();
+  });
+
+  it('ends at nothing when a second finger arrives', async () => {
+    const { host, ev, page } = await mounted();
+    touch(host, page, 'touchstart', [{ clientX: 60, clientY: 20 }]);
+    touch(host, page, 'touchmove', [{ clientX: 60, clientY: 120 }]);
+    // A pinch is not a pull, and the hundred pixels the first finger travelled
+    // are not a reload the reader asked for.
+    touch(host, page, 'touchmove',
+      [{ clientX: 60, clientY: 140 }, { clientX: 200, clientY: 300 }]);
+    touch(host, page, 'touchend', []);
+
+    expect(states(ev)[states(ev).length - 1]).toEqual({ distance: 0, released: true });
+  });
+
+  it('leaves a press that closed a sheet to the sheet', async () => {
+    // On a phone the panel is a sheet over the page, and touching the page is
+    // how the reader puts it away. A drag that does that is spent: the reader
+    // was reaching past the sheet, not asking for the page again — and asking
+    // for it again costs them minutes of this link.
+    const { host, ev, page } = await mounted();
+    ev.dismiss.mockReturnValue(true);
+    const win = host.frame.contentDocument!.defaultView!;
+    page.dispatchEvent(new win.PointerEvent('pointerdown', {
+      bubbles: true, clientX: 60, clientY: 20, button: 0, isPrimary: true, pointerType: 'touch',
+    }));
+
+    pullDown(host, page, 100);
+    expect(ev.pull).not.toHaveBeenCalled();
+  });
+
+  it('ends at nothing when the browser takes the gesture', async () => {
+    const { host, ev, page } = await mounted();
+    touch(host, page, 'touchstart', [{ clientX: 60, clientY: 20 }]);
+    touch(host, page, 'touchmove', [{ clientX: 60, clientY: 120 }]);
+    // The system's own back swipe, the app going away, a call arriving.
+    touch(host, page, 'touchcancel', []);
+
+    expect(states(ev)[states(ev).length - 1]).toEqual({ distance: 0, released: true });
   });
 });

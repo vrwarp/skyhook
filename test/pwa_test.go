@@ -1118,3 +1118,162 @@ func touchAt(ctx context.Context, t *testing.T, page *cdp.Session, kind string, 
 		t.Fatalf("%s: %v", kind, err)
 	}
 }
+
+/*
+A finger pulls the page down, and the page comes again.
+
+The reload button is not on the phone's toolbar — the compact chrome puts back,
+forward and reload in the ⋯ menu, which is the right trade for the first two
+and, for reload, a control buried two taps deep on the one device where a page
+that arrived wrong costs minutes of the link to fetch again. Every phone
+browser binds it to the top of the page itself, and this shell had that gesture
+and spent it on nothing: `overscroll-behavior: none` on its body, there so a
+swipe past the end of a mirrored page cannot make Chrome reload the *app* and
+lose every tab, also meant a pull down at the top did nothing whatever.
+
+Tested from the reader outwards, because that is the half the unit tests
+cannot reach: a real touchscreen emulated in the plane-side browser, real touch
+events dispatched at the glass, the mirror host deciding the drag is a pull,
+the shell drawing the indicator and arming it, the navigate frame crossing the
+link, and the origin serving the page a second time. The page counts its own
+servings, because one arrival of a page looks exactly like the next.
+*/
+func TestPWAAPullDownReloadsThePage(t *testing.T) {
+	h := newPWAHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(180*time.Second))
+	defer cancel()
+	page := h.openClient(ctx, t)
+
+	if err := page.Do(ctx, "Emulation.setTouchEmulationEnabled", map[string]any{
+		"enabled": true, "maxTouchPoints": 5,
+	}, nil); err != nil {
+		t.Fatalf("emulate a touchscreen: %v", err)
+	}
+
+	waitFor(ctx, t, page, `document.getElementById('hud-state').className === 'online'`,
+		budget(45*time.Second), "the client to connect")
+	evalJSON(ctx, t, page, `document.getElementById('newtab').click(), true`, nil)
+	waitFor(ctx, t, page, `!!document.querySelector('iframe.mirror')`,
+		budget(45*time.Second), "a mirror frame")
+	navigate := fmt.Sprintf(`(() => {
+      const bar = document.getElementById('urlbar');
+      bar.value = %q;
+      bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()`, h.site.URL+"/served")
+	evalJSON(ctx, t, page, navigate, nil)
+	waitFor(ctx, t, page, mirrorText+`.includes('served 1 times')`,
+		budget(60*time.Second), "the mirrored page")
+	// And that the tab has stopped waiting for it. A pull at a tab that is
+	// still loading is refused on purpose — one page is already on its way and
+	// asking again throws away every byte of it that has landed — so pulling
+	// before the arrival has settled would be testing the refusal. The stop
+	// button is drawn from the same predicate the refusal is.
+	waitFor(ctx, t, page, `!document.getElementById('reload').classList.contains('stop')`,
+		budget(45*time.Second), "the tab to stop loading")
+
+	// Where the mirror is on the glass. The gesture starts near its top,
+	// because a pull is only a pull from a page that is already at its top.
+	var frame struct{ X, Y, W, H float64 }
+	evalJSON(ctx, t, page, `(() => {
+      const r = document.querySelector('iframe.mirror').getBoundingClientRect();
+      return { X: r.left, Y: r.top, W: r.width, H: r.height };
+    })()`, &frame)
+	if frame.W < 80 || frame.H < 200 {
+		t.Fatalf("the mirror is %vx%v on screen; nothing can be pulled in it", frame.W, frame.H)
+	}
+
+	// What the shell is showing while the finger is down: the indicator's
+	// classes and the words on it, which is the whole affordance.
+	const showing = `(() => {
+      const p = document.getElementById('pull');
+      if (p.hidden) return '';
+      return p.className + '|' + document.getElementById('pull-label').textContent;
+    })()`
+	// And what the frame was handed, so a gesture that never arrived is
+	// distinguishable from one the client failed to understand.
+	const watch = `(() => {
+      const d = document.querySelector('iframe.mirror').contentDocument;
+      window.__touches = [];
+      for (const k of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+        d.addEventListener(k, () => window.__touches.push(k), true);
+      }
+      return true;
+    })()`
+	evalJSON(ctx, t, page, watch, nil)
+
+	x := frame.X + frame.W/2
+	top := frame.Y + 25
+	// A finger down at the top and dragged straight down, in the steps one
+	// actually travels in, reporting what the shell said at the end of it.
+	pull := func(by float64) (indicator, touches string) {
+		evalJSON(ctx, t, page, `(window.__touches = [], true)`, nil)
+		touchAt(ctx, t, page, "touchStart", x, top)
+		for i := 1; i <= 4; i++ {
+			time.Sleep(30 * time.Millisecond)
+			touchAt(ctx, t, page, "touchMove", x, top+by*float64(i)/4)
+		}
+		evalJSON(ctx, t, page, showing, &indicator)
+		time.Sleep(30 * time.Millisecond)
+		touchAt(ctx, t, page, "touchEnd", x, top+by)
+		evalJSON(ctx, t, page, `JSON.stringify(window.__touches)`, &touches)
+		return indicator, touches
+	}
+
+	// Short of the trigger first. The indicator says what the gesture is for
+	// and does not promise the reload — and the page must not come again for
+	// a pull the reader did not finish making.
+	if short, touches := pull(30); short != "" {
+		if strings.Contains(short, "armed") {
+			t.Errorf("a 30px pull armed the reload: the indicator said %q (frame saw %s)",
+				short, touches)
+		}
+		if !strings.Contains(short, "Pull to reload") {
+			t.Errorf("a 30px pull said %q, want the invitation (frame saw %s)", short, touches)
+		}
+	}
+
+	/*
+	 * Injected input is not a finger.
+	 *
+	 * `Input.dispatchTouchEvent` hands the browser a gesture and the browser
+	 * delivers it when it gets to it; on a machine running eight of these at
+	 * once it sometimes delivers the press and nothing after it, which the
+	 * canvas pan test measured and documents. A gesture that never reached the
+	 * frame is not a gesture the client failed to answer, so the pull is
+	 * repeated until the frame confirms it saw a whole one — which is also
+	 * what a reader whose pull did nothing does. The assertions are unchanged
+	 * and are made against a gesture that demonstrably arrived.
+	 */
+	var indicator, touches string
+	armed := false
+	for deadline := time.Now().Add(budget(60 * time.Second)); time.Now().Before(deadline); {
+		indicator, touches = pull(120)
+		if strings.Contains(indicator, "armed") {
+			armed = true
+			break
+		}
+		if !strings.Contains(touches, "touchmove") {
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if !armed {
+		t.Fatalf("a 120px pull never armed the reload; the indicator said %q, the frame saw %s",
+			indicator, touches)
+	}
+
+	// And the release spends it: the origin serves the page a second time.
+	deadline := time.Now().Add(budget(90 * time.Second))
+	var text string
+	for time.Now().Before(deadline) {
+		evalJSON(ctx, t, page, mirrorText, &text)
+		if strings.Contains(text, "served") && !strings.Contains(text, "served 1 times") {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("the page still reads %q after a pull that armed the reload (frame saw %s)",
+		strings.TrimSpace(text), touches)
+}

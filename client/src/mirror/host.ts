@@ -38,6 +38,13 @@ const MIRROR_CSS = `
    the answer. */
 :root { margin: 0; padding: 0; background: #fff; }
 :root > body { margin: 0; padding: 0; }
+/* A swipe that runs past either end of the page stops here. Two things would
+   otherwise answer it: the browser, with the elastic stretch it draws under
+   the shell's own pull-to-reload indicator, and the shell's body underneath
+   this frame, which stops the chain only because it refuses it too — and what
+   it is refusing there is Chrome reloading the *app* and losing every tab.
+   Chaining out of a mirror frame has nowhere useful to go either way. */
+:root { overscroll-behavior: none; }
 /* The percentage-height chain, unconditionally. Landside, html { height:
    100% } resolves against the viewport; here the mirrored html resolves
    against this body, so the frame's own root and body must span the frame
@@ -291,6 +298,22 @@ export interface MirrorFreeze {
   error?: string;
 }
 
+/**
+ * How far a pull-to-reload gesture has got, as the shell hears about it.
+ *
+ * The distance is the finger's, in the frame's CSS pixels, and it is the whole
+ * measurement: what it takes to arm the gesture and how far the indicator
+ * moves for it are the shell's to decide (app/pull.ts). A release that the
+ * reader took back, that went sideways, or that the browser claimed for
+ * itself arrives here as zero — so the shell has one rule to apply and not
+ * three.
+ */
+export interface PullState {
+  distance: number;
+  /** The finger has left the glass. Whatever is going to happen happens now. */
+  released: boolean;
+}
+
 /** Emitted by the host, forwarded to the server by the app shell. */
 export interface HostEvents {
   input(tab: number, ev: Record<string, unknown>): void;
@@ -312,6 +335,11 @@ export interface HostEvents {
   navigating(tab: number, url?: string): void;
   /** A right click, for the shell to answer with Skyhook's own menu. */
   menu(tab: number, target: MenuTarget): void;
+  /**
+   * A finger dragging the page down from its own top, which is where every
+   * phone browser keeps reload and where this one kept nothing at all.
+   */
+  pull(tab: number, state: PullState): void;
   /**
    * The user is doing something else now — a click, a scroll, Escape — inside
    * the frame. Events there never reach the shell's own document, so anything
@@ -943,6 +971,113 @@ export class MirrorHost {
   }
 
   /*
+   * ------------------------------------------------------------ pull to reload
+   *
+   * What the shell does with this is app/pull.ts, which is also where the
+   * argument for having it at all is written down. Here it is only measured,
+   * and the measurement is four questions asked once, when the finger lands:
+   * is this one finger, is the page already at its top, is the finger on
+   * something that pans instead of scrolling, and is there a scrolled list
+   * between it and the page. Any "no" and the gesture is never a pull, however
+   * it goes on to move.
+   *
+   * The last of those is what a browser calls scroll chaining: a drag inside a
+   * list that has been scrolled belongs to that list until the list is back at
+   * its own top, and stealing it for a reload takes the page out from under a
+   * reader who was only scrolling a menu. Asking the same question of every
+   * ancestor at once is what `scrollTop` up the composed path is; a list at
+   * zero is one the drag would chain out of anyway.
+   */
+
+  /** Movement below this is a hand not holding still. It is the same number in
+   *  both directions: a pull that has not been claimed yet must survive a
+   *  finger drifting a pixel upward, and a scroll must not be claimed as one. */
+  private static readonly PULL_SLOP_PX = 8;
+
+  /** A pull-to-reload gesture in progress, or null. `claimed` is set once the
+   *  finger has moved far enough down to have meant it, which is the point the
+   *  shell starts hearing about it. */
+  private pulling: { x: number; y: number; distance: number; claimed: boolean } | null = null;
+
+  /** Whether the press this gesture belongs to was spent closing something the
+   *  shell had over the page. See the pointerdown wiring. */
+  private dismissedPress = false;
+
+  private beginPull(ev: TouchEvent): void {
+    this.pulling = null;
+    // A pinch is not a pull, and neither is a second finger landing on a page
+    // the first one is already dragging.
+    if (ev.touches.length !== 1) return;
+    const win = this.frame.contentWindow;
+    if (!win || win.scrollY > 0) return;
+    // A canvas is panned rather than scrolled (see the drag machinery above),
+    // and the pan starts at exactly the same place this would.
+    if (this.regionAt(this.eventTarget(ev))) return;
+    if (this.scrolledUnderFinger(ev)) return;
+    const touch = ev.touches[0];
+    this.pulling = { x: touch.clientX, y: touch.clientY, distance: 0, claimed: false };
+  }
+
+  private movePull(ev: TouchEvent): void {
+    const pull = this.pulling;
+    if (!pull) return;
+    if (ev.touches.length !== 1) {
+      this.endPull(0);
+      return;
+    }
+    const touch = ev.touches[0];
+    const dy = touch.clientY - pull.y;
+    const dx = touch.clientX - pull.x;
+    // Up, or sideways: a scroll on down the page, a carousel, the system's own
+    // edge swipe. A gesture that has gone somewhere else does not come back
+    // and become a pull — by then the finger is mid-scroll and the page has
+    // moved under it, so the distance this was measuring is not a distance any
+    // more.
+    if (dy <= -MirrorHost.PULL_SLOP_PX || Math.abs(dx) > Math.max(dy, MirrorHost.PULL_SLOP_PX)) {
+      this.endPull(0);
+      return;
+    }
+    if (!pull.claimed && dy < MirrorHost.PULL_SLOP_PX) return;
+    // The press that started this closed a sheet or a menu the shell had over
+    // the page, and a gesture already spent is not also a request for a new
+    // page — on this link an accidental one costs minutes. Asked here rather
+    // than at the press, because a finger produces two streams and this does
+    // not depend on which of them the browser delivers first.
+    if (this.dismissedPress) {
+      this.endPull(0);
+      return;
+    }
+    pull.claimed = true;
+    // Never negative: within the slop the finger is still on its way back down
+    // as far as anyone can tell, and the indicator simply sits at the top.
+    pull.distance = Math.max(dy, 0);
+    this.events.pull(this.tab, { distance: pull.distance, released: false });
+  }
+
+  /**
+   * Ends the gesture, saying how far it got.
+   *
+   * Zero for one the reader took back, one the browser claimed, and one that
+   * was never a pull at all — the shell has a single rule for what a distance
+   * means, and every way of ending short of a reload arrives as a distance too
+   * small to trigger one. A gesture that was never claimed says nothing: the
+   * shell has nothing on screen to put away.
+   */
+  private endPull(distance: number): void {
+    const pull = this.pulling;
+    this.pulling = null;
+    if (!pull?.claimed) return;
+    this.events.pull(this.tab, { distance, released: true });
+  }
+
+  /** Whether anything between the finger and the document has been scrolled
+   *  down. The drag belongs to that list, and to the page only once it is
+   *  back at its top. */
+  private scrolledUnderFinger(ev: Event): boolean {
+    return ev.composedPath().some((node) => ((node as HTMLElement).scrollTop ?? 0) > 0);
+  }
+
+  /*
    * A click inside the mirror, as the semantic event the server replays.
    *
    * Its own method because of how many ways it ends without one: a link
@@ -1076,6 +1211,37 @@ export class MirrorHost {
     // button, and a drag left open would swallow the next click.
     doc.addEventListener('pointerleave', (ev) => this.endDrag(ev as PointerEvent), true);
 
+    /*
+     * The one gesture measured on touch events rather than pointer events, and
+     * it has to be. A pull down at the top of a page is a gesture the browser
+     * has already decided is a scroll, and the note above says what the
+     * browser does with those: one `pointermove` arrives and the rest of the
+     * drag is delivered as a `pointercancel`. That is the correct behaviour
+     * for a pan — the finger belongs to the scroller, not to the page — and it
+     * leaves nothing at all to measure a pull with. Touch events keep coming
+     * for the whole of a gesture the browser has claimed, which is why every
+     * pull-to-refresh ever written is built on them.
+     *
+     * All four are passive, and nothing here ever calls `preventDefault`. The
+     * page is already at its top when a pull begins, so the browser has
+     * nothing left to scroll and the drag costs it nothing to deliver; a
+     * non-passive `touchmove` on this document would put the main thread in
+     * front of every scroll in the mirror to buy a gesture that does not need
+     * it. What would have been the browser's own answer to the overscroll —
+     * the elastic stretch — is refused in CSS instead, at the top of this file.
+     */
+    doc.addEventListener('touchstart', (ev) => this.beginPull(ev as TouchEvent),
+      { capture: true, passive: true });
+    doc.addEventListener('touchmove', (ev) => this.movePull(ev as TouchEvent),
+      { capture: true, passive: true });
+    doc.addEventListener('touchend', () => this.endPull(this.pulling?.distance ?? 0),
+      { capture: true, passive: true });
+    // The browser took the gesture for something of its own — the system back
+    // swipe, a second finger arriving, the app going away. None of those are
+    // the reader asking for a page.
+    doc.addEventListener('touchcancel', () => this.endPull(0),
+      { capture: true, passive: true });
+
     // `pressing` brackets the focus change, which is a default action of the
     // compat mousedown and lands between these two on a phone exactly as it
     // does under a mouse. Nothing else is measured here.
@@ -1108,7 +1274,11 @@ export class MirrorHost {
       this.dragConsumedClick = false;
       this.recordPointer(pointer);
       this.beginDrag(pointer);
-      this.events.dismiss(this.tab);
+      // Kept, rather than discarded as it used to be: a press that closed a
+      // menu or a sheet was spent on that, and the pull machinery below asks
+      // whether this one was. Every press overwrites it, so there is nothing
+      // to clear.
+      this.dismissedPress = this.events.dismiss(this.tab);
     }, true);
 
     // Middle click means "open in a new tab" in every browser, and a mirrored
