@@ -794,6 +794,24 @@ func (s *Session) imageWanted(hashes []string) {
 	}
 }
 
+// imageHeld records pictures the client says it already has, so the pipeline
+// never spends the link pushing them. An ask for the same hash later still
+// wins — imageWanted's permit is checked after the sent ledger — because an
+// ask means the cache lost it after all.
+func (s *Session) imageHeld(hashes []string) {
+	if len(hashes) == 0 {
+		return
+	}
+	s.imgMu.Lock()
+	defer s.imgMu.Unlock()
+	for _, h := range hashes {
+		if h == "" {
+			continue
+		}
+		s.noteImageSent(h)
+	}
+}
+
 // imagesRemembered bounds the ledger. A session that has seen this many
 // distinct images has browsed for a long time, and forgetting the lot costs one
 // round of re-sends rather than unbounded memory.
@@ -1450,6 +1468,33 @@ func planResync(ring *Ring, haveTo uint64, reason string) resyncPlan {
 	return resyncPlan{frames: frames, bytes: size}
 }
 
+// TabCurrent says whether a resuming client's claim about a tab — the seq,
+// document epoch and hash it acked last — matches what the tab has emitted,
+// in which case there is nothing to close and no resync to run. This is the
+// good case planResync's comment promises stays free: a client that
+// reconnects with nothing missing. The claim must name the same document
+// (epoch) and the last emitted frame (seq) exactly; anything less goes down
+// the normal resync path, where the ring decides between replay and
+// snapshot. The hash is not compared here — a silently corrupt replica at
+// the right seq is the integrity loop's case, which keeps its own cadence
+// and catches it from the acks this reconnect already restored.
+func (s *Session) TabCurrent(ta protocol.TabAck) bool {
+	if ta.Seq == 0 || ta.Epoch == 0 {
+		return false
+	}
+	s.mu.Lock()
+	ts := s.tabs[ta.Tab]
+	var tab *mirror.Tab
+	if ts != nil {
+		tab = ts.tab
+	}
+	s.mu.Unlock()
+	if tab == nil {
+		return false
+	}
+	return tab.DocEpoch() == ta.Epoch && tab.Seq() == ta.Seq
+}
+
 // Resync closes a gap: replay if the buffer covers it, otherwise re-snapshot.
 func (s *Session) Resync(ctx context.Context, tab uint32, haveTo uint64, reason string) {
 	s.mu.Lock()
@@ -1931,6 +1976,12 @@ func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol
 		if err := f.DecodeBody(&w); err != nil {
 			return err
 		}
+		// Have is the client volunteering what its cross-flight cache already
+		// holds — pictures from an earlier session this one has never
+		// shipped. Fold them into the sent ledger and they are never pushed:
+		// the field crossed the wire for a year while nothing read it (the
+		// P-107 audit's "filled by the client and read by nobody").
+		s.imageHeld(w.Have)
 		if s.mgr.images != nil {
 			s.imageWanted(w.Hashes)
 			s.mgr.images.Want(f.Tab, w.Hashes)

@@ -2480,6 +2480,21 @@ func (h *harness) connect(ctx context.Context, sessionID string) *client.Client 
 	return cl
 }
 
+// connectResuming reconnects the way the PWA does after a link drop: naming
+// the session and claiming the tabs it already holds.
+func (h *harness) connectResuming(ctx context.Context, sessionID string, resume []protocol.TabAck) *client.Client {
+	h.t.Helper()
+	cl, err := client.Dial(ctx, h.url, client.Options{
+		Token: h.token, SessionID: sessionID, Zstd: true,
+		Viewport: protocol.Viewport{W: 1024, H: 768, DPR: 1},
+		Resume:   resume,
+	})
+	if err != nil {
+		h.t.Fatalf("dial: %v", err)
+	}
+	return cl
+}
+
 // openFixture connects, opens the fixture page and waits for real content.
 // slowLink reports whether the emulated 1.2 s / 250 kbps link is in play.
 func slowLink() bool { return os.Getenv("SKYHOOK_SLOW_LINK") == "1" }

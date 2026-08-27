@@ -163,7 +163,7 @@ describe('client frames encode integers as CBOR integers', () => {
     hello: encodeFrame(FrameType.Hello, 0, helloBody({
       token: 'conformance-token', caps: ['zstd'],
       viewport: { w: 1280, h: 800, dpr: 1, mobile: false },
-      resume: [{ tab: 1, seq: 9, hash: 0xdeadbeef }],
+      resume: [{ tab: 1, seq: 9, hash: 0xdeadbeef, epoch: 4 }],
       client: 'conformance', build: 'conformance-build',
     })),
   };

@@ -397,7 +397,7 @@ export function helloBody(opts: {
   sessionId?: string;
   caps: string[];
   viewport: Viewport;
-  resume?: { tab: number; seq: number; hash: number }[];
+  resume?: { tab: number; seq: number; hash: number; epoch?: number }[];
   queued?: Map<number, unknown>[];
   client: string;
   build: string;
@@ -414,6 +414,10 @@ export function helloBody(opts: {
       t.set(F.tabAck.tab, safeInt(r.tab));
       t.set(F.tabAck.seq, safeInt(r.seq));
       if (r.hash) t.set(F.tabAck.hash, safeInt(r.hash));
+      // Which document those numbers are about: the server answers a
+      // current tab with silence instead of a snapshot, but only when the
+      // claim names the page (see Session.TabCurrent).
+      if (r.epoch) t.set(F.tabAck.epoch, safeInt(r.epoch));
       return t;
     }));
   }

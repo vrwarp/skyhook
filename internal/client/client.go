@@ -61,6 +61,14 @@ type Client struct {
 	// lastCapture is the most recent bundle the server said it had written.
 	lastCapture *protocol.CaptureDone
 
+	// resumed marks tabs this client claimed in Hello.Resume: the claim says
+	// we already hold them, so the Welcome handler must not cold-resync them
+	// — the whole point of the claim is a reconnect that costs nothing.
+	resumed map[uint32]bool
+	// snapshots counts full documents received per tab, which is the unit a
+	// chatter test budgets in: a quiet reconnect should deliver zero.
+	snapshots map[uint32]int
+
 	inputSeq uint64
 	events   chan Event
 	closed   chan struct{}
@@ -92,6 +100,10 @@ type Options struct {
 	Zstd      bool
 	Logger    Logger
 	Insecure  bool
+	// Resume claims tabs this client already holds — what the PWA sends
+	// after a link drop. The server answers a current claim with nothing at
+	// all, which is what TestAQuietTabReconnectsForFree pins.
+	Resume []protocol.TabAck
 }
 
 // Dial connects over the WebSocket fallback and completes the handshake.
@@ -125,7 +137,12 @@ func Attach(ctx context.Context, conn transport.Conn, opts Options) (*Client, er
 		downloads: map[string]protocol.Download{},
 		dlData:    map[string]*dlBuffer{},
 		fileAsks:  map[uint32][]protocol.FileAsk{},
+		resumed:   map[uint32]bool{},
+		snapshots: map[uint32]int{},
 		events:    make(chan Event, 256), closed: make(chan struct{}),
+	}
+	for _, ta := range opts.Resume {
+		c.resumed[ta.Tab] = true
 	}
 	caps := []string{}
 	if opts.Zstd {
@@ -134,6 +151,7 @@ func Attach(ctx context.Context, conn transport.Conn, opts Options) (*Client, er
 	hello := protocol.Hello{
 		Version: protocol.Version, Token: opts.Token, SessionID: opts.SessionID,
 		Caps: caps, Viewport: opts.Viewport, Client: "skyhookctl",
+		Resume: opts.Resume,
 	}
 	if err := c.send(protocol.ChCtrl, protocol.TypeHello, 0, hello); err != nil {
 		return nil, err
@@ -245,7 +263,7 @@ func (c *Client) handle(f *protocol.Frame) {
 		c.sessionID = w.SessionID
 		missing := make([]uint32, 0, len(w.Tabs))
 		for _, tr := range w.Tabs {
-			if c.models[tr.Tab] == nil {
+			if c.models[tr.Tab] == nil && !c.resumed[tr.Tab] {
 				missing = append(missing, tr.Tab)
 			}
 		}
@@ -269,6 +287,7 @@ func (c *Client) handle(f *protocol.Frame) {
 			return
 		}
 		c.mu.Lock()
+		c.snapshots[f.Tab]++
 		c.models[f.Tab] = m
 		c.seqs[f.Tab] = 0
 		// Which document this replica now holds, echoed back on every
@@ -495,6 +514,27 @@ func (c *Client) DocScrolls(tab uint32) []protocol.Op {
 	out := make([]protocol.Op, len(c.docScrolls[tab]))
 	copy(out, c.docScrolls[tab])
 	return out
+}
+
+// Snapshots reports how many full documents have arrived for a tab. A
+// reconnect that missed nothing should add zero to it.
+func (c *Client) Snapshots(tab uint32) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.snapshots[tab]
+}
+
+// State reports what this client would claim about a tab on a resume: the
+// last applied seq, the replica's hash, and the document epoch — the same
+// three facts the PWA's acks carry.
+func (c *Client) State(tab uint32) protocol.TabAck {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ta := protocol.TabAck{Tab: tab, Seq: c.seqs[tab], Epoch: c.epochs[tab]}
+	if m := c.models[tab]; m != nil {
+		ta.Hash = m.Hash()
+	}
+	return ta
 }
 
 // NodeScrolls reports every container scroll op the server has sent for a
@@ -985,6 +1025,28 @@ func (c *Client) ImageBytes(hash string) ([]byte, bool) {
 	defer c.mu.Unlock()
 	b, ok := c.imageData[hash]
 	return b, ok
+}
+
+// PrimeImage seeds the client's image store, modelling the cross-flight
+// cache a real client keeps across sessions: a primed hash is neither asked
+// for after a snapshot nor expected on the wire.
+func (c *Client) PrimeImage(hash string, data []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.imageData[hash] = data
+}
+
+// AnnounceImages tells the server which image bytes this client already
+// holds — a warm cross-flight cache introducing itself (ImageWant.Have), so
+// a new session does not re-ship pictures the device kept.
+func (c *Client) AnnounceImages(have []string) error {
+	return c.send(protocol.ChCtrl, protocol.TypeImageWant, 0, protocol.ImageWant{Have: have})
+}
+
+// AskImages requests image bytes by hash — the client's cache lost them
+// after all, which always outranks the sent ledger.
+func (c *Client) AskImages(tab uint32, hashes []string) error {
+	return c.send(protocol.ChCtrl, protocol.TypeImageWant, tab, protocol.ImageWant{Hashes: hashes})
 }
 
 // AdapterRecords returns the records received so far.

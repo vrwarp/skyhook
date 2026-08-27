@@ -245,6 +245,14 @@ func (m *Manager) Serve(conn transport.Conn) {
 	}
 	for _, ta := range hello.Resume {
 		sess.Ack(ta.Tab, ta.Seq, ta.Hash, ta.Epoch)
+		// A client that missed nothing gets nothing: for a quiet tab the ring
+		// is empty after that ack, and the resync below would answer with a
+		// whole document to close a gap that does not exist — the single
+		// largest avoidable cost on a link that reconnects every few minutes.
+		if sess.TabCurrent(ta) {
+			log.Debug("tab resumed current; no resync", "tab", ta.Tab, "seq", ta.Seq)
+			continue
+		}
 		sess.Resync(ctx, ta.Tab, ta.Seq, "reconnect")
 	}
 	if resumed {

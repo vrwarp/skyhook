@@ -2040,6 +2040,48 @@ describe('an optimistic send the page did not make', () => {
     host.applyMutation(refs(valueOp(40, 'hel'), base), 3, 1);
     expect(composer.textContent).toBe('hello there');
   });
+
+  /*
+   * A burst of typing is one frame, not one per key.
+   *
+   * Appended deltas concatenate losslessly, so pooling them for a beat costs
+   * nothing but the beat — and saves a frame, a landside replay, an echo
+   * batch and an ack per keystroke it absorbs. Anything that is not appended
+   * text flushes the pool ahead of itself, so the wire order of what the
+   * reader did survives exactly.
+   */
+  it('pools a burst of keystrokes into one text frame', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      const snap = withComposer(snapshot());
+      host.applySnapshot(snap);
+
+      let composer = type(host, 'h');
+      composer = type(host, 'he');
+      composer = type(host, 'hel');
+      const textFrames = () => ev.input.mock.calls
+        .map((c) => c[1] as Record<string, unknown>)
+        .filter((p) => p.kind === 'text');
+      expect(textFrames()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(textFrames()).toHaveLength(1);
+      expect(textFrames()[0].text).toBe('hel');
+
+      // A control key flushes the pool ahead of itself: the Enter must not
+      // arrive landside before the letters it follows.
+      type(host, 'hell');
+      pressEnter(composer);
+      const kinds = ev.input.mock.calls
+        .map((c) => (c[1] as Record<string, unknown>).kind)
+        .filter((k) => k === 'text' || k === 'key');
+      expect(kinds).toEqual(['text', 'text', 'key']);
+      expect(textFrames()[1].text).toBe('l');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 /*

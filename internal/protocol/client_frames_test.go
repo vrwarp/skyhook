@@ -200,6 +200,11 @@ func TestClientHelloDecodes(t *testing.T) {
 	if len(hello.Resume) != 1 || hello.Resume[0].Seq != 9 || hello.Resume[0].Hash != 0xdeadbeef {
 		t.Fatalf("resume = %+v", hello.Resume)
 	}
+	// The epoch is what lets the server answer a current tab with silence
+	// instead of a snapshot (Session.TabCurrent).
+	if hello.Resume[0].Epoch != 4 {
+		t.Fatalf("resume epoch = %d, want 4", hello.Resume[0].Epoch)
+	}
 	if hello.Viewport.W != 1280 {
 		t.Fatalf("viewport = %+v", hello.Viewport)
 	}

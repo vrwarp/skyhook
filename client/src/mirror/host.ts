@@ -755,7 +755,47 @@ export class MirrorHost {
 
   // ------------------------------------------------------------------ input
 
+  /** How long appended keystrokes pool before crossing as one frame. Small
+   *  against the link's round trip, large enough that a burst of typing is
+   *  one frame instead of one per key — and with it one landside replay,
+   *  one echo batch and one ack instead of one each per keystroke. */
+  private static readonly TEXT_POOL_MS = 150;
+
+  private pendingText: { node: number; text: string; timer: number } | null = null;
+
+  /** Sends the pooled keystrokes, if any. Every non-text frame calls this
+   *  first, so the wire order of what the reader did is preserved exactly. */
+  private flushPendingText(): void {
+    const p = this.pendingText;
+    if (!p) return;
+    this.pendingText = null;
+    window.clearTimeout(p.timer);
+    this.dispatch({ kind: InputKind.Text, node: p.node, text: p.text });
+  }
+
   private send(ev: Record<string, unknown>): void {
+    // Appended text pools; everything else flushes the pool ahead of itself.
+    // Deltas concatenate losslessly — that is what makes Text "append-only"
+    // — so a burst of keystrokes is one frame carrying the same characters.
+    if (ev.kind === InputKind.Text &&
+        typeof ev.node === 'number' && typeof ev.text === 'string') {
+      const p = this.pendingText;
+      if (p && p.node === ev.node) {
+        p.text += ev.text;
+        return;
+      }
+      this.flushPendingText();
+      this.pendingText = {
+        node: ev.node, text: ev.text,
+        timer: window.setTimeout(() => this.flushPendingText(), MirrorHost.TEXT_POOL_MS),
+      };
+      return;
+    }
+    this.flushPendingText();
+    this.dispatch(ev);
+  }
+
+  private dispatch(ev: Record<string, unknown>): void {
     this.inputSeq += 1;
     // Where focus last moved because the reader moved it. A click's default
     // action is a focus change, so clicks count with the explicit pair.
@@ -2324,6 +2364,10 @@ export class MirrorHost {
     if (this.doc) this.attach(this.doc, !!snap.quirks);
     this.setPageUrl(snap.url);
     this.echo?.release();
+    // Pooled keystrokes go out ahead of the new document: on a resync they
+    // are typing the reader wants kept, and their node ids only mean
+    // anything while the old ids still stand.
+    this.flushPendingText();
     // A held blur names a node in the document being replaced. Sent after this
     // it would name whatever the server has since given that id to, and the
     // gesture it belonged to is over either way. The same goes for a pending
@@ -2835,8 +2879,10 @@ export class MirrorHost {
     const server = op.ref2 < 0 ? '' : this.patcher.stringAt(op.ref2);
     // An echo of an edit the reader has already typed past. Taking it as truth
     // would put the field back several keystrokes and lose them, which is the
-    // one thing local echo exists to prevent.
+    // one thing local echo exists to prevent. Keystrokes still pooling count:
+    // they are newer than anything the server can have echoed, sent or not.
     if (this.applyingCause && this.applyingCause < this.lastEditInputSeq) return;
+    if (this.pendingText && this.pendingText.node === op.node) return;
     if (server !== '') this.ghostsWereNotSent();
     if (server !== valueOf(node)) this.echo?.reconcile(op.node, server);
   }

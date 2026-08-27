@@ -2118,18 +2118,17 @@ prose below is the explanation and [PARITY.md](PARITY.md) is the ledger:
   stylesheet, and `FontFace` exposes no `src`, so there is no url() to rewrite
   and nothing to fetch. Google Chat builds one of its four icon families this
   way and its glyphs arrive as their ligature names.
-- **`wheel` and `hover` are protocol surface nothing sends.** Both are replayed
-  landside (`Tab.wheel`, `Tab.hover`) and no client has ever emitted one: the
-  mirror scrolls plane-side and reports where it got to, and hover is the
-  reader's own (§35's media-feature reasoning). They are kept because the
-  protocol is versioned, not because they work.
-- **The landside browser is a phone with a mouse.** `SetViewport` passes
-  `mobile` to `Emulation.setDeviceMetricsOverride` and never enables touch
-  emulation, so landside `navigator.maxTouchPoints` is 0 and a page branching
-  on touch in *script* builds its mouse interaction model. That is currently
-  self-consistent — §49's gestures are replayed as real mouse events, which is
-  what such a page is listening for — and it is why enabling touch landside is
-  not a one-line change: it would have to arrive with touch input to feed it.
+- **`wheel` and `hover` are sent for the gestures that mean them** (P-004 and
+  P-111's hover third, both closed by §70): a wheel over a gesture-claiming
+  widget crosses and zooms it, a pointer resting on a new element crosses and
+  parks the landside pointer. A wheel over ordinary content deliberately still
+  does not cross — the mirror scrolls plane-side and position telemetry
+  already says where the reader is.
+- **The landside browser claims the touchscreen the reader has** (P-006,
+  closed by §69): the viewport carries a `touch` flag, `SetViewport` turns on
+  touch emulation with it, and a finger's gestures replay as the touch events
+  they were — emulation and input arriving together, which is what this
+  entry used to say made it more than a one-line change.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -4835,3 +4834,63 @@ report queued for the same box, because what would go out after it is the
 nudge's position, not the reader's. `TestAScrolledContainerIsAnnouncedOnce`
 pins the shape with two landside-scrolled boxes: moving the second must not
 re-announce the first.
+
+### 72. Reading the wire with the question "who asked for this"
+
+The interactivity work kept tripping over bytes the link spends on nothing —
+the scroll ledger of §71 was the first — so the wire was walked again the way
+§61 walked it, asking of every message not "who writes and who reads this"
+but "who asked for it". Five answers came back "nobody", and each is now
+either silent or cheaper. All of it is protocol-compatible: no new frame
+types, one field read that was always sent, and behaviour changes only where
+nothing could have depended on the old shape.
+
+**A reconnect that missed nothing cost a snapshot per tab.** planResync's
+comment promised the good case stays free — "a client that reconnects with
+nothing missing sends no resync at all" — but the resume loop above it sent
+one per claimed tab anyway, and for a quiet tab the just-restored ack had
+emptied the ring, so the "nothing to replay" arm answered with a whole
+document. On a link that drops every few minutes, that was the single
+largest avoidable cost the audit found. A resume claim naming the tab's
+exact document (epoch, which the PWA's resume entries now carry) and last
+emitted frame is answered with silence (`Session.TabCurrent`); anything
+less repairs as before. The hash is deliberately not compared there: a
+silently corrupt replica at the right seq is the integrity loop's case, and
+it reads the same restored acks on its own cadence.
+`TestAQuietTabReconnectsForFree` pins both halves.
+
+**One ack per applied batch, ten a second.** Acks are cumulative — the ring
+trims to the highest seq — so a burst of applied batches needs one ack
+naming the last of them, not one each. The worker pools them for a beat,
+latest per tab, flushing immediately for the first ack of a new document,
+which is the answer the server holds resyncs open for.
+
+**Scroll telemetry rode a reliable stream.** The frame's own comment says
+"sent on datagrams, latest wins", and no client had ever used the datagram
+path that was built for it: a lost report was retransmitted stale, holding
+fresher ones behind it for a round trip — bytes spent delivering positions
+the reader had already left. Over QUIC the mid-scroll reports now ride
+datagrams, where a drop costs nothing because a fresher position is 250 ms
+behind it; what must not be lost is the last report of a burst — the
+position lazy loading hangs on — so each scroller arms a short tail and
+re-sends its final position reliably. The WebSocket fallback has one
+reliable pipe and keeps the old behaviour, rather than sending the same
+bytes twice.
+
+**A warm cache said nothing, and was heard anyway.** `ImageWant.Have` was
+the audit's "filled by the client and read by nobody": the client
+volunteered what its cross-flight cache held, the server ignored it, and a
+new session re-shipped every picture on the page. The field is read now —
+haves join the sent ledger, and the client sends them even with nothing to
+ask for. An ask still outranks the ledger, because an ask means the cache
+lost it after all. `TestACachedPictureIsNotPushedAtAKnownHolder` pins the
+suppression and the ask's precedence.
+
+**Typing was a frame per keystroke.** Each one bought a landside replay, an
+echo batch and an ack of its own. Appended deltas concatenate losslessly —
+that is what makes Text append-only — so the host pools a burst for 150 ms
+and sends one frame carrying the same characters. Anything that is not
+appended text flushes the pool ahead of itself, so the wire order of what
+the reader did survives exactly; a value echo arriving while keystrokes are
+still pooling is stale by definition and is refused by the same guard that
+refuses one the reader has typed past.
