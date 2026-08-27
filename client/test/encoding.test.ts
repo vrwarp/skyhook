@@ -146,6 +146,14 @@ describe('client frames encode integers as CBOR integers', () => {
       // landed on.
       pt: 1, node2: 77, point2: [900, 480],
     })),
+    pinch: encodeFrame(FrameType.Input, 1, inputBody({
+      kind: 'drag', node: 42, seq: 10, ts: 1234, pt: 1,
+      point: [400, 500],
+      // Two fingers, sampled at the same instants: what makes a drag a
+      // pinch is the gap between the paths, so they travel together.
+      path: [400, 500, 0, 350, 500, 30, 300, 500, 30],
+      path2: [600, 500, 0, 650, 500, 30, 700, 500, 30],
+    })),
     ack: encodeFrame(FrameType.Ack, 2, ackBody(2, 99, 0xdeadbeef, 3)),
     scroll: encodeFrame(FrameType.Scroll, 1, scrollBody({
       tab: 1, x: 0, y: 4096, h: 900, docH: 120000,

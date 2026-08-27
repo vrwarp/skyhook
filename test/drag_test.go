@@ -197,6 +197,68 @@ func TestAFingersDragArrivesAsTouch(t *testing.T) {
 }
 
 /*
+Two fingers, and the gap between them (P-139).
+
+A pinch is the one gesture a single pointer cannot express: what the page
+reads is the distance between two of them, and a mirror that forwards the
+primary pointer and drops the rest has nothing to say. The frame carries
+both paths, sampled at the same instants, and the replay walks them
+together as two touch points — which is also why it needs the landside
+browser to be claiming a touchscreen.
+*/
+func TestTwoFingersPinchThePage(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.SetViewport(protocol.Viewport{W: 1024, H: 768, DPR: 1, Touch: true}); err != nil {
+		t.Fatalf("set viewport: %v", err)
+	}
+	if err := cl.OpenTab(h.site.URL + "/pinchpad"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "scale: unchanged", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	stage := cl.Model(tab).Find("div", "id", "stage")
+	if stage == nil {
+		t.Fatal("no stage in the mirrored page")
+	}
+	// Two fingers spreading symmetrically: the midpoint never moves, which
+	// is exactly why a pinch cannot be measured as a displacement.
+	if err := cl.Input(tab, protocol.InputEvent{
+		Kind: protocol.InDrag, Node: stage.ID, PT: 1,
+		Point: []int32{400, 500},
+		Path: []int32{
+			160, 300, 0,
+			140, 300, 30,
+			120, 300, 30,
+		},
+		Path2: []int32{
+			200, 300, 0,
+			220, 300, 30,
+			240, 300, 30,
+		},
+	}); err != nil {
+		t.Fatalf("pinch: %v", err)
+	}
+
+	if err := cl.WaitForText(ctx, tab, "fingers: 2", budget(30*time.Second)); err != nil {
+		t.Fatalf("the second finger never reached the page: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "scale: bigger", budget(30*time.Second)); err != nil {
+		t.Fatalf("the fingers spreading never zoomed the page: %v", err)
+	}
+}
+
+/*
 The browser's own drag-and-drop, replayed (P-111's last shape).
 
 Synthetic mouse moves never start a native drag — Chromium runs that

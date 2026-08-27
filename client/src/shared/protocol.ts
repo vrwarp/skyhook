@@ -484,7 +484,7 @@ export const F = {
   input: {
     kind: 1, node: 2, seq: 3, text: 4, key: 5, modifiers: 6, button: 7,
     x: 8, y: 9, fields: 10, expectSeq: 11, ts: 12, start: 13, end: 14, repeat: 16,
-    hold: 17, point: 18, path: 19, pt: 20, node2: 21, point2: 22,
+    hold: 17, point: 18, path: 19, pt: 20, node2: 21, point2: 22, path2: 23,
   },
   scroll: {
     tab: 1, x: 2, y: 3, h: 4, docH: 5, node: 6, seq: 7, visible: 8,

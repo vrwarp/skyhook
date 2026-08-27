@@ -647,6 +647,69 @@ describe('MirrorHost', () => {
     expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(0);
   });
 
+  /**
+   * Two fingers spreading on one surface, as a browser reports them: two
+   * pointer streams with different ids, the second one never `isPrimary`.
+   *
+   * They spread symmetrically on purpose. The midpoint does not move, so a
+   * gesture measured by displacement — which is what a one-finger drag is
+   * — would find nothing travelled and send nothing at all.
+   */
+  function pinchApart(host: MirrorHost, el: Element, from: number, to: number): void {
+    const win = host.frame.contentDocument!.defaultView!;
+    const at = (type: string, id: number, x: number, primary: boolean) => el.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: x, clientY: 40, button: 0,
+        isPrimary: primary, pointerId: id, pointerType: 'touch',
+      }),
+    );
+    at('pointerdown', 1, 150 - from / 2, true);
+    at('pointerdown', 2, 150 + from / 2, false);
+    for (let i = 1; i <= 3; i++) {
+      const gap = from + ((to - from) * i) / 3;
+      at('pointermove', 1, 150 - gap / 2, true);
+      at('pointermove', 2, 150 + gap / 2, false);
+    }
+    at('pointerup', 1, 150 - to / 2, true);
+  }
+
+  it('carries a pinch as the two paths it was made of', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: none'));
+
+    pinchApart(host, host.frame.contentDocument!.getElementById('pad')!, 60, 260);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    const drags = sent.filter((p) => p.kind === 'drag');
+    expect(drags).toHaveLength(1);
+    const pinch = drags[0];
+    expect(pinch.node).toBe(70);
+    // A finger, whatever the first pointer claimed to be.
+    expect(pinch.pt).toBe(1);
+    const path = pinch.path as number[];
+    const path2 = pinch.path2 as number[];
+    // Sampled at the same instants, so the replay can move both at once.
+    expect(path2).toBeDefined();
+    expect(path2.length).toBe(path.length);
+    // Spreading: the two fingers end further apart than they began.
+    expect(Math.abs(path2[0] - path[0]))
+      .toBeLessThan(Math.abs(path2[path2.length - 3] - path[path.length - 3]));
+    // A pinch names no drop target: what it did happened between the fingers.
+    expect(pinch.node2).toBeUndefined();
+  });
+
+  it('leaves a second finger alone on a surface that kept one axis', async () => {
+    // A carousel asked for horizontal swipes, not for a pinch; the browser's
+    // own zoom is the better answer there.
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: pan-y'));
+
+    pinchApart(host, host.frame.contentDocument!.getElementById('pad')!, 60, 260);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.filter((p) => p.path2 !== undefined)).toHaveLength(0);
+  });
+
   it('claims a drag on an element wearing a grab cursor', async () => {
     const { host, ev } = await mount();
     host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));

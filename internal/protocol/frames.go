@@ -572,6 +572,11 @@ type InputEvent struct {
 	// Point2 is where in Node2's box the drag finished, in permille of its
 	// width and height — Point's twin, for the other end of the gesture.
 	Point2 []int32 `cbor:"22,keyasint,omitempty"`
+	// Path2 is a second finger's path, in the same (x, y, dt) triplets as
+	// Path and sampled at the same instants, which is what makes a drag a
+	// pinch: two pointers on one element and the distance between them.
+	// Present only for a gesture the reader made with two fingers.
+	Path2 []int32 `cbor:"23,keyasint,omitempty"`
 }
 
 // ScrollEvent is telemetry: it drives image prioritisation and infinite-scroll

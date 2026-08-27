@@ -509,6 +509,9 @@ export interface InputEventInit {
    *  path says how the gesture moved; these say what it landed on. */
   node2?: number;
   point2?: number[];
+  /** A second finger's path, sampled at the same instants as `path`: what
+   *  makes a drag a pinch. */
+  path2?: number[];
 }
 
 export function inputBody(ev: InputEventInit): Map<number, unknown> {
@@ -536,6 +539,7 @@ export function inputBody(ev: InputEventInit): Map<number, unknown> {
   if (ev.pt) m.set(F.input.pt, safeInt(ev.pt));
   if (ev.node2) m.set(F.input.node2, safeInt(ev.node2));
   if (ev.point2?.length === 2) m.set(F.input.point2, ev.point2.map(safeInt));
+  if (ev.path2?.length) m.set(F.input.path2, ev.path2.map(safeInt));
   return m;
 }
 

@@ -859,6 +859,16 @@ export class MirrorHost {
     samples: Array<{ x: number; y: number; t: number }>;
     pt: number;
     axis: DragAxis;
+    /** The pointer that started it. Every other pointer's moves belong to
+     *  some other gesture — or to the second finger below. */
+    id: number;
+    /** The second finger, once one lands: a pinch. Its samples are kept in
+     *  step with the first finger's, one frame per move of either, so the
+     *  landside replay can move two touch points together. */
+    second?: { id: number; samples: Array<{ x: number; y: number; t: number }> };
+    /** Where each finger was last seen, which is what a frame is made of. */
+    at?: { x: number; y: number };
+    at2?: { x: number; y: number };
   } | null = null;
 
   /**
@@ -1012,7 +1022,43 @@ export class MirrorHost {
       samples: [start],
       pt: MirrorHost.pointerKind(ev.pointerType),
       axis: surface.axis,
+      id: ev.pointerId,
     };
+  }
+
+  /*
+   * A second finger landing on the surface a gesture already owns.
+   *
+   * Every multi-touch gesture a page has — pinch to zoom, two-finger pan,
+   * rotate — is this: two pointers on one element, and the page reading the
+   * distance between them. The client used to take the primary pointer and
+   * drop the rest, so none of them existed (P-139); worse, the second
+   * finger's moves still fed the first finger's path, so a two-finger
+   * gesture sent a single zigzag drag between the two.
+   *
+   * The pinch starts here rather than at the first press, which is also
+   * where the page starts measuring: the one-finger prelude is a different
+   * gesture, and a page reading the gap between two fingers has no gap
+   * until the second one lands.
+   */
+  private addSecondFinger(ev: PointerEvent): void {
+    const drag = this.dragging;
+    if (!drag || drag.second) return;
+    // Only where the page claimed the whole gesture. A carousel that kept
+    // one axis did not ask for a pinch, and the browser's own zoom is the
+    // better answer there.
+    if (drag.axis !== 'both') return;
+    const surface = this.dragSurfaceAt(this.eventTarget(ev));
+    if (!surface || (this.patcher?.idOf(surface.el) ?? 0) !== drag.node) return;
+    const s = this.samplePointer(ev);
+    if (!s) return;
+    const first = drag.samples[drag.samples.length - 1];
+    drag.at = { x: first.x, y: first.y };
+    drag.at2 = { x: s.x, y: s.y };
+    drag.samples = [{ x: first.x, y: first.y, t: s.t }];
+    drag.second = { id: ev.pointerId, samples: [{ x: s.x, y: s.y, t: s.t }] };
+    // A pinch is a touch gesture whatever the first pointer claimed to be.
+    drag.pt = 1;
   }
 
   /**
@@ -1023,11 +1069,44 @@ export class MirrorHost {
    * pan measured from halfway is a pan of the wrong distance. The rest of the
    * path only has to look like a hand moving.
    */
-  private recordDrag(sample: { x: number; y: number; t: number }): void {
-    const drag = this.dragging;
-    if (!drag) return;
-    drag.samples.push(sample);
-    if (drag.samples.length > MirrorHost.DRAG_SAMPLES) drag.samples.splice(1, 1);
+  private recordDrag(sample: { x: number; y: number; t: number }, id: number): void {
+    if (!this.dragging) return;
+    this.recordDragInto(this.dragging, sample, id);
+  }
+
+  private recordDragInto(
+    drag: NonNullable<MirrorHost['dragging']>,
+    sample: { x: number; y: number; t: number },
+    id: number,
+  ): void {
+    if (!drag.second) {
+      // One finger: only its own moves describe it.
+      if (id !== drag.id) return;
+      drag.samples.push(sample);
+      if (drag.samples.length > MirrorHost.DRAG_SAMPLES) drag.samples.splice(1, 1);
+      return;
+    }
+    // Two fingers: a move of either records where both are, so the paths
+    // stay aligned frame for frame and the replay can move two touch
+    // points together.
+    if (id === drag.id) drag.at = { x: sample.x, y: sample.y };
+    else if (id === drag.second.id) drag.at2 = { x: sample.x, y: sample.y };
+    else return;
+    drag.samples.push({ x: drag.at!.x, y: drag.at!.y, t: sample.t });
+    drag.second.samples.push({ x: drag.at2!.x, y: drag.at2!.y, t: sample.t });
+    if (drag.samples.length > MirrorHost.DRAG_SAMPLES) {
+      drag.samples.splice(1, 1);
+      drag.second.samples.splice(1, 1);
+    }
+  }
+
+  /** The distance between two samples, in CSS pixels of the reader's own
+   *  viewport — permille is comparable across layouts, pixels across time. */
+  private gapPx(a: { x: number; y: number }, b: { x: number; y: number }): number {
+    const win = this.frame.contentWindow;
+    const w = win?.innerWidth ?? 0;
+    const h = win?.innerHeight ?? 0;
+    return Math.hypot(((a.x - b.x) / 1000) * w, ((a.y - b.y) / 1000) * h);
   }
 
   /**
@@ -1041,6 +1120,29 @@ export class MirrorHost {
     const drag = this.dragging;
     this.dragging = null;
     if (!drag) return;
+
+    if (drag.second) {
+      // Where the lifting finger finished, recorded like any other move so
+      // the two paths still end at the same instant.
+      const last = this.samplePointer(ev);
+      const id = (ev as PointerEvent).pointerId ?? 0;
+      if (last) this.recordDragInto(drag, last, id);
+      // A pinch is measured by the gap between the fingers rather than by
+      // how far either travelled: a symmetric spread moves the midpoint
+      // nowhere, and a displacement test would throw away the commonest
+      // pinch there is.
+      if (drag.samples.length < 2) return;
+      const startGap = this.gapPx(drag.samples[0], drag.second.samples[0]);
+      const endGap = this.gapPx(
+        drag.samples[drag.samples.length - 1],
+        drag.second.samples[drag.second.samples.length - 1],
+      );
+      if (Math.abs(endGap - startGap) < MirrorHost.DRAG_SLOP_PX) return;
+      this.dragConsumedClick = true;
+      this.sendDrag(drag.node, drag.point, drag.samples, drag.pt, ev, drag.second.samples);
+      return;
+    }
+
     const last = this.samplePointer(ev);
     if (last) drag.samples.push(last);
     if (drag.samples.length < 2) return;
@@ -1111,12 +1213,33 @@ export class MirrorHost {
     samples: Array<{ x: number; y: number; t: number }>,
     pt: number,
     ev: MouseEvent,
+    second?: Array<{ x: number; y: number; t: number }>,
   ): void {
-    const path: number[] = [];
-    for (let i = 0; i < samples.length; i++) {
-      const gap = i === 0 ? 0 : Math.round(samples[i].t - samples[i - 1].t);
-      path.push(samples[i].x, samples[i].y, gap);
+    const asPath = (from: Array<{ x: number; y: number; t: number }>): number[] => {
+      const out: number[] = [];
+      for (let i = 0; i < from.length; i++) {
+        const gap = i === 0 ? 0 : Math.round(from[i].t - from[i - 1].t);
+        out.push(from[i].x, from[i].y, gap);
+      }
+      return out;
+    };
+    if (second) {
+      // A pinch names no drop target: what it did happened between the two
+      // fingers, and whatever is under one of them at the end had nothing
+      // to do with it.
+      this.send({
+        kind: InputKind.Drag,
+        node,
+        modifiers: modifierMask(ev),
+        point,
+        path: asPath(samples),
+        path2: asPath(second),
+        pt: pt || undefined,
+      });
+      this.heldBlur = 0;
+      return;
     }
+    const path = asPath(samples);
     const drop = this.dropTargetAt(ev.clientX, ev.clientY);
     this.send({
       kind: InputKind.Drag,
@@ -1357,13 +1480,24 @@ export class MirrorHost {
   }
 
   private recordPointer(ev: MouseEvent): void {
-    const last = this.pointerPath[this.pointerPath.length - 1];
-    if (last && performance.now() - last.t < MirrorHost.PATH_MIN_GAP_MS) return;
     const sample = this.samplePointer(ev);
     if (!sample) return;
-    this.pointerPath.push(sample);
-    if (this.pointerPath.length > MirrorHost.PATH_SAMPLES) this.pointerPath.shift();
-    this.recordDrag(sample);
+    const id = (ev as PointerEvent).pointerId ?? 0;
+    // The approach a click carries is one pointer's, thinned to samples far
+    // enough apart to describe a hand rather than a frame rate. A second
+    // finger's moves are part of a pinch, not of the way a pointer arrived.
+    if (!this.dragging || id === this.dragging.id) {
+      const last = this.pointerPath[this.pointerPath.length - 1];
+      if (!last || sample.t - last.t >= MirrorHost.PATH_MIN_GAP_MS) {
+        this.pointerPath.push(sample);
+        if (this.pointerPath.length > MirrorHost.PATH_SAMPLES) this.pointerPath.shift();
+      }
+    }
+    // A drag keeps its own samples, capped and thinned by recordDrag: the
+    // approach's spacing rule is about describing one pointer's arrival,
+    // and applying it here dropped a second finger's every move because the
+    // first finger had just been sampled.
+    this.recordDrag(sample, id);
   }
 
   /** The approach as the wire carries it: (x, y, dt) triplets, oldest first. */
@@ -1724,9 +1858,13 @@ export class MirrorHost {
 
     doc.addEventListener('pointerdown', (ev) => {
       const pointer = ev as PointerEvent;
-      // A second finger is not a second gesture: the pan belongs to the pointer
-      // that started it, and a pinch is not something this can carry anyway.
-      if (!pointer.isPrimary) return;
+      // A second finger is not a second gesture — it is the other half of
+      // this one, when the surface claimed the whole gesture. See
+      // addSecondFinger.
+      if (!pointer.isPrimary) {
+        this.addSecondFinger(pointer);
+        return;
+      }
       this.pointerDownAt = performance.now();
       this.lastPointerKind = MirrorHost.pointerKind(pointer.pointerType);
       // A gesture that reached neither the page nor a click — the pointer left

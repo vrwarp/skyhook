@@ -374,6 +374,21 @@ func (t *Tab) drag(ctx context.Context, ev *protocol.InputEvent) error {
 		return nil // nothing to drag along
 	}
 
+	// Two fingers: a pinch, which mouse events cannot express at all — a
+	// page reading the gap between two pointers needs two pointers to
+	// exist. It replays as the touch gesture it was or not at all.
+	if len(ev.Path2) >= 3 && len(ev.Path2)%3 == 0 {
+		if !t.touchEmulated() {
+			// Unreachable in practice: a pinch comes from a touchscreen, and
+			// a client with one says so in its viewport, which is what turns
+			// emulation on. Logged rather than guessed at.
+			t.log.Debug("dropping a pinch: this browser has no touchscreen to feel it with",
+				"tab", t.ID, "node", ev.Node)
+			return nil
+		}
+		return t.pinchReplay(ctx, r, vp, ev)
+	}
+
 	// A finger's drag arrives as the touch it was, when this browser claims
 	// a touchscreen to feel it with (P-006) — but only onto a surface whose
 	// own touch-action claimed the gesture. A widget that pans under a real
@@ -548,6 +563,80 @@ func (t *Tab) clickPoint(r *nodeRect, ev *protocol.InputEvent) (x, y float64) {
 		return r.X + r.W*float64(fx)/1000, r.Y + r.H*float64(fy)/1000
 	}
 	return r.CX + jitter(r.W), r.CY + jitter(r.H)
+}
+
+/*
+pinchReplay puts two fingers on the page and moves them along their own
+paths, together.
+
+The two paths are sampled at the same instants plane-side — one frame per
+move of either finger — so replaying them is a matter of walking both at
+once and dispatching a touch event carrying both points. That alignment is
+the whole reason the wire carries two paths rather than two gestures: a
+pinch is not two drags, it is one gesture whose meaning is the distance
+between them, and a page measuring that distance sees nothing useful if the
+fingers arrive at different moments.
+*/
+func (t *Tab) pinchReplay(ctx context.Context, r *nodeRect, vp protocol.Viewport, ev *protocol.InputEvent) error {
+	frames := len(ev.Path) / 3
+	if n := len(ev.Path2) / 3; n < frames {
+		frames = n
+	}
+	if frames < 2 {
+		return nil // nothing to pinch along
+	}
+	at := func(kind string, i int) error {
+		points := []map[string]any{}
+		if kind != "touchEnd" {
+			points = []map[string]any{
+				{
+					"x":  float64(clampPermille(ev.Path[i*3])) / 1000 * float64(vp.W),
+					"y":  float64(clampPermille(ev.Path[i*3+1])) / 1000 * float64(vp.H),
+					"id": 1,
+				},
+				{
+					"x":  float64(clampPermille(ev.Path2[i*3])) / 1000 * float64(vp.W),
+					"y":  float64(clampPermille(ev.Path2[i*3+1])) / 1000 * float64(vp.H),
+					"id": 2,
+				},
+			}
+		}
+		return t.sess.Do(ctx, "Input.dispatchTouchEvent", map[string]any{
+			"type": kind, "touchPoints": points, "modifiers": ev.Modifiers,
+		}, nil)
+	}
+	if err := at("touchStart", 0); err != nil {
+		return err
+	}
+	spent := time.Duration(0)
+	for i := 1; i < frames; i++ {
+		if gap := time.Duration(ev.Path[i*3+2]) * time.Millisecond; gap > 0 {
+			if gap > pathMaxGap {
+				gap = pathMaxGap
+			}
+			if spent+gap > pathBudget {
+				gap = pathBudget - spent
+			}
+			if gap > 0 {
+				sleepCtx(ctx, gap)
+				spent += gap
+			}
+		}
+		if err := at("touchMove", i); err != nil {
+			return err
+		}
+	}
+	// The same rest every replayed gesture takes before letting go: a zoom
+	// with inertia reads the compressed replay as a flick otherwise.
+	sleepCtx(ctx, dragSettle)
+	if err := at("touchMove", frames-1); err != nil {
+		return err
+	}
+	if err := at("touchEnd", frames-1); err != nil {
+		return err
+	}
+	go t.flushSoon(60 * time.Millisecond)
+	return nil
 }
 
 // touchDragReplay is Tab.drag spoken in touch: the same press, path, pinned

@@ -596,12 +596,12 @@
     {
       "id": "P-139",
       "title": "A second finger is dropped where it lands: no multi-touch gesture has a path",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/host.ts",
         "internal/mirror/input.go"
       ],
-      "notes": "the client takes the primary pointer and ignores every other one, so a pinch is at best a one-finger drag and a two-finger pan is nothing at all. Measured by touch/pinch-zoom. The wire has no shape for it either: a Drag frame carries one path"
+      "notes": "fixed: a second finger landing on a surface that claimed the whole gesture becomes the other half of it rather than being dropped. The two paths are sampled at the same instants — one frame per move of either finger — so the wire carries a gesture rather than two, and the landside replay walks both as touch points together (Path2, field 23). A pinch is measured by the change in the gap rather than by displacement, because a symmetric spread moves the midpoint nowhere and a displacement test would throw away the commonest pinch there is; it names no drop target, because what it did happened between the fingers. Pinned by touch/pinch-zoom, TestTwoFingersPinchThePage and host.dom. Two things the same work fixed: a second finger's moves used to feed the first finger's path, so a two-finger gesture sent one zigzag drag between them; and the drag sampler shared the approach path's spacing rule, which dropped a second finger's every move because the first had just been sampled"
     },
     {
       "id": "P-140",
