@@ -4759,11 +4759,22 @@ the same kind of fact about the reader's machine. And a gesture stamped
 touch is replayed as touch: a tap becomes `Input.dispatchTouchEvent` down,
 the reader's own hold, up — no approach, no hover, because a finger is
 nowhere before it lands — and a drag becomes the touch stream, same path,
-same pinned destination, same anti-flick rest as the mouse replay. Two
+same pinned destination, same anti-flick rest as the mouse replay. Three
 gestures deliberately stay mice: a right-click or double-click is a mouse
-idea whichever pointer made it, and a drag from a `draggable` source keeps
-the interception path, because preserving the browser's own drag-and-drop
-matters more than the modality of the pointer that made it.
+idea whichever pointer made it; a drag from a `draggable` source keeps the
+interception path, because preserving the browser's own drag-and-drop
+matters more than the modality of the pointer that made it; and a finger's
+drag onto a surface that never claimed touch gestures replays as the mouse
+drag it always was. That last one is the fixed point §49 already chose: a
+widget that pans under a real finger must declare `touch-action` or the
+browser takes the swipe for a scroll, so a page without the declaration is
+a page touch moves never reach — its map listens to the mouse, and the
+mouse replay is the one stream it can hear, which is the mirror doing
+better than a real phone on purpose. The agent's rect probe answers
+whether the claim exists (`touchy`), and the first full-suite run after
+the touch work is what surfaced the rule: the mouse-listening canvas
+fixture stopped panning under a finger the moment every touch drag
+replayed as touch.
 
 `touch/drag-pan` pins all three layers through the real client — the pan
 arriving at all, arriving as `pointerType: "touch"`, and the page seeing a

@@ -27,6 +27,10 @@ type nodeRect struct {
 	// the browser's own drag-and-drop rather than a pointer-listening widget
 	// — the two halves of a drag replay. See Tab.drag.
 	Drag bool `json:"drag"`
+	// Touchy says the page claimed touch gestures here (a touch-action on
+	// the element or an ancestor) — the gate on replaying a finger's drag as
+	// touch events. See Tab.drag.
+	Touchy bool `json:"touchy"`
 }
 
 // controlKeys maps the control keys the client forwards verbatim onto the
@@ -371,12 +375,17 @@ func (t *Tab) drag(ctx context.Context, ev *protocol.InputEvent) error {
 	}
 
 	// A finger's drag arrives as the touch it was, when this browser claims
-	// a touchscreen to feel it with (P-006). Except onto a draggable source:
-	// the browser's own drag-and-drop is replayed through mouse interception
-	// below, and what that path preserves — the lift, the drop, the
-	// dataTransfer — matters more than the modality of the pointer that made
-	// it.
-	if ev.PT == 1 && !r.Drag && t.touchEmulated() {
+	// a touchscreen to feel it with (P-006) — but only onto a surface whose
+	// own touch-action claimed the gesture. A widget that pans under a real
+	// finger must make that claim or the browser takes the swipe for a
+	// scroll, so a page that never made it is a page touch moves never
+	// reach: its map listens to the mouse, and replaying the mouse drag it
+	// is listening for is the one way the gesture means anything — the same
+	// better-than-a-real-phone trade §49 chose on purpose. A draggable
+	// source keeps its mouse too: the interception path below preserves the
+	// browser's own drag-and-drop, which matters more than the modality of
+	// the pointer that made it.
+	if ev.PT == 1 && !r.Drag && r.Touchy && t.touchEmulated() {
 		return t.touchDragReplay(ctx, r, end, vp, ev)
 	}
 

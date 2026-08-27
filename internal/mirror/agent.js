@@ -4491,7 +4491,22 @@
         // Whether a press here starts the browser's own drag-and-drop, which
         // a drag replay has to perform through drag interception rather than
         // as mouse moves. See Tab.drag.
-        drag: !!(el.closest && el.closest('[draggable="true"]'))
+        drag: !!(el.closest && el.closest('[draggable="true"]')),
+        // Whether the page claimed touch gestures over this element: a
+        // touch-action on it or an ancestor. A widget that pans under a real
+        // finger must declare this or the browser takes the swipe for a
+        // scroll, so it is the honest test for "would touch events reach the
+        // page at all" — and with it, for which modality a finger's drag
+        // should replay in. See Tab.drag.
+        touchy: (function () {
+          for (var a = el; a && a.style !== undefined; a = a.parentElement) {
+            try {
+              var ta = getComputedStyle(a).touchAction;
+              if (ta && ta !== 'auto') return true;
+            } catch (e) { break; }
+          }
+          return false;
+        })()
       };
     },
     /*
