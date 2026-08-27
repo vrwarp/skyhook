@@ -47,6 +47,10 @@ type Client struct {
 	// model ignores; a test asserting the server did not move the reader
 	// needs the ops, not their effect.
 	docScrolls map[uint32][]protocol.Op
+	// nodeScrolls records the container scroll ops, separately: which box
+	// moved is the fact under test when the chatter of re-announced
+	// scrollers is the question.
+	nodeScrolls map[uint32][]protocol.Op
 	// fileAsks is every file chooser the server has intercepted, keyed by
 	// tab (P-007).
 	fileAsks  map[uint32][]protocol.FileAsk
@@ -315,12 +319,20 @@ func (c *Client) handle(f *protocol.Frame) {
 		c.mu.Lock()
 		c.seqs[f.Tab] = f.Seq
 		for i := range mu.Ops {
-			if mu.Ops[i].Op == protocol.OpScroll && mu.Ops[i].Node == 0 {
+			if mu.Ops[i].Op != protocol.OpScroll {
+				continue
+			}
+			if mu.Ops[i].Node == 0 {
 				if c.docScrolls == nil {
 					c.docScrolls = map[uint32][]protocol.Op{}
 				}
 				c.docScrolls[f.Tab] = append(c.docScrolls[f.Tab], mu.Ops[i])
+				continue
 			}
+			if c.nodeScrolls == nil {
+				c.nodeScrolls = map[uint32][]protocol.Op{}
+			}
+			c.nodeScrolls[f.Tab] = append(c.nodeScrolls[f.Tab], mu.Ops[i])
 		}
 		c.mu.Unlock()
 		c.ack(f.Tab, f.Seq, m.Hash(), epoch)
@@ -482,6 +494,17 @@ func (c *Client) DocScrolls(tab uint32) []protocol.Op {
 	defer c.mu.Unlock()
 	out := make([]protocol.Op, len(c.docScrolls[tab]))
 	copy(out, c.docScrolls[tab])
+	return out
+}
+
+// NodeScrolls reports every container scroll op the server has sent for a
+// tab — the chatter a scrolled-scroller ledger bug once multiplied, and the
+// assertion surface for keeping it single.
+func (c *Client) NodeScrolls(tab uint32) []protocol.Op {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]protocol.Op, len(c.nodeScrolls[tab]))
+	copy(out, c.nodeScrolls[tab])
 	return out
 }
 

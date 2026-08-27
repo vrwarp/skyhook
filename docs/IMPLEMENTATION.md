@@ -4773,3 +4773,65 @@ pins the replay at the protocol level. The phone client needed no change at
 all: it was already sending its gestures from pointer events (§49), so the
 day the viewport flag shipped, its taps and pans started arriving as what
 they always were.
+
+### 70. The wheel the widgets eat, and the rest that is a gesture
+
+P-004's registry entry had already worked out where its own line was: wheel
+deltas must not stream for documents, because scroll telemetry carries where
+the reader is for a fraction of the bytes — and the entry admitted in the
+same breath that this starves "what zoom-canvas widgets alone consume". The
+gesture census (§67) is what turns that sentence into a predicate. A wheel
+turned over a surface that claims gestures — the same cursors,
+`touch-action: none` and roles that claim a drag — is a widget eating the
+wheel, so the mirror stops scrolling (the widget landside will not either)
+and sends it: ticks coalesced for a beat, one frame carrying the deltas, the
+node, and where in its box the cursor sat. The point matters because every
+map zooms about the cursor, so the replay parks the landside pointer there
+before turning the wheel. A wheel anywhere else is untouched: native scroll,
+telemetry, no new bytes. `widgets/wheel-zoom` pins the widget half through
+the real client; the fixture's zoom reports which side of the stage the
+wheel arrived on, so a replay that parks the pointer in the wrong place is
+visible, and `TestSlidersAndHoverMenusReachThePage` pins exactly that.
+
+Hover took the other half of P-111 out. Pointer moves are still never
+streamed — that discipline predates this work and survives it — but a
+pointer that comes to rest is not a stream, it is a gesture: the one every
+hover menu, tooltip and preview card is built on, and the one gesture the
+mirror answered only through a context-menu entry no reader discovers. A
+rest of 400 ms within a hand's tremor, on an element the landside pointer
+is not already parked on, sends one InHover naming the element and the
+resting point inside it; the landside pointer parks there and the page's
+own mouseover machinery does what it does. There is no other rate limit,
+because the gesture is its own: a new hover needs 400 ms of stillness on a
+new element, which a hand cannot produce faster than about once a second.
+A dwell on the node a click just landed on says nothing — the click's
+replay already parked the pointer there — and a finger never dwells, because
+a finger is nowhere between touches.
+
+The one measured surprise was already in the ledger before the fix:
+`widgets/hover-menu`'s baseline had recorded the mirror wearing `:hover`
+state the landside page did not have, as a style-dimension divergence. With
+the dwell parking the landside pointer, both halves wear it, and the
+dimension that caught the divergence is the one that now pins its absence.
+
+### 71. The scroll ledger spoke for every box that had ever moved
+
+The agent keeps a ledger of scroll positions — `lastScroll` — whose reason
+for existing is silence: `ownScroll` writes the host's own nudges into it so
+the scroll listener sees no change and reports nothing (§10). But the
+throttled flush walked the whole ledger and emitted an op for *every* entry,
+moved or not. One container scrolling re-announced every container that had
+ever scrolled, every 250 ms flush, forever — and re-announced the host's own
+`scrollIntoView` nudges with them, the exact positions the ledger exists to
+keep off the wire. The client's `followScroll` guard discarded most of what
+arrived, which is why nobody saw it: bytes spent to be refused, the same
+shape as the wheel-echo entry in the audit (§61), found the same way —
+reading the wire with the question "who asked for this".
+
+The fix is a dirty set beside the ledger: a genuine scroll marks its box,
+the flush emits the marked boxes only, and `ownScroll` unmarks — a host
+nudge that lands inside the throttle window supersedes the reader-caused
+report queued for the same box, because what would go out after it is the
+nudge's position, not the reader's. `TestAScrolledContainerIsAnnouncedOnce`
+pins the shape with two landside-scrolled boxes: moving the second must not
+re-announce the first.

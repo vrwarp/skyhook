@@ -785,6 +785,13 @@ func (t *Tab) hover(ctx context.Context, ev *protocol.InputEvent) error {
 	if err != nil {
 		return err
 	}
+	// Where in the box the reader's pointer is resting, when the client
+	// measured it — a submenu opens under the entry the pointer is on, not
+	// under the middle of the menu.
+	if len(ev.Point) == 2 {
+		x, y := dropPoint(r, ev.Point)
+		return t.movePointer(ctx, x, y, ev.Modifiers)
+	}
 	return t.movePointer(ctx, r.CX+jitter(r.W), r.CY+jitter(r.H), ev.Modifiers)
 }
 
@@ -886,6 +893,31 @@ func (t *Tab) wheel(ctx context.Context, ev *protocol.InputEvent) error {
 	x, y, known := t.pointerX, t.pointerY, t.pointerSet
 	vp := t.opts.Viewport
 	t.mu.Unlock()
+	// A named node beats every guess: the client sends one when the wheel
+	// turned over a widget that consumes it, and where in that widget's box
+	// matters — every map zooms about the point under the cursor. The
+	// pointer is parked there first, because a page that reads the wheel
+	// also reads the mouse position it arrived at.
+	if ev.Node != 0 {
+		r, err := t.rect(ctx, ev.Node)
+		if err != nil {
+			return err
+		}
+		// Not clickPoint: a wheel frame's X and Y are the deltas, and
+		// clickPoint would read them as a pixel offset into the box.
+		x, y = dropPoint(r, ev.Point)
+		if err := t.movePointer(ctx, x, y, ev.Modifiers); err != nil {
+			return err
+		}
+		if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": "mouseWheel", "x": x, "y": y,
+			"deltaX": ev.X, "deltaY": ev.Y, "modifiers": ev.Modifiers,
+		}, nil); err != nil {
+			return err
+		}
+		go t.flushSoon(60 * time.Millisecond)
+		return nil
+	}
 	// A reported path is the pointer's real position, which beats the last one
 	// we happen to have driven it to.
 	if n := len(ev.Path); n >= 3 && n%3 == 0 && vp.W > 0 && vp.H > 0 {

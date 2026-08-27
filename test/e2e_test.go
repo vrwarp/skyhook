@@ -1509,12 +1509,16 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 	// pointer.
 	mux.HandleFunc("/widgets", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Widgets</title></head>
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Widgets</title>
+			<style>#stage { width: 200px; height: 80px; border: 1px solid #888; touch-action: none; }</style>
+			</head>
 			<body><h1>the widget page</h1>
 			<input type="range" id="vol" min="0" max="100" value="10" step="1">
 			<p id="st">volume 10</p>
 			<div id="menu">More options</div>
 			<div id="sub" hidden>the secret entry</div>
+			<div id="stage">the diagram</div>
+			<p id="zoom">zoom 0 at nowhere</p>
 			<script>
 			document.getElementById('vol').addEventListener('input', function () {
 			  document.getElementById('st').textContent = 'volume ' + this.value;
@@ -1522,6 +1526,18 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			document.getElementById('menu').addEventListener('mouseover', function () {
 			  document.getElementById('sub').hidden = false;
 			});
+			// A zoom widget's shape: wheel steps counted, anchored about the
+			// cursor — the quadrant is reported so a replay that parks the
+			// pointer in the wrong place is visible.
+			var zoom = 0;
+			var stage = document.getElementById('stage');
+			stage.addEventListener('wheel', function (e) {
+			  e.preventDefault();
+			  zoom += e.deltaY < 0 ? 1 : -1;
+			  var r = stage.getBoundingClientRect();
+			  var side = (e.clientX - r.left) < r.width / 2 ? 'left' : 'right';
+			  document.getElementById('zoom').textContent = 'zoom ' + zoom + ' at ' + side;
+			}, { passive: false });
 			</script></body></html>`)
 	})
 	// A pointer-event sortable list, the miniature of SortableJS and dnd-kit:
@@ -1563,6 +1579,35 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			  var ids = [];
 			  for (var i = 0; i < cards.children.length; i++) ids.push(cards.children[i].id.slice(5));
 			  document.getElementById('order').textContent = 'order: ' + ids.join(',');
+			});
+			</script></body></html>`)
+	})
+	// Two scrolled containers, moved landside one at a time by the page's own
+	// buttons. What the wire should carry is one scroll op per box that
+	// moved; what it once carried was every box that had ever moved, again,
+	// on every flush.
+	mux.HandleFunc("/twoboxes", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Two boxes</title>
+			<style>.box { height: 100px; overflow: auto; border: 1px solid #888; }
+			.box div { height: 20px; }</style></head>
+			<body><h1>the two-box page</h1>
+			<button id="moveA">move a</button> <button id="moveB">move b</button>
+			<div class="box" id="boxA"></div>
+			<div class="box" id="boxB"></div>
+			<script>
+			for (const box of [document.getElementById('boxA'), document.getElementById('boxB')]) {
+			  for (let i = 0; i < 30; i++) {
+			    const row = document.createElement('div');
+			    row.textContent = box.id + ' row ' + i;
+			    box.appendChild(row);
+			  }
+			}
+			document.getElementById('moveA').addEventListener('click', () => {
+			  document.getElementById('boxA').scrollTop = 100;
+			});
+			document.getElementById('moveB').addEventListener('click', () => {
+			  document.getElementById('boxB').scrollTop = 80;
 			});
 			</script></body></html>`)
 	})

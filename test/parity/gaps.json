@@ -35,12 +35,12 @@
     {
       "id": "P-004",
       "title": "wheel and hover are protocol surface no client sends",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/app/main.ts",
         "internal/mirror/input.go"
       ],
-      "notes": "hover is now sent — the mirror menu's Hover-here entry is the client's InHover (P-111) — so this entry narrows to wheel: protocol surface no client sends. Deliberate for documents, where scroll telemetry already carries where the reader is; wrong for the widgets that consume the wheel themselves, which is what widgets/wheel-zoom measures"
+      "notes": "fixed for the widgets that consume the wheel themselves, which is the half that was wrong: a wheel turned over a gesture-claiming surface (the drag census: touch-action none, grab/resize cursors, role=slider, canvas regions) is taken from the browser, its ticks coalesced for a beat, and sent as one InWheel naming the node and where in its box the cursor sat, replayed landside with the pointer parked at that point first — cursor-anchored zoom zooms about the cursor. A wheel anywhere else deliberately stays the reader's own scroll, reported as scroll telemetry, exactly as before: streaming wheel deltas for documents would spend the link on what position telemetry already carries. widgets/wheel-zoom pins the widget half; the hover half of the old title is P-111's story"
     },
     {
       "id": "P-005",
@@ -324,13 +324,13 @@
     {
       "id": "P-111",
       "title": "mousemove-driven widgets — drag-and-drop, sliders, hover menus — have no input path",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/host.ts",
         "client/src/mirror/echo.ts",
         "internal/mirror/input.go"
       ],
-      "notes": "the drag-shaped two thirds are closed and pinned: the client claims a drag on any element whose own declared affordances say so — a grab/resize cursor, touch-action: none, role=slider, all legible plane-side because the mirror carries the page's CSS — and the browser's native drag-and-drop is watched through its own dragstart/dragover/drop, so one Drag frame crosses naming both ends of the gesture (Node2/Point2), replayed landside as held mouse moves pinned to the destination's box, or through Input.setInterceptDrags for a draggable source. widgets/drag-sortable, widgets/dnd-html5 and widgets/slider-track pin it; TestDraggingACardReordersASortableList and TestADraggableCardDropsOnAZone pin the replay. Sliders and native pickers were already served by setvalue-on-change (TestSlidersAndHoverMenusReachThePage). Still open for the hover third: the context menu's Hover-here entry sends the one InHover that parks the landside pointer, but nothing sends it for the gesture a reader actually makes, which widgets/hover-menu measures"
+      "notes": "closed in two waves, all through the real client. Drags: the census reads the affordances the page itself declared (grab/resize cursors, touch-action none, role=slider — legible plane-side because the mirror carries the page's CSS), the frame names both ends of the gesture (Node2/Point2), the replay pins the drop to the destination's landside box, and the browser's own drag-and-drop crosses via its dragstart/dragover/drop plane-side and Input.setInterceptDrags landside. Hover: a pointer resting 400 ms on a new element is a gesture — the one every hover menu is built on — and sends the InHover that parks the landside pointer where CSS :hover and JS mouseover see it, no streaming, at most one frame per rest. Sliders and native pickers were already served by setvalue-on-change. Pinned by widgets/drag-sortable, widgets/dnd-html5, widgets/slider-track, widgets/hover-menu, the drag_test.go suite and TestSlidersAndHoverMenusReachThePage"
     },
     {
       "id": "P-112",

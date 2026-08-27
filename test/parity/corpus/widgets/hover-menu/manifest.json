@@ -1,24 +1,34 @@
 {
   "id": "widgets/hover-menu",
   "title": "a menu that opens on mouseenter opens for a reader's pointer resting on it",
-  "covers": ["mouseenter menus", "hover-driven UI"],
-  "gaps": ["P-111"],
+  "covers": [
+    "mouseenter menus",
+    "hover-driven UI"
+  ],
+  "gaps": [
+    "P-111"
+  ],
   "waitText": "hover settled",
   "interactions": [
-    {"do": "click", "target": "#poke"},
-    {"do": "waitText", "value": "poked: yes", "name": "the page's listeners work over the mirror"},
-    {"do": "hover", "target": "#products"},
-    {"do": "waitText", "value": "menu: open", "within": 12, "name": "a resting pointer opens the menu"}
-  ],
-  "expectedFail": {
-    "interaction": {
-      "gap": "P-111",
-      "reason": "pointer moves are never streamed and nothing watches for a dwell, so a JS mouseenter menu opens only through the context menu's explicit Hover-here entry — a gesture no reader discovers"
+    {
+      "do": "click",
+      "target": "#poke"
     },
-    "style": {
-      "gap": "P-111",
-      "reason": "the reader's pointer rests on #products, so the mirror wears its :hover background; the landside pointer was never sent there, so the real page does not"
+    {
+      "do": "waitText",
+      "value": "poked: yes",
+      "name": "the page's listeners work over the mirror"
+    },
+    {
+      "do": "hover",
+      "target": "#products"
+    },
+    {
+      "do": "waitText",
+      "value": "menu: open",
+      "within": 12,
+      "name": "a resting pointer opens the menu"
     }
-  },
-  "notes": "the pointer is deliberately left resting on #products through the final probe: hover is state, and the state the reader sees diverging from the state the page has is exactly the measurement"
+  ],
+  "notes": "the pointer is deliberately left resting on #products through the final probe: hover is state, and with the dwell sending InHover the landside pointer is parked there too, so both halves wear the :hover background and the style dimension holds"
 }

@@ -203,6 +203,7 @@
   var fontsWanted = {};            // family -> 1, for fonts nothing can substitute
   var lastText = new Map();     // id -> last text we reported
   var lastScroll = new Map();
+  var dirtyScroll = new Set();  // ids whose position moved since the last flush
   // [id, x, y] for containers already scrolled when a snapshot is taken. Set
   // to an array for the length of the walk and null the rest of the time, so
   // that the mutation path — which shares serializeAttrs — collects nothing.
@@ -4055,9 +4056,14 @@
   function ownScroll(id, el) {
     if (!id) {
       lastScroll.set(0, { x: globalThis.scrollX | 0, y: globalThis.scrollY | 0 });
+      dirtyScroll.delete(0);
       return;
     }
     lastScroll.set(id, { x: el.scrollLeft | 0, y: el.scrollTop | 0 });
+    // A position this side produced supersedes any report the reader's own
+    // scroll had queued for the same box: what would go out now is the
+    // host's nudge, which is exactly what must never echo.
+    dirtyScroll.delete(id);
   }
 
   function onScroll(ev) {
@@ -4080,12 +4086,20 @@
     var prev = lastScroll.get(key);
     if (prev && prev.x === x && prev.y === y) return;
     lastScroll.set(key, { x: x, y: y });
+    // Only the scrollers that actually moved go out. lastScroll is the
+    // ledger of every position ever seen — the flush used to walk all of
+    // it, so one container scrolling re-announced every container that had
+    // ever scrolled, every 250 ms, forever, and re-announced the host's own
+    // ownScroll nudges with them.
+    dirtyScroll.add(key);
     if (scrollTimer) return;
     scrollTimer = setTimeout(function () {
       scrollTimer = null;
-      lastScroll.forEach(function (pos, nid) {
-        pendingOps.push([10, nid, pos.x, pos.y]);
+      dirtyScroll.forEach(function (nid) {
+        var pos = lastScroll.get(nid);
+        if (pos) pendingOps.push([10, nid, pos.x, pos.y]);
       });
+      dirtyScroll.clear();
       scheduleFlush(false);
     }, SCROLL_THROTTLE_MS);
   }

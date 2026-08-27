@@ -741,6 +741,153 @@ describe('MirrorHost', () => {
     expect(drag.point2).toEqual([500, 400]);
   });
 
+  /*
+   * The wheel and the dwell: the census's two slower gestures. A wheel
+   * turned over a claimed surface is the widget's zoom and crosses the wire;
+   * anywhere else it stays the reader's own scroll. A mouse coming to rest
+   * is the gesture every hover menu is built on, and one rest is one frame.
+   */
+
+  /** One tick of the wheel, dispatched the way a browser reports it. */
+  function wheelOn(el: Element, deltaY: number, x = 150, y = 40): WheelEvent {
+    const win = el.ownerDocument.defaultView!;
+    const ev = new win.WheelEvent('wheel', {
+      bubbles: true, cancelable: true, deltaY, clientX: x, clientY: y,
+    });
+    el.dispatchEvent(ev);
+    return ev;
+  }
+
+  /** The pointer passing over an element, from a mouse unless told otherwise. */
+  function pointerOver(el: Element, x: number, y: number, pointerType = 'mouse'): void {
+    const win = el.ownerDocument.defaultView!;
+    el.dispatchEvent(new win.PointerEvent('pointermove', {
+      bubbles: true, clientX: x, clientY: y, isPrimary: true, pointerType,
+    }));
+  }
+
+  it('coalesces a wheel over a claimed surface into one frame', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+      const pad = host.frame.contentDocument!.getElementById('pad')!;
+
+      // Two ticks of a flick, both inside one flush window.
+      const first = wheelOn(pad, -120);
+      const second = wheelOn(pad, -120);
+      // The widget consumes the wheel, so the mirror must not also scroll.
+      expect(first.defaultPrevented).toBe(true);
+      expect(second.defaultPrevented).toBe(true);
+      // And nothing crosses until the beat is over.
+      expect(ev.input).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].kind).toBe('wheel');
+      expect(sent[0].node).toBe(70);
+      expect(sent[0].y).toBe(-240);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves a wheel over ordinary content to the browser', async () => {
+    // The mirror scrolls natively and reports where it got to; a wheel over
+    // text is that scroll, and taking it would freeze the page under the
+    // reader's fingers.
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(snapshot());
+      const li = host.frame.contentDocument!.querySelector('li')!;
+
+      const tick = wheelOn(li, -120);
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(tick.defaultPrevented).toBe(false);
+      expect(ev.input).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends one hover for a mouse at rest, and nothing for staying there', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+      const pad = host.frame.contentDocument!.getElementById('pad')!;
+
+      pointerOver(pad, 150, 40);
+      await vi.advanceTimersByTimeAsync(400);
+
+      let hovers = ev.input.mock.calls
+        .map((c) => c[1] as Record<string, unknown>)
+        .filter((p) => p.kind === 'hover');
+      expect(hovers).toHaveLength(1);
+      expect(hovers[0].node).toBe(70);
+
+      // Drifting inside the slop is stillness, not a new rest...
+      await vi.advanceTimersByTimeAsync(200);
+      pointerOver(pad, 152, 42);
+      pointerOver(pad, 149, 39);
+      await vi.advanceTimersByTimeAsync(400);
+      // ...and a fresh rest on the element already hovered has nothing to add.
+      pointerOver(pad, 300, 40);
+      await vi.advanceTimersByTimeAsync(400);
+
+      hovers = ev.input.mock.calls
+        .map((c) => c[1] as Record<string, unknown>)
+        .filter((p) => p.kind === 'hover');
+      expect(hovers).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never dwells a finger, which is nowhere between touches', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+      const pad = host.frame.contentDocument!.getElementById('pad')!;
+
+      pointerOver(pad, 150, 40, 'touch');
+      await vi.advanceTimersByTimeAsync(400);
+
+      expect(ev.input).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not hover the element a click already parked the pointer on', async () => {
+    // The click's replay parks the landside pointer where it landed, so the
+    // page's own hover machinery has already run there. A dwell saying so
+    // again would spend a round trip repeating it.
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(snapshot());
+      const doc = host.frame.contentDocument!;
+      const li = doc.querySelector('li')!;
+
+      li.dispatchEvent(new doc.defaultView!.MouseEvent('click', { bubbles: true }));
+      ev.input.mockClear();
+
+      pointerOver(li, 150, 40);
+      await vi.advanceTimersByTimeAsync(400);
+
+      const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+      expect(kinds).not.toContain('hover');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports the press a finger actually made, not the gap between two compat events', async () => {
     /*
      * A phone fires mousemove, mousedown, mouseup and click after the finger

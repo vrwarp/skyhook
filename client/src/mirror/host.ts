@@ -1041,6 +1041,143 @@ export class MirrorHost {
   }
 
   /*
+   * ------------------------------------------------------ wheel and dwell
+   *
+   * The mirror scrolls natively and reports where it got to, so the wheel
+   * never needed to cross for documents — that was P-004's design half. The
+   * widgets that consume the wheel themselves are the other half: a map or
+   * a diagram zooms on it, and those are exactly the elements the gesture
+   * census already recognises. A wheel turned over a claimed surface is
+   * taken from the browser and sent; anywhere else it stays the reader's
+   * scroll. Ticks are coalesced per surface for a beat so a fast flick is
+   * one frame, not nine.
+   *
+   * Hover is the same shape at a slower tempo. Pointer moves are never
+   * streamed — that discipline stands — but a pointer that comes to rest is
+   * a gesture, the one every hover menu and tooltip in the world is built
+   * on. A rest long enough to mean something sends one InHover naming the
+   * element and where inside it the pointer sits; the landside pointer
+   * parks there and the page's own mouseover machinery does the rest. A
+   * dwell on the element already hovered says nothing new and sends
+   * nothing.
+   */
+
+  private static readonly WHEEL_FLUSH_MS = 120;
+  private wheelPending: {
+    node: number; dx: number; dy: number;
+    point: number[] | undefined; modifiers: number;
+  } | null = null;
+  private wheelTimer = 0;
+
+  private wheelInFrame(ev: WheelEvent): void {
+    const surface = this.dragSurfaceAt(this.eventTarget(ev));
+    if (!surface) return;
+    const node = this.patcher?.idOf(surface) ?? 0;
+    if (!node) return;
+    // The widget consumes the wheel; the mirror must not also scroll.
+    ev.preventDefault();
+    // Line-mode deltas (Firefox reports lines; Chromium pixels) are scaled
+    // to something pixel-like so the landside page reads familiar numbers.
+    const scale = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? 120 : 1;
+    const pending = this.wheelPending;
+    if (pending && pending.node === node) {
+      pending.dx += ev.deltaX * scale;
+      pending.dy += ev.deltaY * scale;
+      return;
+    }
+    if (pending) this.flushWheel();
+    this.wheelPending = {
+      node,
+      dx: ev.deltaX * scale,
+      dy: ev.deltaY * scale,
+      point: this.pointInBox(ev, surface),
+      modifiers: modifierMask(ev),
+    };
+    this.wheelTimer = window.setTimeout(() => this.flushWheel(), MirrorHost.WHEEL_FLUSH_MS);
+  }
+
+  private flushWheel(): void {
+    const pending = this.wheelPending;
+    this.wheelPending = null;
+    if (this.wheelTimer) { window.clearTimeout(this.wheelTimer); this.wheelTimer = 0; }
+    if (!pending) return;
+    const dx = Math.round(pending.dx);
+    const dy = Math.round(pending.dy);
+    if (!dx && !dy) return;
+    this.send({
+      kind: InputKind.Wheel,
+      node: pending.node,
+      modifiers: pending.modifiers,
+      x: dx,
+      y: dy,
+      point: pending.point,
+    });
+  }
+
+  /** How long a pointer must rest before the rest is a gesture. Below the
+   *  ~500 ms most hover menus wait, above a pointer passing through. */
+  private static readonly DWELL_MS = 400;
+
+  /** A pointer drifting less than this is resting, not moving. */
+  private static readonly DWELL_SLOP_PX = 6;
+
+  private dwell: { x: number; y: number; target: Element | null; timer: number } | null = null;
+
+  /** The node the landside pointer is already resting on — the last hover
+   *  sent, or the last click, whose replay parks the pointer where it
+   *  landed. A dwell there has nothing new to say. No further rate limit:
+   *  a hover needs 400 ms of stillness on a *new* element, and a reader
+   *  cannot produce those faster than roughly one a second by hand. */
+  private lastHoverNode = 0;
+
+  private trackDwell(ev: PointerEvent): void {
+    // A finger is nowhere between touches: dwell is a mouse (or pen) idea.
+    if (ev.pointerType === 'touch') return;
+    if (this.pressing || this.dragging || this.nativeDrag) return;
+    const at = this.dwell;
+    if (at && Math.hypot(ev.clientX - at.x, ev.clientY - at.y) <= MirrorHost.DWELL_SLOP_PX) {
+      at.target = this.eventTarget(ev) as Element | null;
+      return;
+    }
+    if (at) window.clearTimeout(at.timer);
+    this.dwell = {
+      x: ev.clientX, y: ev.clientY,
+      target: this.eventTarget(ev) as Element | null,
+      timer: window.setTimeout(() => this.dwellSettled(), MirrorHost.DWELL_MS),
+    };
+  }
+
+  private dwellSettled(): void {
+    const at = this.dwell;
+    if (!at || this.pressing || this.dragging || this.nativeDrag) return;
+    let el = at.target;
+    if (el && el.nodeType === Node.TEXT_NODE) el = (el as unknown as Text).parentElement;
+    let node = 0;
+    for (let e = el; e; e = MirrorHost.parentOf(e)) {
+      node = this.patcher?.idOf(e) ?? 0;
+      if (node) { el = e; break; }
+    }
+    if (!node || node === this.lastHoverNode) return;
+    this.lastHoverNode = node;
+    this.send({
+      kind: InputKind.Hover,
+      node,
+      point: el ? this.pointAtIn(at.x, at.y, el) : undefined,
+    });
+  }
+
+  /** pointInBox for a coordinate pair rather than an event. */
+  private pointAtIn(x: number, y: number, target: Element): number[] | undefined {
+    if (!target.getBoundingClientRect) return undefined;
+    const r = target.getBoundingClientRect();
+    if (!r.width || !r.height) return undefined;
+    const fx = Math.round(((x - r.left) / r.width) * 1000);
+    const fy = Math.round(((y - r.top) / r.height) * 1000);
+    if (fx < 0 || fx > 1000 || fy < 0 || fy > 1000) return undefined;
+    return [fx, fy];
+  }
+
+  /*
    * ------------------------------------------------- native drag-and-drop
    *
    * A draggable element pressed and moved starts the browser's own drag,
@@ -1338,6 +1475,9 @@ export class MirrorHost {
       path: this.approachPath(),
       pt: this.lastPointerKind || undefined,
     });
+    // The click's replay parks the landside pointer on this node, so it is
+    // also the hovered one: a dwell here now has nothing to add.
+    this.lastHoverNode = node;
     // The press this click becomes landside blurs the field the reader left,
     // in the page's own order and at the page's own moment. Nothing more to
     // hold. See heldBlur.
@@ -1390,7 +1530,18 @@ export class MirrorHost {
    * of pointer.
    */
   private wireInput(doc: Document): void {
-    doc.addEventListener('pointermove', (ev) => this.recordPointer(ev as PointerEvent), true);
+    doc.addEventListener('pointermove', (ev) => {
+      const pointer = ev as PointerEvent;
+      this.recordPointer(pointer);
+      this.trackDwell(pointer);
+    }, true);
+
+    // Non-passive on purpose, and alone in being so: the wheel over a
+    // gesture-claiming widget must be prevented or the mirror scrolls a
+    // document the widget was zooming. Everywhere else the listener returns
+    // before touching the event, and scrolling stays native.
+    doc.addEventListener('wheel', (ev) => this.wheelInFrame(ev as WheelEvent),
+      { capture: true, passive: false });
 
     // A canvas is reached through its pixels or not at all: there is no node
     // inside a map to click and no element inside a game board to focus, so a
@@ -2175,8 +2326,11 @@ export class MirrorHost {
     this.echo?.release();
     // A held blur names a node in the document being replaced. Sent after this
     // it would name whatever the server has since given that id to, and the
-    // gesture it belonged to is over either way.
+    // gesture it belonged to is over either way. The same goes for a pending
+    // wheel and the hover ledger: their node ids belong to the old document.
     this.heldBlur = 0;
+    this.wheelPending = null;
+    this.lastHoverNode = 0;
     // A snapshot for the document already on screen is a resync — the server
     // closing a gap it could not close with diffs — and the reader should not
     // be able to tell it happened. Only a genuine navigation adopts the
