@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>slider-track</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+  /* A div-built slider, the shape every custom video scrubber and volume
+     control takes: a track that seeks on press, a thumb that follows the
+     pointer, and the affordance declared in CSS. Width fixed so the
+     percentage a gesture lands on is the same on both halves. */
+  #track {
+    position: relative; width: 400px; height: 20px; margin: 10px 0;
+    background: rgb(225, 225, 225); border: 1px solid rgb(150, 150, 150);
+    touch-action: none; user-select: none; cursor: pointer;
+  }
+  #thumb {
+    position: absolute; top: 0; left: 190px; width: 20px; height: 18px;
+    background: rgb(90, 90, 200); cursor: grab;
+  }
+  #track .mark { position: absolute; top: 0; width: 1px; height: 4px;
+    background: rgb(180, 180, 180); pointer-events: none; }
+</style>
+</head>
+<body>
+  <h1>slider-track</h1>
+  <p>slider settled</p>
+  <div id="track">
+    <span class="mark" id="mark-10" style="left: 40px"></span>
+    <span class="mark" id="mark-90" style="left: 360px"></span>
+    <div id="thumb"></div>
+  </div>
+  <div id="level">level: 50</div>
+  <div id="moves">moved: no</div>
+  <script>
+    // What a real scrubber does: seek where the press lands (which is also
+    // this page's positive control — a click is a press), then follow the
+    // pointer while it is held. Values quantised to tens so a pixel of
+    // layout difference between the halves cannot flap the answer.
+    var track = document.getElementById('track');
+    var thumb = document.getElementById('thumb');
+    var held = false;
+    function seek(clientX) {
+      var r = track.getBoundingClientRect();
+      var pct = Math.max(0, Math.min(100, ((clientX - r.left) / r.width) * 100));
+      var level = Math.round(pct / 10) * 10;
+      thumb.style.left = Math.round((level / 100) * (r.width - 20)) + 'px';
+      document.getElementById('level').textContent = 'level: ' + level;
+    }
+    track.addEventListener('pointerdown', function (e) {
+      held = true;
+      track.setPointerCapture(e.pointerId);
+      seek(e.clientX);
+    });
+    track.addEventListener('pointermove', function (e) {
+      if (!held) return;
+      document.getElementById('moves').textContent = 'moved: yes';
+      seek(e.clientX);
+    });
+    track.addEventListener('pointerup', function () { held = false; });
+  </script>
+</body>
+</html>

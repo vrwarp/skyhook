@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>hover-menu</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+  #products {
+    display: inline-block; padding: 6px 12px;
+    border: 1px solid rgb(120, 120, 120); background: rgb(240, 240, 240);
+  }
+  /* The CSS half of the affordance works locally in the mirror; the JS half
+     below is what needs the landside page to hear the pointer. */
+  #products:hover { background: rgb(220, 220, 235); }
+  #panel { display: none; padding: 6px 12px; border: 1px solid rgb(120, 120, 120); }
+  #panel.open { display: block; }
+</style>
+</head>
+<body>
+  <h1>hover-menu</h1>
+  <p>hover settled</p>
+  <button id="poke">poke</button>
+  <div id="poked">poked: no</div>
+  <div id="products">products</div>
+  <div id="panel">the winter catalogue</div>
+  <div id="opened">menu: closed</div>
+  <script>
+    // The positive control: the page's listener wiring must work over the
+    // mirror before the hover is blamed.
+    document.getElementById('poke').addEventListener('click', function () {
+      document.getElementById('poked').textContent = 'poked: yes';
+    });
+
+    // A JS hover menu of the kind every storefront nav bar carries: the
+    // panel opens on mouseenter, and only on mouseenter — there is nothing
+    // to click.
+    document.getElementById('products').addEventListener('mouseenter', function () {
+      document.getElementById('panel').className = 'open';
+      document.getElementById('opened').textContent = 'menu: open';
+    });
+  </script>
+</body>
+</html>

@@ -66,6 +66,16 @@ func TestManifestRejections(t *testing.T) {
 			"interactions":[{"do":"teleport"}]}`, "teleport"},
 		{"waitText with nothing to wait for", `{"id":"a/b","waitText":"x",
 			"interactions":[{"do":"waitText","name":"n"}]}`, "needs text"},
+		{"drag without a destination", `{"id":"a/b","waitText":"x",
+			"interactions":[{"do":"drag","target":"#thumb"}]}`, "destination"},
+		{"touchDrag without a target", `{"id":"a/b","waitText":"x",
+			"interactions":[{"do":"touchDrag","to":"#zone"}]}`, "press on"},
+		{"hover without a target", `{"id":"a/b","waitText":"x",
+			"interactions":[{"do":"hover"}]}`, "target"},
+		{"wheel without deltas", `{"id":"a/b","waitText":"x",
+			"interactions":[{"do":"wheel","target":"#stage"}]}`, "dx,dy"},
+		{"to on a non-drag step", `{"id":"a/b","waitText":"x",
+			"interactions":[{"do":"click","target":"#a","to":"#b"}]}`, "destination"},
 		{"imported content without attribution", `{"id":"real/hn","waitText":"x"}`, "attribution"},
 	}
 	for _, tc := range cases {

@@ -40,7 +40,7 @@
         "client/src/app/main.ts",
         "internal/mirror/input.go"
       ],
-      "noPage": "hover is now sent — the mirror menu's Hover-here entry is the client's InHover (P-111) — so this entry narrows to wheel: still protocol surface no client sends, deliberately, because scroll telemetry already carries where the reader is and streaming wheel deltas would spend the link on what zoom-canvas widgets alone consume; catalogued for the executor revision that takes on drag"
+      "notes": "hover is now sent — the mirror menu's Hover-here entry is the client's InHover (P-111) — so this entry narrows to wheel: protocol surface no client sends. Deliberate for documents, where scroll telemetry already carries where the reader is; wrong for the widgets that consume the wheel themselves, which is what widgets/wheel-zoom measures"
     },
     {
       "id": "P-005",
@@ -59,7 +59,7 @@
         "docs/IMPLEMENTATION.md:2120",
         "internal/mirror/tab.go:375"
       ],
-      "noPage": "both harness browsers are mice too, so the divergence cannot arise in-corpus; imported real pages carry the widened page-height band it causes"
+      "notes": "measured by touch/drag-pan since the executor learned touchDrag: the client browser is flipped to a touchscreen, the gesture is injected as real touch events, and the page reports what modality arrived and what navigator.maxTouchPoints claims. Fixing it means the client saying it has a touchscreen and the server both emulating one and replaying touch gestures as touch — emulation and input have to arrive together"
     },
     {
       "id": "P-007",
@@ -330,8 +330,7 @@
         "client/src/mirror/echo.ts",
         "internal/mirror/input.go"
       ],
-      "noPage": "needs a pointer-move step in the interaction executor; catalogued for the executor's next revision alongside P-004",
-      "notes": "two of the three shapes now have paths, pinned by TestSlidersAndHoverMenusReachThePage and TestPWAWidgetChromeAffordances. Sliders (and every native-picker input: color, date, time, month, week): the widget moves locally in the mirror, and the settled value relays once on change as a setvalue — the echo engine now refuses to own non-text inputs, which was also sending a whole-value frame per tick of a focused drag and a meaningless one after every checkbox toggle. Hover menus: hover is state on the ground and pointer moves are never streamed, so the context menu's Hover-here entry sends the one InHover that parks the landside pointer where CSS :hover and JS mouseover can see it. Still open for drag-and-drop: HTML5 DnD needs a gesture vocabulary (dragstart through drop) that neither the wire nor the executor has, deferred with eyes open"
+      "notes": "two of the three shapes now have paths, pinned by TestSlidersAndHoverMenusReachThePage and TestPWAWidgetChromeAffordances. Sliders (and every native-picker input: color, date, time, month, week): the widget moves locally in the mirror, and the settled value relays once on change as a setvalue — the echo engine now refuses to own non-text inputs, which was also sending a whole-value frame per tick of a focused drag and a meaningless one after every checkbox toggle. Hover menus: the context menu's Hover-here entry sends the one InHover that parks the landside pointer, but nothing sends it for the gesture a reader actually makes, which widgets/hover-menu measures. Still open for everything drag-shaped, now measured rather than deferred: widgets/drag-sortable (pointer-event reorder), widgets/dnd-html5 (native drag-and-drop), widgets/slider-track (a held thumb drag; its click-to-seek half works and is the page's positive control)"
     },
     {
       "id": "P-112",

@@ -134,12 +134,20 @@ func (t *Tolerances) Effective() Tolerances {
 // client. Kinds:
 //
 //	click     Target
+//	dblclick  Target
 //	type      Target, Value (typed as keystrokes through the echo path)
 //	select    Target, Value (choose an option in a <select>)
 //	check     Target, Value "true"/"false"
 //	submit    Target (a form)
 //	key       Value (a control key: Enter, Tab, Escape)
 //	scroll    Value (a document Y offset in CSS px)
+//	hover     Target — move the pointer onto the element and let it rest
+//	          there, the way a reader waits for a menu to open
+//	drag      Target, To or Value — press on Target, move along a sampled
+//	          path, release at To's centre (or at Value "dx,dy" CSS px away)
+//	touchDrag Target, To or Value — the same gesture as a finger: real touch
+//	          events on the client page, no mouse events at all
+//	wheel     Target, Value "dx,dy" — one wheel tick over the element
 //	waitText  Value, Within — a checkpoint: the mirror should come to
 //	          contain this text
 //	settle    re-run the settle barrier and re-measure every dimension
@@ -155,6 +163,10 @@ type Interaction struct {
 	Do     string `json:"do"`
 	Target string `json:"target,omitempty"`
 	Value  string `json:"value,omitempty"`
+	// To names the destination of a drag or touchDrag — a second target,
+	// resolved the same way as Target. Value's "dx,dy" offset is the
+	// alternative for a gesture whose end is a distance, not an element.
+	To string `json:"to,omitempty"`
 	// Within bounds a waitText, in seconds; the runner wraps it in budget().
 	Within int `json:"within,omitempty"`
 	// Name makes this step a check in the interaction dimension. An unnamed
@@ -173,9 +185,10 @@ type Interaction struct {
 // selector (or, with a leading "!", does not) — for divergences no probe
 // dimension can see, like an empty <use> box that measures the same full.
 var interactionKinds = map[string]bool{
-	"click": true, "type": true, "select": true, "check": true,
-	"submit": true, "key": true, "scroll": true, "waitText": true,
-	"settle":             true,
+	"click": true, "dblclick": true, "type": true, "select": true,
+	"check": true, "submit": true, "key": true, "scroll": true,
+	"hover": true, "drag": true, "touchDrag": true, "wheel": true,
+	"waitText": true, "settle": true,
 	"assertMirrorCSSHas": true, "assertMirrorCSSLacks": true,
 	"assertShellTabs":      true,
 	"assertMirrorSelector": true,
@@ -244,6 +257,26 @@ func (m *Manifest) validate() error {
 		}
 		if strings.HasPrefix(step.Do, "assert") && step.Name == "" {
 			return fmt.Errorf("parity: %s interaction %d: an assertion is a measurement and must be named", m.ID, i)
+		}
+		switch step.Do {
+		case "drag", "touchDrag":
+			if step.Target == "" {
+				return fmt.Errorf("parity: %s interaction %d: %s needs a target to press on", m.ID, i, step.Do)
+			}
+			if step.To == "" && step.Value == "" {
+				return fmt.Errorf("parity: %s interaction %d: %s needs a destination — `to` or a \"dx,dy\" value", m.ID, i, step.Do)
+			}
+		case "hover", "dblclick":
+			if step.Target == "" {
+				return fmt.Errorf("parity: %s interaction %d: %s needs a target", m.ID, i, step.Do)
+			}
+		case "wheel":
+			if step.Target == "" || step.Value == "" {
+				return fmt.Errorf("parity: %s interaction %d: wheel needs a target and a \"dx,dy\" value", m.ID, i)
+			}
+		}
+		if step.To != "" && step.Do != "drag" && step.Do != "touchDrag" {
+			return fmt.Errorf("parity: %s interaction %d: `to` only names a drag's destination", m.ID, i)
 		}
 	}
 	if strings.HasPrefix(m.ID, "real/") && m.Attribution == "" {

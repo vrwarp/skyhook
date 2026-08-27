@@ -1,0 +1,21 @@
+{
+  "id": "widgets/slider-track",
+  "title": "a div-built slider seeks on press and follows a drag",
+  "covers": ["pointer-event sliders", "setPointerCapture", "click-to-seek"],
+  "gaps": ["P-111"],
+  "waitText": "slider settled",
+  "interactions": [
+    {"do": "click", "target": "#mark-10"},
+    {"do": "waitText", "value": "level: 10", "within": 12, "name": "a press seeks to where the reader pressed"},
+    {"do": "drag", "target": "#thumb", "to": "#mark-90"},
+    {"do": "waitText", "value": "moved: yes", "within": 12, "name": "the drag's motion reaches the page"},
+    {"do": "waitText", "value": "level: 90", "within": 12, "name": "the drag leaves the slider where the reader let go"}
+  ],
+  "expectedFail": {
+    "interaction": {
+      "gap": "P-111",
+      "reason": "the seek works — a click carries its permille point — but the held drag has no path: press-move-release on a div thumb is left to the browser and nothing goes landside"
+    }
+  },
+  "notes": "the click lands on #mark-10, a 1px tick at 10% whose centre maps to level 10 exactly; values quantised to tens so a pixel of cross-half layout difference cannot flap a check"
+}

@@ -36,6 +36,16 @@ func TestParityMedia(t *testing.T)    { runParityGroup(t, "media") }
 func TestParityNav(t *testing.T)      { runParityGroup(t, "nav") }
 func TestParityTextMisc(t *testing.T) { runParityGroup(t, "textmisc") }
 
+// The widgets/ group is the interactivity-fidelity corpus: gesture-driven
+// UI — drag widgets, HTML5 drag-and-drop, hover menus, wheel zoom — each
+// page proving with landside text whether the reader's gesture arrived.
+func TestParityWidgets(t *testing.T) { runParityGroup(t, "widgets") }
+
+// The touch/ group makes the same measurements with a finger: real touch
+// events on the client page, no mouse events at all, which is the stream a
+// phone produces (P-006).
+func TestParityTouch(t *testing.T) { runParityGroup(t, "touch") }
+
 // The real/ group is pages captured from the live web through the pipeline
 // and imported with `skyhookctl bundle import` — the corpus's contact with
 // markup nobody wrote to be measurable. See each manifest's attribution.

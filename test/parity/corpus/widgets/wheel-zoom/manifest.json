@@ -1,0 +1,19 @@
+{
+  "id": "widgets/wheel-zoom",
+  "title": "a wheel turned over a gesture-claiming widget zooms it",
+  "covers": ["wheel listeners", "zoom widgets", "touch-action: none regions"],
+  "gaps": ["P-004"],
+  "waitText": "zoom settled",
+  "interactions": [
+    {"do": "click", "target": "#poke"},
+    {"do": "waitText", "value": "poked: yes", "name": "the page's listeners work over the mirror"},
+    {"do": "wheel", "target": "#stage", "value": "0,-120"},
+    {"do": "waitText", "value": "zoom: 1", "within": 12, "name": "a wheel over the widget reaches its listener"}
+  ],
+  "expectedFail": {
+    "interaction": {
+      "gap": "P-004",
+      "reason": "no client sends InWheel: the mirror scrolls natively and reports position telemetry, which is right for a document and nothing at all for a widget that zooms on the wheel"
+    }
+  }
+}

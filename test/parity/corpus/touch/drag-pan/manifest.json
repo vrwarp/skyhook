@@ -1,0 +1,22 @@
+{
+  "id": "touch/drag-pan",
+  "title": "a finger's drag pans a touch widget, arriving as touch",
+  "covers": ["touch gestures", "pointerType", "maxTouchPoints", "touch-action: none pan surfaces"],
+  "gaps": ["P-006", "P-111"],
+  "waitText": "pan settled",
+  "interactions": [
+    {"do": "click", "target": "#poke"},
+    {"do": "waitText", "value": "poked: yes", "name": "the page's listeners work over the mirror"},
+    {"do": "touchDrag", "target": "#chip", "value": "140,0"},
+    {"do": "waitText", "value": "panned: far", "within": 12, "name": "the finger's pan reaches the page"},
+    {"do": "waitText", "value": "pointer: touch", "within": 12, "name": "the gesture arrives as the touch it was"},
+    {"do": "waitText", "value": "points: touch", "within": 12, "name": "the landside browser claims the touchscreen the reader has"}
+  ],
+  "expectedFail": {
+    "interaction": {
+      "gap": "P-006",
+      "reason": "the landside browser is a phone with a mouse: touch is never emulated and no drag path exists for a non-canvas widget (P-111), so the pan never arrives — and if it did, it would arrive wearing a mouse"
+    }
+  },
+  "notes": "three checks, three layers: the pan arriving at all is P-111's drag path; arriving as pointerType touch and the page seeing maxTouchPoints > 0 are P-006's touch emulation, which only makes sense arriving together with touch input to feed it"
+}

@@ -238,6 +238,13 @@ type parityRun struct {
 	// exceptions in the client page. Snapshotted around each page so an
 	// error is charged to the page that was active when it happened.
 	consoleErrors atomic.Int64
+	// touchOn records that the client browser has been flipped to a
+	// touchscreen for this group, so it is done once rather than per step.
+	touchOn bool
+	// dragSub and dragData carry the executor's native-drag interception:
+	// one subscription per run, the latest intercepted DragData in the slot.
+	dragSub  bool
+	dragData atomic.Value
 }
 
 func runParityGroup(t *testing.T, group string) {
@@ -288,12 +295,25 @@ func runParityPage(ctx context.Context, t *testing.T, run *parityRun, siteURL st
 	openedAt := time.Now()
 	tab, mt := openParityTab(ctx, t, run, url, m.WaitText)
 
+	// Park the pointer on neutral chrome before measuring. A group shares one
+	// client window, so a previous page's hover step would otherwise leave
+	// the pointer resting over whatever this page happens to lay out there —
+	// live :hover state in the probe that this page never asked for.
+	if err := run.page.Do(ctx, "Input.dispatchMouseEvent",
+		map[string]any{"type": "mouseMoved", "x": 4, "y": 4}, nil); err != nil {
+		t.Fatalf("park pointer: %v", err)
+	}
+
 	scrolled := false
 	var checks []parity.Check
 	for i := range m.Interactions {
 		step := &m.Interactions[i]
 		ok := runInteraction(ctx, t, run, tab, mt, step, framesBefore+1, openedAt)
-		if step.Do == "scroll" {
+		switch step.Do {
+		case "scroll", "wheel", "touchDrag":
+			// Any of these can leave the mirror viewport somewhere the
+			// landside screenshot is not, which is the pixel advisory's cue
+			// to say nothing rather than guess.
 			scrolled = true
 		}
 		if step.Name != "" {
@@ -595,7 +615,8 @@ measured — echo, setvalue, landside replay — is the same from there on.
 func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint32, mt *mirror.Tab, step *parity.Interaction, framesAtOpen int, openedAt time.Time) bool {
 	t.Helper()
 	switch step.Do {
-	case "click", "check", "submit", "type", "key", "select", "scroll":
+	case "click", "check", "submit", "type", "key", "select", "scroll",
+		"dblclick", "hover", "drag", "touchDrag", "wheel":
 		// Converge before acting: the step's measurement should be of the
 		// step, not of whatever the previous one still had in flight — and a
 		// stale focus echo (P-121) must be a catalogued gap, not a hazard
@@ -605,6 +626,21 @@ func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint3
 	switch step.Do {
 	case "click", "check", "submit":
 		clickInMirror(ctx, t, run.page, tab, step.Target)
+		return true
+	case "dblclick":
+		dblclickInMirror(ctx, t, run.page, tab, step.Target)
+		return true
+	case "hover":
+		hoverInMirror(ctx, t, run.page, tab, step.Target)
+		return true
+	case "drag":
+		dragInMirror(ctx, t, run, tab, step)
+		return true
+	case "touchDrag":
+		touchDragInMirror(ctx, t, run, tab, step)
+		return true
+	case "wheel":
+		wheelInMirror(ctx, t, run.page, tab, step)
 		return true
 	case "type":
 		focusInMirror(ctx, t, run, tab, step.Target)
@@ -852,6 +888,22 @@ func focusInMirror(ctx context.Context, t *testing.T, run *parityRun, tab uint32
 // the client page, at the element's position on the reader's screen.
 func clickInMirror(ctx context.Context, t *testing.T, page *cdp.Session, tab uint32, target string) {
 	t.Helper()
+	x, y := mirrorPointOf(ctx, t, page, tab, target)
+	move := map[string]any{"type": "mouseMoved", "x": x, "y": y}
+	down := map[string]any{"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}
+	up := map[string]any{"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}
+	for _, ev := range []map[string]any{move, down, up} {
+		if err := page.Do(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
+			t.Fatalf("dispatch mouse event: %v", err)
+		}
+	}
+}
+
+// mirrorPointOf resolves a manifest target to its centre on the reader's
+// screen — mirror-frame offset plus element box — scrolling it into view
+// first, exactly as clickInMirror aims.
+func mirrorPointOf(ctx context.Context, t *testing.T, page *cdp.Session, tab uint32, target string) (float64, float64) {
+	t.Helper()
 	expr := fmt.Sprintf(`(() => {
   const el = %s;
   if (!el) return { found: false };
@@ -870,15 +922,252 @@ func clickInMirror(ctx context.Context, t *testing.T, page *cdp.Session, tab uin
 	if !res.Found {
 		t.Fatalf("nothing in the mirror matches %q", target)
 	}
+	return res.X, res.Y
+}
 
-	move := map[string]any{"type": "mouseMoved", "x": res.X, "y": res.Y}
-	down := map[string]any{"type": "mousePressed", "x": res.X, "y": res.Y, "button": "left", "clickCount": 1}
-	up := map[string]any{"type": "mouseReleased", "x": res.X, "y": res.Y, "button": "left", "clickCount": 1}
-	for _, ev := range []map[string]any{move, down, up} {
+// dragEnd resolves where a drag finishes: the To target's centre, or the
+// start displaced by a "dx,dy" value.
+func dragEnd(ctx context.Context, t *testing.T, page *cdp.Session, tab uint32, step *parity.Interaction, sx, sy float64) (float64, float64) {
+	t.Helper()
+	if step.To != "" {
+		return mirrorPointOf(ctx, t, page, tab, step.To)
+	}
+	var dx, dy float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(step.Value), "%f,%f", &dx, &dy); err != nil {
+		t.Fatalf("drag value %q is not \"dx,dy\"", step.Value)
+	}
+	return sx + dx, sy + dy
+}
+
+// dblclickInMirror double-clicks the way a reader does: two real presses at
+// the same point, the second with clickCount 2, which is what Chromium
+// synthesises a dblclick event from.
+func dblclickInMirror(ctx context.Context, t *testing.T, page *cdp.Session, tab uint32, target string) {
+	t.Helper()
+	x, y := mirrorPointOf(ctx, t, page, tab, target)
+	events := []map[string]any{
+		{"type": "mouseMoved", "x": x, "y": y},
+		{"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+		{"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+		{"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 2},
+		{"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 2},
+	}
+	for _, ev := range events {
 		if err := page.Do(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
 			t.Fatalf("dispatch mouse event: %v", err)
 		}
 	}
+}
+
+// hoverInMirror walks the pointer onto the element and lets it rest there —
+// the gesture a reader makes at a menu that opens on approach. The rest is
+// real wall-clock time, long enough for a dwell-based client to decide the
+// pointer has settled.
+func hoverInMirror(ctx context.Context, t *testing.T, page *cdp.Session, tab uint32, target string) {
+	t.Helper()
+	x, y := mirrorPointOf(ctx, t, page, tab, target)
+	// Approach from a little way off, in a few steps, so the client sees a
+	// pointer arriving rather than teleporting.
+	for i := 3; i >= 0; i-- {
+		ev := map[string]any{"type": "mouseMoved", "x": x - float64(i)*24, "y": y - float64(i)*12}
+		if err := page.Do(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
+			t.Fatalf("dispatch mouse event: %v", err)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	// Let it rest: a dwell-hover client sends after the pointer has been
+	// still past its threshold. Real time, not budget() — the dwell is a
+	// client-side constant, not link-speed work.
+	time.Sleep(1200 * time.Millisecond)
+}
+
+/*
+dragInMirror presses on the target, moves along a sampled path, and releases
+at the destination — real mouse events with real time between them, so the
+client's pointer machinery sees a gesture, not a jump.
+
+One wrinkle is the browser's own drag-and-drop. A real reader pressing on a
+draggable element starts a native drag, and from then on the page gets drag
+events, not pointer events. Injected CDP mouse events never start that drag
+by themselves, so the executor arms Input.setInterceptDrags: when the moves
+would have begun a native drag, Chromium reports it instead of running it,
+and the executor completes the gesture with Input.dispatchDragEvent — real
+dragOver and drop events at the destination, which is exactly what the
+reader's gesture would have delivered. A gesture that intercepts nothing
+(most drags) finishes as the plain mouse release it always was.
+*/
+func dragInMirror(ctx context.Context, t *testing.T, run *parityRun, tab uint32, step *parity.Interaction) {
+	t.Helper()
+	page := run.page
+	if !run.dragSub {
+		run.dragSub = true
+		page.Subscribe("Input.dragIntercepted", func(_ string, params json.RawMessage) {
+			var p struct {
+				Data json.RawMessage `json:"data"`
+			}
+			if json.Unmarshal(params, &p) == nil && len(p.Data) > 0 {
+				run.dragData.Store(p.Data)
+			}
+		})
+	}
+	run.dragData.Store(json.RawMessage(nil))
+	if err := page.Do(ctx, "Input.setInterceptDrags", map[string]any{"enabled": true}, nil); err != nil {
+		t.Fatalf("intercept drags: %v", err)
+	}
+	defer func() {
+		if err := page.Do(ctx, "Input.setInterceptDrags", map[string]any{"enabled": false}, nil); err != nil {
+			t.Logf("un-intercept drags: %v", err)
+		}
+	}()
+
+	sx, sy := mirrorPointOf(ctx, t, page, tab, step.Target)
+	ex, ey := dragEnd(ctx, t, page, tab, step, sx, sy)
+	dispatch := func(ev map[string]any) {
+		if err := page.Do(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
+			t.Fatalf("dispatch mouse event: %v", err)
+		}
+	}
+	dispatch(map[string]any{"type": "mouseMoved", "x": sx, "y": sy})
+	dispatch(map[string]any{"type": "mousePressed", "x": sx, "y": sy, "button": "left", "buttons": 1, "clickCount": 1})
+	const steps = 6
+	for i := 1; i <= steps; i++ {
+		f := float64(i) / steps
+		ev := map[string]any{"type": "mouseMoved", "x": sx + (ex-sx)*f, "y": sy + (ey-sy)*f, "buttons": 1}
+		time.Sleep(25 * time.Millisecond)
+		dispatch(ev)
+	}
+
+	// Did the browser take those moves as the start of a native drag?
+	var data json.RawMessage
+	deadline := time.Now().Add(600 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if raw, _ := run.dragData.Load().(json.RawMessage); len(raw) > 0 {
+			data = raw
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if len(data) > 0 {
+		var parsed any
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			t.Fatalf("drag data: %v", err)
+		}
+		for _, kind := range []string{"dragEnter", "dragOver", "drop"} {
+			if err := page.Do(ctx, "Input.dispatchDragEvent",
+				map[string]any{"type": kind, "x": ex, "y": ey, "data": parsed}, nil); err != nil {
+				t.Fatalf("dispatch drag %s: %v", kind, err)
+			}
+		}
+		dispatch(map[string]any{"type": "mouseReleased", "x": ex, "y": ey, "button": "left", "clickCount": 1})
+		return
+	}
+
+	// A beat at the end: a reader placing a drop does not release mid-flick.
+	time.Sleep(80 * time.Millisecond)
+	dispatch(map[string]any{"type": "mouseReleased", "x": ex, "y": ey, "button": "left", "clickCount": 1})
+}
+
+// touchDragInMirror makes the same gesture as a finger: touch events on the
+// client page, which Chromium turns into pointer events with pointerType
+// "touch" and no mouse events while the finger moves — the stream a phone
+// really produces. Injected touch is not a finger, though: on a loaded
+// machine a press can be dropped whole, so the frame is instrumented and the
+// gesture retried until it demonstrably began.
+func touchDragInMirror(ctx context.Context, t *testing.T, run *parityRun, tab uint32, step *parity.Interaction) {
+	t.Helper()
+	ensureTouch(ctx, t, run)
+	page := run.page
+	sx, sy := mirrorPointOf(ctx, t, page, tab, step.Target)
+	ex, ey := dragEnd(ctx, t, page, tab, step, sx, sy)
+
+	instrument := fmt.Sprintf(`(() => {
+  const f = document.querySelector('iframe.mirror[data-tab="%d"]');
+  if (!f || !f.contentDocument) return false;
+  const w = f.contentWindow;
+  if (!w.__skyTouchSeen) {
+    w.__skyTouchSeen = { down: 0 };
+    f.contentDocument.addEventListener('pointerdown', () => { w.__skyTouchSeen.down++; }, true);
+  }
+  w.__skyTouchSeen.down = 0;
+  return true;
+})()`, tab)
+	sawPress := fmt.Sprintf(`(() => {
+  const f = document.querySelector('iframe.mirror[data-tab="%d"]');
+  return !!(f && f.contentWindow && f.contentWindow.__skyTouchSeen && f.contentWindow.__skyTouchSeen.down > 0);
+})()`, tab)
+
+	touch := func(kind string, points []map[string]any) {
+		if points == nil {
+			points = []map[string]any{}
+		}
+		if err := page.Do(ctx, "Input.dispatchTouchEvent", map[string]any{
+			"type": kind, "touchPoints": points,
+		}, nil); err != nil {
+			t.Fatalf("dispatch touch event: %v", err)
+		}
+	}
+	at := func(x, y float64) []map[string]any {
+		return []map[string]any{{"x": x, "y": y, "id": 1}}
+	}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		var ok bool
+		evalJSON(ctx, t, page, instrument, &ok)
+		if !ok {
+			t.Fatalf("tab %d has no mirror frame to instrument", tab)
+		}
+		touch("touchStart", at(sx, sy))
+		time.Sleep(60 * time.Millisecond)
+		if !evalBool(ctx, page, sawPress) {
+			// The press never reached the frame; withdraw and try again.
+			touch("touchCancel", nil)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		const steps = 5
+		for i := 1; i <= steps; i++ {
+			f := float64(i) / steps
+			time.Sleep(30 * time.Millisecond)
+			touch("touchMove", at(sx+(ex-sx)*f, sy+(ey-sy)*f))
+		}
+		time.Sleep(80 * time.Millisecond)
+		touch("touchEnd", nil)
+		return
+	}
+	t.Fatalf("three injected touch presses never reached tab %d's mirror", tab)
+}
+
+// wheelInMirror turns the reader's wheel once over the element.
+func wheelInMirror(ctx context.Context, t *testing.T, page *cdp.Session, tab uint32, step *parity.Interaction) {
+	t.Helper()
+	x, y := mirrorPointOf(ctx, t, page, tab, step.Target)
+	var dx, dy float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(step.Value), "%f,%f", &dx, &dy); err != nil {
+		t.Fatalf("wheel value %q is not \"dx,dy\"", step.Value)
+	}
+	move := map[string]any{"type": "mouseMoved", "x": x, "y": y}
+	wheel := map[string]any{"type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy}
+	for _, ev := range []map[string]any{move, wheel} {
+		if err := page.Do(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
+			t.Fatalf("dispatch mouse event: %v", err)
+		}
+	}
+}
+
+// ensureTouch flips the client browser to a touchscreen once per group run.
+// Injected touch events reach the page either way; what this changes is what
+// the page believes about the machine (maxTouchPoints), which is itself part
+// of what the touch corpus measures.
+func ensureTouch(ctx context.Context, t *testing.T, run *parityRun) {
+	t.Helper()
+	if run.touchOn {
+		return
+	}
+	if err := run.page.Do(ctx, "Emulation.setTouchEmulationEnabled",
+		map[string]any{"enabled": true, "maxTouchPoints": 5}, nil); err != nil {
+		t.Fatalf("enable touch emulation: %v", err)
+	}
+	run.touchOn = true
 }
 
 func pressKey(ctx context.Context, t *testing.T, page *cdp.Session, key string) {
