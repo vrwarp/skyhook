@@ -595,6 +595,58 @@ describe('MirrorHost', () => {
     return snap;
   }
 
+  /** The same gesture straight down the screen, for a surface that only
+   *  claimed one axis: the browser keeps the other, and so must the mirror. */
+  function dragDown(host: MirrorHost, el: Element, from: number, to: number): void {
+    const win = host.frame.contentDocument!.defaultView!;
+    const at = (type: string, y: number) => el.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: 150, clientY: y, button: 0, isPrimary: true,
+        pointerType: 'mouse',
+      }),
+    );
+    at('pointerdown', from);
+    at('mousedown', from);
+    at('pointermove', Math.round((from + to) / 2));
+    at('pointermove', to);
+    at('pointerup', to);
+    at('mouseup', to);
+    el.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 150, clientY: to }));
+  }
+
+  it('claims the swipe a carousel kept, and leaves the scroll it gave away', async () => {
+    // `touch-action: pan-y` is what every carousel says: the browser may
+    // pan vertically, the page keeps the horizontal gesture. Reading only
+    // `none` claimed neither (P-140).
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: pan-y'));
+    const pad = host.frame.contentDocument!.getElementById('pad')!;
+
+    dragAcross(host, pad, 100, 400);
+    const across = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(across.filter((p) => p.kind === 'drag')).toHaveLength(1);
+
+    ev.input.mockClear();
+    dragDown(host, pad, 40, 300);
+    const down = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    // The browser's axis: the reader is scrolling, and a pan sent landside
+    // would move a page they were only reading past.
+    expect(down.filter((p) => p.kind === 'drag')).toHaveLength(0);
+    expect(down.map((p) => p.kind)).toContain('click');
+  });
+
+  it('leaves a manipulation surface to the browser entirely', async () => {
+    // `manipulation` refuses double-tap zoom and leaves panning alone: a
+    // page asking for a faster tap, not for the gesture.
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: manipulation'));
+
+    dragAcross(host, host.frame.contentDocument!.getElementById('pad')!, 100, 400);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(0);
+  });
+
   it('claims a drag on an element wearing a grab cursor', async () => {
     const { host, ev } = await mount();
     host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
@@ -809,6 +861,37 @@ describe('MirrorHost', () => {
 
       expect(tick.defaultPrevented).toBe(false);
       expect(ev.input).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves the vertical wheel a one-axis widget gave the browser', async () => {
+    // The other half of P-140: claiming a `pan-y` carousel for drags must
+    // not also claim the wheel over it, or the page stops scrolling under
+    // the reader entirely.
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: pan-y'));
+      const pad = host.frame.contentDocument!.getElementById('pad')!;
+      const win = pad.ownerDocument.defaultView!;
+
+      const down = wheelOn(pad, -120);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(down.defaultPrevented).toBe(false);
+      expect(ev.input).not.toHaveBeenCalled();
+
+      // The axis the page kept is the page's, wheel included: a horizontal
+      // wheel over a carousel is the reader asking it to move.
+      const across = new win.WheelEvent('wheel', {
+        bubbles: true, cancelable: true, deltaX: -120, clientX: 150, clientY: 40,
+      });
+      pad.dispatchEvent(across);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(across.defaultPrevented).toBe(true);
+      const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+      expect(sent.filter((p) => p.kind === 'wheel')).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }

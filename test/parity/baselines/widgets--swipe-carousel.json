@@ -21,9 +21,9 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 2
+        "failed": 0
       },
       "checks": [
         {
@@ -32,11 +32,11 @@
         },
         {
           "name": "the swipe's motion reaches the page",
-          "pass": false
+          "pass": true
         },
         {
           "name": "a swipe advances the carousel",
-          "pass": false
+          "pass": true
         }
       ]
     },
@@ -84,9 +84,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "interaction": "P-140"
   },
   "gaps": [
     "P-140"

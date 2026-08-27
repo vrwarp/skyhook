@@ -606,11 +606,11 @@
     {
       "id": "P-140",
       "title": "A widget that claimed one axis is not claimed at all: touch-action pan-x/pan-y goes unread",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/host.ts"
       ],
-      "notes": "the gesture census reads touch-action: none and stops there, but the commonest declaration a swipeable widget makes is pan-y — the browser keeps the vertical scroll, the page keeps the horizontal gesture. Every carousel and swipe-to-dismiss row is built this way and none of them are claimed. Measured by widgets/swipe-carousel"
+      "notes": "fixed: the census reads what a touch-action value leaves to the browser and claims the rest — pan-y keeps the horizontal gesture for the page, pan-x the vertical, none both, and manipulation (a faster tap, not a claim) neither. A drag is then only sent if it ran mostly along the claimed axis, because a gesture along the browser's axis is the browser's: under a finger it never arrives (the scroll claims it and the pointer cancels), under a mouse it is the reader scrolling or selecting. The wheel path checks the same axis, which is what keeps a carousel from swallowing the vertical scroll over it. widgets/swipe-carousel pins the horizontal claim; host.dom pins the vertical drag and the vertical wheel staying native"
     },
     {
       "id": "P-141",

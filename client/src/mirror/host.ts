@@ -315,6 +315,16 @@ export interface PullState {
 }
 
 /** Emitted by the host, forwarded to the server by the app shell. */
+/** Which way a surface claims drag gestures: both axes, or the one the
+ *  browser did not keep. See dragSurfaceAt. */
+type DragAxis = 'both' | 'x' | 'y';
+
+/** A surface that claims drags, and the axis it claimed. */
+interface DragSurface {
+  el: Element;
+  axis: DragAxis;
+}
+
 export interface HostEvents {
   input(tab: number, ev: Record<string, unknown>): void;
   scroll(tab: number, ev: Record<string, unknown>): void;
@@ -848,6 +858,7 @@ export class MirrorHost {
     point: number[] | undefined;
     samples: Array<{ x: number; y: number; t: number }>;
     pt: number;
+    axis: DragAxis;
   } | null = null;
 
   /**
@@ -926,9 +937,9 @@ export class MirrorHost {
    * keeps its old unconditional claim: its content is pixels, so there is
    * nothing else the gesture could mean.
    */
-  private dragSurfaceAt(target: EventTarget | null): Element | null {
+  private dragSurfaceAt(target: EventTarget | null): DragSurface | null {
     const region = this.regionAt(target);
-    if (region) return region;
+    if (region) return { el: region, axis: 'both' };
     const win = this.frame.contentWindow;
     const doc = this.frame.contentDocument;
     if (!win || !doc) return null;
@@ -937,12 +948,49 @@ export class MirrorHost {
     for (let e = el as Element | null; e; e = MirrorHost.parentOf(e)) {
       if (e === doc.body || e === doc.documentElement) return null;
       if (!e.getAttribute) continue;
-      if (e.getAttribute('role') === 'slider') return e;
+      if (e.getAttribute('role') === 'slider') return { el: e, axis: 'both' };
       const cs = win.getComputedStyle(e);
-      if (MirrorHost.DRAG_CURSORS.has(cs.cursor)) return e;
-      if (cs.touchAction === 'none') return e;
+      if (MirrorHost.DRAG_CURSORS.has(cs.cursor)) return { el: e, axis: 'both' };
+      const axis = MirrorHost.claimedAxis(cs.touchAction);
+      if (axis) return { el: e, axis };
     }
     return null;
+  }
+
+  /**
+   * Which way a `touch-action` value claims gestures, or null for a value
+   * that claims none.
+   *
+   * The declaration names what the *browser* may still do, so the page keeps
+   * whatever is left: `none` keeps everything, and the far commoner `pan-y`
+   * — every carousel, every swipe-to-dismiss row — hands the browser the
+   * vertical scroll and keeps the horizontal swipe. Reading only `none`
+   * missed all of them (P-140). `manipulation` is deliberately not a claim:
+   * it refuses double-tap zoom and leaves panning to the browser, which is
+   * a page saying it wants the gesture to feel faster, not that it wants
+   * the gesture.
+   */
+  private static claimedAxis(touchAction: string): DragAxis | null {
+    const value = (touchAction || '').trim();
+    if (!value || value === 'auto' || value === 'manipulation') return null;
+    if (value === 'none') return 'both';
+    const parts = value.split(/\s+/);
+    const panX = parts.some((p) => p === 'pan-x' || p === 'pan-left' || p === 'pan-right');
+    const panY = parts.some((p) => p === 'pan-y' || p === 'pan-up' || p === 'pan-down');
+    // The browser pans one axis, so the page kept the other.
+    if (panY && !panX) return 'x';
+    if (panX && !panY) return 'y';
+    // Both axes left to the browser (or only pinch-zoom refused): the page
+    // claimed no drag.
+    return null;
+  }
+
+  /** Whether a displacement is the gesture the surface claimed. A surface
+   *  that kept one axis did so because the browser owns the other, and a
+   *  drag mostly along the browser's axis is the browser's. */
+  private static onClaimedAxis(axis: DragAxis, dx: number, dy: number): boolean {
+    if (axis === 'both') return true;
+    return axis === 'x' ? Math.abs(dx) > Math.abs(dy) : Math.abs(dy) > Math.abs(dx);
   }
 
   /** The wire's name for a pointer's kind: 0 mouse, 1 touch, 2 pen. */
@@ -954,15 +1002,16 @@ export class MirrorHost {
     if (ev.button !== 0) return;
     const surface = this.dragSurfaceAt(this.eventTarget(ev));
     if (!surface) return;
-    const node = this.patcher?.idOf(surface) ?? 0;
+    const node = this.patcher?.idOf(surface.el) ?? 0;
     if (!node) return;
     const start = this.samplePointer(ev);
     if (!start) return;
     this.dragging = {
       node,
-      point: this.pointInBox(ev, surface),
+      point: this.pointInBox(ev, surface.el),
       samples: [start],
       pt: MirrorHost.pointerKind(ev.pointerType),
+      axis: surface.axis,
     };
   }
 
@@ -1001,11 +1050,15 @@ export class MirrorHost {
     const h = win?.innerHeight ?? 0;
     const first = drag.samples[0];
     const end = drag.samples[drag.samples.length - 1];
-    const moved = Math.hypot(
-      ((end.x - first.x) / 1000) * w,
-      ((end.y - first.y) / 1000) * h,
-    );
-    if (moved < MirrorHost.DRAG_SLOP_PX) return;
+    const dx = ((end.x - first.x) / 1000) * w;
+    const dy = ((end.y - first.y) / 1000) * h;
+    if (Math.hypot(dx, dy) < MirrorHost.DRAG_SLOP_PX) return;
+    // A surface that kept one axis left the other to the browser, and a
+    // gesture mostly along the browser's axis is the browser's: under a
+    // finger it never arrives here at all (the scroll claims it and the
+    // pointer cancels), and under a mouse it is the reader scrolling or
+    // selecting, which this must not take away.
+    if (!MirrorHost.onClaimedAxis(drag.axis, dx, dy)) return;
 
     this.dragConsumedClick = true;
     this.sendDrag(drag.node, drag.point, drag.samples, drag.pt, ev);
@@ -1112,7 +1165,11 @@ export class MirrorHost {
   private wheelInFrame(ev: WheelEvent): void {
     const surface = this.dragSurfaceAt(this.eventTarget(ev));
     if (!surface) return;
-    const node = this.patcher?.idOf(surface) ?? 0;
+    // A surface that claimed one axis kept the browser's scroll on the
+    // other, and the wheel is mostly used on that other one: taking the
+    // vertical wheel over a carousel would stop the page scrolling at all.
+    if (!MirrorHost.onClaimedAxis(surface.axis, ev.deltaX, ev.deltaY)) return;
+    const node = this.patcher?.idOf(surface.el) ?? 0;
     if (!node) return;
     // The widget consumes the wheel; the mirror must not also scroll.
     ev.preventDefault();
@@ -1130,7 +1187,7 @@ export class MirrorHost {
       node,
       dx: ev.deltaX * scale,
       dy: ev.deltaY * scale,
-      point: this.pointInBox(ev, surface),
+      point: this.pointInBox(ev, surface.el),
       modifiers: modifierMask(ev),
     };
     this.wheelTimer = window.setTimeout(() => this.flushWheel(), MirrorHost.WHEEL_FLUSH_MS);
