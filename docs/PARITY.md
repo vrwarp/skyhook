@@ -116,16 +116,16 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-61 gaps: 13 open, 11 by-design, 36 fixed, 1 disproven.
+61 gaps: 10 open, 11 by-design, 39 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
 | P-001 | open | A canvas that animates unprompted is not followed | — reader-initiated animation is pinned by test/canvas_test.go; the unprompted case is the canvasStreamEvery knob, a configuration choice rather than a parity property |
 | P-002 | fixed | Icon fonts ship whole, never subsetted | — a byte-cost gap, not a rendering one: whether the glyphs draw at all is fonts/icon-ligature's business |
 | P-003 | open | A font registered through the FontFace API cannot ship; its glyphs render as their ligature names | fonts/faces |
-| P-004 | open | wheel and hover are protocol surface no client sends | — hover is now sent — the mirror menu's Hover-here entry is the client's InHover (P-111) — so this entry narrows to wheel: still protocol surface no client sends, deliberately, because scroll telemetry already carries where the reader is and streaming wheel deltas would spend the link on what zoom-canvas widgets alone consume; catalogued for the executor revision that takes on drag |
+| P-004 | fixed | wheel and hover are protocol surface no client sends | widgets/wheel-zoom |
 | P-005 | by-design | Password and sensitive-autocomplete values never cross the wire | forms/password |
-| P-006 | open | The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half | — both harness browsers are mice too, so the divergence cannot arise in-corpus; imported real pages carry the widened page-height band it causes |
+| P-006 | fixed | The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half | touch/drag-pan |
 | P-007 | fixed | File upload is not implemented | — |
 | P-008 | fixed | Clipboard copy executes plane-side only; cross-tab paste fidelity is absent | — |
 | P-009 | open | Find-in-page has no chrome-UI affordance | — a chrome-UI gap, not a mirror-rendering one |
@@ -153,7 +153,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-108 | fixed | Downloads are unhandled: a download link writes a file onto the VPS and the reader sees nothing happen | — |
 | P-109 | fixed | window.open and a plain click on target=_blank open a landside tab no client tab will ever show | nav/target-blank |
 | P-110 | fixed | There is no print path: window.print does nothing for the reader | — |
-| P-111 | open | mousemove-driven widgets — drag-and-drop, sliders, hover menus — have no input path | — needs a pointer-move step in the interaction executor; catalogued for the executor's next revision alongside P-004 |
+| P-111 | fixed | mousemove-driven widgets — drag-and-drop, sliders, hover menus — have no input path | touch/drag-pan, widgets/dnd-html5, widgets/drag-sortable, widgets/hover-menu, widgets/slider-track |
 | P-112 | open | An audio element is photographed as a still control strip; no audio ever crosses | media/audio |
 | P-113 | fixed | DPR is never applied to image transcodes or region shots: every picture is soft on a 2x or 3x screen | — |
 | P-114 | fixed | A prefers-color-scheme media query nested inside a plain style rule crosses with its question intact instead of being resolved landside | css/nesting-scheme |

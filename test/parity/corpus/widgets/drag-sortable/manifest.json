@@ -1,0 +1,42 @@
+{
+  "id": "widgets/drag-sortable",
+  "title": "a pointer-event sortable list can be reordered by dragging a card",
+  "covers": [
+    "pointer-event drag widgets",
+    "setPointerCapture",
+    "elementFromPoint drop targets"
+  ],
+  "gaps": [
+    "P-111"
+  ],
+  "waitText": "sortable settled",
+  "interactions": [
+    {
+      "do": "click",
+      "target": "#poke"
+    },
+    {
+      "do": "waitText",
+      "value": "poked: yes",
+      "name": "the page's listeners work over the mirror"
+    },
+    {
+      "do": "drag",
+      "target": "#card-a",
+      "to": "#card-c"
+    },
+    {
+      "do": "waitText",
+      "value": "drag heard: yes",
+      "within": 12,
+      "name": "the drag's motion reaches the page"
+    },
+    {
+      "do": "waitText",
+      "value": "order: b,c,a",
+      "within": 12,
+      "name": "dropping a card reorders the list"
+    }
+  ],
+  "notes": "the card styling carries the affordance signals (cursor: grab, touch-action: none, user-select: none) every real sortable sets, which is what a plane-side gesture census has to read"
+}

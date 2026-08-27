@@ -1,12 +1,13 @@
 {
   "input": "owENAgEFqQFlY2xpY2sCGCoDBwYICwMMGv////8RGFMSghj6GQH0E4kYZBjIABiMGQEEEBi0GQEsFQ==",
   "text": "owENAgEFpQFkdGV4dAIYKgMIBGVoZWxsbwwZBNI=",
+  "drag": "owENAgEFqQFkZHJhZwIYKgMJDBkE0hKCGKYZAfQTiRiSGQEEABjDGQEEGB4Y9BkBBBgeFAEVGE0WghkDhBkB4A==",
   "ack": "owEFAgIFpAECAhhjAxrerb7vBAM=",
   "scroll": "owEOAgEFpAEBAxkQAAQZA4QFGgAB1MA=",
   "resync": "owEGAgEFowEBAgwDY2dhcA==",
   "navigate": "owEJAgEFoQF1aHR0cHM6Ly9leGFtcGxlLnRlc3Qv",
-  "viewport": "ogEYGgWkARkFAAIZAyADAQVkZGFyaw==",
+  "viewport": "ogEYGgWlARkFAAIZAyADAQVkZGFyawb1",
   "imageWant": "owERAgEFogGBaGRlYWRiZWVmAoFoY2FmZWJhYmU=",
   "adapter": "ogEVBaUBamdvb2dsZWNoYXQCZHNlbmQDYnMxBHNzZWUgeW91IGF0IHRoZSBnYXRlBWdsb2NhbC0x",
-  "hello": "ogEBBacBAQJxY29uZm9ybWFuY2UtdG9rZW4EgWR6c3RkBaMBGQUAAhkDIAMBBoGjAQECCQMa3q2+7whrY29uZm9ybWFuY2UJcWNvbmZvcm1hbmNlLWJ1aWxk"
+  "hello": "ogEBBacBAQJxY29uZm9ybWFuY2UtdG9rZW4EgWR6c3RkBaMBGQUAAhkDIAMBBoGkAQECCQMa3q2+7wQECGtjb25mb3JtYW5jZQlxY29uZm9ybWFuY2UtYnVpbGQ="
 }

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>drag-sortable</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+  /* The shape every sortable library gives its cards: a grab cursor, no
+     text selection mid-drag, and the touch gesture claimed from the
+     browser. These are also the affordance signals a scripted mirror can
+     read, which is part of what this page measures. */
+  #cards { width: 240px; }
+  .card {
+    padding: 6px 10px; margin: 4px 0; border: 1px solid rgb(120, 120, 120);
+    background: rgb(240, 240, 240);
+    cursor: grab; user-select: none; touch-action: none;
+  }
+</style>
+</head>
+<body>
+  <h1>drag-sortable</h1>
+  <p>sortable settled</p>
+  <button id="poke">poke</button>
+  <div id="poked">poked: no</div>
+  <div id="cards">
+    <div class="card" id="card-a">alpha card</div>
+    <div class="card" id="card-b">beta card</div>
+    <div class="card" id="card-c">gamma card</div>
+  </div>
+  <div id="order">order: a,b,c</div>
+  <div id="heard">drag heard: no</div>
+  <script>
+    // The positive control: this page's listener wiring must work over the
+    // mirror before the drag is blamed.
+    document.getElementById('poke').addEventListener('click', function () {
+      document.getElementById('poked').textContent = 'poked: yes';
+    });
+
+    // A miniature of what SortableJS and dnd-kit do: pointer events, a
+    // capture on the pressed card, and the drop target read from the
+    // pointer's position at release.
+    var cards = document.getElementById('cards');
+    var lifted = null;
+    cards.addEventListener('pointerdown', function (e) {
+      var card = e.target.closest('.card');
+      if (!card) return;
+      lifted = card;
+      card.setPointerCapture(e.pointerId);
+    });
+    cards.addEventListener('pointermove', function () {
+      if (!lifted) return;
+      document.getElementById('heard').textContent = 'drag heard: yes';
+    });
+    cards.addEventListener('pointerup', function (e) {
+      if (!lifted) return;
+      var over = document.elementFromPoint(e.clientX, e.clientY);
+      var dest = over && over.closest ? over.closest('.card') : null;
+      if (dest && dest !== lifted) {
+        dest.after(lifted);
+      }
+      lifted = null;
+      var ids = [];
+      var kids = cards.children;
+      for (var i = 0; i < kids.length; i++) ids.push(kids[i].id.slice(5));
+      document.getElementById('order').textContent = 'order: ' + ids.join(',');
+    });
+  </script>
+</body>
+</html>

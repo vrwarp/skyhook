@@ -23,6 +23,14 @@ type nodeRect struct {
 	Tag      string  `json:"tag"`
 	Editable bool    `json:"editable"`
 	Href     string  `json:"href"`
+	// Drag says the element sits inside a draggable="true" subtree, which is
+	// the browser's own drag-and-drop rather than a pointer-listening widget
+	// — the two halves of a drag replay. See Tab.drag.
+	Drag bool `json:"drag"`
+	// Touchy says the page claimed touch gestures here (a touch-action on
+	// the element or an ancestor) — the gate on replaying a finger's drag as
+	// touch events. See Tab.drag.
+	Touchy bool `json:"touchy"`
 }
 
 // controlKeys maps the control keys the client forwards verbatim onto the
@@ -220,6 +228,14 @@ func (t *Tab) click(ctx context.Context, ev *protocol.InputEvent) error {
 		return err
 	}
 	x, y := t.clickPoint(r, ev)
+	// A finger's tap arrives as the touch it was, when this browser claims a
+	// touchscreen to feel it with (P-006). Only the plain tap: a right-click
+	// or a double-click is a mouse idea whichever pointer made it, and the
+	// compat mouse sequence Chromium synthesises from a touch is the page's
+	// own business.
+	if ev.Kind == protocol.InClick && ev.PT == 1 && t.touchEmulated() {
+		return t.touchTap(ctx, x, y, ev)
+	}
 	button := "left"
 	clicks := 1
 	switch {
@@ -272,6 +288,37 @@ func (t *Tab) click(ctx context.Context, ev *protocol.InputEvent) error {
 	return nil
 }
 
+// touchEmulated says whether this tab's browser is currently claiming a
+// touchscreen — the gate on replaying a gesture as touch events, because a
+// page that was told maxTouchPoints is 0 is not listening for them.
+func (t *Tab) touchEmulated() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.opts.Viewport.Touch
+}
+
+// touchTap is a finger's click: down, the reader's own hold, up. No approach
+// and no hover — a finger is nowhere before it lands, which is exactly the
+// stream a phone produces and the reason the compat mouse events all carry
+// one millisecond.
+func (t *Tab) touchTap(ctx context.Context, x, y float64, ev *protocol.InputEvent) error {
+	point := []map[string]any{{"x": x, "y": y, "id": 1}}
+	if err := t.sess.Do(ctx, "Input.dispatchTouchEvent", map[string]any{
+		"type": "touchStart", "touchPoints": point, "modifiers": ev.Modifiers,
+	}, nil); err != nil {
+		return err
+	}
+	sent := time.Now()
+	sleepCtx(ctx, pressHold(holdFor(ev), time.Since(sent)))
+	if err := t.sess.Do(ctx, "Input.dispatchTouchEvent", map[string]any{
+		"type": "touchEnd", "touchPoints": []map[string]any{}, "modifiers": ev.Modifiers,
+	}, nil); err != nil {
+		return err
+	}
+	go t.flushSoon(60 * time.Millisecond)
+	return nil
+}
+
 /*
 drag replays a press, a path and a release as one gesture.
 
@@ -293,8 +340,29 @@ one following every move gets that too.
 It is bounded by the same path budget as a click's approach: a reader who spent
 four seconds dragging does not get four seconds of landside replay before the
 answer starts coming back.
+
+Two refinements carry the gestures that are not pans. A drag that names where
+it finished (Node2/Point2) has its last move pinned to that element's landside
+box: the permille path puts the drop near the right place, the element puts it
+on the right one, which is the difference between the list row the reader chose
+and the row beside it when the two layouts sit a few pixels apart. And a drag
+whose source is draggable="true" is the browser's own drag-and-drop, which
+synthetic mouse moves alone never start: the moves are made under
+Input.setInterceptDrags, Chromium reports the drag they would have begun, and
+the gesture is completed with real dragOver and drop events at the destination
+— the same events the reader's gesture delivered plane-side.
 */
 func (t *Tab) drag(ctx context.Context, ev *protocol.InputEvent) error {
+	// The destination resolves first: rect scrolls an offscreen target into
+	// view, and a scroll after the press would move the ground mid-gesture.
+	// An unknown drop node is not an error — the path still says where the
+	// gesture finished.
+	var end *nodeRect
+	if ev.Node2 != 0 {
+		if r2, err := t.rect(ctx, ev.Node2); err == nil {
+			end = r2
+		}
+	}
 	r, err := t.rect(ctx, ev.Node)
 	if err != nil {
 		return err
@@ -304,6 +372,48 @@ func (t *Tab) drag(ctx context.Context, ev *protocol.InputEvent) error {
 	t.mu.Unlock()
 	if vp.W <= 0 || vp.H <= 0 || len(ev.Path) < 3 || len(ev.Path)%3 != 0 {
 		return nil // nothing to drag along
+	}
+
+	// A finger's drag arrives as the touch it was, when this browser claims
+	// a touchscreen to feel it with (P-006) — but only onto a surface whose
+	// own touch-action claimed the gesture. A widget that pans under a real
+	// finger must make that claim or the browser takes the swipe for a
+	// scroll, so a page that never made it is a page touch moves never
+	// reach: its map listens to the mouse, and replaying the mouse drag it
+	// is listening for is the one way the gesture means anything — the same
+	// better-than-a-real-phone trade §49 chose on purpose. A draggable
+	// source keeps its mouse too: the interception path below preserves the
+	// browser's own drag-and-drop, which matters more than the modality of
+	// the pointer that made it.
+	if ev.PT == 1 && !r.Drag && r.Touchy && t.touchEmulated() {
+		return t.touchDragReplay(ctx, r, end, vp, ev)
+	}
+
+	intercepting := false
+	if r.Drag {
+		t.dragSubOnce.Do(func() {
+			t.sess.Subscribe("Input.dragIntercepted", func(_ string, params json.RawMessage) {
+				var p struct {
+					Data json.RawMessage `json:"data"`
+				}
+				if json.Unmarshal(params, &p) == nil && len(p.Data) > 0 {
+					t.dragData.Store(p.Data)
+				}
+			})
+		})
+		t.dragData.Store(json.RawMessage(nil))
+		if err := t.sess.Do(ctx, "Input.setInterceptDrags", map[string]any{"enabled": true}, nil); err != nil {
+			// An older browser without interception still gets the moves.
+			t.log.Debug("drag interception unavailable", "tab", t.ID, "err", err)
+		} else {
+			intercepting = true
+			defer func() {
+				if err := t.sess.Do(context.WithoutCancel(ctx), "Input.setInterceptDrags",
+					map[string]any{"enabled": false}, nil); err != nil {
+					t.log.Debug("drag interception left on", "tab", t.ID, "err", err)
+				}
+			}()
+		}
 	}
 
 	x, y := t.clickPoint(r, ev)
@@ -338,9 +448,22 @@ func (t *Tab) drag(ctx context.Context, ev *protocol.InputEvent) error {
 			}
 		}
 		// buttons: 1 throughout — a move with no button down is a hover, and a
-		// map told the button came up mid-drag stops panning there.
+		// map told the button came up mid-drag stops panning there. button:
+		// "left" as well, which page JS cannot tell apart (a move's .button is
+		// 0 either way) but Chromium's own drag controller reads: a held move
+		// without it never begins a native drag, so interception would starve.
 		if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
-			"type": "mouseMoved", "x": x, "y": y,
+			"type": "mouseMoved", "x": x, "y": y, "button": "left",
+			"modifiers": ev.Modifiers, "buttons": 1, "clickCount": 0,
+		}, nil); err != nil {
+			return err
+		}
+	}
+	// Land on the element the reader dropped on, not merely near it.
+	if end != nil {
+		x, y = dropPoint(end, ev.Point2)
+		if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": "mouseMoved", "x": x, "y": y, "button": "left",
 			"modifiers": ev.Modifiers, "buttons": 1, "clickCount": 0,
 		}, nil); err != nil {
 			return err
@@ -349,6 +472,34 @@ func (t *Tab) drag(ctx context.Context, ev *protocol.InputEvent) error {
 	t.mu.Lock()
 	t.pointerX, t.pointerY, t.pointerSet = x, y, true
 	t.mu.Unlock()
+
+	if intercepting {
+		if data := t.awaitDragData(ctx, 700*time.Millisecond); data != nil {
+			var parsed any
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				return err
+			}
+			for _, kind := range []string{"dragEnter", "dragOver", "drop"} {
+				if err := t.sess.Do(ctx, "Input.dispatchDragEvent", map[string]any{
+					"type": kind, "x": x, "y": y, "data": parsed,
+				}, nil); err != nil {
+					return err
+				}
+			}
+			if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+				"type": "mouseReleased", "x": x, "y": y, "button": "left",
+				"clickCount": 1, "modifiers": ev.Modifiers, "buttons": 0,
+			}, nil); err != nil {
+				return err
+			}
+			go t.flushSoon(60 * time.Millisecond)
+			return nil
+		}
+		// The moves never began a native drag — the mirror believed the
+		// element draggable and the page built something else — so the
+		// gesture finishes as the plain drag it turned out to be.
+		t.log.Debug("drag interception armed but nothing intercepted", "tab", t.ID, "node", ev.Node)
+	}
 
 	// Come to rest before letting go.
 	//
@@ -362,7 +513,7 @@ func (t *Tab) drag(ctx context.Context, ev *protocol.InputEvent) error {
 	// worked.
 	sleepCtx(ctx, dragSettle)
 	if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
-		"type": "mouseMoved", "x": x, "y": y,
+		"type": "mouseMoved", "x": x, "y": y, "button": "left",
 		"modifiers": ev.Modifiers, "buttons": 1, "clickCount": 0,
 	}, nil); err != nil {
 		return err
@@ -397,6 +548,90 @@ func (t *Tab) clickPoint(r *nodeRect, ev *protocol.InputEvent) (x, y float64) {
 		return r.X + r.W*float64(fx)/1000, r.Y + r.H*float64(fy)/1000
 	}
 	return r.CX + jitter(r.W), r.CY + jitter(r.H)
+}
+
+// touchDragReplay is Tab.drag spoken in touch: the same press, path, pinned
+// destination and anti-flick rest, delivered as the touch events a finger
+// really produces so a page listening for pointerType "touch" — or for touch
+// events themselves — hears what happened.
+func (t *Tab) touchDragReplay(ctx context.Context, r *nodeRect, end *nodeRect, vp protocol.Viewport, ev *protocol.InputEvent) error {
+	x, y := t.clickPoint(r, ev)
+	at := func(kind string, x, y float64) error {
+		return t.sess.Do(ctx, "Input.dispatchTouchEvent", map[string]any{
+			"type":        kind,
+			"touchPoints": []map[string]any{{"x": x, "y": y, "id": 1}},
+			"modifiers":   ev.Modifiers,
+		}, nil)
+	}
+	if err := at("touchStart", x, y); err != nil {
+		return err
+	}
+	spent := time.Duration(0)
+	for i := 0; i+2 < len(ev.Path); i += 3 {
+		x = float64(clampPermille(ev.Path[i])) / 1000 * float64(vp.W)
+		y = float64(clampPermille(ev.Path[i+1])) / 1000 * float64(vp.H)
+		if gap := time.Duration(ev.Path[i+2]) * time.Millisecond; gap > 0 && i > 0 {
+			if gap > pathMaxGap {
+				gap = pathMaxGap
+			}
+			if spent+gap > pathBudget {
+				gap = pathBudget - spent
+			}
+			if gap > 0 {
+				sleepCtx(ctx, gap)
+				spent += gap
+			}
+		}
+		if err := at("touchMove", x, y); err != nil {
+			return err
+		}
+	}
+	if end != nil {
+		x, y = dropPoint(end, ev.Point2)
+		if err := at("touchMove", x, y); err != nil {
+			return err
+		}
+	}
+	// The same rest Tab.drag takes before letting go, for the same reason: a
+	// replay compressed into the path budget reads as a flick to anything
+	// measuring velocity, and a flick is a gesture that never worked here.
+	sleepCtx(ctx, dragSettle)
+	if err := at("touchMove", x, y); err != nil {
+		return err
+	}
+	if err := t.sess.Do(ctx, "Input.dispatchTouchEvent", map[string]any{
+		"type": "touchEnd", "touchPoints": []map[string]any{}, "modifiers": ev.Modifiers,
+	}, nil); err != nil {
+		return err
+	}
+	go t.flushSoon(60 * time.Millisecond)
+	return nil
+}
+
+// dropPoint is clickPoint's twin for the far end of a drag: where inside the
+// destination's landside box the gesture finishes.
+func dropPoint(r *nodeRect, point []int32) (x, y float64) {
+	if len(point) == 2 {
+		fx := clampPermille(point[0])
+		fy := clampPermille(point[1])
+		return r.X + r.W*float64(fx)/1000, r.Y + r.H*float64(fy)/1000
+	}
+	return r.CX, r.CY
+}
+
+// awaitDragData waits briefly for the Input.dragIntercepted event the moves
+// under Input.setInterceptDrags should have produced.
+func (t *Tab) awaitDragData(ctx context.Context, within time.Duration) json.RawMessage {
+	deadline := time.Now().Add(within)
+	for {
+		if raw, _ := t.dragData.Load().(json.RawMessage); len(raw) > 0 {
+			return raw
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return nil
+		}
+		sleepCtx(ctx, 25*time.Millisecond)
+	}
 }
 
 func clampPermille(v int32) int32 {
@@ -559,6 +794,13 @@ func (t *Tab) hover(ctx context.Context, ev *protocol.InputEvent) error {
 	if err != nil {
 		return err
 	}
+	// Where in the box the reader's pointer is resting, when the client
+	// measured it — a submenu opens under the entry the pointer is on, not
+	// under the middle of the menu.
+	if len(ev.Point) == 2 {
+		x, y := dropPoint(r, ev.Point)
+		return t.movePointer(ctx, x, y, ev.Modifiers)
+	}
 	return t.movePointer(ctx, r.CX+jitter(r.W), r.CY+jitter(r.H), ev.Modifiers)
 }
 
@@ -660,6 +902,31 @@ func (t *Tab) wheel(ctx context.Context, ev *protocol.InputEvent) error {
 	x, y, known := t.pointerX, t.pointerY, t.pointerSet
 	vp := t.opts.Viewport
 	t.mu.Unlock()
+	// A named node beats every guess: the client sends one when the wheel
+	// turned over a widget that consumes it, and where in that widget's box
+	// matters — every map zooms about the point under the cursor. The
+	// pointer is parked there first, because a page that reads the wheel
+	// also reads the mouse position it arrived at.
+	if ev.Node != 0 {
+		r, err := t.rect(ctx, ev.Node)
+		if err != nil {
+			return err
+		}
+		// Not clickPoint: a wheel frame's X and Y are the deltas, and
+		// clickPoint would read them as a pixel offset into the box.
+		x, y = dropPoint(r, ev.Point)
+		if err := t.movePointer(ctx, x, y, ev.Modifiers); err != nil {
+			return err
+		}
+		if err := t.sess.Do(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": "mouseWheel", "x": x, "y": y,
+			"deltaX": ev.X, "deltaY": ev.Y, "modifiers": ev.Modifiers,
+		}, nil); err != nil {
+			return err
+		}
+		go t.flushSoon(60 * time.Millisecond)
+		return nil
+	}
 	// A reported path is the pointer's real position, which beats the last one
 	// we happen to have driven it to.
 	if n := len(ev.Path); n >= 3 && n%3 == 0 && vp.W > 0 && vp.H > 0 {

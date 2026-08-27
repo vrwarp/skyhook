@@ -202,16 +202,34 @@ echo reconciliation.
 Resolving clicks by node id rather than coordinates is what makes the mirror
 robust to layout drift between the mirrored document and the real page.
 
-`drag(node, {point, path})` is the exception, and the exception proves the
-rule. A canvas is reached through its pixels or not at all: there is no node
-inside a map to click and none inside a game board to focus, so nothing the
-rest of this list can say means "pan from here to there". What a map
-understands is a button going down, moving and coming up, and the distances
-between those points are the whole message. The path arrives in the same units
-as a click's approach — viewport permille — which is what makes it comparable
-across two layouts, and the press lands at `point` inside the node's box.
-Plane-side the gesture is only claimed when the press was on such a region:
-anywhere else it is the reader selecting text.
+`drag(node, {point, path, node2, point2, pt})` is the exception, and the
+exception proves the rule. A canvas is reached through its pixels or not at
+all: there is no node inside a map to click and none inside a game board to
+focus, so nothing the rest of this list can say means "pan from here to
+there". What a map understands is a button going down, moving and coming up,
+and the distances between those points are the whole message. The path
+arrives in the same units as a click's approach — viewport permille — which
+is what makes it comparable across two layouts, and the press lands at
+`point` inside the node's box.
+
+A drag that finished on something also says what: `node2` (21) names the
+element under the release and `point2` (22) where inside its box, which is
+the node-id discipline applied to the far end of the gesture — the permille
+path puts a drop near the right list row across two layouts, `node2` puts it
+on it. `pt` (20) is the pointer's kind (0 mouse, 1 touch, 2 pen), so a
+touch-emulating landside browser can replay a finger's gesture as the touch
+events it really was. A drag whose source sits in a `draggable="true"`
+subtree is replayed through the browser's own drag-and-drop
+(`Input.setInterceptDrags` + `Input.dispatchDragEvent`), because synthetic
+mouse moves never start a native drag by themselves.
+
+Plane-side the gesture is only claimed when the press was on a surface that
+asked for one — a canvas region, or an element whose own declared
+affordances say drag: a grab or resize cursor, `touch-action: none`,
+`role="slider"`, all legible in the mirror because the page's CSS and
+attributes cross. Anywhere else it is the reader selecting text. The
+browser's native drag-and-drop is watched through its own dragstart,
+dragover and drop events, which run plane-side, ghost image and all.
 
 A click additionally carries what the reader's pointer actually did, because
 the alternative is the server inventing it:
@@ -220,6 +238,7 @@ the alternative is the server inventing it:
 hold  17  ms the button was down
 point 18  where in the node's box the pointer was, permille of its width/height
 path  19  the approach: (x, y, dt) triplets, viewport permille and milliseconds
+pt    20  the pointer's kind: 0 mouse, 1 touch, 2 pen
 ```
 
 Permille rather than pixels: the reader's box was laid out with different fonts

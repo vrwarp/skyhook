@@ -35,12 +35,12 @@
     {
       "id": "P-004",
       "title": "wheel and hover are protocol surface no client sends",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/app/main.ts",
         "internal/mirror/input.go"
       ],
-      "noPage": "hover is now sent — the mirror menu's Hover-here entry is the client's InHover (P-111) — so this entry narrows to wheel: still protocol surface no client sends, deliberately, because scroll telemetry already carries where the reader is and streaming wheel deltas would spend the link on what zoom-canvas widgets alone consume; catalogued for the executor revision that takes on drag"
+      "notes": "fixed for the widgets that consume the wheel themselves, which is the half that was wrong: a wheel turned over a gesture-claiming surface (the drag census: touch-action none, grab/resize cursors, role=slider, canvas regions) is taken from the browser, its ticks coalesced for a beat, and sent as one InWheel naming the node and where in its box the cursor sat, replayed landside with the pointer parked at that point first — cursor-anchored zoom zooms about the cursor. A wheel anywhere else deliberately stays the reader's own scroll, reported as scroll telemetry, exactly as before: streaming wheel deltas for documents would spend the link on what position telemetry already carries. widgets/wheel-zoom pins the widget half; the hover half of the old title is P-111's story"
     },
     {
       "id": "P-005",
@@ -54,12 +54,12 @@
     {
       "id": "P-006",
       "title": "The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "docs/IMPLEMENTATION.md:2120",
         "internal/mirror/tab.go:375"
       ],
-      "noPage": "both harness browsers are mice too, so the divergence cannot arise in-corpus; imported real pages carry the widened page-height band it causes"
+      "notes": "fixed, the way the old known-gaps note said it would have to be: emulation arriving together with touch input to feed it. The client's viewport carries a touch flag read off navigator.maxTouchPoints; SetViewport turns on Emulation.setTouchEmulationEnabled landside when it is set; and every click and drag frame carries the pointer kind that made it (InputEvent.PT), so a finger's tap replays as Input.dispatchTouchEvent and its drag as the touch stream a page listening for pointerType 'touch' expects. touch/drag-pan pins all three layers: the pan arriving, arriving as touch, and the page seeing maxTouchPoints > 0. A right-click or double-tap still replays as the mouse idea it is; a drag onto a draggable source keeps the mouse-interception path that preserves the browser's own drag-and-drop; and a finger's drag onto a surface that never claimed touch-action replays as mouse — a page that never claimed the gesture is one touch moves never reach on a real phone, and its mouse-listening map hears the replay it was always listening for"
     },
     {
       "id": "P-007",
@@ -324,14 +324,13 @@
     {
       "id": "P-111",
       "title": "mousemove-driven widgets — drag-and-drop, sliders, hover menus — have no input path",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/host.ts",
         "client/src/mirror/echo.ts",
         "internal/mirror/input.go"
       ],
-      "noPage": "needs a pointer-move step in the interaction executor; catalogued for the executor's next revision alongside P-004",
-      "notes": "two of the three shapes now have paths, pinned by TestSlidersAndHoverMenusReachThePage and TestPWAWidgetChromeAffordances. Sliders (and every native-picker input: color, date, time, month, week): the widget moves locally in the mirror, and the settled value relays once on change as a setvalue — the echo engine now refuses to own non-text inputs, which was also sending a whole-value frame per tick of a focused drag and a meaningless one after every checkbox toggle. Hover menus: hover is state on the ground and pointer moves are never streamed, so the context menu's Hover-here entry sends the one InHover that parks the landside pointer where CSS :hover and JS mouseover can see it. Still open for drag-and-drop: HTML5 DnD needs a gesture vocabulary (dragstart through drop) that neither the wire nor the executor has, deferred with eyes open"
+      "notes": "closed in two waves, all through the real client. Drags: the census reads the affordances the page itself declared (grab/resize cursors, touch-action none, role=slider — legible plane-side because the mirror carries the page's CSS), the frame names both ends of the gesture (Node2/Point2), the replay pins the drop to the destination's landside box, and the browser's own drag-and-drop crosses via its dragstart/dragover/drop plane-side and Input.setInterceptDrags landside. Hover: a pointer resting 400 ms on a new element is a gesture — the one every hover menu is built on — and sends the InHover that parks the landside pointer where CSS :hover and JS mouseover see it, no streaming, at most one frame per rest. Sliders and native pickers were already served by setvalue-on-change. Pinned by widgets/drag-sortable, widgets/dnd-html5, widgets/slider-track, widgets/hover-menu, the drag_test.go suite and TestSlidersAndHoverMenusReachThePage"
     },
     {
       "id": "P-112",

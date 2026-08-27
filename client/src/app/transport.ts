@@ -227,8 +227,16 @@ export class Transport {
     await writer.write(msg);
   }
 
+  /** Whether telemetry can travel as real datagrams — only over QUIC; the
+   *  WebSocket fallback has one reliable pipe and pretending otherwise would
+   *  just send the same bytes twice. */
+  canDatagram(): boolean {
+    return !!this.wt;
+  }
+
   /** Sends telemetry unreliably; drops are expected and fine. */
   async sendDatagram(msg: Uint8Array): Promise<void> {
+    this.bytesSent += msg.length;
     if (this.ws) {
       this.ws.send(msg);
       return;

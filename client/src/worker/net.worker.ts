@@ -36,6 +36,11 @@ export interface Pairing extends TransportConfig {
 interface TabProgress {
   seq: number;
   hash: number;
+  /** Which document the seq and hash are about. Rides the resume entry so
+   *  the server can tell "current, nothing missed" from "same numbers,
+   *  different page" — the difference between a free reconnect and a
+   *  snapshot per tab. */
+  epoch: number;
 }
 
 let transport: Transport | null = null;
@@ -97,6 +102,36 @@ const closedTabs = new Set<number>();
 
 /** The shortest gap between two resync requests for the same tab. */
 const RESYNC_MIN_GAP_MS = 1000;
+
+/*
+ * Acknowledgements are cumulative — the server trims its replay ring to the
+ * highest seq acked — so nothing is lost by answering a burst of applied
+ * batches with one ack naming the last of them. A busy page emits a batch
+ * per 100 ms, and each used to go back as its own ctrl frame: ten small
+ * messages a second competing with input for the same class, on a link
+ * where every message costs. Acks now pool for a beat, latest per tab, with
+ * one exception flushed immediately: the first ack of a new document
+ * (epoch), which is the answer the server holds resyncs open for.
+ */
+const ACK_POOL_MS = 250;
+
+/** How long after the last report of a scroll burst its final position is
+ *  re-sent reliably. Longer than the 250 ms report throttle so a continuing
+ *  scroll keeps replacing it; short enough that lazy loading is not kept
+ *  waiting once the reader settles. */
+const SCROLL_TAIL_MS = 700;
+const scrollTails = new Map<string, { timer: ReturnType<typeof setTimeout> }>();
+const pendingAcks = new Map<number, { seq: number; hash: number; epoch: number }>();
+const ackedEpoch = new Map<number, number>();
+let ackTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushAcks(): void {
+  if (ackTimer) { clearTimeout(ackTimer); ackTimer = null; }
+  for (const [tab, a] of pendingAcks) {
+    void send(Channel.Ctrl, encodeFrame(FrameType.Ack, tab, ackBody(tab, a.seq, a.hash, a.epoch)));
+  }
+  pendingAcks.clear();
+}
 /** Input frames captured while offline, replayed in the next Hello. */
 const outbox: Map<number, unknown>[] = [];
 let online = false;
@@ -172,6 +207,14 @@ async function connect(): Promise<void> {
       stopTimers();
       const wasOnline = online;
       online = false;
+      // Pooled acks die with the link: the next Hello's resume list carries
+      // the same facts, fresher. Scroll tails too — offline scroll is
+      // dropped by design, and the tail must not outlive the link that
+      // armed it.
+      pendingAcks.clear();
+      if (ackTimer) { clearTimeout(ackTimer); ackTimer = null; }
+      for (const tail of scrollTails.values()) clearTimeout(tail.timer);
+      scrollTails.clear();
       if (isFatalClose(code)) {
         refused = refusalFor(code);
         post('status', { online: false, kind: 'none', reason, refused });
@@ -238,7 +281,7 @@ function scheduleReconnect(): void {
 function sendHello(): void {
   if (!pairing) return;
   const resume = Array.from(progress.entries()).map(([tab, p]) => ({
-    tab, seq: p.seq, hash: p.hash,
+    tab, seq: p.seq, hash: p.hash, epoch: p.epoch,
   }));
   const queued = outbox.splice(0, outbox.length);
   void send(Channel.Ctrl, encodeFrame(FrameType.Hello, 0, helloBody({
@@ -347,7 +390,7 @@ function handleMessage(msg: Uint8Array): void {
       break;
     }
     case FrameType.Snapshot:
-      progress.set(frame.tab, { seq: 0, hash: 0 });
+      progress.set(frame.tab, { seq: 0, hash: 0, epoch: 0 });
       // A snapshot restarts the numbering and resets the intern table, so
       // everything handed over before it is about a document that is gone.
       delivered.set(frame.tab, 0);
@@ -734,23 +777,59 @@ self.addEventListener('message', (event: MessageEvent) => {
       void send(Channel.Input, encodeFrame(FrameType.Input, ev.tab, inputBody(ev)));
       break;
     }
-    case 'scroll':
-      void send(Channel.Telemetry, encodeFrame(FrameType.Scroll, Number(cmd.args.tab),
-        scrollBody(cmd.args as unknown as {
-          tab: number; x: number; y: number; h: number; docH: number;
-        })));
+    case 'scroll': {
+      const args = cmd.args as unknown as {
+        tab: number; x: number; y: number; h: number; docH: number; node?: number;
+      };
+      const payload = encodeFrame(FrameType.Scroll, Number(args.tab), scrollBody(args));
+      if (!transport || !online) break;
+      if (!transport.canDatagram()) {
+        // One reliable pipe: the report travels as it always did.
+        void send(Channel.Telemetry, payload);
+        break;
+      }
+      /*
+       * Position telemetry is latest-wins by design — the frame says so —
+       * and a reliable stream betrays that on a lossy link: a lost report
+       * is retransmitted stale, holding newer ones behind it for a round
+       * trip. So mid-scroll reports ride datagrams, where a drop costs
+       * nothing because a fresher position is 250 ms behind it. What must
+       * not be lost is the *last* report of a burst — the position the
+       * reader settled at, the one lazy loading hangs on — so each
+       * scroller arms a short tail, and when no newer report replaces it
+       * the final position goes again, reliably.
+       */
+      const msg = frameMessage(Channel.Telemetry, payload);
+      const key = `${Number(args.tab)}:${Number(args.node ?? 0)}`;
+      const prior = scrollTails.get(key);
+      if (prior) clearTimeout(prior.timer);
+      scrollTails.set(key, {
+        timer: setTimeout(() => {
+          scrollTails.delete(key);
+          if (transport && online) transport.send(Channel.Telemetry, msg).catch(() => { /* link's problem */ });
+        }, SCROLL_TAIL_MS),
+      });
+      transport.sendDatagram(msg).catch(() => { /* drops are the deal */ });
       break;
+    }
     case 'ack': {
       const tab = Number(cmd.args.tab);
       const seq = Number(cmd.args.seq);
-      progress.set(tab, { seq, hash: Number(cmd.args.hash) });
+      const epoch = Number(cmd.args.epoch ?? 0);
+      progress.set(tab, { seq, hash: Number(cmd.args.hash), epoch });
       // The shell can only acknowledge what it was given, so this is normally
       // already true. It is not after a snapshot the shell applied and this
       // side never saw, and an ack is the more recent of the two answers.
       if (seq > (delivered.get(tab) ?? 0)) delivered.set(tab, seq);
-      void send(Channel.Ctrl, encodeFrame(FrameType.Ack, tab,
-        ackBody(tab, Number(cmd.args.seq), Number(cmd.args.hash),
-          Number(cmd.args.epoch ?? 0))));
+      pendingAcks.set(tab, { seq, hash: Number(cmd.args.hash), epoch });
+      if (epoch !== (ackedEpoch.get(tab) ?? 0)) {
+        // The first word about a new document cannot wait: the server sits
+        // on further resyncs until it hears the snapshot landed.
+        ackedEpoch.set(tab, epoch);
+        flushAcks();
+      } else if (!ackTimer) {
+        ackTimer = setTimeout(() => { ackTimer = null; flushAcks(); }, ACK_POOL_MS);
+      }
       break;
     }
     case 'wantImage': {
@@ -758,10 +837,14 @@ self.addEventListener('message', (event: MessageEvent) => {
       const hashes = cmd.args.hashes as string[];
       void cachedHashes(hashes).then((have) => {
         // Anything the cross-flight cache already holds is free; tell the page
-        // so it can paint, and only ask the server for the rest.
+        // so it can paint, and only ask the server for the rest. The haves go
+        // too, even with nothing to ask for: the server folds them into its
+        // sent ledger and never pushes those bytes — a warm cache that said
+        // nothing was the audit's "filled by the client and read by nobody",
+        // and a new session used to re-ship every picture on the page.
         for (const h of have) post('imageData', { tab, hash: h });
         const missing = hashes.filter((h) => !have.includes(h));
-        if (missing.length) {
+        if (missing.length || have.length) {
           void send(Channel.Ctrl,
             encodeFrame(FrameType.ImageWant, tab, imageWantBody(missing, have)));
         }

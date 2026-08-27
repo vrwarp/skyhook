@@ -65,4 +65,21 @@ func TestSlidersAndHoverMenusReachThePage(t *testing.T) {
 	if err := cl.WaitForText(ctx, tab, "the secret entry", budget(30*time.Second)); err != nil {
 		t.Fatalf("the hover never reached the page: %v", err)
 	}
+
+	// A wheel naming its widget zooms it, about the point the cursor sat at:
+	// the pointer is parked at the frame's Point before the wheel turns, so a
+	// cursor-anchored zoom reads the right anchor (P-004's widget half).
+	stage := cl.Model(tab).Find("div", "id", "stage")
+	if stage == nil {
+		t.Fatal("no stage in the mirrored page")
+	}
+	if err := cl.Input(tab, protocol.InputEvent{
+		Kind: protocol.InWheel, Node: stage.ID, Y: -120,
+		Point: []int32{250, 500},
+	}); err != nil {
+		t.Fatalf("wheel: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "zoom 1 at left", budget(30*time.Second)); err != nil {
+		t.Fatalf("the wheel never reached the widget: %v", err)
+	}
 }

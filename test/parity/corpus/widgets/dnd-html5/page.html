@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>dnd-html5</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+  #card {
+    width: 140px; padding: 8px; margin: 6px 0;
+    border: 1px solid rgb(120, 120, 120); background: rgb(235, 235, 245);
+    cursor: grab; user-select: none;
+  }
+  .zone {
+    width: 220px; height: 64px; margin: 6px 0;
+    border: 2px dashed rgb(150, 150, 150); background: rgb(248, 248, 248);
+  }
+</style>
+</head>
+<body>
+  <h1>dnd-html5</h1>
+  <p>dnd settled</p>
+  <button id="poke">poke</button>
+  <div id="poked">poked: no</div>
+  <div id="card" draggable="true">the card</div>
+  <div class="zone" id="zone-a">zone a</div>
+  <div class="zone" id="zone-b">zone b</div>
+  <div id="lifted">lifted: no</div>
+  <div id="landed">landed: nowhere</div>
+  <script>
+    // The positive control: the page's listener wiring must work over the
+    // mirror before the drag is blamed.
+    document.getElementById('poke').addEventListener('click', function () {
+      document.getElementById('poked').textContent = 'poked: yes';
+    });
+
+    // The browser's own drag-and-drop, as every kanban and file-tray uses
+    // it: dragstart on the source, dragover preventDefault to permit the
+    // drop, and the drop reading what was carried.
+    document.getElementById('card').addEventListener('dragstart', function (e) {
+      e.dataTransfer.setData('text/plain', 'card');
+      document.getElementById('lifted').textContent = 'lifted: yes';
+    });
+    var zones = document.querySelectorAll('.zone');
+    for (var i = 0; i < zones.length; i++) {
+      zones[i].addEventListener('dragover', function (e) { e.preventDefault(); });
+      zones[i].addEventListener('drop', function (e) {
+        e.preventDefault();
+        document.getElementById('landed').textContent =
+          'landed: ' + (e.dataTransfer.getData('text/plain') || 'something') + ' on ' + e.currentTarget.id;
+      });
+    }
+  </script>
+</body>
+</html>

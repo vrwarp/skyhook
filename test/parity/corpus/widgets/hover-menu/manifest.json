@@ -1,0 +1,34 @@
+{
+  "id": "widgets/hover-menu",
+  "title": "a menu that opens on mouseenter opens for a reader's pointer resting on it",
+  "covers": [
+    "mouseenter menus",
+    "hover-driven UI"
+  ],
+  "gaps": [
+    "P-111"
+  ],
+  "waitText": "hover settled",
+  "interactions": [
+    {
+      "do": "click",
+      "target": "#poke"
+    },
+    {
+      "do": "waitText",
+      "value": "poked: yes",
+      "name": "the page's listeners work over the mirror"
+    },
+    {
+      "do": "hover",
+      "target": "#products"
+    },
+    {
+      "do": "waitText",
+      "value": "menu: open",
+      "within": 12,
+      "name": "a resting pointer opens the menu"
+    }
+  ],
+  "notes": "the pointer is deliberately left resting on #products through the final probe: hover is state, and with the dwell sending InHover the landside pointer is parked there too, so both halves wear the :hover background and the style dimension holds"
+}

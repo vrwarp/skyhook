@@ -551,6 +551,343 @@ describe('MirrorHost', () => {
     expect(kinds).not.toContain('drag');
   });
 
+  /*
+   * The gesture census: which press-move-release the mirror claims as a drag.
+   *
+   * No page script runs in the mirror, so nothing here can ask the page what
+   * it would do with a pointer — but the page already said. A grab cursor, a
+   * role="slider", a touch-action: none are the affordances a drag widget
+   * declares, and the mirror carries the attributes and stylesheets they are
+   * declared in, so they are legible at the moment of the press. Everywhere
+   * undeclared stays the reader's own text selection, which the tests above
+   * pin.
+   */
+
+  /** Adds a plain div declaring itself a drag widget by one attribute — a
+   *  grab cursor the way a map pane does, a role the way a slider does.
+   *  jsdom's getComputedStyle reads inline style, so the cursor variant works
+   *  without a stylesheet. */
+  function withDragSurface(snap: Snapshot, name: string, value: string): Snapshot {
+    const base = snap.strings.length;
+    snap.strings.push('div', name, value, 'id', 'pad');
+    snap.nodes.push({
+      id: 70, parent: 1, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2, base + 3, base + 4], flags: 0,
+    });
+    return snap;
+  }
+
+  /** Adds the two ends of a native HTML5 drag: a card that says
+   *  draggable="true", and a plain zone for it to land on. */
+  function withDraggableCard(snap: Snapshot): Snapshot {
+    const base = snap.strings.length;
+    snap.strings.push('div', 'draggable', 'true', 'id', 'card', 'zone');
+    snap.nodes.push(
+      {
+        id: 80, parent: 1, kind: NodeKind.Element, ref: base,
+        attrs: [base + 1, base + 2, base + 3, base + 4], flags: 0,
+      },
+      {
+        id: 81, parent: 1, kind: NodeKind.Element, ref: base,
+        attrs: [base + 3, base + 5], flags: 0,
+      },
+    );
+    return snap;
+  }
+
+  it('claims a drag on an element wearing a grab cursor', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+
+    dragAcross(host, host.frame.contentDocument!.getElementById('pad')!, 100, 400);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    // Exactly one drag and no click: landside the pair would be a pan
+    // followed by a press wherever it ended.
+    expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(1);
+    expect(sent.map((p) => p.kind)).not.toContain('click');
+    const drag = sent.find((p) => p.kind === 'drag')!;
+    expect(drag.node).toBe(70);
+    // A mouse is the wire's zero, and zero is omitted.
+    expect(drag.pt).toBeUndefined();
+  });
+
+  it('claims a drag on a slider, which declares itself in its role', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'role', 'slider'));
+
+    dragAcross(host, host.frame.contentDocument!.getElementById('pad')!, 100, 400);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(1);
+    expect(sent.map((p) => p.kind)).not.toContain('click');
+    expect(sent.find((p) => p.kind === 'drag')!.node).toBe(70);
+  });
+
+  it('keeps a drag through a boundary crossing inside the frame', async () => {
+    // The capture listener hears pointerleave for every element boundary the
+    // pointer crosses mid-drag — over a list, that is every row. Only really
+    // leaving the frame ends the gesture, and the difference is the
+    // relatedTarget: a crossing names the element being entered, a departure
+    // from the frame names nothing. See the pointerleave wiring in wireInput.
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const pad = doc.getElementById('pad')!;
+    const at = (type: string, x: number, init: PointerEventInit = {}) => pad.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: x, clientY: 40, button: 0, isPrimary: true,
+        pointerType: 'mouse', ...init,
+      }),
+    );
+
+    at('pointerdown', 100);
+    at('pointermove', 150);
+    // The pointer crosses into a sibling; pointerleave does not bubble, but
+    // the document's capture listener hears it all the same.
+    at('pointerleave', 250, { bubbles: false, relatedTarget: doc.querySelector('li') });
+    at('pointermove', 300);
+    at('pointerup', 400);
+
+    const drags = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'drag');
+    expect(drags).toHaveLength(1);
+    const path = drags[0].path as number[];
+    // The path ends where the button came up. A drag cut off at the crossing
+    // would have been sent from the leave instead, and end at 250's permille.
+    expect(path[path.length - 3]).toBe(Math.round((400 / win.innerWidth) * 1000));
+  });
+
+  it('says a drag came from a finger, so landside replays it as one', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+
+    swipeAcross(host, host.frame.contentDocument!.getElementById('pad')!, 100, 400);
+
+    const drags = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'drag');
+    expect(drags).toHaveLength(1);
+    expect(drags[0].node).toBe(70);
+    // The wire's name for a touch pointer; a slider dragged with a mouse
+    // gesture on a touch page is how landside misses the widget.
+    expect(drags[0].pt).toBe(1);
+  });
+
+  it('carries the browser\'s own drag-and-drop as a single drag frame', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDraggableCard(snapshot()));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const card = doc.getElementById('card')!;
+    const zone = doc.getElementById('zone')!;
+    // jsdom has no DragEvent; the listeners read only the MouseEvent fields,
+    // and the dataTransfer a real one carries is landside state the wire
+    // never needs.
+    const dnd = (target: Element, type: string, x: number) => {
+      const event = new win.MouseEvent(type, {
+        bubbles: true, cancelable: true, clientX: x, clientY: 40,
+      });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    dnd(card, 'dragstart', 100);
+    // Without the preventDefault on dragover the browser never delivers the
+    // drop at all: cancelling it is what keeps the frame a legal drop target.
+    expect(dnd(zone, 'dragover', 250).defaultPrevented).toBe(true);
+    dnd(zone, 'drop', 400);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(1);
+    expect(sent.map((p) => p.kind)).not.toContain('click');
+    expect(sent.find((p) => p.kind === 'drag')!.node).toBe(80);
+
+    // A drag let go of nowhere — an escape, a release over nothing — ends in
+    // dragend with no drop, and nothing crossed the page for the wire to say.
+    dnd(card, 'dragstart', 100);
+    dnd(card, 'dragend', 100);
+    expect(ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'drag')).toHaveLength(1);
+  });
+
+  it('names the element a drag finished over, and where in its box', async () => {
+    // The path already says how the gesture moved; node2 says what it landed
+    // on, which survives the two halves laying the page out a few pixels
+    // apart.
+    const { host, ev } = await mount();
+    host.applySnapshot(withDraggableCard(withDragSurface(snapshot(), 'style', 'cursor: grab')));
+    const doc = host.frame.contentDocument!;
+    const zone = doc.getElementById('zone')!;
+    // jsdom neither lays out nor hit-tests, so both are told directly: the
+    // release lands on the zone, whose box sits at 300..500 across the top.
+    doc.elementFromPoint = () => zone;
+    Object.defineProperty(zone, 'getBoundingClientRect', {
+      value: () => ({ left: 300, top: 0, width: 200, height: 100 }),
+      configurable: true,
+    });
+
+    dragAcross(host, doc.getElementById('pad')!, 100, 400);
+
+    const drag = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .find((p) => p.kind === 'drag')!;
+    expect(drag.node).toBe(70);
+    expect(drag.node2).toBe(81);
+    // Halfway across the zone, at the height the gesture travelled on — in
+    // permille of the box, because the landside box is a different size.
+    expect(drag.point2).toEqual([500, 400]);
+  });
+
+  /*
+   * The wheel and the dwell: the census's two slower gestures. A wheel
+   * turned over a claimed surface is the widget's zoom and crosses the wire;
+   * anywhere else it stays the reader's own scroll. A mouse coming to rest
+   * is the gesture every hover menu is built on, and one rest is one frame.
+   */
+
+  /** One tick of the wheel, dispatched the way a browser reports it. */
+  function wheelOn(el: Element, deltaY: number, x = 150, y = 40): WheelEvent {
+    const win = el.ownerDocument.defaultView!;
+    const ev = new win.WheelEvent('wheel', {
+      bubbles: true, cancelable: true, deltaY, clientX: x, clientY: y,
+    });
+    el.dispatchEvent(ev);
+    return ev;
+  }
+
+  /** The pointer passing over an element, from a mouse unless told otherwise. */
+  function pointerOver(el: Element, x: number, y: number, pointerType = 'mouse'): void {
+    const win = el.ownerDocument.defaultView!;
+    el.dispatchEvent(new win.PointerEvent('pointermove', {
+      bubbles: true, clientX: x, clientY: y, isPrimary: true, pointerType,
+    }));
+  }
+
+  it('coalesces a wheel over a claimed surface into one frame', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+      const pad = host.frame.contentDocument!.getElementById('pad')!;
+
+      // Two ticks of a flick, both inside one flush window.
+      const first = wheelOn(pad, -120);
+      const second = wheelOn(pad, -120);
+      // The widget consumes the wheel, so the mirror must not also scroll.
+      expect(first.defaultPrevented).toBe(true);
+      expect(second.defaultPrevented).toBe(true);
+      // And nothing crosses until the beat is over.
+      expect(ev.input).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].kind).toBe('wheel');
+      expect(sent[0].node).toBe(70);
+      expect(sent[0].y).toBe(-240);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves a wheel over ordinary content to the browser', async () => {
+    // The mirror scrolls natively and reports where it got to; a wheel over
+    // text is that scroll, and taking it would freeze the page under the
+    // reader's fingers.
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(snapshot());
+      const li = host.frame.contentDocument!.querySelector('li')!;
+
+      const tick = wheelOn(li, -120);
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(tick.defaultPrevented).toBe(false);
+      expect(ev.input).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends one hover for a mouse at rest, and nothing for staying there', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+      const pad = host.frame.contentDocument!.getElementById('pad')!;
+
+      pointerOver(pad, 150, 40);
+      await vi.advanceTimersByTimeAsync(400);
+
+      let hovers = ev.input.mock.calls
+        .map((c) => c[1] as Record<string, unknown>)
+        .filter((p) => p.kind === 'hover');
+      expect(hovers).toHaveLength(1);
+      expect(hovers[0].node).toBe(70);
+
+      // Drifting inside the slop is stillness, not a new rest...
+      await vi.advanceTimersByTimeAsync(200);
+      pointerOver(pad, 152, 42);
+      pointerOver(pad, 149, 39);
+      await vi.advanceTimersByTimeAsync(400);
+      // ...and a fresh rest on the element already hovered has nothing to add.
+      pointerOver(pad, 300, 40);
+      await vi.advanceTimersByTimeAsync(400);
+
+      hovers = ev.input.mock.calls
+        .map((c) => c[1] as Record<string, unknown>)
+        .filter((p) => p.kind === 'hover');
+      expect(hovers).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never dwells a finger, which is nowhere between touches', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+      const pad = host.frame.contentDocument!.getElementById('pad')!;
+
+      pointerOver(pad, 150, 40, 'touch');
+      await vi.advanceTimersByTimeAsync(400);
+
+      expect(ev.input).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not hover the element a click already parked the pointer on', async () => {
+    // The click's replay parks the landside pointer where it landed, so the
+    // page's own hover machinery has already run there. A dwell saying so
+    // again would spend a round trip repeating it.
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(snapshot());
+      const doc = host.frame.contentDocument!;
+      const li = doc.querySelector('li')!;
+
+      li.dispatchEvent(new doc.defaultView!.MouseEvent('click', { bubbles: true }));
+      ev.input.mockClear();
+
+      pointerOver(li, 150, 40);
+      await vi.advanceTimersByTimeAsync(400);
+
+      const kinds = ev.input.mock.calls.map((c) => (c[1] as Record<string, unknown>).kind);
+      expect(kinds).not.toContain('hover');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports the press a finger actually made, not the gap between two compat events', async () => {
     /*
      * A phone fires mousemove, mousedown, mouseup and click after the finger
@@ -1702,6 +2039,48 @@ describe('an optimistic send the page did not make', () => {
     // Caused by the very first thing the reader did, long since typed past.
     host.applyMutation(refs(valueOp(40, 'hel'), base), 3, 1);
     expect(composer.textContent).toBe('hello there');
+  });
+
+  /*
+   * A burst of typing is one frame, not one per key.
+   *
+   * Appended deltas concatenate losslessly, so pooling them for a beat costs
+   * nothing but the beat — and saves a frame, a landside replay, an echo
+   * batch and an ack per keystroke it absorbs. Anything that is not appended
+   * text flushes the pool ahead of itself, so the wire order of what the
+   * reader did survives exactly.
+   */
+  it('pools a burst of keystrokes into one text frame', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      const snap = withComposer(snapshot());
+      host.applySnapshot(snap);
+
+      let composer = type(host, 'h');
+      composer = type(host, 'he');
+      composer = type(host, 'hel');
+      const textFrames = () => ev.input.mock.calls
+        .map((c) => c[1] as Record<string, unknown>)
+        .filter((p) => p.kind === 'text');
+      expect(textFrames()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(textFrames()).toHaveLength(1);
+      expect(textFrames()[0].text).toBe('hel');
+
+      // A control key flushes the pool ahead of itself: the Enter must not
+      // arrive landside before the letters it follows.
+      type(host, 'hell');
+      pressEnter(composer);
+      const kinds = ev.input.mock.calls
+        .map((c) => (c[1] as Record<string, unknown>).kind)
+        .filter((k) => k === 'text' || k === 'key');
+      expect(kinds).toEqual(['text', 'text', 'key']);
+      expect(textFrames()[1].text).toBe('l');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

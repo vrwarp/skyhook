@@ -246,6 +246,12 @@ type Viewport struct {
 	// bundle is written, along with every image the server fetched and
 	// transcoded from that render. See IMPLEMENTATION.md §45.
 	Scheme string `cbor:"5,keyasint,omitempty"`
+	// Touch says the reader's device has a touchscreen. The landside browser
+	// emulates one to match (P-006): a page that branches on maxTouchPoints
+	// builds its touch interaction model only when the machine claims the
+	// hardware, and the claim is honest exactly when input arrives to feed it
+	// — which is what InputEvent.PT carries.
+	Touch bool `cbor:"6,keyasint,omitempty"`
 }
 
 // Resync asks the server to close a gap.
@@ -552,6 +558,20 @@ type InputEvent struct {
 	// and y in permille of the viewport, dt in milliseconds since the previous
 	// sample. Real cursor movement, sampled plane-side, replayed landside.
 	Path []int32 `cbor:"19,keyasint,omitempty"`
+	// PT is the pointer's kind: 0 mouse, 1 touch, 2 pen. The replay wants to
+	// speak the modality the reader used — a page that branches on
+	// pointerType gets the truth, and a touch-emulating landside browser can
+	// deliver a finger's gesture as the touch events it really was.
+	PT int `cbor:"20,keyasint,omitempty"`
+	// Node2 names where a drag finished: the element under the pointer at
+	// release. The path says how the gesture moved; Node2 says what it landed
+	// on, which survives the two halves laying the page out differently —
+	// permille of the viewport puts a drop near the right place, Node2 puts
+	// it on the right element.
+	Node2 int64 `cbor:"21,keyasint,omitempty"`
+	// Point2 is where in Node2's box the drag finished, in permille of its
+	// width and height — Point's twin, for the other end of the gesture.
+	Point2 []int32 `cbor:"22,keyasint,omitempty"`
 }
 
 // ScrollEvent is telemetry: it drives image prioritisation and infinite-scroll

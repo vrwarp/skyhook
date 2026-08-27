@@ -217,6 +217,11 @@ type Tab struct {
 	// move starts from there rather than materialising at its destination.
 	pointerX, pointerY float64
 	pointerSet         bool
+	// dragSubOnce and dragData carry native drag interception for Tab.drag:
+	// one Input.dragIntercepted subscription per tab, the latest intercepted
+	// DragData in the slot.
+	dragSubOnce sync.Once
+	dragData    atomic.Value
 	// canBack and canForward are held here for the same reason url and title
 	// are: most state frames are partial, and a partial frame that left these
 	// out would read on the client as "there is no history", disabling the back
@@ -479,6 +484,20 @@ func (t *Tab) SetViewport(ctx context.Context, vp protocol.Viewport) error {
 		"mobile":            vp.Mobile,
 	}, nil); err != nil {
 		return err
+	}
+	// The reader's device has a touchscreen, so this browser claims one too
+	// (P-006): a page that branches on maxTouchPoints builds its touch
+	// interaction model only when the machine says the hardware exists — and
+	// the claim is honest here because the client stamps its gestures with
+	// the pointer kind that made them, and a finger's arrives as touch
+	// events. Emulation and input travel together or the page is lied to
+	// twice, in opposite directions.
+	touch := map[string]any{"enabled": vp.Touch}
+	if vp.Touch {
+		touch["maxTouchPoints"] = 5
+	}
+	if err := t.sess.Do(ctx, "Emulation.setTouchEmulationEnabled", touch, nil); err != nil {
+		t.log.Debug("touch emulation unavailable", "tab", t.ID, "err", err)
 	}
 	return t.setColorScheme(ctx, vp.Scheme, was != vp.Scheme)
 }

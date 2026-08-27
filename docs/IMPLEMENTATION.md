@@ -2118,18 +2118,17 @@ prose below is the explanation and [PARITY.md](PARITY.md) is the ledger:
   stylesheet, and `FontFace` exposes no `src`, so there is no url() to rewrite
   and nothing to fetch. Google Chat builds one of its four icon families this
   way and its glyphs arrive as their ligature names.
-- **`wheel` and `hover` are protocol surface nothing sends.** Both are replayed
-  landside (`Tab.wheel`, `Tab.hover`) and no client has ever emitted one: the
-  mirror scrolls plane-side and reports where it got to, and hover is the
-  reader's own (§35's media-feature reasoning). They are kept because the
-  protocol is versioned, not because they work.
-- **The landside browser is a phone with a mouse.** `SetViewport` passes
-  `mobile` to `Emulation.setDeviceMetricsOverride` and never enables touch
-  emulation, so landside `navigator.maxTouchPoints` is 0 and a page branching
-  on touch in *script* builds its mouse interaction model. That is currently
-  self-consistent — §49's gestures are replayed as real mouse events, which is
-  what such a page is listening for — and it is why enabling touch landside is
-  not a one-line change: it would have to arrive with touch input to feed it.
+- **`wheel` and `hover` are sent for the gestures that mean them** (P-004 and
+  P-111's hover third, both closed by §70): a wheel over a gesture-claiming
+  widget crosses and zooms it, a pointer resting on a new element crosses and
+  parks the landside pointer. A wheel over ordinary content deliberately still
+  does not cross — the mirror scrolls plane-side and position telemetry
+  already says where the reader is.
+- **The landside browser claims the touchscreen the reader has** (P-006,
+  closed by §69): the viewport carries a `touch` flag, `SetViewport` turns on
+  touch emulation with it, and a finger's gestures replay as the touch events
+  they were — emulation and input arriving together, which is what this
+  entry used to say made it more than a one-line change.
 - **A second adapter** (design P2) is not built.
 - **File upload** (R10) is not implemented. Clipboard integration is the mirror's
   native selection plus cut/copy/paste on the context menu; copy still executes
@@ -4644,3 +4643,265 @@ glass, the shell arming, and an origin that counts its own servings so that a
 second arrival of the same page is visible at all. It also asserts the pull
 that stops short: a 30-pixel drag raises the indicator, does not arm it, and
 does not spend the link.
+
+### 67. A drag is a gesture the page already described
+
+Three of the parity corpus's new gesture pages (§68) failed the same way: a
+pointer-event sortable list, an HTML5 drag-and-drop card, and a div-built
+slider's held thumb all did nothing over the mirror, because the client
+claimed a drag on exactly one kind of element — a canvas region — and
+everywhere else a press-move-release is the reader selecting text. That rule
+was right to be conservative: selection is native in the mirror, and a client
+that hijacks it to guess at drags has broken the commonest gesture there is
+to serve a rarer one. What was wrong was the premise that the client cannot
+know which elements want dragging.
+
+It can, because the page already said so, and the mirror already carries the
+saying. Every drag widget declares its affordance in the material the wire
+ships: a `grab` or resize cursor in its stylesheet, `touch-action: none` to
+claim the gesture from the browser's scroller, `role="slider"` for the
+machine-readable ones, `draggable="true"` for the browser's own drag-and-drop.
+So the census (`dragSurfaceAt`) walks the composed path at pointerdown reading
+computed styles and attributes, and claims the gesture only where the page
+declared one — plain text and links never qualify, and selection stays whole.
+The claim costs no wire bytes and no landside work: the evidence was already
+plane-side.
+
+What crosses is the canvas pan's frame, taught to name its other end. A drag
+that finished on something says what — `node2` and `point2`, the node-id
+discipline applied to the release — because the two halves lay the page out a
+few pixels apart, and a drop delivered by viewport permille alone lands on
+the list row *beside* the one the reader chose. The replay pins the last move
+to the destination's landside box, which is the difference between "near the
+right card" and "on it".
+
+The browser's own drag-and-drop needed both halves handled specially. Plane
+side there is nothing to claim: pressing a draggable element starts the
+native drag, which cancels the pointer stream — so the host watches the drag
+the browser runs (dragstart for the source, dragover to keep the frame a
+legal drop target, drop for the landing) and sends the same one frame. The
+reader gets the ghost image and drop cursor for free, from their own browser.
+Landside the same asymmetry returns: synthetic mouse moves never start a
+native drag, so for a `draggable` source the replay arms
+`Input.setInterceptDrags`, lets Chromium report the drag the moves would have
+begun, and completes it with real `dragOver` and `drop` events at the
+destination — the page's own dragstart handler runs landside and rebuilds the
+dataTransfer the wire never carries. One Chromium subtlety cost an afternoon:
+a held move without `button: "left"` never begins a native drag — page JS
+cannot tell the difference (a move's `.button` is 0 either way), but the
+browser's drag controller can, and the interception starves without it.
+
+The measurement found two latent bugs on its way in, both the same shape:
+`pointerleave` and `mouseleave` do not bubble, but the host's *capture*
+listeners on the document hear them for every element boundary the pointer
+crosses — so a drag across a list of cards ended at the first card's edge,
+and a press that wandered over a child span dropped its held blur (§48)
+early. A canvas never noticed because a canvas has no children. Both
+listeners now act only when the pointer really left the frame, which is the
+crossing with no element being entered: `relatedTarget === null`.
+
+`widgets/drag-sortable`, `widgets/dnd-html5` and `widgets/slider-track` pin
+the whole path through the real client; `TestDraggingACardReordersASortableList`
+and `TestADraggableCardDropsOnAZone` pin the replay;
+`TestPWADraggingACardReordersTheList` pins the census recognising a reader's
+own mouse. P-111's registry entry narrows to the hover third (§70).
+
+### 68. Measuring the gestures before fixing them
+
+The parity corpus measured the fidelity of pages that only need clicking,
+because clicking, typing and scrolling were the only steps its executor could
+perform. The gestures readers actually lose over the mirror — dragging a
+card, holding a slider's thumb, resting a pointer on a menu, a wheel over a
+zoom widget, a finger panning a map — were catalogued (P-004, P-006, P-111)
+and measured by nothing, which is the state §61 warns about: mechanisms
+argued over in prose with no instrument holding either side to it.
+
+So the instrument came first. The executor learned five steps — `drag`,
+`touchDrag`, `hover`, `wheel`, `dblclick` — each performed the way a reader
+performs it, through the real client. A drag is real mouse events along a
+sampled path with real time between them; a touchDrag is real touch events
+and nothing else, because that is the stream a phone produces (§49) — and
+the frame is instrumented and the gesture retried, because an injected press
+is not a finger and a loaded machine can drop one whole. Two mechanics were
+not obvious. Injected mouse moves never start a browser's native drag, so
+the drag step arms `Input.setInterceptDrags` and completes an intercepted
+drag with real `dragOver`/`drop` events — without which no executor can even
+*ask* whether HTML5 drag-and-drop works. And a group shares one client
+window, so each page parks the pointer on neutral chrome before measuring:
+a previous page's hover would otherwise leave `:hover` state lying across
+whatever this page laid out under the old pointer position.
+
+Six corpus pages use the steps, every one proving its own wiring with a
+click before blaming the gesture. Their first run wrote the ledger the fixes
+would be held to: sortable, drag-and-drop, slider-drag and hover all failing
+under their gaps; the slider's click-to-seek half passing (the trailing
+click of a failed drag lands at the release point — a fidelity fact nobody
+had written down); and hover-menu catching the mirror wearing `:hover`
+state the landside page was never told about, as a style-dimension
+divergence — hover is state, and the reader seeing state the page does not
+have is exactly the kind of divergence the suite exists to name.
+
+### 69. A finger arrives as a finger
+
+The old known-gaps entry for P-006 explained why enabling touch emulation
+landside was not a one-line change: a browser claiming `maxTouchPoints > 0`
+invites the page to build its touch interaction model, and a mirror that
+then replays every gesture as mouse events has lied to that model twice, in
+opposite directions. Emulation had to arrive together with touch input to
+feed it — which the drag work (§67) finally made possible, because gestures
+now cross with the pointer kind that made them (`InputEvent.PT`).
+
+So the claim and the input travel as one fact. The client's viewport carries
+`touch`, read off `navigator.maxTouchPoints` at send time; `SetViewport`
+turns on `Emulation.setTouchEmulationEnabled` landside when it is set, the
+same call that already sizes the window and paints the scheme, because it is
+the same kind of fact about the reader's machine. And a gesture stamped
+touch is replayed as touch: a tap becomes `Input.dispatchTouchEvent` down,
+the reader's own hold, up — no approach, no hover, because a finger is
+nowhere before it lands — and a drag becomes the touch stream, same path,
+same pinned destination, same anti-flick rest as the mouse replay. Three
+gestures deliberately stay mice: a right-click or double-click is a mouse
+idea whichever pointer made it; a drag from a `draggable` source keeps the
+interception path, because preserving the browser's own drag-and-drop
+matters more than the modality of the pointer that made it; and a finger's
+drag onto a surface that never claimed touch gestures replays as the mouse
+drag it always was. That last one is the fixed point §49 already chose: a
+widget that pans under a real finger must declare `touch-action` or the
+browser takes the swipe for a scroll, so a page without the declaration is
+a page touch moves never reach — its map listens to the mouse, and the
+mouse replay is the one stream it can hear, which is the mirror doing
+better than a real phone on purpose. The agent's rect probe answers
+whether the claim exists (`touchy`), and the first full-suite run after
+the touch work is what surfaced the rule: the mouse-listening canvas
+fixture stopped panning under a finger the moment every touch drag
+replayed as touch.
+
+`touch/drag-pan` pins all three layers through the real client — the pan
+arriving at all, arriving as `pointerType: "touch"`, and the page seeing a
+machine that admits to a touchscreen — and `TestAFingersDragArrivesAsTouch`
+pins the replay at the protocol level. The phone client needed no change at
+all: it was already sending its gestures from pointer events (§49), so the
+day the viewport flag shipped, its taps and pans started arriving as what
+they always were.
+
+### 70. The wheel the widgets eat, and the rest that is a gesture
+
+P-004's registry entry had already worked out where its own line was: wheel
+deltas must not stream for documents, because scroll telemetry carries where
+the reader is for a fraction of the bytes — and the entry admitted in the
+same breath that this starves "what zoom-canvas widgets alone consume". The
+gesture census (§67) is what turns that sentence into a predicate. A wheel
+turned over a surface that claims gestures — the same cursors,
+`touch-action: none` and roles that claim a drag — is a widget eating the
+wheel, so the mirror stops scrolling (the widget landside will not either)
+and sends it: ticks coalesced for a beat, one frame carrying the deltas, the
+node, and where in its box the cursor sat. The point matters because every
+map zooms about the cursor, so the replay parks the landside pointer there
+before turning the wheel. A wheel anywhere else is untouched: native scroll,
+telemetry, no new bytes. `widgets/wheel-zoom` pins the widget half through
+the real client; the fixture's zoom reports which side of the stage the
+wheel arrived on, so a replay that parks the pointer in the wrong place is
+visible, and `TestSlidersAndHoverMenusReachThePage` pins exactly that.
+
+Hover took the other half of P-111 out. Pointer moves are still never
+streamed — that discipline predates this work and survives it — but a
+pointer that comes to rest is not a stream, it is a gesture: the one every
+hover menu, tooltip and preview card is built on, and the one gesture the
+mirror answered only through a context-menu entry no reader discovers. A
+rest of 400 ms within a hand's tremor, on an element the landside pointer
+is not already parked on, sends one InHover naming the element and the
+resting point inside it; the landside pointer parks there and the page's
+own mouseover machinery does what it does. There is no other rate limit,
+because the gesture is its own: a new hover needs 400 ms of stillness on a
+new element, which a hand cannot produce faster than about once a second.
+A dwell on the node a click just landed on says nothing — the click's
+replay already parked the pointer there — and a finger never dwells, because
+a finger is nowhere between touches.
+
+The one measured surprise was already in the ledger before the fix:
+`widgets/hover-menu`'s baseline had recorded the mirror wearing `:hover`
+state the landside page did not have, as a style-dimension divergence. With
+the dwell parking the landside pointer, both halves wear it, and the
+dimension that caught the divergence is the one that now pins its absence.
+
+### 71. The scroll ledger spoke for every box that had ever moved
+
+The agent keeps a ledger of scroll positions — `lastScroll` — whose reason
+for existing is silence: `ownScroll` writes the host's own nudges into it so
+the scroll listener sees no change and reports nothing (§10). But the
+throttled flush walked the whole ledger and emitted an op for *every* entry,
+moved or not. One container scrolling re-announced every container that had
+ever scrolled, every 250 ms flush, forever — and re-announced the host's own
+`scrollIntoView` nudges with them, the exact positions the ledger exists to
+keep off the wire. The client's `followScroll` guard discarded most of what
+arrived, which is why nobody saw it: bytes spent to be refused, the same
+shape as the wheel-echo entry in the audit (§61), found the same way —
+reading the wire with the question "who asked for this".
+
+The fix is a dirty set beside the ledger: a genuine scroll marks its box,
+the flush emits the marked boxes only, and `ownScroll` unmarks — a host
+nudge that lands inside the throttle window supersedes the reader-caused
+report queued for the same box, because what would go out after it is the
+nudge's position, not the reader's. `TestAScrolledContainerIsAnnouncedOnce`
+pins the shape with two landside-scrolled boxes: moving the second must not
+re-announce the first.
+
+### 72. Reading the wire with the question "who asked for this"
+
+The interactivity work kept tripping over bytes the link spends on nothing —
+the scroll ledger of §71 was the first — so the wire was walked again the way
+§61 walked it, asking of every message not "who writes and who reads this"
+but "who asked for it". Five answers came back "nobody", and each is now
+either silent or cheaper. All of it is protocol-compatible: no new frame
+types, one field read that was always sent, and behaviour changes only where
+nothing could have depended on the old shape.
+
+**A reconnect that missed nothing cost a snapshot per tab.** planResync's
+comment promised the good case stays free — "a client that reconnects with
+nothing missing sends no resync at all" — but the resume loop above it sent
+one per claimed tab anyway, and for a quiet tab the just-restored ack had
+emptied the ring, so the "nothing to replay" arm answered with a whole
+document. On a link that drops every few minutes, that was the single
+largest avoidable cost the audit found. A resume claim naming the tab's
+exact document (epoch, which the PWA's resume entries now carry) and last
+emitted frame is answered with silence (`Session.TabCurrent`); anything
+less repairs as before. The hash is deliberately not compared there: a
+silently corrupt replica at the right seq is the integrity loop's case, and
+it reads the same restored acks on its own cadence.
+`TestAQuietTabReconnectsForFree` pins both halves.
+
+**One ack per applied batch, ten a second.** Acks are cumulative — the ring
+trims to the highest seq — so a burst of applied batches needs one ack
+naming the last of them, not one each. The worker pools them for a beat,
+latest per tab, flushing immediately for the first ack of a new document,
+which is the answer the server holds resyncs open for.
+
+**Scroll telemetry rode a reliable stream.** The frame's own comment says
+"sent on datagrams, latest wins", and no client had ever used the datagram
+path that was built for it: a lost report was retransmitted stale, holding
+fresher ones behind it for a round trip — bytes spent delivering positions
+the reader had already left. Over QUIC the mid-scroll reports now ride
+datagrams, where a drop costs nothing because a fresher position is 250 ms
+behind it; what must not be lost is the last report of a burst — the
+position lazy loading hangs on — so each scroller arms a short tail and
+re-sends its final position reliably. The WebSocket fallback has one
+reliable pipe and keeps the old behaviour, rather than sending the same
+bytes twice.
+
+**A warm cache said nothing, and was heard anyway.** `ImageWant.Have` was
+the audit's "filled by the client and read by nobody": the client
+volunteered what its cross-flight cache held, the server ignored it, and a
+new session re-shipped every picture on the page. The field is read now —
+haves join the sent ledger, and the client sends them even with nothing to
+ask for. An ask still outranks the ledger, because an ask means the cache
+lost it after all. `TestACachedPictureIsNotPushedAtAKnownHolder` pins the
+suppression and the ask's precedence.
+
+**Typing was a frame per keystroke.** Each one bought a landside replay, an
+echo batch and an ack of its own. Appended deltas concatenate losslessly —
+that is what makes Text append-only — so the host pools a burst for 150 ms
+and sends one frame carrying the same characters. Anything that is not
+appended text flushes the pool ahead of itself, so the wire order of what
+the reader did survives exactly; a value echo arriving while keystrokes are
+still pooling is stale by definition and is refused by the same guard that
+refuses one the reader has typed past.

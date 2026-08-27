@@ -1,0 +1,36 @@
+{
+  "id": "widgets/wheel-zoom",
+  "title": "a wheel turned over a gesture-claiming widget zooms it",
+  "covers": [
+    "wheel listeners",
+    "zoom widgets",
+    "touch-action: none regions"
+  ],
+  "gaps": [
+    "P-004"
+  ],
+  "waitText": "zoom settled",
+  "interactions": [
+    {
+      "do": "click",
+      "target": "#poke"
+    },
+    {
+      "do": "waitText",
+      "value": "poked: yes",
+      "name": "the page's listeners work over the mirror"
+    },
+    {
+      "do": "wheel",
+      "target": "#stage",
+      "value": "0,-120"
+    },
+    {
+      "do": "waitText",
+      "value": "zoom: 1",
+      "within": 12,
+      "name": "a wheel over the widget reaches its listener"
+    }
+  ],
+  "notes": "the wheel crosses only because the stage claims gestures (touch-action: none puts it in the census): a wheel over ordinary content stays the reader's own scroll, reported as telemetry, which is P-004's deliberate document half"
+}

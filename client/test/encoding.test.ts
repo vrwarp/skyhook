@@ -139,6 +139,13 @@ describe('client frames encode integers as CBOR integers', () => {
     text: encodeFrame(FrameType.Input, 1, inputBody({
       kind: 'text', node: 42, seq: 8, text: 'hello', ts: 1234,
     })),
+    drag: encodeFrame(FrameType.Input, 1, inputBody({
+      kind: 'drag', node: 42, seq: 9, ts: 1234,
+      point: [166, 500], path: [146, 260, 0, 195, 260, 30, 244, 260, 30],
+      // Both ends of the gesture: what it was made with, and what it
+      // landed on.
+      pt: 1, node2: 77, point2: [900, 480],
+    })),
     ack: encodeFrame(FrameType.Ack, 2, ackBody(2, 99, 0xdeadbeef, 3)),
     scroll: encodeFrame(FrameType.Scroll, 1, scrollBody({
       tab: 1, x: 0, y: 4096, h: 900, docH: 120000,
@@ -146,7 +153,7 @@ describe('client frames encode integers as CBOR integers', () => {
     resync: encodeFrame(FrameType.Resync, 1, resyncBody(1, 12, 'gap')),
     navigate: encodeFrame(FrameType.Navigate, 1, navigateBody('https://example.test/', '')),
     viewport: encodeFrame(FrameType.Viewport, 0, viewportBody({
-      w: 1280, h: 800, dpr: 1, mobile: false, scheme: 'dark',
+      w: 1280, h: 800, dpr: 1, mobile: false, scheme: 'dark', touch: true,
     })),
     imageWant: encodeFrame(FrameType.ImageWant, 1, imageWantBody(['deadbeef'], ['cafebabe'])),
     adapter: encodeFrame(FrameType.AdapterCmd, 0, adapterCommandBody({
@@ -156,7 +163,7 @@ describe('client frames encode integers as CBOR integers', () => {
     hello: encodeFrame(FrameType.Hello, 0, helloBody({
       token: 'conformance-token', caps: ['zstd'],
       viewport: { w: 1280, h: 800, dpr: 1, mobile: false },
-      resume: [{ tab: 1, seq: 9, hash: 0xdeadbeef }],
+      resume: [{ tab: 1, seq: 9, hash: 0xdeadbeef, epoch: 4 }],
       client: 'conformance', build: 'conformance-build',
     })),
   };

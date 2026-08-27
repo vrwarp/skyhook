@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>wheel-zoom</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+  /* The shape every map and diagram viewer takes: a box that has claimed
+     the gestures over itself — touch-action: none is the declaration — and
+     zooms on the wheel instead of letting the page scroll. */
+  #stage {
+    width: 300px; height: 120px; margin: 6px 0;
+    border: 1px solid rgb(120, 120, 120); background: rgb(245, 245, 250);
+    touch-action: none; user-select: none; cursor: grab;
+  }
+</style>
+</head>
+<body>
+  <h1>wheel-zoom</h1>
+  <p>zoom settled</p>
+  <button id="poke">poke</button>
+  <div id="poked">poked: no</div>
+  <div id="stage">the diagram</div>
+  <div id="zoom">zoom: 0</div>
+  <script>
+    // The positive control: the page's listener wiring must work over the
+    // mirror before the wheel is blamed.
+    document.getElementById('poke').addEventListener('click', function () {
+      document.getElementById('poked').textContent = 'poked: yes';
+    });
+
+    // Steps, not deltas: a coalesced wheel arrives as one event, and the
+    // measurement is that the page heard the reader's intent, not the exact
+    // number of hardware ticks their wheel produces.
+    var zoom = 0;
+    document.getElementById('stage').addEventListener('wheel', function (e) {
+      e.preventDefault();
+      zoom += e.deltaY < 0 ? 1 : -1;
+      document.getElementById('zoom').textContent = 'zoom: ' + zoom;
+    }, { passive: false });
+  </script>
+</body>
+</html>
