@@ -1,0 +1,98 @@
+{
+  "page": "widgets/key-shortcuts",
+  "dimensions": {
+    "attributes": {
+      "status": "pass",
+      "counts": {
+        "attrsExtraPlane": 0,
+        "attrsMissingPlane": 0,
+        "nodesDiffering": 0,
+        "valuesDiffering": 0
+      }
+    },
+    "geometry": {
+      "status": "pass",
+      "counts": {
+        "nodesOff": 0
+      },
+      "buckets": {
+        "pageHeightPct": "+0",
+        "worst": "0"
+      }
+    },
+    "interaction": {
+      "status": "fail",
+      "counts": {
+        "failed": 2
+      },
+      "checks": [
+        {
+          "name": "the page's own control moves the cursor",
+          "pass": true
+        },
+        {
+          "name": "keys typed into a field go to the field and nowhere else",
+          "pass": true
+        },
+        {
+          "name": "a page shortcut key reaches the page",
+          "pass": false
+        },
+        {
+          "name": "a shifted shortcut key reaches the page",
+          "pass": false
+        }
+      ]
+    },
+    "resources": {
+      "status": "pass",
+      "counts": {
+        "consoleErrors": 0,
+        "cspViolations": 0,
+        "fontsMustLoadMissing": 0,
+        "imgBrokenLand": 0,
+        "imgBrokenPlane": 0,
+        "pendingAtProbe": 0,
+        "shotsMissingPlane": 0,
+        "substitutedTags": 0
+      },
+      "buckets": {
+        "fontsMissingPlane": "",
+        "missingImages": "none"
+      }
+    },
+    "structure": {
+      "status": "pass",
+      "counts": {
+        "missingLand": 0,
+        "missingPlane": 0,
+        "tagMismatch": 0
+      },
+      "checks": [
+        {
+          "name": "hashesAgree",
+          "pass": true
+        }
+      ]
+    },
+    "style": {
+      "status": "pass",
+      "counts": {
+        "nodesDiffering": 0,
+        "visibilityDiffering": 0
+      }
+    },
+    "text": {
+      "status": "pass",
+      "counts": {
+        "nodesDiffering": 0
+      }
+    }
+  },
+  "expectedFail": {
+    "interaction": "P-141"
+  },
+  "gaps": [
+    "P-141"
+  ]
+}

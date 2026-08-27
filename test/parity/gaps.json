@@ -592,6 +592,35 @@
         "internal/client/client.go"
       ],
       "notes": "protocol.ImageMeta is two messages sharing a body. One describes an asset — size, type, blurhash, and the alt text of the element that referenced it — and comes from the snapshot that named it or the transcode that made it. The other is a verdict, {Hash, Missing: true}, sent from the four places in the pipeline that can conclude the bytes are not coming, none of which ever learned anything else about the key: only abandon() holds a Request, and only for the tab that asked. internal/client replaced its table entry for entry, so a verdict wiped the description — and answerIfStranded fires whenever a client's ImageWant reaches a key that is neither done nor in flight, which on the emulated link is any key the pipeline gave up on before the want arrived. TestAnImageThatCannotBeFetchedIsReportedRatherThanLeftPending asserts the alt travels, and failed on it on the shaped job. The mirror's own client never had this: it fills an element's alt in from the meta only when the element has none, because the alt it renders came with the element. Fixed by folding rather than replacing — a field the frame does not carry is left alone, with Missing the exception in both directions, since it is the whole of what a verdict says and a later description is the key's second chance. Pinned by TestAVerdictAboutAnImageKeepsWhatIsKnownAboutIt"
+    },
+    {
+      "id": "P-139",
+      "title": "A second finger is dropped where it lands: no multi-touch gesture has a path",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/host.ts",
+        "internal/mirror/input.go"
+      ],
+      "notes": "the client takes the primary pointer and ignores every other one, so a pinch is at best a one-finger drag and a two-finger pan is nothing at all. Measured by touch/pinch-zoom. The wire has no shape for it either: a Drag frame carries one path"
+    },
+    {
+      "id": "P-140",
+      "title": "A widget that claimed one axis is not claimed at all: touch-action pan-x/pan-y goes unread",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "the gesture census reads touch-action: none and stops there, but the commonest declaration a swipeable widget makes is pan-y — the browser keeps the vertical scroll, the page keeps the horizontal gesture. Every carousel and swipe-to-dismiss row is built this way and none of them are claimed. Measured by widgets/swipe-carousel"
+    },
+    {
+      "id": "P-141",
+      "title": "Page keyboard shortcuts never cross: only control keys are forwarded",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/echo.ts",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "the echo engine forwards Enter, Tab, Escape, the arrows and the editing keys, and returns false for everything else — so j/k navigation, ? for help, / to search, and every other single-key affordance a reader-facing app has is swallowed plane-side. Measured by widgets/key-shortcuts. Auto-repeat is the same code's other half: InputEvent.Repeat exists, the landside replay honours it up to 32, and the client hardcodes 1"
     }
   ]
 }

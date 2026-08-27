@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>key-shortcuts</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+</style>
+</head>
+<body>
+  <h1>key-shortcuts</h1>
+  <p>shortcuts settled</p>
+  <button id="down">move down</button>
+  <div id="row">row: 1</div>
+  <input id="box" type="text">
+  <div id="state">state: box[] keys[]</div>
+  <script>
+    // Everything this page reports goes through one line, and every check
+    // asks that line a question with a single answer. A hidden element
+    // holding the answer would not do: the mirror carries text whether or
+    // not it is displayed, so a check for it would pass before the gesture
+    // that is supposed to produce it.
+    var row = 1, keys = '';
+    var box = document.getElementById('box');
+    function report() {
+      document.getElementById('row').textContent = 'row: ' + row;
+      document.getElementById('state').textContent =
+        'state: box[' + box.value + '] keys[' + keys + ']';
+    }
+
+    // The positive control: the button moves the same cursor the j key is
+    // meant to, so a dead page cannot be mistaken for the gap.
+    document.getElementById('down').addEventListener('click', function () {
+      row += 1;
+      report();
+    });
+
+    // The shape every reader-facing app has: single-key navigation on the
+    // document, with no field involved and nothing to click. Gmail, Hacker
+    // News, GitHub, every mail client — j and k move, ? explains. And the
+    // guard every one of them has too: a key typed into a field belongs to
+    // the field.
+    document.addEventListener('keydown', function (e) {
+      var el = e.target;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      if (e.key === 'j') row += 1;
+      else if (e.key === 'k') row = Math.max(1, row - 1);
+      else if (e.key !== '?') return;
+      keys += e.key;
+      report();
+    });
+
+    box.addEventListener('input', report);
+  </script>
+</body>
+</html>

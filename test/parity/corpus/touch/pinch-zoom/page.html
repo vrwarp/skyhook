@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>pinch-zoom</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+  /* A photo viewer's shape: the gesture claimed from the browser so the
+     page zooms rather than the document scrolling. */
+  #stage {
+    width: 300px; height: 160px; margin: 6px 0;
+    border: 1px solid rgb(120, 120, 120); background: rgb(245, 245, 250);
+    touch-action: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+  <h1>pinch-zoom</h1>
+  <p>zoom settled</p>
+  <button id="poke">poke</button>
+  <div id="poked">poked: no</div>
+  <div id="stage">the photograph</div>
+  <div id="fingers">fingers: 0</div>
+  <div id="scale">scale: unchanged</div>
+  <script>
+    // The positive control: the page's listener wiring must work over the
+    // mirror before the pinch is blamed.
+    document.getElementById('poke').addEventListener('click', function () {
+      document.getElementById('poked').textContent = 'poked: yes';
+    });
+
+    // What every pinch-zoom does: track the pointers by id, and read the
+    // distance between two of them. Reported in words rather than numbers
+    // because a pixel of cross-half layout difference must not flap a check
+    // — the question is whether a second finger exists at all.
+    var stage = document.getElementById('stage');
+    var live = new Map();
+    var startGap = 0, most = 0;
+    function gap() {
+      var pts = Array.from(live.values());
+      if (pts.length < 2) return 0;
+      return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    }
+    stage.addEventListener('pointerdown', function (e) {
+      live.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (live.size > most) {
+        most = live.size;
+        document.getElementById('fingers').textContent = 'fingers: ' + most;
+      }
+      if (live.size === 2) startGap = gap();
+    });
+    stage.addEventListener('pointermove', function (e) {
+      if (!live.has(e.pointerId)) return;
+      live.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (live.size < 2 || !startGap) return;
+      var now = gap();
+      if (now > startGap + 20) {
+        document.getElementById('scale').textContent = 'scale: bigger';
+      } else if (now < startGap - 20) {
+        document.getElementById('scale').textContent = 'scale: smaller';
+      }
+    });
+    function lift(e) { live.delete(e.pointerId); }
+    stage.addEventListener('pointerup', lift);
+    stage.addEventListener('pointercancel', lift);
+  </script>
+</body>
+</html>
