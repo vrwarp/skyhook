@@ -292,6 +292,12 @@ function viewport(): Viewport {
     dpr: window.devicePixelRatio || 1,
     mobile: isPhone() && isTouch(),
     scheme: schemePref || deviceScheme(),
+    // maxTouchPoints rather than the coarse-pointer media query: a touch
+    // laptop points with a mouse but its fingers are real, and the landside
+    // browser should claim the hardware whenever a finger's gesture could
+    // arrive (P-006). Read at send time, not cached — the answer is what the
+    // machine says now.
+    touch: (navigator.maxTouchPoints || 0) > 0,
   };
 }
 

@@ -595,6 +595,12 @@ export class MirrorHost {
   private pointerPath: Array<{ x: number; y: number; t: number }> = [];
   /** When the button went down, so a click can report how long it was held. */
   private pointerDownAt = 0;
+
+  /** What kind of pointer last pressed: 0 mouse, 1 touch, 2 pen. Rides the
+   *  click and drag frames so the landside replay can speak the reader's
+   *  modality. A keyboard-activated click inherits the last press's kind,
+   *  which is the machine the reader is on either way. */
+  private lastPointerKind = 0;
   /** Whether a button is down over the mirror right now. A press that started
    *  in the shell — the URL bar, a menu — never sets this, which is the
    *  difference heldBlur turns on. */
@@ -789,14 +795,31 @@ export class MirrorHost {
   private static readonly PATH_MAX_AGE_MS = 500;
 
   /**
-   * A drag in progress over a canvas, or null.
+   * A drag in progress over a surface that asked for one, or null.
    *
-   * Only over a canvas. Everywhere else a press-move-release is the reader
-   * selecting text, which the mirror does natively and must not have taken
-   * away from it — and there is a node to click besides, which is the whole
-   * reason the rest of the mirror never needs coordinates.
+   * Only over such a surface. Everywhere else a press-move-release is the
+   * reader selecting text, which the mirror does natively and must not have
+   * taken away from it — and there is a node to click besides, which is the
+   * whole reason the rest of the mirror never needs coordinates. What counts
+   * as asking is dragSurfaceAt's question.
    */
   private dragging: {
+    node: number;
+    point: number[] | undefined;
+    samples: Array<{ x: number; y: number; t: number }>;
+    pt: number;
+  } | null = null;
+
+  /**
+   * A native HTML5 drag in progress, or null. The browser runs the gesture
+   * itself inside the sandboxed frame — ghost image, drop cursor, all of it
+   * — and this only listens: dragstart names the source, dragover keeps the
+   * frame a legal drop target and samples the motion, drop says where it
+   * ended. What the page's own dragstart handler put in the dataTransfer is
+   * landside state; the wire carries the gesture, and the landside replay
+   * runs the real handlers again.
+   */
+  private nativeDrag: {
     node: number;
     point: number[] | undefined;
     samples: Array<{ x: number; y: number; t: number }>;
@@ -833,15 +856,74 @@ export class MirrorHost {
     return el?.closest?.('[data-skyhook-static]') ?? null;
   }
 
-  private beginDrag(ev: MouseEvent): void {
+  /** The step up the rendered tree, crossing shadow boundaries the way the
+   *  gesture's hit-testing did. */
+  private static parentOf(el: Element): Element | null {
+    if (el.parentElement) return el.parentElement;
+    const root = el.getRootNode();
+    return root instanceof ShadowRoot ? root.host : null;
+  }
+
+  /** The cursors a page puts on things it means to be dragged. `pointer` is
+   *  deliberately absent — that is the click affordance — and so is `text`:
+   *  selection belongs to the reader. */
+  private static readonly DRAG_CURSORS = new Set([
+    'grab', 'grabbing', 'move', 'all-scroll',
+    'ew-resize', 'ns-resize', 'nesw-resize', 'nwse-resize',
+    'col-resize', 'row-resize',
+  ]);
+
+  /*
+   * The surface a press claims a drag on, or null for everywhere a
+   * press-move-release must stay the reader's own text selection.
+   *
+   * No page script runs in the mirror, so nothing here can ask the page what
+   * it would do with a pointer. But the page already said: the mirror carries
+   * its stylesheets and attributes, so the affordances a drag widget declares
+   * — a grab or resize cursor, touch-action: none to claim the gesture from
+   * the browser, role="slider" for the machine-readable ones — are all
+   * legible plane-side, at the moment of the press, for free. A canvas region
+   * keeps its old unconditional claim: its content is pixels, so there is
+   * nothing else the gesture could mean.
+   */
+  private dragSurfaceAt(target: EventTarget | null): Element | null {
+    const region = this.regionAt(target);
+    if (region) return region;
+    const win = this.frame.contentWindow;
+    const doc = this.frame.contentDocument;
+    if (!win || !doc) return null;
+    let el = target as Node | null;
+    if (el && el.nodeType === Node.TEXT_NODE) el = (el as Text).parentElement;
+    for (let e = el as Element | null; e; e = MirrorHost.parentOf(e)) {
+      if (e === doc.body || e === doc.documentElement) return null;
+      if (!e.getAttribute) continue;
+      if (e.getAttribute('role') === 'slider') return e;
+      const cs = win.getComputedStyle(e);
+      if (MirrorHost.DRAG_CURSORS.has(cs.cursor)) return e;
+      if (cs.touchAction === 'none') return e;
+    }
+    return null;
+  }
+
+  /** The wire's name for a pointer's kind: 0 mouse, 1 touch, 2 pen. */
+  private static pointerKind(type: string | undefined): number {
+    return type === 'touch' ? 1 : type === 'pen' ? 2 : 0;
+  }
+
+  private beginDrag(ev: PointerEvent): void {
     if (ev.button !== 0) return;
-    const region = this.regionAt(this.eventTarget(ev));
-    if (!region) return;
-    const node = this.patcher?.idOf(region) ?? 0;
+    const surface = this.dragSurfaceAt(this.eventTarget(ev));
+    if (!surface) return;
+    const node = this.patcher?.idOf(surface) ?? 0;
     if (!node) return;
     const start = this.samplePointer(ev);
     if (!start) return;
-    this.dragging = { node, point: this.pointInBox(ev, region), samples: [start] };
+    this.dragging = {
+      node,
+      point: this.pointInBox(ev, surface),
+      samples: [start],
+      pt: MirrorHost.pointerKind(ev.pointerType),
+    };
   }
 
   /**
@@ -885,22 +967,137 @@ export class MirrorHost {
     );
     if (moved < MirrorHost.DRAG_SLOP_PX) return;
 
-    const path: number[] = [];
-    for (let i = 0; i < drag.samples.length; i++) {
-      const gap = i === 0 ? 0 : Math.round(drag.samples[i].t - drag.samples[i - 1].t);
-      path.push(drag.samples[i].x, drag.samples[i].y, gap);
-    }
     this.dragConsumedClick = true;
+    this.sendDrag(drag.node, drag.point, drag.samples, drag.pt, ev);
+  }
+
+  /**
+   * Where a drag finished: the mirrored element under the release point and
+   * the position inside its box. The path already says how the gesture
+   * moved; this says what it landed on, which survives the two halves
+   * laying the page out a few pixels apart — permille of the viewport puts
+   * a drop near the right place, the element puts it on the right one.
+   */
+  private dropTargetAt(x: number, y: number): { node: number; point: number[] | undefined } {
+    const doc = this.frame.contentDocument;
+    if (!doc) return { node: 0, point: undefined };
+    let el: Element | null;
+    try {
+      el = doc.elementFromPoint(x, y);
+    } catch {
+      // A document that cannot hit-test names no drop target; the path's
+      // own end still says where the gesture finished.
+      return { node: 0, point: undefined };
+    }
+    // elementFromPoint stops at a shadow host; the gesture's hit-testing
+    // does not, and neither does the reader's idea of what they dropped on.
+    while (el?.shadowRoot) {
+      const inner = el.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    for (let e = el; e; e = MirrorHost.parentOf(e)) {
+      const node = this.patcher?.idOf(e) ?? 0;
+      if (node) {
+        const r = e.getBoundingClientRect();
+        if (!r.width || !r.height) return { node, point: undefined };
+        const fx = Math.round(((x - r.left) / r.width) * 1000);
+        const fy = Math.round(((y - r.top) / r.height) * 1000);
+        const point = fx >= 0 && fx <= 1000 && fy >= 0 && fy <= 1000 ? [fx, fy] : undefined;
+        return { node, point };
+      }
+    }
+    return { node: 0, point: undefined };
+  }
+
+  /** The drag frame both gesture paths end in: the pointer one and the
+   *  browser's own drag-and-drop. */
+  private sendDrag(
+    node: number,
+    point: number[] | undefined,
+    samples: Array<{ x: number; y: number; t: number }>,
+    pt: number,
+    ev: MouseEvent,
+  ): void {
+    const path: number[] = [];
+    for (let i = 0; i < samples.length; i++) {
+      const gap = i === 0 ? 0 : Math.round(samples[i].t - samples[i - 1].t);
+      path.push(samples[i].x, samples[i].y, gap);
+    }
+    const drop = this.dropTargetAt(ev.clientX, ev.clientY);
     this.send({
       kind: InputKind.Drag,
-      node: drag.node,
+      node,
       modifiers: modifierMask(ev),
-      point: drag.point,
+      point,
       path,
+      pt: pt || undefined,
+      node2: drop.node || undefined,
+      point2: drop.point,
     });
     // A pan is a press and a release like any other, so it carries the blur
     // landside the same way a click does. See heldBlur.
     this.heldBlur = 0;
+  }
+
+  /*
+   * ------------------------------------------------- native drag-and-drop
+   *
+   * A draggable element pressed and moved starts the browser's own drag,
+   * inside the sandboxed frame, ghost image and all — and cancels the
+   * pointer stream, so the pointer path above never sees the gesture. These
+   * three handlers watch the drag the browser runs: the source at dragstart,
+   * the motion at dragover (where preventDefault is also what keeps the
+   * frame a legal drop target — without it the browser never delivers the
+   * drop), and the landing at drop. What crosses the wire is one Drag frame
+   * naming both ends; the landside replay performs the same gesture on the
+   * real page, whose own dragstart handler rebuilds the dataTransfer this
+   * side could see but never needs to send.
+   *
+   * A drag that did not start in the mirror — a file from the reader's
+   * desktop — is left entirely to the browser, exactly as before.
+   */
+
+  private beginNativeDrag(ev: DragEvent): void {
+    const target = this.eventTarget(ev) as Element | null;
+    const source = (target?.closest?.('[draggable="true"]') ?? target) as Element | null;
+    const node = this.patcher?.idOf(source) ?? 0;
+    if (!node || !source) return;
+    // The browser owns this gesture now. A draggable element often also
+    // wears a grab cursor, so the pointer path may have claimed the same
+    // press; left armed, the release would send the gesture twice.
+    this.dragging = null;
+    const start = this.samplePointer(ev);
+    this.nativeDrag = {
+      node,
+      point: this.pointInBox(ev, source),
+      samples: start ? [start] : [],
+    };
+  }
+
+  private moveNativeDrag(ev: DragEvent): void {
+    const drag = this.nativeDrag;
+    if (!drag) return;
+    ev.preventDefault();
+    const sample = this.samplePointer(ev);
+    if (!sample) return;
+    const last = drag.samples[drag.samples.length - 1];
+    if (last && sample.t - last.t < MirrorHost.PATH_MIN_GAP_MS) return;
+    drag.samples.push(sample);
+    if (drag.samples.length > MirrorHost.DRAG_SAMPLES) drag.samples.splice(1, 1);
+  }
+
+  private endNativeDrag(ev: DragEvent): void {
+    const drag = this.nativeDrag;
+    this.nativeDrag = null;
+    if (!drag) return;
+    // The default for a drop nothing handles is navigating to what was
+    // dragged, which a mirror must never perform.
+    ev.preventDefault();
+    const last = this.samplePointer(ev);
+    if (last) drag.samples.push(last);
+    if (!drag.samples.length) return;
+    this.sendDrag(drag.node, drag.point, drag.samples, this.lastPointerKind, ev);
   }
 
   /** Sends a blur the gesture that caused it turned out not to be carrying. */
@@ -1139,6 +1336,7 @@ export class MirrorHost {
       hold: this.holdMs(),
       point: this.pointInBox(ev, (anchor ?? target) as Element),
       path: this.approachPath(),
+      pt: this.lastPointerKind || undefined,
     });
     // The press this click becomes landside blurs the field the reader left,
     // in the page's own order and at the page's own moment. Nothing more to
@@ -1208,8 +1406,24 @@ export class MirrorHost {
     // browser claimed it.
     doc.addEventListener('pointercancel', () => { this.dragging = null; }, true);
     // A pointer that left the frame mid-drag is not coming back to release the
-    // button, and a drag left open would swallow the next click.
-    doc.addEventListener('pointerleave', (ev) => this.endDrag(ev as PointerEvent), true);
+    // button, and a drag left open would swallow the next click. The listener
+    // captures, and pointerleave does not bubble — so it fires here for every
+    // element boundary the pointer crosses on its way across the page, which
+    // for a drag over a list is every row. Only the real departure ends the
+    // gesture: leaving the frame has no element being entered, so its
+    // relatedTarget is null, and a boundary crossing's never is.
+    doc.addEventListener('pointerleave', (ev) => {
+      const pointer = ev as PointerEvent;
+      if (pointer.relatedTarget === null) this.endDrag(pointer);
+    }, true);
+
+    // The browser's own drag-and-drop; see the native-drag block above.
+    doc.addEventListener('dragstart', (ev) => this.beginNativeDrag(ev as DragEvent), true);
+    doc.addEventListener('dragover', (ev) => this.moveNativeDrag(ev as DragEvent), true);
+    doc.addEventListener('drop', (ev) => this.endNativeDrag(ev as DragEvent), true);
+    // dragend arrives after every outcome — a drop, an escape, a release over
+    // nothing. Whatever it was, the gesture is over.
+    doc.addEventListener('dragend', () => { this.nativeDrag = null; }, true);
 
     /*
      * The one gesture measured on touch events rather than pointer events, and
@@ -1244,9 +1458,14 @@ export class MirrorHost {
 
     // `pressing` brackets the focus change, which is a default action of the
     // compat mousedown and lands between these two on a phone exactly as it
-    // does under a mouse. Nothing else is measured here.
+    // does under a mouse. Nothing else is measured here. mouseleave does not
+    // bubble, so this capture listener hears every element boundary the
+    // pointer crosses mid-press; only really leaving the frame — no element
+    // being entered, relatedTarget null — ends the bracket.
     doc.addEventListener('mouseup', () => { this.pressing = false; }, true);
-    doc.addEventListener('mouseleave', () => { this.pressing = false; }, true);
+    doc.addEventListener('mouseleave', (ev) => {
+      if ((ev as MouseEvent).relatedTarget === null) this.pressing = false;
+    }, true);
 
     doc.addEventListener('click', (ev) => {
       this.clickInFrame(ev);
@@ -1261,6 +1480,7 @@ export class MirrorHost {
       // that started it, and a pinch is not something this can carry anyway.
       if (!pointer.isPrimary) return;
       this.pointerDownAt = performance.now();
+      this.lastPointerKind = MirrorHost.pointerKind(pointer.pointerType);
       // A gesture that reached neither the page nor a click — the pointer left
       // the frame, the page swallowed it — leaves its blur held. Nothing later
       // is going to resolve it, and the landside page is still sitting in a
@@ -1316,6 +1536,7 @@ export class MirrorHost {
         hold: this.holdMs(),
         point: this.pointInBox(mouse, mouse.target as Element),
         path: this.approachPath(),
+        pt: this.lastPointerKind || undefined,
       });
       this.heldBlur = 0;
     }, true);

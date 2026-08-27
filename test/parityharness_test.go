@@ -274,6 +274,16 @@ func runParityGroup(t *testing.T, group string) {
 	waitFor(ctx, t, run.page, `document.getElementById('hud-state').className === 'online'`,
 		budget(45*time.Second), "the client to connect")
 
+	// The touch group's client is a touchscreen, and the whole session knows
+	// it: emulation is flipped on before any page opens, and the resize makes
+	// the shell re-read maxTouchPoints and send the viewport that carries it
+	// — which is what turns the landside browser into a touchscreen too
+	// (P-006), the same way a phone client does at connect.
+	if group == "touch" {
+		ensureTouch(ctx, t, run)
+		evalJSON(ctx, t, run.page, `(window.dispatchEvent(new Event('resize')), true)`, nil)
+	}
+
 	site, _ := corpusServers(t, pages)
 
 	// Serial on purpose: one client browser, one active tab, and the probes

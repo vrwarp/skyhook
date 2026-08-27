@@ -4644,3 +4644,132 @@ glass, the shell arming, and an origin that counts its own servings so that a
 second arrival of the same page is visible at all. It also asserts the pull
 that stops short: a 30-pixel drag raises the indicator, does not arm it, and
 does not spend the link.
+
+### 67. A drag is a gesture the page already described
+
+Three of the parity corpus's new gesture pages (§68) failed the same way: a
+pointer-event sortable list, an HTML5 drag-and-drop card, and a div-built
+slider's held thumb all did nothing over the mirror, because the client
+claimed a drag on exactly one kind of element — a canvas region — and
+everywhere else a press-move-release is the reader selecting text. That rule
+was right to be conservative: selection is native in the mirror, and a client
+that hijacks it to guess at drags has broken the commonest gesture there is
+to serve a rarer one. What was wrong was the premise that the client cannot
+know which elements want dragging.
+
+It can, because the page already said so, and the mirror already carries the
+saying. Every drag widget declares its affordance in the material the wire
+ships: a `grab` or resize cursor in its stylesheet, `touch-action: none` to
+claim the gesture from the browser's scroller, `role="slider"` for the
+machine-readable ones, `draggable="true"` for the browser's own drag-and-drop.
+So the census (`dragSurfaceAt`) walks the composed path at pointerdown reading
+computed styles and attributes, and claims the gesture only where the page
+declared one — plain text and links never qualify, and selection stays whole.
+The claim costs no wire bytes and no landside work: the evidence was already
+plane-side.
+
+What crosses is the canvas pan's frame, taught to name its other end. A drag
+that finished on something says what — `node2` and `point2`, the node-id
+discipline applied to the release — because the two halves lay the page out a
+few pixels apart, and a drop delivered by viewport permille alone lands on
+the list row *beside* the one the reader chose. The replay pins the last move
+to the destination's landside box, which is the difference between "near the
+right card" and "on it".
+
+The browser's own drag-and-drop needed both halves handled specially. Plane
+side there is nothing to claim: pressing a draggable element starts the
+native drag, which cancels the pointer stream — so the host watches the drag
+the browser runs (dragstart for the source, dragover to keep the frame a
+legal drop target, drop for the landing) and sends the same one frame. The
+reader gets the ghost image and drop cursor for free, from their own browser.
+Landside the same asymmetry returns: synthetic mouse moves never start a
+native drag, so for a `draggable` source the replay arms
+`Input.setInterceptDrags`, lets Chromium report the drag the moves would have
+begun, and completes it with real `dragOver` and `drop` events at the
+destination — the page's own dragstart handler runs landside and rebuilds the
+dataTransfer the wire never carries. One Chromium subtlety cost an afternoon:
+a held move without `button: "left"` never begins a native drag — page JS
+cannot tell the difference (a move's `.button` is 0 either way), but the
+browser's drag controller can, and the interception starves without it.
+
+The measurement found two latent bugs on its way in, both the same shape:
+`pointerleave` and `mouseleave` do not bubble, but the host's *capture*
+listeners on the document hear them for every element boundary the pointer
+crosses — so a drag across a list of cards ended at the first card's edge,
+and a press that wandered over a child span dropped its held blur (§48)
+early. A canvas never noticed because a canvas has no children. Both
+listeners now act only when the pointer really left the frame, which is the
+crossing with no element being entered: `relatedTarget === null`.
+
+`widgets/drag-sortable`, `widgets/dnd-html5` and `widgets/slider-track` pin
+the whole path through the real client; `TestDraggingACardReordersASortableList`
+and `TestADraggableCardDropsOnAZone` pin the replay;
+`TestPWADraggingACardReordersTheList` pins the census recognising a reader's
+own mouse. P-111's registry entry narrows to the hover third (§70).
+
+### 68. Measuring the gestures before fixing them
+
+The parity corpus measured the fidelity of pages that only need clicking,
+because clicking, typing and scrolling were the only steps its executor could
+perform. The gestures readers actually lose over the mirror — dragging a
+card, holding a slider's thumb, resting a pointer on a menu, a wheel over a
+zoom widget, a finger panning a map — were catalogued (P-004, P-006, P-111)
+and measured by nothing, which is the state §61 warns about: mechanisms
+argued over in prose with no instrument holding either side to it.
+
+So the instrument came first. The executor learned five steps — `drag`,
+`touchDrag`, `hover`, `wheel`, `dblclick` — each performed the way a reader
+performs it, through the real client. A drag is real mouse events along a
+sampled path with real time between them; a touchDrag is real touch events
+and nothing else, because that is the stream a phone produces (§49) — and
+the frame is instrumented and the gesture retried, because an injected press
+is not a finger and a loaded machine can drop one whole. Two mechanics were
+not obvious. Injected mouse moves never start a browser's native drag, so
+the drag step arms `Input.setInterceptDrags` and completes an intercepted
+drag with real `dragOver`/`drop` events — without which no executor can even
+*ask* whether HTML5 drag-and-drop works. And a group shares one client
+window, so each page parks the pointer on neutral chrome before measuring:
+a previous page's hover would otherwise leave `:hover` state lying across
+whatever this page laid out under the old pointer position.
+
+Six corpus pages use the steps, every one proving its own wiring with a
+click before blaming the gesture. Their first run wrote the ledger the fixes
+would be held to: sortable, drag-and-drop, slider-drag and hover all failing
+under their gaps; the slider's click-to-seek half passing (the trailing
+click of a failed drag lands at the release point — a fidelity fact nobody
+had written down); and hover-menu catching the mirror wearing `:hover`
+state the landside page was never told about, as a style-dimension
+divergence — hover is state, and the reader seeing state the page does not
+have is exactly the kind of divergence the suite exists to name.
+
+### 69. A finger arrives as a finger
+
+The old known-gaps entry for P-006 explained why enabling touch emulation
+landside was not a one-line change: a browser claiming `maxTouchPoints > 0`
+invites the page to build its touch interaction model, and a mirror that
+then replays every gesture as mouse events has lied to that model twice, in
+opposite directions. Emulation had to arrive together with touch input to
+feed it — which the drag work (§67) finally made possible, because gestures
+now cross with the pointer kind that made them (`InputEvent.PT`).
+
+So the claim and the input travel as one fact. The client's viewport carries
+`touch`, read off `navigator.maxTouchPoints` at send time; `SetViewport`
+turns on `Emulation.setTouchEmulationEnabled` landside when it is set, the
+same call that already sizes the window and paints the scheme, because it is
+the same kind of fact about the reader's machine. And a gesture stamped
+touch is replayed as touch: a tap becomes `Input.dispatchTouchEvent` down,
+the reader's own hold, up — no approach, no hover, because a finger is
+nowhere before it lands — and a drag becomes the touch stream, same path,
+same pinned destination, same anti-flick rest as the mouse replay. Two
+gestures deliberately stay mice: a right-click or double-click is a mouse
+idea whichever pointer made it, and a drag from a `draggable` source keeps
+the interception path, because preserving the browser's own drag-and-drop
+matters more than the modality of the pointer that made it.
+
+`touch/drag-pan` pins all three layers through the real client — the pan
+arriving at all, arriving as `pointerType: "touch"`, and the page seeing a
+machine that admits to a touchscreen — and `TestAFingersDragArrivesAsTouch`
+pins the replay at the protocol level. The phone client needed no change at
+all: it was already sending its gestures from pointer events (§49), so the
+day the viewport flag shipped, its taps and pans started arriving as what
+they always were.

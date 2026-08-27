@@ -1,20 +1,41 @@
 {
   "id": "widgets/dnd-html5",
   "title": "a draggable element can be dropped on an HTML5 dropzone",
-  "covers": ["draggable", "dragstart/dragover/drop", "dataTransfer"],
-  "gaps": ["P-111"],
+  "covers": [
+    "draggable",
+    "dragstart/dragover/drop",
+    "dataTransfer"
+  ],
+  "gaps": [
+    "P-111"
+  ],
   "waitText": "dnd settled",
   "interactions": [
-    {"do": "click", "target": "#poke"},
-    {"do": "waitText", "value": "poked: yes", "name": "the page's listeners work over the mirror"},
-    {"do": "drag", "target": "#card", "to": "#zone-b"},
-    {"do": "waitText", "value": "lifted: yes", "within": 12, "name": "the lift starts the page's own dragstart"},
-    {"do": "waitText", "value": "landed: card on zone-b", "within": 12, "name": "the drop lands on the zone the reader chose"}
-  ],
-  "expectedFail": {
-    "interaction": {
-      "gap": "P-111",
-      "reason": "HTML5 drag-and-drop has no wire vocabulary: the mirror's native drag starts and ends plane-side with nothing sent, so the landside page never hears dragstart or drop"
+    {
+      "do": "click",
+      "target": "#poke"
+    },
+    {
+      "do": "waitText",
+      "value": "poked: yes",
+      "name": "the page's listeners work over the mirror"
+    },
+    {
+      "do": "drag",
+      "target": "#card",
+      "to": "#zone-b"
+    },
+    {
+      "do": "waitText",
+      "value": "lifted: yes",
+      "within": 12,
+      "name": "the lift starts the page's own dragstart"
+    },
+    {
+      "do": "waitText",
+      "value": "landed: card on zone-b",
+      "within": 12,
+      "name": "the drop lands on the zone the reader chose"
     }
-  }
+  ]
 }

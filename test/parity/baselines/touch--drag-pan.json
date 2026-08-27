@@ -21,9 +21,9 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 3
+        "failed": 0
       },
       "checks": [
         {
@@ -32,15 +32,15 @@
         },
         {
           "name": "the finger's pan reaches the page",
-          "pass": false
+          "pass": true
         },
         {
           "name": "the gesture arrives as the touch it was",
-          "pass": false
+          "pass": true
         },
         {
           "name": "the landside browser claims the touchscreen the reader has",
-          "pass": false
+          "pass": true
         }
       ]
     },
@@ -88,9 +88,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "interaction": "P-006"
   },
   "gaps": [
     "P-006",

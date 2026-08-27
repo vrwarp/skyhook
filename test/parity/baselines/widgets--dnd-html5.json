@@ -21,9 +21,9 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 2
+        "failed": 0
       },
       "checks": [
         {
@@ -32,11 +32,11 @@
         },
         {
           "name": "the lift starts the page's own dragstart",
-          "pass": false
+          "pass": true
         },
         {
           "name": "the drop lands on the zone the reader chose",
-          "pass": false
+          "pass": true
         }
       ]
     },
@@ -84,9 +84,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "interaction": "P-111"
   },
   "gaps": [
     "P-111"

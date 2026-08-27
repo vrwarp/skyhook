@@ -551,6 +551,196 @@ describe('MirrorHost', () => {
     expect(kinds).not.toContain('drag');
   });
 
+  /*
+   * The gesture census: which press-move-release the mirror claims as a drag.
+   *
+   * No page script runs in the mirror, so nothing here can ask the page what
+   * it would do with a pointer — but the page already said. A grab cursor, a
+   * role="slider", a touch-action: none are the affordances a drag widget
+   * declares, and the mirror carries the attributes and stylesheets they are
+   * declared in, so they are legible at the moment of the press. Everywhere
+   * undeclared stays the reader's own text selection, which the tests above
+   * pin.
+   */
+
+  /** Adds a plain div declaring itself a drag widget by one attribute — a
+   *  grab cursor the way a map pane does, a role the way a slider does.
+   *  jsdom's getComputedStyle reads inline style, so the cursor variant works
+   *  without a stylesheet. */
+  function withDragSurface(snap: Snapshot, name: string, value: string): Snapshot {
+    const base = snap.strings.length;
+    snap.strings.push('div', name, value, 'id', 'pad');
+    snap.nodes.push({
+      id: 70, parent: 1, kind: NodeKind.Element, ref: base,
+      attrs: [base + 1, base + 2, base + 3, base + 4], flags: 0,
+    });
+    return snap;
+  }
+
+  /** Adds the two ends of a native HTML5 drag: a card that says
+   *  draggable="true", and a plain zone for it to land on. */
+  function withDraggableCard(snap: Snapshot): Snapshot {
+    const base = snap.strings.length;
+    snap.strings.push('div', 'draggable', 'true', 'id', 'card', 'zone');
+    snap.nodes.push(
+      {
+        id: 80, parent: 1, kind: NodeKind.Element, ref: base,
+        attrs: [base + 1, base + 2, base + 3, base + 4], flags: 0,
+      },
+      {
+        id: 81, parent: 1, kind: NodeKind.Element, ref: base,
+        attrs: [base + 3, base + 5], flags: 0,
+      },
+    );
+    return snap;
+  }
+
+  it('claims a drag on an element wearing a grab cursor', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+
+    dragAcross(host, host.frame.contentDocument!.getElementById('pad')!, 100, 400);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    // Exactly one drag and no click: landside the pair would be a pan
+    // followed by a press wherever it ended.
+    expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(1);
+    expect(sent.map((p) => p.kind)).not.toContain('click');
+    const drag = sent.find((p) => p.kind === 'drag')!;
+    expect(drag.node).toBe(70);
+    // A mouse is the wire's zero, and zero is omitted.
+    expect(drag.pt).toBeUndefined();
+  });
+
+  it('claims a drag on a slider, which declares itself in its role', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'role', 'slider'));
+
+    dragAcross(host, host.frame.contentDocument!.getElementById('pad')!, 100, 400);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(1);
+    expect(sent.map((p) => p.kind)).not.toContain('click');
+    expect(sent.find((p) => p.kind === 'drag')!.node).toBe(70);
+  });
+
+  it('keeps a drag through a boundary crossing inside the frame', async () => {
+    // The capture listener hears pointerleave for every element boundary the
+    // pointer crosses mid-drag — over a list, that is every row. Only really
+    // leaving the frame ends the gesture, and the difference is the
+    // relatedTarget: a crossing names the element being entered, a departure
+    // from the frame names nothing. See the pointerleave wiring in wireInput.
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const pad = doc.getElementById('pad')!;
+    const at = (type: string, x: number, init: PointerEventInit = {}) => pad.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: x, clientY: 40, button: 0, isPrimary: true,
+        pointerType: 'mouse', ...init,
+      }),
+    );
+
+    at('pointerdown', 100);
+    at('pointermove', 150);
+    // The pointer crosses into a sibling; pointerleave does not bubble, but
+    // the document's capture listener hears it all the same.
+    at('pointerleave', 250, { bubbles: false, relatedTarget: doc.querySelector('li') });
+    at('pointermove', 300);
+    at('pointerup', 400);
+
+    const drags = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'drag');
+    expect(drags).toHaveLength(1);
+    const path = drags[0].path as number[];
+    // The path ends where the button came up. A drag cut off at the crossing
+    // would have been sent from the leave instead, and end at 250's permille.
+    expect(path[path.length - 3]).toBe(Math.round((400 / win.innerWidth) * 1000));
+  });
+
+  it('says a drag came from a finger, so landside replays it as one', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
+
+    swipeAcross(host, host.frame.contentDocument!.getElementById('pad')!, 100, 400);
+
+    const drags = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'drag');
+    expect(drags).toHaveLength(1);
+    expect(drags[0].node).toBe(70);
+    // The wire's name for a touch pointer; a slider dragged with a mouse
+    // gesture on a touch page is how landside misses the widget.
+    expect(drags[0].pt).toBe(1);
+  });
+
+  it('carries the browser\'s own drag-and-drop as a single drag frame', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDraggableCard(snapshot()));
+    const doc = host.frame.contentDocument!;
+    const win = doc.defaultView!;
+    const card = doc.getElementById('card')!;
+    const zone = doc.getElementById('zone')!;
+    // jsdom has no DragEvent; the listeners read only the MouseEvent fields,
+    // and the dataTransfer a real one carries is landside state the wire
+    // never needs.
+    const dnd = (target: Element, type: string, x: number) => {
+      const event = new win.MouseEvent(type, {
+        bubbles: true, cancelable: true, clientX: x, clientY: 40,
+      });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    dnd(card, 'dragstart', 100);
+    // Without the preventDefault on dragover the browser never delivers the
+    // drop at all: cancelling it is what keeps the frame a legal drop target.
+    expect(dnd(zone, 'dragover', 250).defaultPrevented).toBe(true);
+    dnd(zone, 'drop', 400);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(1);
+    expect(sent.map((p) => p.kind)).not.toContain('click');
+    expect(sent.find((p) => p.kind === 'drag')!.node).toBe(80);
+
+    // A drag let go of nowhere — an escape, a release over nothing — ends in
+    // dragend with no drop, and nothing crossed the page for the wire to say.
+    dnd(card, 'dragstart', 100);
+    dnd(card, 'dragend', 100);
+    expect(ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'drag')).toHaveLength(1);
+  });
+
+  it('names the element a drag finished over, and where in its box', async () => {
+    // The path already says how the gesture moved; node2 says what it landed
+    // on, which survives the two halves laying the page out a few pixels
+    // apart.
+    const { host, ev } = await mount();
+    host.applySnapshot(withDraggableCard(withDragSurface(snapshot(), 'style', 'cursor: grab')));
+    const doc = host.frame.contentDocument!;
+    const zone = doc.getElementById('zone')!;
+    // jsdom neither lays out nor hit-tests, so both are told directly: the
+    // release lands on the zone, whose box sits at 300..500 across the top.
+    doc.elementFromPoint = () => zone;
+    Object.defineProperty(zone, 'getBoundingClientRect', {
+      value: () => ({ left: 300, top: 0, width: 200, height: 100 }),
+      configurable: true,
+    });
+
+    dragAcross(host, doc.getElementById('pad')!, 100, 400);
+
+    const drag = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .find((p) => p.kind === 'drag')!;
+    expect(drag.node).toBe(70);
+    expect(drag.node2).toBe(81);
+    // Halfway across the zone, at the height the gesture travelled on — in
+    // permille of the box, because the landside box is a different size.
+    expect(drag.point2).toEqual([500, 400]);
+  });
+
   it('reports the press a finger actually made, not the gap between two compat events', async () => {
     /*
      * A phone fires mousemove, mousedown, mouseup and click after the finger

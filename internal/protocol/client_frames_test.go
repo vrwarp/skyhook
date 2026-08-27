@@ -90,6 +90,26 @@ func TestClientInputFramesDecode(t *testing.T) {
 	if text.Kind != protocol.InText || text.Text != "hello" {
 		t.Fatalf("text event = %+v", text)
 	}
+
+	f = decodeClientFrame(t, frames, "drag")
+	var drag protocol.InputEvent
+	if err := f.DecodeBody(&drag); err != nil {
+		t.Fatalf("drag body does not decode: %v", err)
+	}
+	if drag.Kind != protocol.InDrag || drag.Node != 42 {
+		t.Fatalf("drag event = %+v", drag)
+	}
+	// Both ends of the gesture: the modality it was made with, and the
+	// element it landed on with the position inside its box.
+	if drag.PT != 1 {
+		t.Errorf("pt = %d, want 1 (touch)", drag.PT)
+	}
+	if drag.Node2 != 77 {
+		t.Errorf("node2 = %d, want 77", drag.Node2)
+	}
+	if len(drag.Point2) != 2 || drag.Point2[0] != 900 || drag.Point2[1] != 480 {
+		t.Errorf("point2 = %v, want [900 480]", drag.Point2)
+	}
 }
 
 func TestClientControlFramesDecode(t *testing.T) {
@@ -141,6 +161,11 @@ func TestClientControlFramesDecode(t *testing.T) {
 	// landside tab is put into it, and the page is painted there. See §45.
 	if vp.Scheme != "dark" {
 		t.Fatalf("viewport scheme = %q, want %q", vp.Scheme, "dark")
+	}
+	// And so does the touchscreen (P-006): the landside browser claims the
+	// hardware the reader's device has.
+	if !vp.Touch {
+		t.Fatalf("viewport touch did not survive: %+v", vp)
 	}
 
 	var want protocol.ImageWant

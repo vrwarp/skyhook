@@ -21,9 +21,9 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 1
+        "failed": 0
       },
       "checks": [
         {
@@ -32,7 +32,7 @@
         },
         {
           "name": "the drag's motion reaches the page",
-          "pass": false
+          "pass": true
         },
         {
           "name": "the drag leaves the slider where the reader let go",
@@ -84,9 +84,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "interaction": "P-111"
   },
   "gaps": [
     "P-111"

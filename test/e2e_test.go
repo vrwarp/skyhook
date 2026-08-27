@@ -1524,6 +1524,109 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			});
 			</script></body></html>`)
 	})
+	// A pointer-event sortable list, the miniature of SortableJS and dnd-kit:
+	// cards claimed with cursor/touch-action, reordered by where the pointer
+	// was at release. The page reports the order and whether it heard motion,
+	// which is what a drag replay has to produce — pointerdown, held moves,
+	// pointerup — rather than a click.
+	mux.HandleFunc("/sortable", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Sortable</title>
+			<style>.card { padding: 8px; margin: 4px; border: 1px solid #888;
+			  cursor: grab; user-select: none; touch-action: none; width: 200px; }</style>
+			</head><body><h1>the sortable page</h1>
+			<div id="cards">
+			  <div class="card" id="card-a">alpha card</div>
+			  <div class="card" id="card-b">beta card</div>
+			  <div class="card" id="card-c">gamma card</div>
+			</div>
+			<p id="order">order: a,b,c</p>
+			<p id="heard">drag heard: no</p>
+			<script>
+			var cards = document.getElementById('cards');
+			var lifted = null;
+			cards.addEventListener('pointerdown', function (e) {
+			  var card = e.target.closest('.card');
+			  if (!card) return;
+			  lifted = card;
+			  card.setPointerCapture(e.pointerId);
+			});
+			cards.addEventListener('pointermove', function () {
+			  if (lifted) document.getElementById('heard').textContent = 'drag heard: yes';
+			});
+			cards.addEventListener('pointerup', function (e) {
+			  if (!lifted) return;
+			  var over = document.elementFromPoint(e.clientX, e.clientY);
+			  var dest = over && over.closest ? over.closest('.card') : null;
+			  if (dest && dest !== lifted) dest.after(lifted);
+			  lifted = null;
+			  var ids = [];
+			  for (var i = 0; i < cards.children.length; i++) ids.push(cards.children[i].id.slice(5));
+			  document.getElementById('order').textContent = 'order: ' + ids.join(',');
+			});
+			</script></body></html>`)
+	})
+	// A touch pan surface that reports what modality arrived and what the
+	// machine claims about touchscreens — the two facts P-006 is about.
+	mux.HandleFunc("/touchpad", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Touchpad</title>
+			<style>#pad { width: 300px; height: 140px; border: 1px solid #888;
+			  touch-action: none; user-select: none; }</style>
+			</head><body><h1>the touchpad page</h1>
+			<div id="pad">the pad</div>
+			<p id="pointer">pointer: none</p>
+			<p id="panned">panned: not yet</p>
+			<p id="points">points: unknown</p>
+			<script>
+			document.getElementById('points').textContent =
+			  'points: ' + (navigator.maxTouchPoints > 0 ? 'touch' : 'mouse-only');
+			var pad = document.getElementById('pad');
+			var startX = null;
+			pad.addEventListener('pointerdown', function (e) {
+			  startX = e.clientX;
+			  document.getElementById('pointer').textContent = 'pointer: ' + e.pointerType;
+			});
+			pad.addEventListener('pointerup', function (e) {
+			  if (startX === null) return;
+			  document.getElementById('panned').textContent =
+			    'panned: ' + ((e.clientX - startX) > 60 ? 'far' : 'hardly');
+			  startX = null;
+			});
+			</script></body></html>`)
+	})
+	// The browser's own drag-and-drop: a draggable card and two dropzones.
+	// The landside replay cannot make Chromium start a native drag from
+	// synthetic mouse moves, so this pins the interception path — the drag
+	// reported by Input.setInterceptDrags and completed with real dragOver
+	// and drop events.
+	mux.HandleFunc("/dropzone", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Dropzone</title>
+			<style>.zone { width: 220px; height: 70px; margin: 6px; border: 2px dashed #999; }
+			#card { width: 140px; padding: 8px; margin: 6px; border: 1px solid #888; cursor: grab; }</style>
+			</head><body><h1>the dropzone page</h1>
+			<div id="card" draggable="true">the card</div>
+			<div class="zone" id="zone-a">zone a</div>
+			<div class="zone" id="zone-b">zone b</div>
+			<p id="lifted">lifted: no</p>
+			<p id="landed">landed: nowhere</p>
+			<script>
+			document.getElementById('card').addEventListener('dragstart', function (e) {
+			  e.dataTransfer.setData('text/plain', 'card');
+			  document.getElementById('lifted').textContent = 'lifted: yes';
+			});
+			var zones = document.querySelectorAll('.zone');
+			for (var i = 0; i < zones.length; i++) {
+			  zones[i].addEventListener('dragover', function (e) { e.preventDefault(); });
+			  zones[i].addEventListener('drop', function (e) {
+			    e.preventDefault();
+			    document.getElementById('landed').textContent =
+			      'landed: ' + (e.dataTransfer.getData('text/plain') || 'something') + ' on ' + e.currentTarget.id;
+			  });
+			}
+			</script></body></html>`)
+	})
 	// A chat composer's shape: a contenteditable, and a line reporting what the
 	// page itself thinks is in it. The report is the point — it is the page's
 	// own reading of its editing host, which is what a real composer sends.

@@ -21,9 +21,9 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 2
+        "failed": 0
       },
       "checks": [
         {
@@ -32,11 +32,11 @@
         },
         {
           "name": "the drag's motion reaches the page",
-          "pass": false
+          "pass": true
         },
         {
           "name": "dropping a card reorders the list",
-          "pass": false
+          "pass": true
         }
       ]
     },
@@ -84,9 +84,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "interaction": "P-111"
   },
   "gaps": [
     "P-111"

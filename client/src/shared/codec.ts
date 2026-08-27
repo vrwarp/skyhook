@@ -436,6 +436,7 @@ export function viewportBody(v: Viewport): Map<number, unknown> {
   m.set(F.viewport.dpr, v.dpr);
   if (v.mobile) m.set(F.viewport.mobile, true);
   if (v.scheme) m.set(F.viewport.scheme, v.scheme);
+  if (v.touch) m.set(F.viewport.touch, true);
   return m;
 }
 
@@ -497,6 +498,13 @@ export interface InputEventInit {
   point?: number[];
   /** The approach: (x, y, dt) triplets, viewport permille and milliseconds. */
   path?: number[];
+  /** The pointer's kind: 0 mouse, 1 touch, 2 pen — so the landside replay
+   *  can speak the modality the reader used. */
+  pt?: number;
+  /** The element a drag finished on, and where in its box, permille. The
+   *  path says how the gesture moved; these say what it landed on. */
+  node2?: number;
+  point2?: number[];
 }
 
 export function inputBody(ev: InputEventInit): Map<number, unknown> {
@@ -521,6 +529,9 @@ export function inputBody(ev: InputEventInit): Map<number, unknown> {
   if (ev.hold) m.set(F.input.hold, safeInt(ev.hold));
   if (ev.point?.length === 2) m.set(F.input.point, ev.point.map(safeInt));
   if (ev.path?.length) m.set(F.input.path, ev.path.map(safeInt));
+  if (ev.pt) m.set(F.input.pt, safeInt(ev.pt));
+  if (ev.node2) m.set(F.input.node2, safeInt(ev.node2));
+  if (ev.point2?.length === 2) m.set(F.input.point2, ev.point2.map(safeInt));
   return m;
 }
 

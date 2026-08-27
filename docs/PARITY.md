@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-61 gaps: 13 open, 11 by-design, 36 fixed, 1 disproven.
+61 gaps: 12 open, 11 by-design, 37 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -125,7 +125,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-003 | open | A font registered through the FontFace API cannot ship; its glyphs render as their ligature names | fonts/faces |
 | P-004 | open | wheel and hover are protocol surface no client sends | widgets/wheel-zoom |
 | P-005 | by-design | Password and sensitive-autocomplete values never cross the wire | forms/password |
-| P-006 | open | The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half | touch/drag-pan |
+| P-006 | fixed | The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half | touch/drag-pan |
 | P-007 | fixed | File upload is not implemented | — |
 | P-008 | fixed | Clipboard copy executes plane-side only; cross-tab paste fidelity is absent | — |
 | P-009 | open | Find-in-page has no chrome-UI affordance | — a chrome-UI gap, not a mirror-rendering one |

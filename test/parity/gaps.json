@@ -54,12 +54,12 @@
     {
       "id": "P-006",
       "title": "The landside browser is a phone with a mouse: touch is never emulated, so maxTouchPoints is 0 and pointer-aware pages lay out differently per half",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "docs/IMPLEMENTATION.md:2120",
         "internal/mirror/tab.go:375"
       ],
-      "notes": "measured by touch/drag-pan since the executor learned touchDrag: the client browser is flipped to a touchscreen, the gesture is injected as real touch events, and the page reports what modality arrived and what navigator.maxTouchPoints claims. Fixing it means the client saying it has a touchscreen and the server both emulating one and replaying touch gestures as touch — emulation and input have to arrive together"
+      "notes": "fixed, the way the old known-gaps note said it would have to be: emulation arriving together with touch input to feed it. The client's viewport carries a touch flag read off navigator.maxTouchPoints; SetViewport turns on Emulation.setTouchEmulationEnabled landside when it is set; and every click and drag frame carries the pointer kind that made it (InputEvent.PT), so a finger's tap replays as Input.dispatchTouchEvent and its drag as the touch stream a page listening for pointerType 'touch' expects. touch/drag-pan pins all three layers: the pan arriving, arriving as touch, and the page seeing maxTouchPoints > 0. A right-click or double-tap still replays as the mouse idea it is, and a drag onto a draggable source keeps the mouse-interception path that preserves the browser's own drag-and-drop"
     },
     {
       "id": "P-007",
@@ -330,7 +330,7 @@
         "client/src/mirror/echo.ts",
         "internal/mirror/input.go"
       ],
-      "notes": "two of the three shapes now have paths, pinned by TestSlidersAndHoverMenusReachThePage and TestPWAWidgetChromeAffordances. Sliders (and every native-picker input: color, date, time, month, week): the widget moves locally in the mirror, and the settled value relays once on change as a setvalue — the echo engine now refuses to own non-text inputs, which was also sending a whole-value frame per tick of a focused drag and a meaningless one after every checkbox toggle. Hover menus: the context menu's Hover-here entry sends the one InHover that parks the landside pointer, but nothing sends it for the gesture a reader actually makes, which widgets/hover-menu measures. Still open for everything drag-shaped, now measured rather than deferred: widgets/drag-sortable (pointer-event reorder), widgets/dnd-html5 (native drag-and-drop), widgets/slider-track (a held thumb drag; its click-to-seek half works and is the page's positive control)"
+      "notes": "the drag-shaped two thirds are closed and pinned: the client claims a drag on any element whose own declared affordances say so — a grab/resize cursor, touch-action: none, role=slider, all legible plane-side because the mirror carries the page's CSS — and the browser's native drag-and-drop is watched through its own dragstart/dragover/drop, so one Drag frame crosses naming both ends of the gesture (Node2/Point2), replayed landside as held mouse moves pinned to the destination's box, or through Input.setInterceptDrags for a draggable source. widgets/drag-sortable, widgets/dnd-html5 and widgets/slider-track pin it; TestDraggingACardReordersASortableList and TestADraggableCardDropsOnAZone pin the replay. Sliders and native pickers were already served by setvalue-on-change (TestSlidersAndHoverMenusReachThePage). Still open for the hover third: the context menu's Hover-here entry sends the one InHover that parks the landside pointer, but nothing sends it for the gesture a reader actually makes, which widgets/hover-menu measures"
     },
     {
       "id": "P-112",

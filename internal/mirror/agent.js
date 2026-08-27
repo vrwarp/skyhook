@@ -4473,7 +4473,11 @@
         x: r.left, y: r.top, w: r.width, h: r.height,
         cx: r.left + r.width / 2, cy: r.top + r.height / 2,
         tag: el.tagName, editable: isEditable(el),
-        href: el.tagName === 'A' ? (el.href || '') : ''
+        href: el.tagName === 'A' ? (el.href || '') : '',
+        // Whether a press here starts the browser's own drag-and-drop, which
+        // a drag replay has to perform through drag interception rather than
+        // as mouse moves. See Tab.drag.
+        drag: !!(el.closest && el.closest('[draggable="true"]'))
       };
     },
     /*
