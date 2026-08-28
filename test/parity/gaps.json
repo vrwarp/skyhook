@@ -615,12 +615,22 @@
     {
       "id": "P-141",
       "title": "Page keyboard shortcuts never cross: only control keys are forwarded",
-      "status": "open",
+      "status": "fixed",
       "refs": [
         "client/src/mirror/echo.ts",
         "client/src/mirror/host.ts"
       ],
-      "notes": "the echo engine forwards Enter, Tab, Escape, the arrows and the editing keys, and returns false for everything else — so j/k navigation, ? for help, / to search, and every other single-key affordance a reader-facing app has is swallowed plane-side. Measured by widgets/key-shortcuts. Auto-repeat is the same code's other half: InputEvent.Repeat exists, the landside replay honours it up to 32, and the client hardcodes 1"
+      "notes": "fixed on both halves. Plane-side: a printable key pressed with no field holding the caret goes landside as an InKey, which is what a page's own shortcuts are made of. Deliberately not forwarded — a key typed into a field (it belongs to the field and travels as text), a ctrl or meta chord (the browser's, except the two the shell claims, which are now offered to the shell because an event inside the frame never reaches the shell's document), anything with alt (the OS's), and the space bar, whose default action outside a field is to scroll the mirror natively and for free. Landside: a printable InKey is dispatched as the keystroke it was rather than inserted as text — Input.insertText fires no keydown and needs an editable to insert into, so a shortcut key did nothing at all. Auto-repeat is carried too: the client pools a held key's repeats into one frame with a count, which the replay has always honoured up to 32. Pinned by widgets/key-shortcuts, TestAPagesOwnKeysReachIt and host.dom"
+    },
+    {
+      "id": "P-142",
+      "title": "The echo engine held the server's focus echo and replayed it at blur, putting the caret back in the field the reader had just left",
+      "status": "fixed",
+      "refs": [
+        "client/src/mirror/echo.ts",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "found by widgets/key-shortcuts, whose click out of a text field kept landing back in it. The echo engine buffers server ops that touch the field the reader owns, so their rewrites do not fight the typing — but it buffered focus ops too, and replayed them on blur: the instant the reader leaves. That lands past both guards, because the host's staleness check reads the cause of the mutation being applied and a replayed op carries none, and its owned-field check has just been cleared by the blur itself. The caret jumped back into the field, and on a phone the keyboard with it. A focus op is about a moment rather than about content, so it is no longer deferred at all: it reaches the host, which ignores it while the reader owns the field, which is what it was for. The P-121 family's third instance — after the round-trip echo and the composer value"
     }
   ]
 }

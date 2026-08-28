@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-64 gaps: 11 open, 11 by-design, 41 fixed, 1 disproven.
+65 gaps: 10 open, 11 by-design, 43 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -183,7 +183,8 @@ The table below is generated from `gaps.json` and the corpus by
 | P-138 | fixed | A verdict about an image erased the description of it: the alt text of an asset that 404s was lost to whichever frame landed last | — |
 | P-139 | fixed | A second finger is dropped where it lands: no multi-touch gesture has a path | touch/pinch-zoom |
 | P-140 | fixed | A widget that claimed one axis is not claimed at all: touch-action pan-x/pan-y goes unread | widgets/swipe-carousel |
-| P-141 | open | Page keyboard shortcuts never cross: only control keys are forwarded | widgets/key-shortcuts |
+| P-141 | fixed | Page keyboard shortcuts never cross: only control keys are forwarded | widgets/key-shortcuts |
+| P-142 | fixed | The echo engine held the server's focus echo and replayed it at blur, putting the caret back in the field the reader had just left | — |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

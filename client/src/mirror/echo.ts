@@ -17,7 +17,10 @@ export interface EchoHooks {
   /** Sends a text insertion to the server. */
   sendText(node: number, text: string): void;
   /** Sends a control key to the server. */
-  sendKey(node: number, key: string, modifiers: number, repeat: number): void;
+  /** `held` is true when the key event is the keyboard's own auto-repeat,
+   *  which the host pools into one frame carrying a count rather than one
+   *  frame per repeat. */
+  sendKey(node: number, key: string, modifiers: number, held: boolean): void;
   /** Sends the whole field value, used when local and server state diverge. */
   sendValue(node: number, value: string, start: number, end: number): void;
   /** Sends focus/blur so the landside page sees the same focus we do. */
@@ -126,11 +129,14 @@ export class EchoEngine {
         setValue(owned.node, '');
         owned.local = '';
       }
-      this.hooks.sendKey(id, 'Enter', modifiers, 1);
+      this.hooks.sendKey(id, 'Enter', modifiers, false);
       return true;
     }
     if (CONTROL_KEYS.has(ev.key)) {
-      this.hooks.sendKey(id, ev.key, modifiers, ev.repeat ? 1 : 1);
+      // The keyboard's own repeat flag, not a hardcoded 1: a held arrow is
+      // one gesture, which the host pools into a single frame carrying its
+      // count — a count the landside replay has always known how to honour.
+      this.hooks.sendKey(id, ev.key, modifiers, ev.repeat);
       // Editing keys are still handled natively so the field looks right; the
       // resulting input event reconciles the value.
       return ev.key !== 'Backspace' && ev.key !== 'Delete';
@@ -151,6 +157,17 @@ export class EchoEngine {
       // The server echoes the field value back as data-sky-value; that is the
       // reconciliation signal, not a mutation to apply blindly.
       return true;
+    }
+    if (op.op === OpCode.Focus) {
+      // A focus op is about a moment rather than about content, and holding
+      // one is worse than applying it: the host already ignores a focus
+      // echo that arrives while the reader owns a field, but a deferred one
+      // is replayed at blur — the instant the reader leaves — and lands
+      // past both guards, because a replayed op carries no cause. The caret
+      // jumps back into the field they just left, and on a phone the
+      // keyboard comes back up with it. Let it through to be ignored now
+      // rather than obeyed later.
+      return false;
     }
     owned.deferred.push(op);
     return true;

@@ -79,6 +79,7 @@ function events() {
     navigating: vi.fn(),
     menu: vi.fn(),
     pull: vi.fn(),
+    chord: vi.fn(() => false),
     dismiss: vi.fn(() => false),
   };
 }
@@ -955,6 +956,84 @@ describe('MirrorHost', () => {
       expect(across.defaultPrevented).toBe(true);
       const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
       expect(sent.filter((p) => p.kind === 'wheel')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** A key pressed in the frame, as the reader's keyboard delivers it. */
+  function pressIn(host: MirrorHost, key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+    const doc = host.frame.contentDocument!;
+    const ev = new doc.defaultView!.KeyboardEvent('keydown', {
+      key, bubbles: true, cancelable: true, ...init,
+    });
+    (doc.activeElement ?? doc.body).dispatchEvent(ev);
+    return ev;
+  }
+
+  it('sends a page shortcut key when no field has the caret', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+
+    pressIn(host, 'j');
+    pressIn(host, '?', { shiftKey: true });
+
+    const keys = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'key');
+    expect(keys.map((k) => k.key)).toEqual(['j', '?']);
+  });
+
+  it('leaves the keys that are not the page\'s to claim', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+
+    // The space bar scrolls the mirror, natively and for free; alt belongs
+    // to the OS; a named key that is not an editing key is the browser's.
+    pressIn(host, ' ');
+    pressIn(host, 'g', { altKey: true });
+    pressIn(host, 'F5');
+
+    expect(ev.input.mock.calls.filter((c) => (c[1] as Record<string, unknown>).kind === 'key'))
+      .toHaveLength(0);
+  });
+
+  it('offers a chord to the shell instead of the page', async () => {
+    // An event inside the frame never reaches the shell's own document, so
+    // Ctrl/⌘+D over a mirrored page was bookmarking the app in the reader's
+    // own browser.
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    ev.chord.mockReturnValue(true);
+
+    const taken = pressIn(host, 'd', { ctrlKey: true });
+
+    expect(ev.chord).toHaveBeenCalled();
+    expect(taken.defaultPrevented).toBe(true);
+    expect(ev.input.mock.calls.filter((c) => (c[1] as Record<string, unknown>).kind === 'key'))
+      .toHaveLength(0);
+  });
+
+  it('pools a held key into one frame carrying its count', async () => {
+    // The wire has always had Repeat, and the landside replay has always
+    // honoured it; the client sent a hardcoded 1 and one frame per repeat.
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(snapshot());
+
+      pressIn(host, 'ArrowDown');
+      for (let i = 0; i < 4; i++) pressIn(host, 'ArrowDown', { repeat: true });
+      await vi.advanceTimersByTimeAsync(200);
+
+      const keys = ev.input.mock.calls
+        .map((c) => c[1] as Record<string, unknown>)
+        .filter((p) => p.kind === 'key');
+      // The press the reader is waiting on goes at once; the repeats behind
+      // it arrive as one frame that says how many there were.
+      expect(keys).toHaveLength(2);
+      expect(keys[0].repeat).toBe(1);
+      expect(keys[1].repeat).toBe(4);
     } finally {
       vi.useRealTimers();
     }

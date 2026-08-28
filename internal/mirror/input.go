@@ -925,8 +925,20 @@ func (t *Tab) key(ctx context.Context, ev *protocol.InputEvent) error {
 	}
 	k, ok := controlKeys[ev.Key]
 	if !ok {
-		// Not a control key: treat it as text so we still do the right thing.
-		return t.insertText(ctx, &protocol.InputEvent{Node: ev.Node, Text: ev.Key})
+		p, printable := printableKey(ev.Key)
+		if !printable {
+			// Nothing this side knows how to press; treating it as text is
+			// the old fallback and the least surprising one.
+			return t.insertText(ctx, &protocol.InputEvent{Node: ev.Node, Text: ev.Key})
+		}
+		// A real keystroke rather than an insertion. A page's own shortcuts
+		// are keydown handlers on the document (P-141), and Input.insertText
+		// fires none of them — it needs an editable to insert into and does
+		// nothing at all when the reader is only reading. Dispatched as the
+		// key it was, it does both: the shortcut fires, and a field that
+		// happens to be focused receives the character, exactly as a
+		// keyboard would have done.
+		k = p
 	}
 	rep := ev.Repeat
 	if rep <= 0 {
@@ -956,6 +968,96 @@ func (t *Tab) key(ctx context.Context, ev *protocol.InputEvent) error {
 	}
 	go t.flushSoon(120 * time.Millisecond)
 	return nil
+}
+
+/*
+printableKey builds the pieces Chromium needs for one printable character:
+the physical key it would have come from, its virtual key code, and the
+text it produces.
+
+A bare character is not enough to press a key with. The page reads
+`event.key`, `event.code` and the modifiers, and a dispatch that leaves the
+last two out arrives as a keystroke from no key at all — which some
+handlers ignore and some read as the wrong one. The layout is US, like the
+harness's own key steps: the reader's real layout is plane-side, and what
+crosses the wire is the character they produced rather than the key they
+pressed to produce it.
+*/
+func printableKey(key string) (struct {
+	Code  string
+	Key   string
+	VK    int
+	Text  string
+	Unmod string
+}, bool) {
+	var out struct {
+		Code  string
+		Key   string
+		VK    int
+		Text  string
+		Unmod string
+	}
+	r := []rune(key)
+	if len(r) != 1 {
+		return out, false
+	}
+	c := r[0]
+	out.Key, out.Text, out.Unmod = key, key, key
+	switch {
+	case c >= 'a' && c <= 'z':
+		out.Code, out.VK = "Key"+strings.ToUpper(key), int(c-'a'+'A')
+	case c >= 'A' && c <= 'Z':
+		out.Code, out.VK = "Key"+key, int(c)
+		out.Unmod = strings.ToLower(key)
+	case c >= '0' && c <= '9':
+		out.Code, out.VK = "Digit"+key, int(c)
+	default:
+		punct, ok := punctuationKeys[c]
+		if !ok {
+			return out, false
+		}
+		out.Code, out.VK, out.Unmod = punct.Code, punct.VK, punct.Unmod
+	}
+	return out, true
+}
+
+// The punctuation a page's shortcuts actually use — ? for help, / to
+// search, . and , to step — with the physical key each comes from on a US
+// layout and the character that key produces unshifted.
+var punctuationKeys = map[rune]struct {
+	Code  string
+	VK    int
+	Unmod string
+}{
+	'/':  {"Slash", 191, "/"},
+	'?':  {"Slash", 191, "/"},
+	'.':  {"Period", 190, "."},
+	'>':  {"Period", 190, "."},
+	',':  {"Comma", 188, ","},
+	'<':  {"Comma", 188, ","},
+	';':  {"Semicolon", 186, ";"},
+	':':  {"Semicolon", 186, ";"},
+	'-':  {"Minus", 189, "-"},
+	'_':  {"Minus", 189, "-"},
+	'=':  {"Equal", 187, "="},
+	'+':  {"Equal", 187, "="},
+	'[':  {"BracketLeft", 219, "["},
+	']':  {"BracketRight", 221, "]"},
+	'\\': {"Backslash", 220, "\\"},
+	'\'': {"Quote", 222, "'"},
+	'"':  {"Quote", 222, "'"},
+	'`':  {"Backquote", 192, "`"},
+	'~':  {"Backquote", 192, "`"},
+	'!':  {"Digit1", 49, "1"},
+	'@':  {"Digit2", 50, "2"},
+	'#':  {"Digit3", 51, "3"},
+	'$':  {"Digit4", 52, "4"},
+	'%':  {"Digit5", 53, "5"},
+	'^':  {"Digit6", 54, "6"},
+	'&':  {"Digit7", 55, "7"},
+	'*':  {"Digit8", 56, "8"},
+	'(':  {"Digit9", 57, "9"},
+	')':  {"Digit0", 48, "0"},
 }
 
 func (t *Tab) setValue(ctx context.Context, ev *protocol.InputEvent) error {

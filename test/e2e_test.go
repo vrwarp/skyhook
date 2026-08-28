@@ -1640,6 +1640,25 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			});
 			</script></body></html>`)
 	})
+	// A page whose shortcuts are keys, not clicks: the shape Gmail, Hacker
+	// News and every mail client have, and the one a mirror that forwards
+	// only the editing keys can never work.
+	mux.HandleFunc("/shortcuts", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Shortcuts</title></head>
+			<body><h1>the shortcuts page</h1>
+			<div id="state">state: keys[] rows[1]</div>
+			<script>
+			var keys = '', row = 1;
+			document.addEventListener('keydown', function (e) {
+			  if (e.key === 'j') row += 1;
+			  else if (e.key !== '?') return;
+			  keys += e.key;
+			  document.getElementById('state').textContent =
+			    'state: keys[' + keys + '] rows[' + row + ']';
+			});
+			</script></body></html>`)
+	})
 	// A pinch surface: two fingers and the gap between them, which is the
 	// one measurement a single pointer cannot express.
 	mux.HandleFunc("/pinchpad", func(w http.ResponseWriter, _ *http.Request) {

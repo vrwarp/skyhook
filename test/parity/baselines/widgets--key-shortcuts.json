@@ -21,9 +21,9 @@
       }
     },
     "interaction": {
-      "status": "fail",
+      "status": "pass",
       "counts": {
-        "failed": 2
+        "failed": 0
       },
       "checks": [
         {
@@ -36,11 +36,11 @@
         },
         {
           "name": "a page shortcut key reaches the page",
-          "pass": false
+          "pass": true
         },
         {
           "name": "a shifted shortcut key reaches the page",
-          "pass": false
+          "pass": true
         }
       ]
     },
@@ -88,9 +88,6 @@
         "nodesDiffering": 0
       }
     }
-  },
-  "expectedFail": {
-    "interaction": "P-141"
   },
   "gaps": [
     "P-141"

@@ -84,6 +84,28 @@ describe('EchoEngine', () => {
     expect(echo.ownedId).toBe(0);
   });
 
+  /*
+   * A focus op is about a moment, not about content.
+   *
+   * Holding one is worse than applying it. The host ignores a focus echo
+   * that arrives while the reader owns a field, but a *deferred* one is
+   * replayed at blur — the instant the reader leaves — and lands past both
+   * guards, because a replayed op carries no cause. The caret jumps back
+   * into the field they just left, and on a phone the keyboard comes back
+   * up with it. Found by the keyboard-shortcut corpus page, whose click out
+   * of a field kept landing back in it (P-142).
+   */
+  it('never holds a focus op to replay at blur', () => {
+    const { echo, input } = setup();
+    echo.focus(input);
+    // OpCode.Focus is 9.
+    const focusOp = { op: 9, node: 42 } as never;
+    expect(echo.defer(focusOp, () => input)).toBe(false);
+    const apply = vi.fn();
+    echo.blur(apply);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
   it('drops a server value identical to the local one', () => {
     const { echo, input } = setup();
     echo.focus(input);

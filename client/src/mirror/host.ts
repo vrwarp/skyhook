@@ -358,6 +358,14 @@ export interface HostEvents {
    * there rather than also reaching the page.
    */
   dismiss(tab: number): boolean;
+  /**
+   * A ctrl or meta chord pressed inside the frame, offered to the shell
+   * because the shell's own document never sees one: the shortcuts it
+   * claims — a bookmark, the saved list, a capture — would otherwise be
+   * answered by the reader's own browser, which would bookmark the app.
+   * Returns true if the shell took it.
+   */
+  chord(tab: number, ev: KeyboardEvent): boolean;
 }
 
 /**
@@ -746,8 +754,7 @@ export class MirrorHost {
     this.echo = new EchoEngine(doc, {
       idOf: (node: Node | null): number => this.patcher?.idOf(node) ?? 0,
       sendText: (node, text) => this.send({ kind: InputKind.Text, node, text }),
-      sendKey: (node, key, modifiers, repeat) =>
-        this.send({ kind: InputKind.Key, node, key, modifiers, repeat }),
+      sendKey: (node, key, modifiers, held) => this.sendKeyPooled(node, key, modifiers, held),
       sendValue: (node, value, start, end) =>
         this.send({ kind: InputKind.SetValue, node, text: value, start, end }),
       sendFocus: (node, focused) => {
@@ -772,6 +779,75 @@ export class MirrorHost {
   private static readonly TEXT_POOL_MS = 150;
 
   private pendingText: { node: number; text: string; timer: number } | null = null;
+
+  /**
+   * A key the keyboard is repeating, pooled.
+   *
+   * A held arrow is one gesture, and the wire has always had the field for
+   * it — `Repeat`, which the landside replay honours up to 32 — while the
+   * client sent a hardcoded 1 and one frame per repeat. Pooling turns a
+   * two-second hold from sixty frames into a handful carrying counts.
+   */
+  private pendingKey: {
+    node: number; key: string; modifiers: number; repeat: number; timer: number;
+  } | null = null;
+
+  private flushPendingKey(): void {
+    const k = this.pendingKey;
+    if (!k) return;
+    this.pendingKey = null;
+    window.clearTimeout(k.timer);
+    this.dispatch({
+      kind: InputKind.Key, node: k.node, key: k.key,
+      modifiers: k.modifiers, repeat: k.repeat,
+    });
+  }
+
+  private sendKeyPooled(node: number, key: string, modifiers: number, held: boolean): void {
+    if (!held) {
+      // A fresh press goes at once: the reader is waiting on this one, and
+      // the repeats behind it are the only part worth pooling. `send`
+      // flushes any pool first, so the wire order is what the hand did.
+      this.send({ kind: InputKind.Key, node, key, modifiers, repeat: 1 });
+      return;
+    }
+    const p = this.pendingKey;
+    if (p && p.node === node && p.key === key && p.modifiers === modifiers) {
+      p.repeat += 1;
+      return;
+    }
+    // A different key repeating: the one before it is finished.
+    this.flushPendingKey();
+    this.pendingKey = {
+      node, key, modifiers, repeat: 1,
+      timer: window.setTimeout(() => this.flushPendingKey(), MirrorHost.TEXT_POOL_MS),
+    };
+  }
+
+  /*
+   * A key the page's own shortcuts want, when no field has the caret.
+   *
+   * The echo engine forwards the editing keys and returns false for
+   * everything else, so every printable key outside a field was swallowed
+   * here and no page shortcut had ever worked over the mirror (P-141) —
+   * j/k navigation, ? for help, / to search, the affordance every
+   * reader-facing app has.
+   *
+   * What is deliberately not forwarded: a key typed into a field, which
+   * belongs to the field and travels as text; a ctrl or meta chord, which
+   * belongs to the browser around this app (and to the shell, below);
+   * anything with alt, which belongs to the OS; and the space bar, whose
+   * default action outside a field is to scroll the page — plane-side,
+   * natively, for free.
+   */
+  private pageKey(ev: KeyboardEvent): void {
+    if (ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    if (ev.key.length !== 1 || ev.key === ' ') return;
+    const doc = this.frame.contentDocument;
+    if (!doc || asEditable(doc.activeElement)) return;
+    const node = this.patcher?.idOf(doc.activeElement) ?? 0;
+    this.sendKeyPooled(node, ev.key, modifierMask(ev), ev.repeat);
+  }
 
   /** Sends the pooled keystrokes, if any. Every non-text frame calls this
    *  first, so the wire order of what the reader did is preserved exactly. */
@@ -802,6 +878,7 @@ export class MirrorHost {
       return;
     }
     this.flushPendingText();
+    this.flushPendingKey();
     this.dispatch(ev);
   }
 
@@ -1989,7 +2066,20 @@ export class MirrorHost {
         key.preventDefault();
         return;
       }
-      if (this.echo?.key(key)) key.preventDefault();
+      if (this.echo?.key(key)) {
+        key.preventDefault();
+        return;
+      }
+      // A chord belongs to the browser around this app, except the two the
+      // shell claims for itself — and those never reached it, because an
+      // event inside this frame never reaches the shell's document. The
+      // reader pressing Ctrl/⌘+D over a mirrored page was bookmarking the
+      // app shell in their own browser instead.
+      if (key.ctrlKey || key.metaKey) {
+        if (this.events.chord(this.tab, key)) key.preventDefault();
+        return;
+      }
+      this.pageKey(key);
     }, true);
 
     const win = this.frame.contentWindow;
@@ -2563,6 +2653,7 @@ export class MirrorHost {
     // are typing the reader wants kept, and their node ids only mean
     // anything while the old ids still stand.
     this.flushPendingText();
+    this.flushPendingKey();
     // A held blur names a node in the document being replaced. Sent after this
     // it would name whatever the server has since given that id to, and the
     // gesture it belonged to is over either way. The same goes for a pending
