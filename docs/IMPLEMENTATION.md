@@ -4905,3 +4905,112 @@ appended text flushes the pool ahead of itself, so the wire order of what
 the reader did survives exactly; a value echo arriving while keystrokes are
 still pooling is stale by definition and is refused by the same guard that
 refuses one the reader has typed past.
+
+### 73. The gestures a phone has that a mouse does not
+
+The gesture census (§67) claimed a drag where the page declared one, and
+measured three more shapes it could not yet carry. Each turned out to be a
+different kind of wrong.
+
+**A widget that claimed one axis was not claimed at all.** The census read
+`touch-action: none` and stopped there, but the commonest declaration a
+swipeable thing makes is `pan-y`: the browser may scroll vertically, the
+page keeps the horizontal swipe. Every carousel, image strip and
+swipe-to-dismiss row is built that way, and none of them were claimed. The
+census now reads what a value *leaves* to the browser and claims what is
+left — and a drag is sent only if it ran mostly along the claimed axis,
+because a gesture along the browser's axis is the browser's. The wheel path
+asks the same question, and that half is load-bearing rather than tidy:
+claiming a `pan-y` carousel without it would have eaten the vertical wheel
+over every carousel and stopped the page scrolling under the reader, which
+the corpus page could never have caught because it declares its own axis.
+
+**A second finger was dropped where it landed.** A pinch is the one gesture
+a single pointer cannot express — what the page reads is the distance
+between two of them — and the client took the primary pointer and ignored
+the rest. Worse than ignored: the second finger's moves still fed the first
+finger's path, so a two-finger gesture sent one zigzag drag between them. A
+second finger on a surface that claimed the whole gesture is now the other
+half of it, from the moment it lands, which is also where the page starts
+measuring. Both paths are sampled at the same instants — one frame per move
+of either — so the wire carries one gesture rather than two and the replay
+walks them together as two touch points.
+
+Two details are load-bearing. A pinch is measured by the change in the gap
+rather than by displacement: a symmetric spread moves the midpoint nowhere,
+and the slop test a drag uses would have thrown away the commonest pinch
+there is. And it names no drop target, because what it did happened between
+the fingers. A surface that claimed only one axis is left alone: a carousel
+asked for horizontal swipes, and the browser's own zoom is the better
+answer to a pinch on it.
+
+**The unit test found the third.** The drag sampler shared the approach
+path's spacing rule — samples at least 12 ms apart, which describes one
+pointer's arrival — so a second finger's every move was dropped because the
+first finger had just been sampled. The approach keeps its thinning; a drag
+keeps its own samples, capped as they always were.
+
+### 74. A page's own keyboard, and the caret that would not stay put
+
+The echo engine forwarded the editing keys and returned false for
+everything else, so every printable key outside a field was swallowed
+plane-side: j/k navigation, `?` for help, `/` to search — the affordance
+every reader-facing app has, working over the mirror never.
+
+Plane-side the rule is now about what the key belongs to. A key typed into
+a field belongs to the field and travels as text. A ctrl or meta chord
+belongs to the browser around this app — except the two the shell claims,
+which are offered to it now rather than dropped, because an event inside
+the frame never reaches the shell's document and Ctrl/⌘+D over a mirrored
+page was bookmarking the app shell in the reader's own browser. Alt belongs
+to the OS. The space bar belongs to the mirror, whose scroll is native and
+a round trip faster than anything this could send. Everything else, with no
+field holding the caret, is the page's.
+
+Landside the replay had the matching hole: anything that was not a control
+key was inserted as text, and `Input.insertText` fires no keydown at all —
+so even a shortcut key that crossed did nothing, and with the caret outside
+a field there was nowhere to insert it either. A printable key is
+dispatched as the keystroke it was, derived back into the physical key and
+shift state a US layout would have produced, so the page reads `e.key` and
+a focused field still receives the character.
+
+Auto-repeat crosses as what it is. `Repeat` has been on the wire since the
+beginning and the replay has always honoured it up to 32; the client sent a
+hardcoded 1 and one frame per repeat. A held key pools into one frame
+carrying its count, with the first press going at once because that is the
+one the reader is waiting on.
+
+**And the measurement found a fourth instance of P-121's family**, which is
+why the corpus page could not pass until it was fixed. The echo engine
+buffers server ops that touch the field the reader owns, so the server's
+rewrites cannot fight their typing — and it buffered *focus* ops with them,
+replaying at blur: the instant the reader leaves. That lands past both
+guards, because the host's staleness check reads the cause of the mutation
+being applied and a replayed op carries none, and its owned-field check has
+just been cleared by the blur itself. The caret jumped back into the field
+they had left, and on a phone the keyboard came back up with it. A focus op
+is about a moment rather than about content, so it is not deferred at all
+now: it reaches the host, which ignores it while the reader owns the field
+— which is what the guard was for all along (P-142).
+
+### 75. Deleting the surface nobody wrote
+
+P-107 catalogued the wire's dead surface and said what to do with it:
+delete it at the next protocol change rather than trip over it. This wave
+added four fields, so this is that change.
+
+Gone: `TypeIntegrity` (the divergence check was built better — a fenced
+landside checkpoint answered by the hash already on every Ack, costing no
+frame of its own), `OpImage` and `Op.Image` (an image binds through its
+node's attributes and its own frame), `Op.Drop` (the style path is
+append-only; removing a rule from a constructed stylesheet is design work,
+not a field), `ScrollEvent.Seq` and `ScrollEvent.Visible` (telemetry is
+latest-wins and needs no sequence; image priority is decided landside from
+the position the frame already carries), and the `select` input kind
+(selection is native in the mirror, and the handler did nothing).
+
+Every number stays retired with a tombstone rather than reused, the way
+frame type 23 and `InputEvent` field 15 already were. The conformance
+fixtures did not move by a byte, which is the proof that nothing had ever
+written any of it.

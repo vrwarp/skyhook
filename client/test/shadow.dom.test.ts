@@ -90,7 +90,7 @@ describe('a mirrored sub-document inside a shadow root', () => {
       strings: [],
       ops: [{
         op: OpCode.Style, node: 4, parent: 0, before: 0, ref: 0, ref2: 0,
-        nodes: [], off: 0, del: 0, add: ['p{font-weight:700}'], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 0, del: 0, add: ['p{font-weight:700}'], x: 0, y: 0, str: '',
       }],
       docHash: 0,
       flush: false,

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>swipe-carousel</title>
+<style>
+  html { color: rgb(0, 0, 0); font-family: arial, sans-serif; }
+  body { margin: 0; padding: 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  div { min-height: 18px; }
+  /* The declaration every carousel makes, and the only one it makes:
+     touch-action: pan-y hands the browser the vertical scroll and keeps the
+     horizontal gesture for the page. Deliberately no grab cursor and no
+     role — those are already claimed, and this page exists to ask whether
+     the axis claim alone is heard. */
+  #rail {
+    width: 300px; height: 90px; margin: 6px 0;
+    border: 1px solid rgb(120, 120, 120); background: rgb(245, 245, 250);
+    touch-action: pan-y; user-select: none;
+  }
+</style>
+</head>
+<body>
+  <h1>swipe-carousel</h1>
+  <p>carousel settled</p>
+  <button id="next">next</button>
+  <div id="rail">the gallery</div>
+  <div id="slide">slide: 1</div>
+  <div id="swiped">swiped: no</div>
+  <script>
+    // The positive control: the button advances the same carousel the swipe
+    // is meant to, so a dead page cannot be mistaken for the gap.
+    var at = 1;
+    function show(n) {
+      at = n;
+      document.getElementById('slide').textContent = 'slide: ' + at;
+    }
+    document.getElementById('next').addEventListener('click', function () {
+      show(at + 1);
+    });
+
+    // What Swiper and every hand-rolled carousel do: pointer events on the
+    // rail, a horizontal displacement past a threshold advancing a slide.
+    var rail = document.getElementById('rail');
+    var from = null;
+    rail.addEventListener('pointerdown', function (e) { from = e.clientX; });
+    rail.addEventListener('pointermove', function () {
+      if (from !== null) document.getElementById('swiped').textContent = 'swiped: yes';
+    });
+    rail.addEventListener('pointerup', function (e) {
+      if (from === null) return;
+      var dx = e.clientX - from;
+      from = null;
+      if (dx < -40) show(at + 1);
+      else if (dx > 40) show(at - 1);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+{
+  "id": "widgets/swipe-carousel",
+  "title": "a carousel that claimed only the horizontal axis advances on a swipe",
+  "covers": [
+    "touch-action: pan-y",
+    "swipe carousels",
+    "axis-claimed gestures"
+  ],
+  "gaps": [
+    "P-140"
+  ],
+  "waitText": "carousel settled",
+  "interactions": [
+    {
+      "do": "click",
+      "target": "#next"
+    },
+    {
+      "do": "waitText",
+      "value": "slide: 2",
+      "within": 12,
+      "name": "the page's own control advances the carousel"
+    },
+    {
+      "do": "drag",
+      "target": "#rail",
+      "value": "-120,0"
+    },
+    {
+      "do": "waitText",
+      "value": "swiped: yes",
+      "within": 12,
+      "name": "the swipe's motion reaches the page"
+    },
+    {
+      "do": "waitText",
+      "value": "slide: 3",
+      "within": 12,
+      "name": "a swipe advances the carousel"
+    }
+  ],
+  "notes": "the rail declares touch-action: pan-y and nothing else — no grab cursor, no role — so it measures the axis claim alone. The census claims the horizontal gesture the page kept and leaves the vertical scroll to the browser, which is also why the wheel path checks the same axis: taking the vertical wheel here would stop the page scrolling at all"
+}

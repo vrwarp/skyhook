@@ -39,7 +39,7 @@ function scrollOp(node: number, x: number, y: number): Mutation {
     strings: [], docHash: 0, flush: false,
     ops: [{
       op: OpCode.Scroll, node, parent: 0, before: 0, ref: 0, ref2: 0,
-      nodes: [], off: 0, del: 0, add: [], drop: [], x, y, str: '',
+      nodes: [], off: 0, del: 0, add: [], x, y, str: '',
     }],
   };
 }
@@ -79,6 +79,7 @@ function events() {
     navigating: vi.fn(),
     menu: vi.fn(),
     pull: vi.fn(),
+    chord: vi.fn(() => false),
     dismiss: vi.fn(() => false),
   };
 }
@@ -595,6 +596,121 @@ describe('MirrorHost', () => {
     return snap;
   }
 
+  /** The same gesture straight down the screen, for a surface that only
+   *  claimed one axis: the browser keeps the other, and so must the mirror. */
+  function dragDown(host: MirrorHost, el: Element, from: number, to: number): void {
+    const win = host.frame.contentDocument!.defaultView!;
+    const at = (type: string, y: number) => el.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: 150, clientY: y, button: 0, isPrimary: true,
+        pointerType: 'mouse',
+      }),
+    );
+    at('pointerdown', from);
+    at('mousedown', from);
+    at('pointermove', Math.round((from + to) / 2));
+    at('pointermove', to);
+    at('pointerup', to);
+    at('mouseup', to);
+    el.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 150, clientY: to }));
+  }
+
+  it('claims the swipe a carousel kept, and leaves the scroll it gave away', async () => {
+    // `touch-action: pan-y` is what every carousel says: the browser may
+    // pan vertically, the page keeps the horizontal gesture. Reading only
+    // `none` claimed neither (P-140).
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: pan-y'));
+    const pad = host.frame.contentDocument!.getElementById('pad')!;
+
+    dragAcross(host, pad, 100, 400);
+    const across = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(across.filter((p) => p.kind === 'drag')).toHaveLength(1);
+
+    ev.input.mockClear();
+    dragDown(host, pad, 40, 300);
+    const down = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    // The browser's axis: the reader is scrolling, and a pan sent landside
+    // would move a page they were only reading past.
+    expect(down.filter((p) => p.kind === 'drag')).toHaveLength(0);
+    expect(down.map((p) => p.kind)).toContain('click');
+  });
+
+  it('leaves a manipulation surface to the browser entirely', async () => {
+    // `manipulation` refuses double-tap zoom and leaves panning alone: a
+    // page asking for a faster tap, not for the gesture.
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: manipulation'));
+
+    dragAcross(host, host.frame.contentDocument!.getElementById('pad')!, 100, 400);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.filter((p) => p.kind === 'drag')).toHaveLength(0);
+  });
+
+  /**
+   * Two fingers spreading on one surface, as a browser reports them: two
+   * pointer streams with different ids, the second one never `isPrimary`.
+   *
+   * They spread symmetrically on purpose. The midpoint does not move, so a
+   * gesture measured by displacement — which is what a one-finger drag is
+   * — would find nothing travelled and send nothing at all.
+   */
+  function pinchApart(host: MirrorHost, el: Element, from: number, to: number): void {
+    const win = host.frame.contentDocument!.defaultView!;
+    const at = (type: string, id: number, x: number, primary: boolean) => el.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true, clientX: x, clientY: 40, button: 0,
+        isPrimary: primary, pointerId: id, pointerType: 'touch',
+      }),
+    );
+    at('pointerdown', 1, 150 - from / 2, true);
+    at('pointerdown', 2, 150 + from / 2, false);
+    for (let i = 1; i <= 3; i++) {
+      const gap = from + ((to - from) * i) / 3;
+      at('pointermove', 1, 150 - gap / 2, true);
+      at('pointermove', 2, 150 + gap / 2, false);
+    }
+    at('pointerup', 1, 150 - to / 2, true);
+  }
+
+  it('carries a pinch as the two paths it was made of', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: none'));
+
+    pinchApart(host, host.frame.contentDocument!.getElementById('pad')!, 60, 260);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    const drags = sent.filter((p) => p.kind === 'drag');
+    expect(drags).toHaveLength(1);
+    const pinch = drags[0];
+    expect(pinch.node).toBe(70);
+    // A finger, whatever the first pointer claimed to be.
+    expect(pinch.pt).toBe(1);
+    const path = pinch.path as number[];
+    const path2 = pinch.path2 as number[];
+    // Sampled at the same instants, so the replay can move both at once.
+    expect(path2).toBeDefined();
+    expect(path2.length).toBe(path.length);
+    // Spreading: the two fingers end further apart than they began.
+    expect(Math.abs(path2[0] - path[0]))
+      .toBeLessThan(Math.abs(path2[path2.length - 3] - path[path.length - 3]));
+    // A pinch names no drop target: what it did happened between the fingers.
+    expect(pinch.node2).toBeUndefined();
+  });
+
+  it('leaves a second finger alone on a surface that kept one axis', async () => {
+    // A carousel asked for horizontal swipes, not for a pinch; the browser's
+    // own zoom is the better answer there.
+    const { host, ev } = await mount();
+    host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: pan-y'));
+
+    pinchApart(host, host.frame.contentDocument!.getElementById('pad')!, 60, 260);
+
+    const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(sent.filter((p) => p.path2 !== undefined)).toHaveLength(0);
+  });
+
   it('claims a drag on an element wearing a grab cursor', async () => {
     const { host, ev } = await mount();
     host.applySnapshot(withDragSurface(snapshot(), 'style', 'cursor: grab'));
@@ -809,6 +925,115 @@ describe('MirrorHost', () => {
 
       expect(tick.defaultPrevented).toBe(false);
       expect(ev.input).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves the vertical wheel a one-axis widget gave the browser', async () => {
+    // The other half of P-140: claiming a `pan-y` carousel for drags must
+    // not also claim the wheel over it, or the page stops scrolling under
+    // the reader entirely.
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(withDragSurface(snapshot(), 'style', 'touch-action: pan-y'));
+      const pad = host.frame.contentDocument!.getElementById('pad')!;
+      const win = pad.ownerDocument.defaultView!;
+
+      const down = wheelOn(pad, -120);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(down.defaultPrevented).toBe(false);
+      expect(ev.input).not.toHaveBeenCalled();
+
+      // The axis the page kept is the page's, wheel included: a horizontal
+      // wheel over a carousel is the reader asking it to move.
+      const across = new win.WheelEvent('wheel', {
+        bubbles: true, cancelable: true, deltaX: -120, clientX: 150, clientY: 40,
+      });
+      pad.dispatchEvent(across);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(across.defaultPrevented).toBe(true);
+      const sent = ev.input.mock.calls.map((c) => c[1] as Record<string, unknown>);
+      expect(sent.filter((p) => p.kind === 'wheel')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** A key pressed in the frame, as the reader's keyboard delivers it. */
+  function pressIn(host: MirrorHost, key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+    const doc = host.frame.contentDocument!;
+    const ev = new doc.defaultView!.KeyboardEvent('keydown', {
+      key, bubbles: true, cancelable: true, ...init,
+    });
+    (doc.activeElement ?? doc.body).dispatchEvent(ev);
+    return ev;
+  }
+
+  it('sends a page shortcut key when no field has the caret', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+
+    pressIn(host, 'j');
+    pressIn(host, '?', { shiftKey: true });
+
+    const keys = ev.input.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .filter((p) => p.kind === 'key');
+    expect(keys.map((k) => k.key)).toEqual(['j', '?']);
+  });
+
+  it('leaves the keys that are not the page\'s to claim', async () => {
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+
+    // The space bar scrolls the mirror, natively and for free; alt belongs
+    // to the OS; a named key that is not an editing key is the browser's.
+    pressIn(host, ' ');
+    pressIn(host, 'g', { altKey: true });
+    pressIn(host, 'F5');
+
+    expect(ev.input.mock.calls.filter((c) => (c[1] as Record<string, unknown>).kind === 'key'))
+      .toHaveLength(0);
+  });
+
+  it('offers a chord to the shell instead of the page', async () => {
+    // An event inside the frame never reaches the shell's own document, so
+    // Ctrl/⌘+D over a mirrored page was bookmarking the app in the reader's
+    // own browser.
+    const { host, ev } = await mount();
+    host.applySnapshot(snapshot());
+    ev.chord.mockReturnValue(true);
+
+    const taken = pressIn(host, 'd', { ctrlKey: true });
+
+    expect(ev.chord).toHaveBeenCalled();
+    expect(taken.defaultPrevented).toBe(true);
+    expect(ev.input.mock.calls.filter((c) => (c[1] as Record<string, unknown>).kind === 'key'))
+      .toHaveLength(0);
+  });
+
+  it('pools a held key into one frame carrying its count', async () => {
+    // The wire has always had Repeat, and the landside replay has always
+    // honoured it; the client sent a hardcoded 1 and one frame per repeat.
+    vi.useFakeTimers();
+    try {
+      const { host, ev } = await mount();
+      host.applySnapshot(snapshot());
+
+      pressIn(host, 'ArrowDown');
+      for (let i = 0; i < 4; i++) pressIn(host, 'ArrowDown', { repeat: true });
+      await vi.advanceTimersByTimeAsync(200);
+
+      const keys = ev.input.mock.calls
+        .map((c) => c[1] as Record<string, unknown>)
+        .filter((p) => p.kind === 'key');
+      // The press the reader is waiting on goes at once; the repeats behind
+      // it arrive as one frame that says how many there were.
+      expect(keys).toHaveLength(2);
+      expect(keys[0].repeat).toBe(1);
+      expect(keys[1].repeat).toBe(4);
     } finally {
       vi.useRealTimers();
     }
@@ -1733,7 +1958,7 @@ describe('MirrorHost', () => {
       flush: false,
       ops: [{
         op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 11, ref2: 0,
-        nodes: [], off: 5, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 5, del: 0, add: [], x: 0, y: 0, str: '',
       }],
     };
     host.applyMutation(mutation, 3);
@@ -1761,7 +1986,7 @@ describe('MirrorHost', () => {
       flush: false,
       ops: [{
         op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 11, ref2: 0,
-        nodes: [], off: 5, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 5, del: 0, add: [], x: 0, y: 0, str: '',
       }],
     });
     host.applyMutation(batch(), 3);
@@ -1779,7 +2004,7 @@ describe('MirrorHost', () => {
       strings: [' still'], docHash: 0, flush: false,
       ops: [{
         op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 12, ref2: 0,
-        nodes: [], off: 14, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 14, del: 0, add: [], x: 0, y: 0, str: '',
       }],
     }, 4);
     expect(host.frame.contentDocument!.body.textContent).toBe('first and more still');
@@ -1793,7 +2018,7 @@ describe('MirrorHost', () => {
         strings: [' more'], docHash: 0, flush: false,
         ops: [{
           op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 11, ref2: 0,
-          nodes: [], off: 5, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+          nodes: [], off: 5, del: 0, add: [], x: 0, y: 0, str: '',
         }],
       }, 5);
 
@@ -1953,7 +2178,7 @@ describe('an optimistic send the page did not make', () => {
       strings: ['data-sky-value', value], docHash: 0, flush: false,
       ops: [{
         op: OpCode.Attr, node, parent: 0, before: 0, ref: -1, ref2: -1,
-        nodes: [], off: 0, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 0, del: 0, add: [], x: 0, y: 0, str: '',
       }],
     };
   }

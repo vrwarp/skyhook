@@ -705,6 +705,7 @@ async function hostFor(tab: number): Promise<MirrorHost | null> {
     navigating: (t, url) => asking(t, 'Loading', url),
     menu: (t, target) => showMenu(target.x, target.y, mirrorMenu(t, target)),
     pull: (t, state) => pulling(t, state),
+    chord: (_t: number, ev: KeyboardEvent) => shellChord(ev),
     dismiss: () => {
       // Both halves are reported, because what the caller does with the answer
       // is stop the gesture there rather than also spending it on the page —
@@ -2689,32 +2690,43 @@ document.addEventListener('keydown', (ev) => {
     stopTab(tabs.active);
     return;
   }
-  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+  if (shellChord(ev)) ev.preventDefault();
+});
+
+/**
+ * The chords the shell claims, wherever they were pressed.
+ *
+ * This is a function rather than the body of the listener above because an
+ * event inside a mirror frame never reaches this document: the reader
+ * pressing Ctrl/⌘+D over a mirrored page was bookmarking the app shell in
+ * their own browser, which is the one page in this session nobody needs a
+ * way back to. The host offers the frame's chords here instead.
+ */
+function shellChord(ev: KeyboardEvent): boolean {
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return false;
   const key = ev.key.toLowerCase();
   // Ctrl/⌘+Shift+D. The browser's own devtools chord is F12 and Ctrl+Shift+I,
   // and this deliberately avoids both: on a mirrored page devtools show a
   // sandboxed frame full of inert nodes, which is the wrong answer to the
   // question somebody pressing them is asking.
   if (ev.shiftKey) {
-    if (key !== 'd') return;
-    ev.preventDefault();
+    if (key !== 'd') return false;
     askForCapture();
-    return;
+    return true;
   }
   // The two chords every browser already has for this, doing what they do
   // everywhere else. Both are claimed from the host browser deliberately: its
-  // own bookmark would save the app shell's address, which is the one page in
-  // this session nobody needs a way back to.
+  // own bookmark would save the app shell's address.
   if (key === 'd') {
-    ev.preventDefault();
     toggleBookmark();
-    return;
+    return true;
   }
   if (key === 'b') {
-    ev.preventDefault();
     showPanel('marks');
+    return true;
   }
-});
+  return false;
+}
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;

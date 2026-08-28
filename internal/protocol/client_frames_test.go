@@ -110,6 +110,20 @@ func TestClientInputFramesDecode(t *testing.T) {
 	if len(drag.Point2) != 2 || drag.Point2[0] != 900 || drag.Point2[1] != 480 {
 		t.Errorf("point2 = %v, want [900 480]", drag.Point2)
 	}
+
+	f = decodeClientFrame(t, frames, "pinch")
+	var pinch protocol.InputEvent
+	if err := f.DecodeBody(&pinch); err != nil {
+		t.Fatalf("pinch body does not decode: %v", err)
+	}
+	// The second finger's path is what tells a pinch from a pan, and the two
+	// are sampled at the same instants so a replay can move them together.
+	if len(pinch.Path) != 9 || len(pinch.Path2) != 9 {
+		t.Fatalf("pinch paths = %v / %v, want nine elements each", pinch.Path, pinch.Path2)
+	}
+	if pinch.Path2[0] != 600 || pinch.Path2[6] != 700 {
+		t.Errorf("path2 = %v, want the second finger moving away from the first", pinch.Path2)
+	}
 }
 
 func TestClientControlFramesDecode(t *testing.T) {

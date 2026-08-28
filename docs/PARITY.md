@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-61 gaps: 10 open, 11 by-design, 39 fixed, 1 disproven.
+65 gaps: 9 open, 11 by-design, 44 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -149,7 +149,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-104 | fixed | Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing | — |
 | P-105 | by-design | HTML comments are never mirrored, though KindComment exists on both halves of the protocol | — |
 | P-106 | fixed | object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box | textmisc/object-embed |
-| P-107 | open | Dead wire surface: TypeIntegrity, OpImage and ScrollEvent.Visible are never produced or consumed | — wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it |
+| P-107 | fixed | Dead wire surface: frames and fields declared on both halves and written by neither | — wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it |
 | P-108 | fixed | Downloads are unhandled: a download link writes a file onto the VPS and the reader sees nothing happen | — |
 | P-109 | fixed | window.open and a plain click on target=_blank open a landside tab no client tab will ever show | nav/target-blank |
 | P-110 | fixed | There is no print path: window.print does nothing for the reader | — |
@@ -181,6 +181,10 @@ The table below is generated from `gaps.json` and the corpus by
 | P-136 | fixed | A failing e2e test's log dump was 93% Chromium's complaints about the machine, so the records describing the mirror had been pushed out of the ring | — |
 | P-137 | fixed | A frame emitted between a commit and its history read moved the address bar onto the new page with the old page's back button | — |
 | P-138 | fixed | A verdict about an image erased the description of it: the alt text of an asset that 404s was lost to whichever frame landed last | — |
+| P-139 | fixed | A second finger is dropped where it lands: no multi-touch gesture has a path | touch/pinch-zoom |
+| P-140 | fixed | A widget that claimed one axis is not claimed at all: touch-action pan-x/pan-y goes unread | widgets/swipe-carousel |
+| P-141 | fixed | Page keyboard shortcuts never cross: only control keys are forwarded | widgets/key-shortcuts |
+| P-142 | fixed | The echo engine held the server's focus echo and replayed it at blur, putting the caret back in the field the reader had just left | — |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

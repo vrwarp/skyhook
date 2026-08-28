@@ -83,3 +83,51 @@ func TestSlidersAndHoverMenusReachThePage(t *testing.T) {
 		t.Fatalf("the wheel never reached the widget: %v", err)
 	}
 }
+
+/*
+A page's own keys, replayed as keys (P-141).
+
+The landside replay used to treat anything that was not a control key as
+text to insert, which fires no keydown at all — so a shortcut key arriving
+from the client did nothing, and with focus outside a field there was
+nowhere to insert it either. A printable key is dispatched as the keystroke
+it was: the page's handler sees `e.key`, and a field that happens to be
+focused still receives the character, exactly as a keyboard would do.
+*/
+func TestAPagesOwnKeysReachIt(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), budget(120*time.Second))
+	defer cancel()
+	cl := h.connect(ctx, "")
+	defer func() { _ = cl.Close() }()
+
+	if err := cl.OpenTab(h.site.URL + "/shortcuts"); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	tab, err := cl.WaitForTab(ctx, budget(30*time.Second))
+	if err != nil {
+		t.Fatalf("wait for tab: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "state: keys[] rows[1]", budget(45*time.Second)); err != nil {
+		t.Fatalf("mirror never delivered the page: %v", err)
+	}
+
+	// No node: nothing has the caret, which is exactly when a page's own
+	// shortcuts are the reader's only affordance.
+	if err := cl.Input(tab, protocol.InputEvent{Kind: protocol.InKey, Key: "j"}); err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "keys[j] rows[2]", budget(30*time.Second)); err != nil {
+		t.Fatalf("a plain key never reached the page: %v", err)
+	}
+	// A shifted key is a different character from the same physical key, and
+	// the page reads the character.
+	if err := cl.Input(tab, protocol.InputEvent{
+		Kind: protocol.InKey, Key: "?", Modifiers: 8,
+	}); err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	if err := cl.WaitForText(ctx, tab, "keys[j?]", budget(30*time.Second)); err != nil {
+		t.Fatalf("a shifted key never reached the page: %v", err)
+	}
+}

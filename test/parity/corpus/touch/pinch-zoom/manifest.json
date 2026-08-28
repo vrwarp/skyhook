@@ -1,0 +1,42 @@
+{
+  "id": "touch/pinch-zoom",
+  "title": "two fingers spreading on a photo viewer zoom it",
+  "covers": [
+    "multi-touch",
+    "pinch gestures",
+    "pointerId tracking"
+  ],
+  "gaps": [
+    "P-139"
+  ],
+  "waitText": "zoom settled",
+  "interactions": [
+    {
+      "do": "click",
+      "target": "#poke"
+    },
+    {
+      "do": "waitText",
+      "value": "poked: yes",
+      "name": "the page's listeners work over the mirror"
+    },
+    {
+      "do": "pinch",
+      "target": "#stage",
+      "value": "120"
+    },
+    {
+      "do": "waitText",
+      "value": "fingers: 2",
+      "within": 12,
+      "name": "the second finger reaches the page"
+    },
+    {
+      "do": "waitText",
+      "value": "scale: bigger",
+      "within": 12,
+      "name": "the fingers spreading zoom the page in"
+    }
+  ],
+  "notes": "reported in words rather than a scale factor: the question is whether two pointers exist at all, and a numeric zoom would flap on a pixel of cross-half layout difference. The pinch begins where the page's own measurement does — when the second finger lands — and the two paths are sampled at the same instants so the replay moves both touch points together"
+}

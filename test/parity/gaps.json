@@ -281,14 +281,15 @@
     },
     {
       "id": "P-107",
-      "title": "Dead wire surface: TypeIntegrity, OpImage and ScrollEvent.Visible are never produced or consumed",
-      "status": "open",
+      "title": "Dead wire surface: frames and fields declared on both halves and written by neither",
+      "status": "fixed",
       "refs": [
         "internal/protocol/frames.go:131",
         "internal/protocol/frames.go:375",
         "internal/protocol/frames.go:526"
       ],
-      "noPage": "wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it"
+      "noPage": "wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it",
+      "notes": "deleted, at the moment the entry was recorded for: the next protocol change. TypeIntegrity (the divergence check is a fenced landside checkpoint answered by the hash already on every Ack, so it costs no frame), OpImage and Op.Image (an image binds through its node's attributes and its own frame), Op.Drop (the style path is append-only; removing a rule from a constructed stylesheet is real design work, not a field), ScrollEvent.Seq and ScrollEvent.Visible (telemetry is latest-wins and needs no sequence; image priority is decided landside from the position the frame already carries), and the 'select' input kind (selection is native in the mirror and the handler did nothing). Every number stays retired with a tombstone rather than reused, the way frame type 23 and InputEvent field 15 already were. The conformance fixtures did not move by a byte, which is the proof that nothing ever wrote any of it"
     },
     {
       "id": "P-108",
@@ -592,6 +593,45 @@
         "internal/client/client.go"
       ],
       "notes": "protocol.ImageMeta is two messages sharing a body. One describes an asset — size, type, blurhash, and the alt text of the element that referenced it — and comes from the snapshot that named it or the transcode that made it. The other is a verdict, {Hash, Missing: true}, sent from the four places in the pipeline that can conclude the bytes are not coming, none of which ever learned anything else about the key: only abandon() holds a Request, and only for the tab that asked. internal/client replaced its table entry for entry, so a verdict wiped the description — and answerIfStranded fires whenever a client's ImageWant reaches a key that is neither done nor in flight, which on the emulated link is any key the pipeline gave up on before the want arrived. TestAnImageThatCannotBeFetchedIsReportedRatherThanLeftPending asserts the alt travels, and failed on it on the shaped job. The mirror's own client never had this: it fills an element's alt in from the meta only when the element has none, because the alt it renders came with the element. Fixed by folding rather than replacing — a field the frame does not carry is left alone, with Missing the exception in both directions, since it is the whole of what a verdict says and a later description is the key's second chance. Pinned by TestAVerdictAboutAnImageKeepsWhatIsKnownAboutIt"
+    },
+    {
+      "id": "P-139",
+      "title": "A second finger is dropped where it lands: no multi-touch gesture has a path",
+      "status": "fixed",
+      "refs": [
+        "client/src/mirror/host.ts",
+        "internal/mirror/input.go"
+      ],
+      "notes": "fixed: a second finger landing on a surface that claimed the whole gesture becomes the other half of it rather than being dropped. The two paths are sampled at the same instants — one frame per move of either finger — so the wire carries a gesture rather than two, and the landside replay walks both as touch points together (Path2, field 23). A pinch is measured by the change in the gap rather than by displacement, because a symmetric spread moves the midpoint nowhere and a displacement test would throw away the commonest pinch there is; it names no drop target, because what it did happened between the fingers. Pinned by touch/pinch-zoom, TestTwoFingersPinchThePage and host.dom. Two things the same work fixed: a second finger's moves used to feed the first finger's path, so a two-finger gesture sent one zigzag drag between them; and the drag sampler shared the approach path's spacing rule, which dropped a second finger's every move because the first had just been sampled"
+    },
+    {
+      "id": "P-140",
+      "title": "A widget that claimed one axis is not claimed at all: touch-action pan-x/pan-y goes unread",
+      "status": "fixed",
+      "refs": [
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "fixed: the census reads what a touch-action value leaves to the browser and claims the rest — pan-y keeps the horizontal gesture for the page, pan-x the vertical, none both, and manipulation (a faster tap, not a claim) neither. A drag is then only sent if it ran mostly along the claimed axis, because a gesture along the browser's axis is the browser's: under a finger it never arrives (the scroll claims it and the pointer cancels), under a mouse it is the reader scrolling or selecting. The wheel path checks the same axis, which is what keeps a carousel from swallowing the vertical scroll over it. widgets/swipe-carousel pins the horizontal claim; host.dom pins the vertical drag and the vertical wheel staying native"
+    },
+    {
+      "id": "P-141",
+      "title": "Page keyboard shortcuts never cross: only control keys are forwarded",
+      "status": "fixed",
+      "refs": [
+        "client/src/mirror/echo.ts",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "fixed on both halves. Plane-side: a printable key pressed with no field holding the caret goes landside as an InKey, which is what a page's own shortcuts are made of. Deliberately not forwarded — a key typed into a field (it belongs to the field and travels as text), a ctrl or meta chord (the browser's, except the two the shell claims, which are now offered to the shell because an event inside the frame never reaches the shell's document), anything with alt (the OS's), and the space bar, whose default action outside a field is to scroll the mirror natively and for free. Landside: a printable InKey is dispatched as the keystroke it was rather than inserted as text — Input.insertText fires no keydown and needs an editable to insert into, so a shortcut key did nothing at all. Auto-repeat is carried too: the client pools a held key's repeats into one frame with a count, which the replay has always honoured up to 32. Pinned by widgets/key-shortcuts, TestAPagesOwnKeysReachIt and host.dom"
+    },
+    {
+      "id": "P-142",
+      "title": "The echo engine held the server's focus echo and replayed it at blur, putting the caret back in the field the reader had just left",
+      "status": "fixed",
+      "refs": [
+        "client/src/mirror/echo.ts",
+        "client/src/mirror/host.ts"
+      ],
+      "notes": "found by widgets/key-shortcuts, whose click out of a text field kept landing back in it. The echo engine buffers server ops that touch the field the reader owns, so their rewrites do not fight the typing — but it buffered focus ops too, and replayed them on blur: the instant the reader leaves. That lands past both guards, because the host's staleness check reads the cause of the mutation being applied and a replayed op carries none, and its owned-field check has just been cleared by the blur itself. The caret jumped back into the field, and on a phone the keyboard with it. A focus op is about a moment rather than about content, so it is no longer deferred at all: it reaches the host, which ignores it while the reader owns the field, which is what it was for. The P-121 family's third instance — after the round-trip echo and the composer value"
     }
   ]
 }

@@ -1640,6 +1640,64 @@ func buildHarness(t *testing.T, listenAddr string, tweak func(*session.ManagerOp
 			});
 			</script></body></html>`)
 	})
+	// A page whose shortcuts are keys, not clicks: the shape Gmail, Hacker
+	// News and every mail client have, and the one a mirror that forwards
+	// only the editing keys can never work.
+	mux.HandleFunc("/shortcuts", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Shortcuts</title></head>
+			<body><h1>the shortcuts page</h1>
+			<div id="state">state: keys[] rows[1]</div>
+			<script>
+			var keys = '', row = 1;
+			document.addEventListener('keydown', function (e) {
+			  if (e.key === 'j') row += 1;
+			  else if (e.key !== '?') return;
+			  keys += e.key;
+			  document.getElementById('state').textContent =
+			    'state: keys[' + keys + '] rows[' + row + ']';
+			});
+			</script></body></html>`)
+	})
+	// A pinch surface: two fingers and the gap between them, which is the
+	// one measurement a single pointer cannot express.
+	mux.HandleFunc("/pinchpad", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Pinch</title>
+			<style>#stage { width: 300px; height: 160px; border: 1px solid #888;
+			  touch-action: none; user-select: none; }</style>
+			</head><body><h1>the pinch page</h1>
+			<div id="stage">the photograph</div>
+			<p id="fingers">fingers: 0</p>
+			<p id="scale">scale: unchanged</p>
+			<script>
+			var live = new Map(), startGap = 0, most = 0;
+			var stage = document.getElementById('stage');
+			function gap() {
+			  var p = Array.from(live.values());
+			  return p.length < 2 ? 0 : Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+			}
+			stage.addEventListener('pointerdown', function (e) {
+			  live.set(e.pointerId, { x: e.clientX, y: e.clientY });
+			  if (live.size > most) {
+			    most = live.size;
+			    document.getElementById('fingers').textContent = 'fingers: ' + most;
+			  }
+			  if (live.size === 2) startGap = gap();
+			});
+			stage.addEventListener('pointermove', function (e) {
+			  if (!live.has(e.pointerId)) return;
+			  live.set(e.pointerId, { x: e.clientX, y: e.clientY });
+			  if (live.size < 2 || !startGap) return;
+			  var now = gap();
+			  if (now > startGap + 20) document.getElementById('scale').textContent = 'scale: bigger';
+			  else if (now < startGap - 20) document.getElementById('scale').textContent = 'scale: smaller';
+			});
+			function lift(e) { live.delete(e.pointerId); }
+			stage.addEventListener('pointerup', lift);
+			stage.addEventListener('pointercancel', lift);
+			</script></body></html>`)
+	})
 	// The browser's own drag-and-drop: a draggable card and two dropzones.
 	// The landside replay cannot make Chromium start a native drag from
 	// synthetic mouse moves, so this pins the interception path — the drag

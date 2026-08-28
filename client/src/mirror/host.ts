@@ -315,6 +315,16 @@ export interface PullState {
 }
 
 /** Emitted by the host, forwarded to the server by the app shell. */
+/** Which way a surface claims drag gestures: both axes, or the one the
+ *  browser did not keep. See dragSurfaceAt. */
+type DragAxis = 'both' | 'x' | 'y';
+
+/** A surface that claims drags, and the axis it claimed. */
+interface DragSurface {
+  el: Element;
+  axis: DragAxis;
+}
+
 export interface HostEvents {
   input(tab: number, ev: Record<string, unknown>): void;
   scroll(tab: number, ev: Record<string, unknown>): void;
@@ -348,6 +358,14 @@ export interface HostEvents {
    * there rather than also reaching the page.
    */
   dismiss(tab: number): boolean;
+  /**
+   * A ctrl or meta chord pressed inside the frame, offered to the shell
+   * because the shell's own document never sees one: the shortcuts it
+   * claims — a bookmark, the saved list, a capture — would otherwise be
+   * answered by the reader's own browser, which would bookmark the app.
+   * Returns true if the shell took it.
+   */
+  chord(tab: number, ev: KeyboardEvent): boolean;
 }
 
 /**
@@ -736,8 +754,7 @@ export class MirrorHost {
     this.echo = new EchoEngine(doc, {
       idOf: (node: Node | null): number => this.patcher?.idOf(node) ?? 0,
       sendText: (node, text) => this.send({ kind: InputKind.Text, node, text }),
-      sendKey: (node, key, modifiers, repeat) =>
-        this.send({ kind: InputKind.Key, node, key, modifiers, repeat }),
+      sendKey: (node, key, modifiers, held) => this.sendKeyPooled(node, key, modifiers, held),
       sendValue: (node, value, start, end) =>
         this.send({ kind: InputKind.SetValue, node, text: value, start, end }),
       sendFocus: (node, focused) => {
@@ -762,6 +779,75 @@ export class MirrorHost {
   private static readonly TEXT_POOL_MS = 150;
 
   private pendingText: { node: number; text: string; timer: number } | null = null;
+
+  /**
+   * A key the keyboard is repeating, pooled.
+   *
+   * A held arrow is one gesture, and the wire has always had the field for
+   * it — `Repeat`, which the landside replay honours up to 32 — while the
+   * client sent a hardcoded 1 and one frame per repeat. Pooling turns a
+   * two-second hold from sixty frames into a handful carrying counts.
+   */
+  private pendingKey: {
+    node: number; key: string; modifiers: number; repeat: number; timer: number;
+  } | null = null;
+
+  private flushPendingKey(): void {
+    const k = this.pendingKey;
+    if (!k) return;
+    this.pendingKey = null;
+    window.clearTimeout(k.timer);
+    this.dispatch({
+      kind: InputKind.Key, node: k.node, key: k.key,
+      modifiers: k.modifiers, repeat: k.repeat,
+    });
+  }
+
+  private sendKeyPooled(node: number, key: string, modifiers: number, held: boolean): void {
+    if (!held) {
+      // A fresh press goes at once: the reader is waiting on this one, and
+      // the repeats behind it are the only part worth pooling. `send`
+      // flushes any pool first, so the wire order is what the hand did.
+      this.send({ kind: InputKind.Key, node, key, modifiers, repeat: 1 });
+      return;
+    }
+    const p = this.pendingKey;
+    if (p && p.node === node && p.key === key && p.modifiers === modifiers) {
+      p.repeat += 1;
+      return;
+    }
+    // A different key repeating: the one before it is finished.
+    this.flushPendingKey();
+    this.pendingKey = {
+      node, key, modifiers, repeat: 1,
+      timer: window.setTimeout(() => this.flushPendingKey(), MirrorHost.TEXT_POOL_MS),
+    };
+  }
+
+  /*
+   * A key the page's own shortcuts want, when no field has the caret.
+   *
+   * The echo engine forwards the editing keys and returns false for
+   * everything else, so every printable key outside a field was swallowed
+   * here and no page shortcut had ever worked over the mirror (P-141) —
+   * j/k navigation, ? for help, / to search, the affordance every
+   * reader-facing app has.
+   *
+   * What is deliberately not forwarded: a key typed into a field, which
+   * belongs to the field and travels as text; a ctrl or meta chord, which
+   * belongs to the browser around this app (and to the shell, below);
+   * anything with alt, which belongs to the OS; and the space bar, whose
+   * default action outside a field is to scroll the page — plane-side,
+   * natively, for free.
+   */
+  private pageKey(ev: KeyboardEvent): void {
+    if (ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    if (ev.key.length !== 1 || ev.key === ' ') return;
+    const doc = this.frame.contentDocument;
+    if (!doc || asEditable(doc.activeElement)) return;
+    const node = this.patcher?.idOf(doc.activeElement) ?? 0;
+    this.sendKeyPooled(node, ev.key, modifierMask(ev), ev.repeat);
+  }
 
   /** Sends the pooled keystrokes, if any. Every non-text frame calls this
    *  first, so the wire order of what the reader did is preserved exactly. */
@@ -792,6 +878,7 @@ export class MirrorHost {
       return;
     }
     this.flushPendingText();
+    this.flushPendingKey();
     this.dispatch(ev);
   }
 
@@ -848,6 +935,17 @@ export class MirrorHost {
     point: number[] | undefined;
     samples: Array<{ x: number; y: number; t: number }>;
     pt: number;
+    axis: DragAxis;
+    /** The pointer that started it. Every other pointer's moves belong to
+     *  some other gesture — or to the second finger below. */
+    id: number;
+    /** The second finger, once one lands: a pinch. Its samples are kept in
+     *  step with the first finger's, one frame per move of either, so the
+     *  landside replay can move two touch points together. */
+    second?: { id: number; samples: Array<{ x: number; y: number; t: number }> };
+    /** Where each finger was last seen, which is what a frame is made of. */
+    at?: { x: number; y: number };
+    at2?: { x: number; y: number };
   } | null = null;
 
   /**
@@ -926,9 +1024,9 @@ export class MirrorHost {
    * keeps its old unconditional claim: its content is pixels, so there is
    * nothing else the gesture could mean.
    */
-  private dragSurfaceAt(target: EventTarget | null): Element | null {
+  private dragSurfaceAt(target: EventTarget | null): DragSurface | null {
     const region = this.regionAt(target);
-    if (region) return region;
+    if (region) return { el: region, axis: 'both' };
     const win = this.frame.contentWindow;
     const doc = this.frame.contentDocument;
     if (!win || !doc) return null;
@@ -937,12 +1035,49 @@ export class MirrorHost {
     for (let e = el as Element | null; e; e = MirrorHost.parentOf(e)) {
       if (e === doc.body || e === doc.documentElement) return null;
       if (!e.getAttribute) continue;
-      if (e.getAttribute('role') === 'slider') return e;
+      if (e.getAttribute('role') === 'slider') return { el: e, axis: 'both' };
       const cs = win.getComputedStyle(e);
-      if (MirrorHost.DRAG_CURSORS.has(cs.cursor)) return e;
-      if (cs.touchAction === 'none') return e;
+      if (MirrorHost.DRAG_CURSORS.has(cs.cursor)) return { el: e, axis: 'both' };
+      const axis = MirrorHost.claimedAxis(cs.touchAction);
+      if (axis) return { el: e, axis };
     }
     return null;
+  }
+
+  /**
+   * Which way a `touch-action` value claims gestures, or null for a value
+   * that claims none.
+   *
+   * The declaration names what the *browser* may still do, so the page keeps
+   * whatever is left: `none` keeps everything, and the far commoner `pan-y`
+   * — every carousel, every swipe-to-dismiss row — hands the browser the
+   * vertical scroll and keeps the horizontal swipe. Reading only `none`
+   * missed all of them (P-140). `manipulation` is deliberately not a claim:
+   * it refuses double-tap zoom and leaves panning to the browser, which is
+   * a page saying it wants the gesture to feel faster, not that it wants
+   * the gesture.
+   */
+  private static claimedAxis(touchAction: string): DragAxis | null {
+    const value = (touchAction || '').trim();
+    if (!value || value === 'auto' || value === 'manipulation') return null;
+    if (value === 'none') return 'both';
+    const parts = value.split(/\s+/);
+    const panX = parts.some((p) => p === 'pan-x' || p === 'pan-left' || p === 'pan-right');
+    const panY = parts.some((p) => p === 'pan-y' || p === 'pan-up' || p === 'pan-down');
+    // The browser pans one axis, so the page kept the other.
+    if (panY && !panX) return 'x';
+    if (panX && !panY) return 'y';
+    // Both axes left to the browser (or only pinch-zoom refused): the page
+    // claimed no drag.
+    return null;
+  }
+
+  /** Whether a displacement is the gesture the surface claimed. A surface
+   *  that kept one axis did so because the browser owns the other, and a
+   *  drag mostly along the browser's axis is the browser's. */
+  private static onClaimedAxis(axis: DragAxis, dx: number, dy: number): boolean {
+    if (axis === 'both') return true;
+    return axis === 'x' ? Math.abs(dx) > Math.abs(dy) : Math.abs(dy) > Math.abs(dx);
   }
 
   /** The wire's name for a pointer's kind: 0 mouse, 1 touch, 2 pen. */
@@ -954,16 +1089,53 @@ export class MirrorHost {
     if (ev.button !== 0) return;
     const surface = this.dragSurfaceAt(this.eventTarget(ev));
     if (!surface) return;
-    const node = this.patcher?.idOf(surface) ?? 0;
+    const node = this.patcher?.idOf(surface.el) ?? 0;
     if (!node) return;
     const start = this.samplePointer(ev);
     if (!start) return;
     this.dragging = {
       node,
-      point: this.pointInBox(ev, surface),
+      point: this.pointInBox(ev, surface.el),
       samples: [start],
       pt: MirrorHost.pointerKind(ev.pointerType),
+      axis: surface.axis,
+      id: ev.pointerId,
     };
+  }
+
+  /*
+   * A second finger landing on the surface a gesture already owns.
+   *
+   * Every multi-touch gesture a page has — pinch to zoom, two-finger pan,
+   * rotate — is this: two pointers on one element, and the page reading the
+   * distance between them. The client used to take the primary pointer and
+   * drop the rest, so none of them existed (P-139); worse, the second
+   * finger's moves still fed the first finger's path, so a two-finger
+   * gesture sent a single zigzag drag between the two.
+   *
+   * The pinch starts here rather than at the first press, which is also
+   * where the page starts measuring: the one-finger prelude is a different
+   * gesture, and a page reading the gap between two fingers has no gap
+   * until the second one lands.
+   */
+  private addSecondFinger(ev: PointerEvent): void {
+    const drag = this.dragging;
+    if (!drag || drag.second) return;
+    // Only where the page claimed the whole gesture. A carousel that kept
+    // one axis did not ask for a pinch, and the browser's own zoom is the
+    // better answer there.
+    if (drag.axis !== 'both') return;
+    const surface = this.dragSurfaceAt(this.eventTarget(ev));
+    if (!surface || (this.patcher?.idOf(surface.el) ?? 0) !== drag.node) return;
+    const s = this.samplePointer(ev);
+    if (!s) return;
+    const first = drag.samples[drag.samples.length - 1];
+    drag.at = { x: first.x, y: first.y };
+    drag.at2 = { x: s.x, y: s.y };
+    drag.samples = [{ x: first.x, y: first.y, t: s.t }];
+    drag.second = { id: ev.pointerId, samples: [{ x: s.x, y: s.y, t: s.t }] };
+    // A pinch is a touch gesture whatever the first pointer claimed to be.
+    drag.pt = 1;
   }
 
   /**
@@ -974,11 +1146,44 @@ export class MirrorHost {
    * pan measured from halfway is a pan of the wrong distance. The rest of the
    * path only has to look like a hand moving.
    */
-  private recordDrag(sample: { x: number; y: number; t: number }): void {
-    const drag = this.dragging;
-    if (!drag) return;
-    drag.samples.push(sample);
-    if (drag.samples.length > MirrorHost.DRAG_SAMPLES) drag.samples.splice(1, 1);
+  private recordDrag(sample: { x: number; y: number; t: number }, id: number): void {
+    if (!this.dragging) return;
+    this.recordDragInto(this.dragging, sample, id);
+  }
+
+  private recordDragInto(
+    drag: NonNullable<MirrorHost['dragging']>,
+    sample: { x: number; y: number; t: number },
+    id: number,
+  ): void {
+    if (!drag.second) {
+      // One finger: only its own moves describe it.
+      if (id !== drag.id) return;
+      drag.samples.push(sample);
+      if (drag.samples.length > MirrorHost.DRAG_SAMPLES) drag.samples.splice(1, 1);
+      return;
+    }
+    // Two fingers: a move of either records where both are, so the paths
+    // stay aligned frame for frame and the replay can move two touch
+    // points together.
+    if (id === drag.id) drag.at = { x: sample.x, y: sample.y };
+    else if (id === drag.second.id) drag.at2 = { x: sample.x, y: sample.y };
+    else return;
+    drag.samples.push({ x: drag.at!.x, y: drag.at!.y, t: sample.t });
+    drag.second.samples.push({ x: drag.at2!.x, y: drag.at2!.y, t: sample.t });
+    if (drag.samples.length > MirrorHost.DRAG_SAMPLES) {
+      drag.samples.splice(1, 1);
+      drag.second.samples.splice(1, 1);
+    }
+  }
+
+  /** The distance between two samples, in CSS pixels of the reader's own
+   *  viewport — permille is comparable across layouts, pixels across time. */
+  private gapPx(a: { x: number; y: number }, b: { x: number; y: number }): number {
+    const win = this.frame.contentWindow;
+    const w = win?.innerWidth ?? 0;
+    const h = win?.innerHeight ?? 0;
+    return Math.hypot(((a.x - b.x) / 1000) * w, ((a.y - b.y) / 1000) * h);
   }
 
   /**
@@ -992,6 +1197,29 @@ export class MirrorHost {
     const drag = this.dragging;
     this.dragging = null;
     if (!drag) return;
+
+    if (drag.second) {
+      // Where the lifting finger finished, recorded like any other move so
+      // the two paths still end at the same instant.
+      const last = this.samplePointer(ev);
+      const id = (ev as PointerEvent).pointerId ?? 0;
+      if (last) this.recordDragInto(drag, last, id);
+      // A pinch is measured by the gap between the fingers rather than by
+      // how far either travelled: a symmetric spread moves the midpoint
+      // nowhere, and a displacement test would throw away the commonest
+      // pinch there is.
+      if (drag.samples.length < 2) return;
+      const startGap = this.gapPx(drag.samples[0], drag.second.samples[0]);
+      const endGap = this.gapPx(
+        drag.samples[drag.samples.length - 1],
+        drag.second.samples[drag.second.samples.length - 1],
+      );
+      if (Math.abs(endGap - startGap) < MirrorHost.DRAG_SLOP_PX) return;
+      this.dragConsumedClick = true;
+      this.sendDrag(drag.node, drag.point, drag.samples, drag.pt, ev, drag.second.samples);
+      return;
+    }
+
     const last = this.samplePointer(ev);
     if (last) drag.samples.push(last);
     if (drag.samples.length < 2) return;
@@ -1001,11 +1229,15 @@ export class MirrorHost {
     const h = win?.innerHeight ?? 0;
     const first = drag.samples[0];
     const end = drag.samples[drag.samples.length - 1];
-    const moved = Math.hypot(
-      ((end.x - first.x) / 1000) * w,
-      ((end.y - first.y) / 1000) * h,
-    );
-    if (moved < MirrorHost.DRAG_SLOP_PX) return;
+    const dx = ((end.x - first.x) / 1000) * w;
+    const dy = ((end.y - first.y) / 1000) * h;
+    if (Math.hypot(dx, dy) < MirrorHost.DRAG_SLOP_PX) return;
+    // A surface that kept one axis left the other to the browser, and a
+    // gesture mostly along the browser's axis is the browser's: under a
+    // finger it never arrives here at all (the scroll claims it and the
+    // pointer cancels), and under a mouse it is the reader scrolling or
+    // selecting, which this must not take away.
+    if (!MirrorHost.onClaimedAxis(drag.axis, dx, dy)) return;
 
     this.dragConsumedClick = true;
     this.sendDrag(drag.node, drag.point, drag.samples, drag.pt, ev);
@@ -1058,12 +1290,33 @@ export class MirrorHost {
     samples: Array<{ x: number; y: number; t: number }>,
     pt: number,
     ev: MouseEvent,
+    second?: Array<{ x: number; y: number; t: number }>,
   ): void {
-    const path: number[] = [];
-    for (let i = 0; i < samples.length; i++) {
-      const gap = i === 0 ? 0 : Math.round(samples[i].t - samples[i - 1].t);
-      path.push(samples[i].x, samples[i].y, gap);
+    const asPath = (from: Array<{ x: number; y: number; t: number }>): number[] => {
+      const out: number[] = [];
+      for (let i = 0; i < from.length; i++) {
+        const gap = i === 0 ? 0 : Math.round(from[i].t - from[i - 1].t);
+        out.push(from[i].x, from[i].y, gap);
+      }
+      return out;
+    };
+    if (second) {
+      // A pinch names no drop target: what it did happened between the two
+      // fingers, and whatever is under one of them at the end had nothing
+      // to do with it.
+      this.send({
+        kind: InputKind.Drag,
+        node,
+        modifiers: modifierMask(ev),
+        point,
+        path: asPath(samples),
+        path2: asPath(second),
+        pt: pt || undefined,
+      });
+      this.heldBlur = 0;
+      return;
     }
+    const path = asPath(samples);
     const drop = this.dropTargetAt(ev.clientX, ev.clientY);
     this.send({
       kind: InputKind.Drag,
@@ -1112,7 +1365,11 @@ export class MirrorHost {
   private wheelInFrame(ev: WheelEvent): void {
     const surface = this.dragSurfaceAt(this.eventTarget(ev));
     if (!surface) return;
-    const node = this.patcher?.idOf(surface) ?? 0;
+    // A surface that claimed one axis kept the browser's scroll on the
+    // other, and the wheel is mostly used on that other one: taking the
+    // vertical wheel over a carousel would stop the page scrolling at all.
+    if (!MirrorHost.onClaimedAxis(surface.axis, ev.deltaX, ev.deltaY)) return;
+    const node = this.patcher?.idOf(surface.el) ?? 0;
     if (!node) return;
     // The widget consumes the wheel; the mirror must not also scroll.
     ev.preventDefault();
@@ -1130,7 +1387,7 @@ export class MirrorHost {
       node,
       dx: ev.deltaX * scale,
       dy: ev.deltaY * scale,
-      point: this.pointInBox(ev, surface),
+      point: this.pointInBox(ev, surface.el),
       modifiers: modifierMask(ev),
     };
     this.wheelTimer = window.setTimeout(() => this.flushWheel(), MirrorHost.WHEEL_FLUSH_MS);
@@ -1300,13 +1557,24 @@ export class MirrorHost {
   }
 
   private recordPointer(ev: MouseEvent): void {
-    const last = this.pointerPath[this.pointerPath.length - 1];
-    if (last && performance.now() - last.t < MirrorHost.PATH_MIN_GAP_MS) return;
     const sample = this.samplePointer(ev);
     if (!sample) return;
-    this.pointerPath.push(sample);
-    if (this.pointerPath.length > MirrorHost.PATH_SAMPLES) this.pointerPath.shift();
-    this.recordDrag(sample);
+    const id = (ev as PointerEvent).pointerId ?? 0;
+    // The approach a click carries is one pointer's, thinned to samples far
+    // enough apart to describe a hand rather than a frame rate. A second
+    // finger's moves are part of a pinch, not of the way a pointer arrived.
+    if (!this.dragging || id === this.dragging.id) {
+      const last = this.pointerPath[this.pointerPath.length - 1];
+      if (!last || sample.t - last.t >= MirrorHost.PATH_MIN_GAP_MS) {
+        this.pointerPath.push(sample);
+        if (this.pointerPath.length > MirrorHost.PATH_SAMPLES) this.pointerPath.shift();
+      }
+    }
+    // A drag keeps its own samples, capped and thinned by recordDrag: the
+    // approach's spacing rule is about describing one pointer's arrival,
+    // and applying it here dropped a second finger's every move because the
+    // first finger had just been sampled.
+    this.recordDrag(sample, id);
   }
 
   /** The approach as the wire carries it: (x, y, dt) triplets, oldest first. */
@@ -1667,9 +1935,13 @@ export class MirrorHost {
 
     doc.addEventListener('pointerdown', (ev) => {
       const pointer = ev as PointerEvent;
-      // A second finger is not a second gesture: the pan belongs to the pointer
-      // that started it, and a pinch is not something this can carry anyway.
-      if (!pointer.isPrimary) return;
+      // A second finger is not a second gesture — it is the other half of
+      // this one, when the surface claimed the whole gesture. See
+      // addSecondFinger.
+      if (!pointer.isPrimary) {
+        this.addSecondFinger(pointer);
+        return;
+      }
       this.pointerDownAt = performance.now();
       this.lastPointerKind = MirrorHost.pointerKind(pointer.pointerType);
       // A gesture that reached neither the page nor a click — the pointer left
@@ -1794,7 +2066,20 @@ export class MirrorHost {
         key.preventDefault();
         return;
       }
-      if (this.echo?.key(key)) key.preventDefault();
+      if (this.echo?.key(key)) {
+        key.preventDefault();
+        return;
+      }
+      // A chord belongs to the browser around this app, except the two the
+      // shell claims for itself — and those never reached it, because an
+      // event inside this frame never reaches the shell's document. The
+      // reader pressing Ctrl/⌘+D over a mirrored page was bookmarking the
+      // app shell in their own browser instead.
+      if (key.ctrlKey || key.metaKey) {
+        if (this.events.chord(this.tab, key)) key.preventDefault();
+        return;
+      }
+      this.pageKey(key);
     }, true);
 
     const win = this.frame.contentWindow;
@@ -2368,6 +2653,7 @@ export class MirrorHost {
     // are typing the reader wants kept, and their node ids only mean
     // anything while the old ids still stand.
     this.flushPendingText();
+    this.flushPendingKey();
     // A held blur names a node in the document being replaced. Sent after this
     // it would name whatever the server has since given that id to, and the
     // gesture it belonged to is over either way. The same goes for a pending

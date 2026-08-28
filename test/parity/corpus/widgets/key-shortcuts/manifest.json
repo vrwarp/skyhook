@@ -1,0 +1,60 @@
+{
+  "id": "widgets/key-shortcuts",
+  "title": "single-key page shortcuts reach the page when no field has the caret",
+  "covers": [
+    "document keydown shortcuts",
+    "printable keys outside editables"
+  ],
+  "gaps": [
+    "P-141"
+  ],
+  "waitText": "shortcuts settled",
+  "interactions": [
+    {
+      "do": "click",
+      "target": "#down"
+    },
+    {
+      "do": "waitText",
+      "value": "row: 2",
+      "within": 12,
+      "name": "the page's own control moves the cursor"
+    },
+    {
+      "do": "type",
+      "target": "#box",
+      "value": "jj"
+    },
+    {
+      "do": "waitText",
+      "value": "box[jj] keys[]",
+      "within": 12,
+      "name": "keys typed into a field go to the field and nowhere else"
+    },
+    {
+      "do": "click",
+      "target": "#down"
+    },
+    {
+      "do": "key",
+      "value": "j"
+    },
+    {
+      "do": "waitText",
+      "value": "keys[j]",
+      "within": 12,
+      "name": "a page shortcut key reaches the page"
+    },
+    {
+      "do": "key",
+      "value": "?"
+    },
+    {
+      "do": "waitText",
+      "value": "keys[j?]",
+      "within": 12,
+      "name": "a shifted shortcut key reaches the page"
+    }
+  ],
+  "notes": "the guard rail goes first and stands alone: typing must reach the field and fire no shortcut, which was true before the fix and stays true after it. The click between the typing and the keys is what takes the caret back out of the field, the way a reader leaves one"
+}

@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -320,7 +321,7 @@ func runParityPage(ctx context.Context, t *testing.T, run *parityRun, siteURL st
 		step := &m.Interactions[i]
 		ok := runInteraction(ctx, t, run, tab, mt, step, framesBefore+1, openedAt)
 		switch step.Do {
-		case "scroll", "wheel", "touchDrag":
+		case "scroll", "wheel", "touchDrag", "pinch":
 			// Any of these can leave the mirror viewport somewhere the
 			// landside screenshot is not, which is the pixel advisory's cue
 			// to say nothing rather than guess.
@@ -626,7 +627,7 @@ func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint3
 	t.Helper()
 	switch step.Do {
 	case "click", "check", "submit", "type", "key", "select", "scroll",
-		"dblclick", "hover", "drag", "touchDrag", "wheel":
+		"dblclick", "hover", "drag", "touchDrag", "pinch", "wheel":
 		// Converge before acting: the step's measurement should be of the
 		// step, not of whatever the previous one still had in flight — and a
 		// stale focus echo (P-121) must be a catalogued gap, not a hazard
@@ -648,6 +649,9 @@ func runInteraction(ctx context.Context, t *testing.T, run *parityRun, tab uint3
 		return true
 	case "touchDrag":
 		touchDragInMirror(ctx, t, run, tab, step)
+		return true
+	case "pinch":
+		pinchInMirror(ctx, t, run, tab, step)
 		return true
 	case "wheel":
 		wheelInMirror(ctx, t, run.page, tab, step)
@@ -1147,6 +1151,52 @@ func touchDragInMirror(ctx context.Context, t *testing.T, run *parityRun, tab ui
 	t.Fatalf("three injected touch presses never reached tab %d's mirror", tab)
 }
 
+// pinchInMirror puts two fingers on the element and moves them apart (or, for
+// a negative value, together) — the gesture every map and photo viewer reads
+// as zoom, and the one gesture that needs more than one pointer to exist.
+func pinchInMirror(ctx context.Context, t *testing.T, run *parityRun, tab uint32, step *parity.Interaction) {
+	t.Helper()
+	ensureTouch(ctx, t, run)
+	page := run.page
+	cx, cy := mirrorPointOf(ctx, t, page, tab, step.Target)
+	var spread float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(step.Value), "%f", &spread); err != nil {
+		t.Fatalf("pinch value %q is not a distance in CSS px", step.Value)
+	}
+	// Start half the spread apart and end a full spread apart, so a gesture
+	// that grows the gap by `spread` begins with the fingers already down
+	// and separated — two fingers landing on the same pixel is a gesture no
+	// hand makes and some pages refuse outright.
+	start := math.Abs(spread) / 2
+	end := start + spread
+	if end < 8 {
+		end = 8
+	}
+	touch := func(kind string, gap float64) {
+		points := []map[string]any{}
+		if kind != "touchEnd" {
+			points = []map[string]any{
+				{"x": cx - gap/2, "y": cy, "id": 1},
+				{"x": cx + gap/2, "y": cy, "id": 2},
+			}
+		}
+		if err := page.Do(ctx, "Input.dispatchTouchEvent", map[string]any{
+			"type": kind, "touchPoints": points,
+		}, nil); err != nil {
+			t.Fatalf("dispatch touch event: %v", err)
+		}
+	}
+	touch("touchStart", start)
+	const steps = 5
+	for i := 1; i <= steps; i++ {
+		f := float64(i) / steps
+		time.Sleep(30 * time.Millisecond)
+		touch("touchMove", start+(end-start)*f)
+	}
+	time.Sleep(80 * time.Millisecond)
+	touch("touchEnd", end)
+}
+
 // wheelInMirror turns the reader's wheel once over the element.
 func wheelInMirror(ctx context.Context, t *testing.T, page *cdp.Session, tab uint32, step *parity.Interaction) {
 	t.Helper()
@@ -1180,14 +1230,82 @@ func ensureTouch(ctx context.Context, t *testing.T, run *parityRun) {
 	run.touchOn = true
 }
 
+/*
+pressKey presses one key on the client page, named the way a manifest names
+it: "Enter", "Escape", "Tab", or a single printable character like "j" or
+"?".
+
+A printable key needs more than a name to be a real keystroke. Chromium
+builds the event from the pieces a keyboard would have produced — the
+virtual key code, the physical `code`, the shift state that makes "?" a "?"
+and not a "/" — and a page reading `e.key` sees the wrong thing, or nothing,
+if they disagree. So they are derived here from the character itself rather
+than tabulated, which is what lets a manifest ask for any key a page's
+shortcuts might use.
+*/
 func pressKey(ctx context.Context, t *testing.T, page *cdp.Session, key string) {
 	t.Helper()
-	code := map[string]int{"Enter": 13, "Tab": 9, "Escape": 27}[key]
-	down := map[string]any{"type": "keyDown", "key": key, "windowsVirtualKeyCode": code}
-	if key == "Enter" {
-		down["text"] = "\r"
+	named := map[string]struct {
+		vk   int
+		text string
+	}{
+		"Enter":  {13, "\r"},
+		"Tab":    {9, "\t"},
+		"Escape": {27, ""},
 	}
-	up := map[string]any{"type": "keyUp", "key": key, "windowsVirtualKeyCode": code}
+	down := map[string]any{"type": "keyDown", "key": key}
+	up := map[string]any{"type": "keyUp", "key": key}
+	if n, ok := named[key]; ok {
+		down["windowsVirtualKeyCode"], up["windowsVirtualKeyCode"] = n.vk, n.vk
+		down["code"], up["code"] = key, key
+		if n.text != "" {
+			down["text"] = n.text
+		}
+	} else {
+		r := []rune(key)
+		if len(r) != 1 {
+			t.Fatalf("key %q is neither a named key nor a single character", key)
+		}
+		c := r[0]
+		// The physical key and the shift state that would have produced this
+		// character on a US layout — the two facts a bare key name loses.
+		var code string
+		var vk int
+		modifiers := 0
+		switch {
+		case c >= 'a' && c <= 'z':
+			code, vk = "Key"+strings.ToUpper(string(c)), int(c-'a'+'A')
+		case c >= 'A' && c <= 'Z':
+			code, vk, modifiers = "Key"+string(c), int(c), 8 // shift
+		case c >= '0' && c <= '9':
+			code, vk = "Digit"+string(c), int(c)
+		default:
+			shifted := map[rune]struct {
+				code string
+				vk   int
+				sh   bool
+			}{
+				'/': {"Slash", 191, false}, '?': {"Slash", 191, true},
+				'.': {"Period", 190, false}, ',': {"Comma", 188, false},
+				' ': {"Space", 32, false}, '-': {"Minus", 189, false},
+				'=': {"Equal", 187, false}, '+': {"Equal", 187, true},
+			}
+			s, ok := shifted[c]
+			if !ok {
+				t.Fatalf("no key mapping for %q; add one to pressKey", key)
+			}
+			code, vk = s.code, s.vk
+			if s.sh {
+				modifiers = 8
+			}
+		}
+		down["code"], up["code"] = code, code
+		down["windowsVirtualKeyCode"], up["windowsVirtualKeyCode"] = vk, vk
+		down["text"] = key
+		if modifiers != 0 {
+			down["modifiers"], up["modifiers"] = modifiers, modifiers
+		}
+	}
 	for _, ev := range []map[string]any{down, up} {
 		if err := page.Do(ctx, "Input.dispatchKeyEvent", ev, nil); err != nil {
 			t.Fatalf("dispatch key event: %v", err)

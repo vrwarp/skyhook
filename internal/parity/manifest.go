@@ -147,6 +147,8 @@ func (t *Tolerances) Effective() Tolerances {
 //	          path, release at To's centre (or at Value "dx,dy" CSS px away)
 //	touchDrag Target, To or Value — the same gesture as a finger: real touch
 //	          events on the client page, no mouse events at all
+//	pinch     Target, Value — two fingers on the element, moved apart by
+//	          Value CSS px (negative to bring them together)
 //	wheel     Target, Value "dx,dy" — one wheel tick over the element
 //	waitText  Value, Within — a checkpoint: the mirror should come to
 //	          contain this text
@@ -187,8 +189,8 @@ type Interaction struct {
 var interactionKinds = map[string]bool{
 	"click": true, "dblclick": true, "type": true, "select": true,
 	"check": true, "submit": true, "key": true, "scroll": true,
-	"hover": true, "drag": true, "touchDrag": true, "wheel": true,
-	"waitText": true, "settle": true,
+	"hover": true, "drag": true, "touchDrag": true, "pinch": true,
+	"wheel": true, "waitText": true, "settle": true,
 	"assertMirrorCSSHas": true, "assertMirrorCSSLacks": true,
 	"assertShellTabs":      true,
 	"assertMirrorSelector": true,
@@ -273,6 +275,14 @@ func (m *Manifest) validate() error {
 		case "wheel":
 			if step.Target == "" || step.Value == "" {
 				return fmt.Errorf("parity: %s interaction %d: wheel needs a target and a \"dx,dy\" value", m.ID, i)
+			}
+		case "pinch":
+			if step.Target == "" || step.Value == "" {
+				return fmt.Errorf("parity: %s interaction %d: pinch needs a target and how far apart to move the fingers", m.ID, i)
+			}
+		case "key":
+			if step.Value == "" {
+				return fmt.Errorf("parity: %s interaction %d: key needs a key to press", m.ID, i)
 			}
 		}
 		if step.To != "" && step.Do != "drag" && step.Do != "touchDrag" {
