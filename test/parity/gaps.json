@@ -281,14 +281,15 @@
     },
     {
       "id": "P-107",
-      "title": "Dead wire surface: TypeIntegrity, OpImage and ScrollEvent.Visible are never produced or consumed",
-      "status": "open",
+      "title": "Dead wire surface: frames and fields declared on both halves and written by neither",
+      "status": "fixed",
       "refs": [
         "internal/protocol/frames.go:131",
         "internal/protocol/frames.go:375",
         "internal/protocol/frames.go:526"
       ],
-      "noPage": "wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it"
+      "noPage": "wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it",
+      "notes": "deleted, at the moment the entry was recorded for: the next protocol change. TypeIntegrity (the divergence check is a fenced landside checkpoint answered by the hash already on every Ack, so it costs no frame), OpImage and Op.Image (an image binds through its node's attributes and its own frame), Op.Drop (the style path is append-only; removing a rule from a constructed stylesheet is real design work, not a field), ScrollEvent.Seq and ScrollEvent.Visible (telemetry is latest-wins and needs no sequence; image priority is decided landside from the position the frame already carries), and the 'select' input kind (selection is native in the mirror and the handler did nothing). Every number stays retired with a tombstone rather than reused, the way frame type 23 and InputEvent field 15 already were. The conformance fixtures did not move by a byte, which is the proof that nothing ever wrote any of it"
     },
     {
       "id": "P-108",

@@ -634,7 +634,7 @@ func opHistogram(ops []protocol.Op) map[string]int {
 	names := map[uint8]string{
 		protocol.OpInsert: "insert", protocol.OpRemove: "remove", protocol.OpAttr: "attr",
 		protocol.OpText: "text", protocol.OpMove: "move", protocol.OpSplice: "splice",
-		protocol.OpStyle: "style", protocol.OpImage: "image", protocol.OpFocus: "focus",
+		protocol.OpStyle: "style", protocol.OpFocus: "focus",
 		protocol.OpScroll: "scroll", protocol.OpDocInfo: "docinfo",
 	}
 	out := map[string]int{}

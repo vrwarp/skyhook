@@ -219,7 +219,7 @@ func (m *Model) applyOp(op *protocol.Op) error {
 		if op.Str != "" {
 			m.Title = op.Str
 		}
-	case protocol.OpFocus, protocol.OpScroll, protocol.OpImage:
+	case protocol.OpFocus, protocol.OpScroll:
 		// No structural effect on the replica.
 	}
 	return nil

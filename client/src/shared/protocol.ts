@@ -43,7 +43,10 @@ export enum FrameType {
   // 23 was Speculative, a prefetched snapshot. Prefetch is gone; the number
   // stays retired rather than reused.
   Kill = 24,
-  Integrity = 25,
+  // 25 was Integrity, a frame carrying subtree hashes for the client to
+  // answer. The divergence check is built from a fenced checkpoint landside
+  // and the hash already on every Ack, so it costs no frame of its own. The
+  // number stays retired rather than reused.
   Viewport = 26,
   Capture = 27,
   CapturePart = 28,
@@ -139,7 +142,8 @@ export enum OpCode {
   Move = 5,
   Splice = 6,
   Style = 7,
-  Image = 8,
+  // 8 was Image, an inline ImageMeta on an op. An image binds through its
+  // node's attributes and its own frame; neither end ever wrote this one.
   Focus = 9,
   Scroll = 10,
   DocInfo = 11,
@@ -155,7 +159,8 @@ export const InputKind = {
   Submit: 'submit',
   Focus: 'focus',
   Blur: 'blur',
-  Select: 'select',
+  // 'select' was an input kind no client ever sent: selection is native in
+  // the mirror, and the server's handler for it did nothing.
   Hover: 'hover',
   Paste: 'paste',
   SetValue: 'setvalue',
@@ -244,7 +249,6 @@ export interface MutationOp {
   off: number;
   del: number;
   add: string[];
-  drop: number[];
   x: number;
   y: number;
   str: string;
@@ -472,7 +476,8 @@ export const F = {
   nodeScroll: { node: 1, x: 2, y: 3 },
   op: {
     op: 1, node: 2, parent: 3, before: 4, ref: 5, ref2: 6, nodes: 7,
-    off: 8, del: 9, add: 10, drop: 11, image: 12, x: 13, y: 14, str: 15,
+    // 11 (drop) and 12 (image) are retired; see OpCode.
+    off: 8, del: 9, add: 10, x: 13, y: 14, str: 15,
   },
   mutation: { strings: 1, ops: 2, docHash: 3, flush: 4 },
   imageMeta: {
@@ -487,8 +492,9 @@ export const F = {
     hold: 17, point: 18, path: 19, pt: 20, node2: 21, point2: 22, path2: 23,
   },
   scroll: {
-    tab: 1, x: 2, y: 3, h: 4, docH: 5, node: 6, seq: 7, visible: 8,
-    anchor: 9, anchorY: 10,
+    // 7 (seq) and 8 (visible) are retired: telemetry is latest-wins, and
+    // image priority is decided landside from the position this carries.
+    tab: 1, x: 2, y: 3, h: 4, docH: 5, node: 6, anchor: 9, anchorY: 10,
   },
   adapterRecord: {
     adapter: 1, kind: 2, id: 3, space: 4, author: 5, text: 6, ts: 7, seq: 8, unread: 9, extra: 10,

@@ -127,8 +127,12 @@ const (
 	// 23 was TypeSpeculative, a prefetched snapshot. Speculation is gone: it
 	// crawled links the user never opened, which is what a scraper looks like
 	// from the origin's side. The number stays retired rather than reused.
-	TypeKill        Type = 24 // client -> server, wipe landside session + profile
-	TypeIntegrity   Type = 25 // server -> client subtree hashes; client replies on ctrl
+	TypeKill Type = 24 // client -> server, wipe landside session + profile
+	// 25 was TypeIntegrity, a frame carrying subtree hashes for the client to
+	// answer. The divergence check was built differently and better: the agent
+	// is fenced for a Checkpoint, and the client's answer rides the hash and
+	// epoch already on every Ack, so the check costs no frame of its own. The
+	// number stays retired rather than reused.
 	TypeViewport    Type = 26 // client -> server, window size / dpr changed
 	TypeCapture     Type = 27 // both ways: ask for a diagnostic capture / for the client's half
 	TypeCapturePart Type = 28 // client -> server, one plane-side artifact (or a chunk of one)
@@ -408,14 +412,14 @@ type ScopedCSS struct {
 
 // Mutation op codes.
 const (
-	OpInsert  uint8 = 1
-	OpRemove  uint8 = 2
-	OpAttr    uint8 = 3
-	OpText    uint8 = 4
-	OpMove    uint8 = 5
-	OpSplice  uint8 = 6
-	OpStyle   uint8 = 7
-	OpImage   uint8 = 8
+	OpInsert uint8 = 1
+	OpRemove uint8 = 2
+	OpAttr   uint8 = 3
+	OpText   uint8 = 4
+	OpMove   uint8 = 5
+	OpSplice uint8 = 6
+	OpStyle  uint8 = 7
+	// 8 was OpImage; see Op's retired fields.
 	OpFocus   uint8 = 9
 	OpScroll  uint8 = 10
 	OpDocInfo uint8 = 11
@@ -426,20 +430,22 @@ type Op struct {
 	Op uint8 `cbor:"1,keyasint"`
 	// Node is the node the op acts on. For OpStyle it names the shadow root
 	// whose sheet is being added to, and zero means the document's own.
-	Node   int64      `cbor:"2,keyasint,omitempty"`
-	Parent int64      `cbor:"3,keyasint,omitempty"`
-	Before int64      `cbor:"4,keyasint,omitempty"`
-	Ref    int32      `cbor:"5,keyasint,omitempty"`
-	Ref2   int32      `cbor:"6,keyasint,omitempty"`
-	Nodes  []Node     `cbor:"7,keyasint,omitempty"`  // OpInsert subtree, document order
-	Off    int32      `cbor:"8,keyasint,omitempty"`  // OpSplice offset
-	Del    int32      `cbor:"9,keyasint,omitempty"`  // OpSplice deleted count
-	Add    []string   `cbor:"10,keyasint,omitempty"` // OpStyle: rule texts to add
-	Drop   []int32    `cbor:"11,keyasint,omitempty"` // OpStyle: rule indices to drop
-	Image  *ImageMeta `cbor:"12,keyasint,omitempty"`
-	X      int        `cbor:"13,keyasint,omitempty"`
-	Y      int        `cbor:"14,keyasint,omitempty"`
-	Str    string     `cbor:"15,keyasint,omitempty"` // OpDocInfo url/title, OpSplice literal
+	Node   int64    `cbor:"2,keyasint,omitempty"`
+	Parent int64    `cbor:"3,keyasint,omitempty"`
+	Before int64    `cbor:"4,keyasint,omitempty"`
+	Ref    int32    `cbor:"5,keyasint,omitempty"`
+	Ref2   int32    `cbor:"6,keyasint,omitempty"`
+	Nodes  []Node   `cbor:"7,keyasint,omitempty"`  // OpInsert subtree, document order
+	Off    int32    `cbor:"8,keyasint,omitempty"`  // OpSplice offset
+	Del    int32    `cbor:"9,keyasint,omitempty"`  // OpSplice deleted count
+	Add    []string `cbor:"10,keyasint,omitempty"` // OpStyle: rule texts to add
+	// 11 was Drop, rule indices to remove from a constructed stylesheet, and
+	// 12 was an inline ImageMeta. Neither end ever wrote either: the style
+	// path is append-only and an image binds through its node's attributes
+	// and its own ImageMeta frame. Both numbers stay retired.
+	X   int    `cbor:"13,keyasint,omitempty"`
+	Y   int    `cbor:"14,keyasint,omitempty"`
+	Str string `cbor:"15,keyasint,omitempty"` // OpDocInfo url/title, OpSplice literal
 }
 
 // Mutation is a batch of ops for one tab. Strings extend the intern table.
@@ -516,7 +522,8 @@ const (
 	InSubmit   = "submit"
 	InFocus    = "focus"
 	InBlur     = "blur"
-	InSelect   = "select"
+	// "select" was an input kind the client never sent: selection is native
+	// in the mirror, and the server's handler for it did nothing. Retired.
 	InHover    = "hover"
 	InPaste    = "paste"
 	InSetValue = "setvalue"
@@ -582,14 +589,17 @@ type InputEvent struct {
 // ScrollEvent is telemetry: it drives image prioritisation and infinite-scroll
 // synthesis landside. Sent on datagrams, latest wins.
 type ScrollEvent struct {
-	Tab     uint32  `cbor:"1,keyasint"`
-	X       int     `cbor:"2,keyasint,omitempty"`
-	Y       int     `cbor:"3,keyasint,omitempty"`
-	H       int     `cbor:"4,keyasint,omitempty"` // viewport height
-	DocH    int     `cbor:"5,keyasint,omitempty"` // mirrored document height
-	Node    int64   `cbor:"6,keyasint,omitempty"` // scroll container, 0 = document
-	Seq     uint64  `cbor:"7,keyasint,omitempty"`
-	Visible []int64 `cbor:"8,keyasint,omitempty"` // node ids near the viewport
+	Tab  uint32 `cbor:"1,keyasint"`
+	X    int    `cbor:"2,keyasint,omitempty"`
+	Y    int    `cbor:"3,keyasint,omitempty"`
+	H    int    `cbor:"4,keyasint,omitempty"` // viewport height
+	DocH int    `cbor:"5,keyasint,omitempty"` // mirrored document height
+	Node int64  `cbor:"6,keyasint,omitempty"` // scroll container, 0 = document
+	// 7 was Seq and 8 was Visible, a list of node ids near the viewport for
+	// prioritising their images. Neither was ever written: telemetry is
+	// latest-wins, so it needs no sequence, and image priority is decided
+	// landside from the scroll position this frame already carries. Both
+	// numbers stay retired.
 	// Anchor names the mirrored element at the top of the plane's viewport,
 	// and AnchorY where its border box sits relative to that top (P-020). A
 	// document scroll lands exactly when the same element is put at the same
@@ -729,12 +739,6 @@ type DictUpdate struct {
 	ID     uint32 `cbor:"1,keyasint"`
 	Origin string `cbor:"2,keyasint,omitempty"`
 	Data   []byte `cbor:"3,keyasint"`
-}
-
-// Integrity is the periodic Merkle-ish divergence check.
-type Integrity struct {
-	Roots map[int64]uint64 `cbor:"1,keyasint"` // subtree root node id -> hash
-	Full  uint64           `cbor:"2,keyasint,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

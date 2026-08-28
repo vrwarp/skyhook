@@ -247,7 +247,6 @@ export function decodeMutation(body: unknown): Mutation {
       off: num(o, F.op.off),
       del: num(o, F.op.del),
       add: arr<string>(o, F.op.add),
-      drop: arr<number>(o, F.op.drop),
       x: num(o, F.op.x),
       y: num(o, F.op.y),
       str: str(o, F.op.str),
@@ -544,7 +543,7 @@ export function inputBody(ev: InputEventInit): Map<number, unknown> {
 }
 
 export function scrollBody(o: {
-  tab: number; x: number; y: number; h: number; docH: number; node?: number; seq?: number;
+  tab: number; x: number; y: number; h: number; docH: number; node?: number;
   anchor?: number; anchorY?: number;
 }): Map<number, unknown> {
   const m = new Map<number, unknown>();
@@ -554,7 +553,6 @@ export function scrollBody(o: {
   if (o.h) m.set(F.scroll.h, safeInt(o.h));
   if (o.docH) m.set(F.scroll.docH, safeInt(o.docH));
   if (o.node) m.set(F.scroll.node, safeInt(o.node));
-  if (o.seq) m.set(F.scroll.seq, safeInt(o.seq));
   if (o.anchor) m.set(F.scroll.anchor, safeInt(o.anchor));
   // Zero is a real offset here — the anchor's edge exactly at the viewport
   // top — so the anchor's presence is the gate, not the value's truthiness.

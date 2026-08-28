@@ -60,7 +60,7 @@ function mutation(ops: Partial<Mutation['ops'][number]>[], strings: string[] = [
     flush: false,
     ops: ops.map((o) => ({
       op: OpCode.Text, node: 0, parent: 0, before: 0, ref: 0, ref2: 0,
-      nodes: [], off: 0, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+      nodes: [], off: 0, del: 0, add: [], x: 0, y: 0, str: '',
       ...o,
     })) as Mutation['ops'],
   };

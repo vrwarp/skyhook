@@ -39,7 +39,7 @@ function scrollOp(node: number, x: number, y: number): Mutation {
     strings: [], docHash: 0, flush: false,
     ops: [{
       op: OpCode.Scroll, node, parent: 0, before: 0, ref: 0, ref2: 0,
-      nodes: [], off: 0, del: 0, add: [], drop: [], x, y, str: '',
+      nodes: [], off: 0, del: 0, add: [], x, y, str: '',
     }],
   };
 }
@@ -1958,7 +1958,7 @@ describe('MirrorHost', () => {
       flush: false,
       ops: [{
         op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 11, ref2: 0,
-        nodes: [], off: 5, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 5, del: 0, add: [], x: 0, y: 0, str: '',
       }],
     };
     host.applyMutation(mutation, 3);
@@ -1986,7 +1986,7 @@ describe('MirrorHost', () => {
       flush: false,
       ops: [{
         op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 11, ref2: 0,
-        nodes: [], off: 5, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 5, del: 0, add: [], x: 0, y: 0, str: '',
       }],
     });
     host.applyMutation(batch(), 3);
@@ -2004,7 +2004,7 @@ describe('MirrorHost', () => {
       strings: [' still'], docHash: 0, flush: false,
       ops: [{
         op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 12, ref2: 0,
-        nodes: [], off: 14, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 14, del: 0, add: [], x: 0, y: 0, str: '',
       }],
     }, 4);
     expect(host.frame.contentDocument!.body.textContent).toBe('first and more still');
@@ -2018,7 +2018,7 @@ describe('MirrorHost', () => {
         strings: [' more'], docHash: 0, flush: false,
         ops: [{
           op: OpCode.Splice, node: 4, parent: 0, before: 0, ref: 11, ref2: 0,
-          nodes: [], off: 5, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+          nodes: [], off: 5, del: 0, add: [], x: 0, y: 0, str: '',
         }],
       }, 5);
 
@@ -2178,7 +2178,7 @@ describe('an optimistic send the page did not make', () => {
       strings: ['data-sky-value', value], docHash: 0, flush: false,
       ops: [{
         op: OpCode.Attr, node, parent: 0, before: 0, ref: -1, ref2: -1,
-        nodes: [], off: 0, del: 0, add: [], drop: [], x: 0, y: 0, str: '',
+        nodes: [], off: 0, del: 0, add: [], x: 0, y: 0, str: '',
       }],
     };
   }

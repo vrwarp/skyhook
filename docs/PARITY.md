@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-65 gaps: 10 open, 11 by-design, 43 fixed, 1 disproven.
+65 gaps: 9 open, 11 by-design, 44 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -149,7 +149,7 @@ The table below is generated from `gaps.json` and the corpus by
 | P-104 | fixed | Favicons never travel: TabState.FaviconID is decoded by the client and set by nothing | — |
 | P-105 | by-design | HTML comments are never mirrored, though KindComment exists on both halves of the protocol | — |
 | P-106 | fixed | object, embed and applet are dropped whole with no stand-in: an unexplained hole where an iframe gets a labelled box | textmisc/object-embed |
-| P-107 | open | Dead wire surface: TypeIntegrity, OpImage and ScrollEvent.Visible are never produced or consumed | — wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it |
+| P-107 | fixed | Dead wire surface: frames and fields declared on both halves and written by neither | — wire bookkeeping with no rendering consequence; recorded so the next protocol change deletes it rather than trips over it |
 | P-108 | fixed | Downloads are unhandled: a download link writes a file onto the VPS and the reader sees nothing happen | — |
 | P-109 | fixed | window.open and a plain click on target=_blank open a landside tab no client tab will ever show | nav/target-blank |
 | P-110 | fixed | There is no print path: window.print does nothing for the reader | — |

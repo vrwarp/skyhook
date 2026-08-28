@@ -120,8 +120,6 @@ func (t *Tab) dispatchInput(ctx context.Context, ev *protocol.InputEvent) error 
 		return t.drag(ctx, ev)
 	case protocol.InHover:
 		return t.hover(ctx, ev)
-	case protocol.InSelect:
-		return nil // selection is native in the mirror; nothing to replay
 	}
 	return fmt.Errorf("mirror: unknown input kind %q", ev.Kind)
 }
