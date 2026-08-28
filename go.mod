@@ -3,15 +3,15 @@ module github.com/vrwarp/skyhook
 go 1.25.0
 
 require (
-	github.com/fxamacker/cbor/v2 v2.9.2
+	github.com/fxamacker/cbor/v2 v2.9.3
 	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/compress v1.19.2
 	github.com/quic-go/quic-go v0.61.0
 	github.com/quic-go/webtransport-go v0.12.0
 	github.com/tdewolff/font v0.0.0-20260809175822-e00d3ed980cd
-	golang.org/x/crypto v0.54.0
-	golang.org/x/image v0.44.0
-	golang.org/x/net v0.57.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/image v0.45.0
+	golang.org/x/net v0.58.0
 )
 
 require (
@@ -22,5 +22,5 @@ require (
 	github.com/tdewolff/parse/v2 v2.8.15 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
