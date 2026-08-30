@@ -137,14 +137,14 @@ func TestPWAHistoryCompletesAnAddressAndForgetsOne(t *testing.T) {
 		t.Errorf("toast after forgetting an address = %q, want it to say what happened", toast)
 	}
 
+	// Waited for, like every other read of this list. The X writes to IndexedDB
+	// and the dropdown re-queries it, so asking for the completions and reading
+	// them in the same breath samples the list one render before the removal —
+	// which on a box running eight browsers is the render it gets.
 	evalJSON(ctx, t, page, completeFor("127.0.0.1"), nil)
-	var titles []string
-	evalJSON(ctx, t, page, suggestTitles, &titles)
-	for _, title := range titles {
-		if title == "Second" {
-			t.Fatalf("the removed address is still offered: %v", titles)
-		}
-	}
+	waitFor(ctx, t, page,
+		`(() => { const t = `+suggestTitles+`; return t.length > 0 && !t.includes('Second'); })()`,
+		budget(30*time.Second), "the removed address to stop being offered")
 
 	// And the notice is the way back, which is the only reason removing is
 	// allowed to happen without a confirmation.

@@ -632,6 +632,30 @@
         "client/src/mirror/host.ts"
       ],
       "notes": "found by widgets/key-shortcuts, whose click out of a text field kept landing back in it. The echo engine buffers server ops that touch the field the reader owns, so their rewrites do not fight the typing — but it buffered focus ops too, and replayed them on blur: the instant the reader leaves. That lands past both guards, because the host's staleness check reads the cause of the mutation being applied and a replayed op carries none, and its owned-field check has just been cleared by the blur itself. The caret jumped back into the field, and on a phone the keyboard with it. A focus op is about a moment rather than about content, so it is no longer deferred at all: it reaches the host, which ignores it while the reader owns the field, which is what it was for. The P-121 family's third instance — after the round-trip echo and the composer value"
+    },
+    {
+      "id": "P-143",
+      "title": "One un-deadlined CDP call wedged a tab's inbound queue for good, and nothing anywhere said so",
+      "status": "fixed",
+      "refs": [
+        "internal/session/session.go",
+        "internal/session/inbound_test.go",
+        "internal/session/capture.go"
+      ],
+      "noPage": "a liveness gap in the inbound queue, not a rendering one: the mirror was a perfect copy throughout, and bundle triage says clean on every tab",
+      "notes": "found in a Hacker News capture. Tab 1's last frame went out at 00:15:22; the reader then tapped one story's comments link three times over the next forty seconds, at 00:24:44, 00:24:59 and 00:25:25. All three are in the session timeline, which records an input on arrival, and none of them was replayed: no navigation, no tab-work failure, not one line in the server log, and the landside agent still reporting focusedId 59 — the story link focused by a click at 00:15:02. Per-tab queues had moved this wedge off the connection without bounding it, so a job ran with no deadline of any kind and cdp.Call blocks forever on a request the browser never answers. Everything else about the tab stayed alive, which is why it looked fine: the mirror matched the page, and the thirty-second integrity check passed twice between the taps. Fixed by giving each piece of inbound work a budget chosen by which side of the link its call is on — three minutes for a navigation, a page build or a resync, thirty seconds for a click, a scroll or an upload — and by saying so when one is abandoned: a WARN, a job-abandoned event in the session timeline, and running/queued/jobsAbandoned on the tab's page in a bundle, none of which existed to be read the first time"
+    },
+    {
+      "id": "P-144",
+      "title": "A cross-origin frame whose target dies without a detach event is asked to re-snapshot every two seconds for the life of the tab",
+      "status": "fixed",
+      "refs": [
+        "internal/mirror/frames.go",
+        "internal/mirror/input.go",
+        "internal/mirror/mirror_test.go"
+      ],
+      "noPage": "needs a cross-origin frame whose CDP target dies mid-load and a top-level navigation over it; the corpus is hermetic and static by rule, so the shape has no page",
+      "notes": "the same Hacker News capture, one layer down. An article opened four cross-origin frames; the m.stripe.network one lost its CDP session within the second, and the reader pressed back over it. No Target.detachedFromTarget ever arrived, so nothing marked the frame gone — and resplice, which resets every frame on each new top-level document, kept handing it back to the reconciler. It was asked to say itself again 330 times over ten and a half minutes, across three more navigations, on a page whose own agent reported zero frames. The retry pair was 664 of the 983 lines in the bundle's log, which is two days of history evicted to hold them, and DocHash walked it and failed, so the capture could not fingerprint the one tab the reader was complaining about. Fixed the way reconcile itself is argued for — check the state rather than trust the event: a refusal backs the frame off, doubling from one tick, and six refusals in a row retire it, freeing its slot and taking its subtree out of the client's document. DocHash now walks spliced frames only, the list Checkpoint already used, because a frame that was never spliced put no nodes in anyone's document"
     }
   ]
 }

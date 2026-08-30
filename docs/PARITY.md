@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-65 gaps: 9 open, 11 by-design, 44 fixed, 1 disproven.
+67 gaps: 9 open, 11 by-design, 46 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -185,6 +185,8 @@ The table below is generated from `gaps.json` and the corpus by
 | P-140 | fixed | A widget that claimed one axis is not claimed at all: touch-action pan-x/pan-y goes unread | widgets/swipe-carousel |
 | P-141 | fixed | Page keyboard shortcuts never cross: only control keys are forwarded | widgets/key-shortcuts |
 | P-142 | fixed | The echo engine held the server's focus echo and replayed it at blur, putting the caret back in the field the reader had just left | — |
+| P-143 | fixed | One un-deadlined CDP call wedged a tab's inbound queue for good, and nothing anywhere said so | — a liveness gap in the inbound queue, not a rendering one: the mirror was a perfect copy throughout, and bundle triage says clean on every tab |
+| P-144 | fixed | A cross-origin frame whose target dies without a detach event is asked to re-snapshot every two seconds for the life of the tab | — needs a cross-origin frame whose CDP target dies mid-load and a top-level navigation over it; the corpus is hermetic and static by rule, so the shape has no page |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

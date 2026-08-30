@@ -109,6 +109,15 @@ type tabState struct {
 	// committed is holding the queue, and the reader asking for it to end must
 	// not have to wait for it to end. Guarded by Session.mu.
 	jobCancel context.CancelFunc
+	// What the tab's loop is doing this instant and since when, empty while it
+	// is idle, plus how much is waiting behind it and how many pieces of work
+	// have been abandoned for outstaying their budget. None of this changes
+	// what the tab does; all of it is what a capture had no way to say. See
+	// tabLoop and jobBudget. Guarded by Session.mu.
+	running      string
+	runningSince time.Time
+	queued       int
+	abandoned    int
 
 	acked    uint64
 	lastHash uint64
@@ -193,6 +202,9 @@ to reading. Per-tab order is preserved, which is all anything depends on: two
 clicks in one tab keep their order, and a click in another tab is not behind
 them. Closing a tab cancels this context, so a navigation that will never commit
 ends the moment the reader says so rather than whenever the browser gives up.
+
+What that fix did not do was bound the work itself, and the wedge it moved off
+the connection stayed alive inside one tab. See jobBudget.
 */
 func (s *Session) tabLoop(id uint32, ts *tabState) {
 	for {
@@ -203,6 +215,7 @@ func (s *Session) tabLoop(id uint32, ts *tabState) {
 			return
 		case job := <-ts.work:
 			s.mu.Lock()
+			ts.queued--
 			calledOff := job.what == "navigate" && job.gen < ts.stopGen
 			s.mu.Unlock()
 			if calledOff {
@@ -213,15 +226,41 @@ func (s *Session) tabLoop(id uint32, ts *tabState) {
 					"session", s.ID, "tab", id)
 				continue
 			}
-			ctx, cancel := context.WithCancel(ts.life)
+			budget := jobBudget(job.what)
+			ctx, cancel := context.WithTimeout(ts.life, budget)
+			started := time.Now()
 			s.mu.Lock()
 			ts.jobCancel = cancel
+			ts.running, ts.runningSince = job.what, started
 			s.mu.Unlock()
 			err := job.run(ctx)
+			spent := time.Since(started)
+			// Its own deadline rather than the tab being closed or stopped:
+			// only the first is this tab quietly failing to do what the reader
+			// asked, which is the thing nobody could see.
+			overran := errors.Is(ctx.Err(), context.DeadlineExceeded)
 			s.mu.Lock()
 			ts.jobCancel = nil
+			ts.running, ts.runningSince = "", time.Time{}
+			if overran {
+				ts.abandoned++
+			}
+			waiting := ts.queued
 			s.mu.Unlock()
 			cancel()
+			if overran {
+				// Out loud, because this is the shape of a tab that has stopped
+				// answering the reader: everything else about it still works —
+				// the mirror keeps arriving, the integrity check keeps passing
+				// — and only what the reader does has nowhere to go.
+				s.log.Warn("a tab outstayed its budget on one piece of work; abandoning it",
+					"session", s.ID, "tab", id, "what", job.what,
+					"budget", budget, "waiting", waiting)
+				s.events.Add("job-abandoned", id, map[string]any{
+					"what": job.what, "afterMs": spent.Milliseconds(), "waiting": waiting,
+				})
+				continue
+			}
 			if err != nil {
 				// Not an error frame back to the client: by the time this is
 				// known the frame that asked for it is long answered, and a tab
@@ -233,6 +272,60 @@ func (s *Session) tabLoop(id uint32, ts *tabState) {
 		}
 	}
 }
+
+/*
+jobBudget is how long one piece of a tab's inbound work may run.
+
+There was no budget at all, on the argument that the work is legitimately slow:
+Page.navigate does not return until the origin commits, and a snapshot's
+Runtime.evaluate does not return while the page's main thread is busy. Both are
+true, and neither is a reason for no bound — because the queue is serial, an
+un-bounded call is a tab whose reader has been silently disconnected from their
+own browser for as long as it lasts.
+
+A capture shows what that costs. On a Hacker News front page a tab's last frame
+went out at 00:15:22 and the reader then tapped a story's comments link three
+times over the next forty seconds. The server recorded all three inputs on
+arrival and replayed none of them: no navigation, no failure, no line in the
+log, and the landside document's focused element still the link from a click
+ten minutes earlier. Everything else about the tab was alive — the mirror
+matched the page exactly, the thirty-second integrity check passed twice in
+between — so nothing anywhere said the tab was dead. The reader opened the same
+link in a new tab instead, which worked, and filed the capture as "clicking on
+a link doesn't seem to load".
+
+The distinction the budgets draw is not fast against slow, it is which side of
+the link the call is on. Everything here is a call to a browser on this
+machine; the second the reader is waiting for is spent on the air, not on this.
+So a navigation gets minutes, because committing a page is the browser waiting
+on an origin, and everything else gets thirty seconds, because replaying a
+click or a scroll into a page that is already there has no honest reason to
+take longer. Whichever it is, the tab comes back.
+*/
+func jobBudget(what string) time.Duration {
+	switch what {
+	case "navigate", "open", "resync":
+		return jobBudgetSlow
+	default:
+		return jobBudgetPrompt
+	}
+}
+
+// The two budgets, as variables so a test can measure the behaviour in a second
+// rather than in three minutes.
+var (
+	// jobBudgetSlow covers a navigation the origin has accepted and not
+	// answered, a page being built, and a whole document being re-serialised:
+	// all three are the browser waiting on something, and all three are what
+	// the reader asked for. Long enough to outlast the worst of them — the
+	// capture behind tabLoop has reddit committing after a hundred seconds —
+	// and short enough that a tab cannot be lost for a whole session.
+	jobBudgetSlow = 3 * time.Minute
+	// jobBudgetPrompt covers a click, a scroll, an upload: dispatched into a
+	// document that is already there, and answered in milliseconds whenever
+	// anything is answering at all.
+	jobBudgetPrompt = 30 * time.Second
+)
 
 /*
 interrupt ends what a tab is doing without closing it.
@@ -287,6 +380,9 @@ func (s *Session) submit(tab uint32, job tabJob) error {
 	}
 	select {
 	case ts.work <- job:
+		s.mu.Lock()
+		ts.queued++
+		s.mu.Unlock()
 		return nil
 	default:
 	}

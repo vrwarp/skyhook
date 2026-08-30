@@ -133,6 +133,20 @@ type frozenTab struct {
 	// client asking faster than the link can answer is a real condition with no
 	// other trace: the storm it used to cause is gone, and so is the evidence.
 	resyncDropped int
+	// What the tab's inbound queue is doing: the job running now and for how
+	// long, how much is waiting behind it, and how many pieces of work have
+	// been abandoned for outstaying their budget.
+	//
+	// A bundle used to say nothing at all about this, and the one that asked
+	// for it could not be answered: the reader's taps were recorded on arrival
+	// and never replayed, and every other thing the bundle measures said the
+	// tab was healthy. A queue is the one place a tab can swallow what the
+	// reader does while still looking alive, so it is now the first thing the
+	// tab's page in a bundle reports. See jobBudget.
+	running       string
+	runningFor    time.Duration
+	queued        int
+	jobsAbandoned int
 }
 
 // freezeTabs copies the perishable state of every tab, right now.
@@ -155,6 +169,10 @@ func (s *Session) freezeTabs() []frozenTab {
 		s.mu.Lock()
 		f.acked, f.clientHash = ts.acked, ts.lastHash
 		f.resyncDropped = ts.resyncDropped
+		f.running, f.queued, f.jobsAbandoned = ts.running, ts.queued, ts.abandoned
+		if !ts.runningSince.IsZero() {
+			f.runningFor = time.Since(ts.runningSince)
+		}
 		page := ts.tab
 		f.url = ts.openURL
 		s.mu.Unlock()
@@ -415,6 +433,16 @@ func (c *capture) gatherTab(f *frozenTab) {
 		// Zero is the ordinary answer. Anything large says the client was
 		// asking for repairs faster than the link could deliver them.
 		"resyncDropped": f.resyncDropped,
+		// An idle queue is the ordinary answer here too: nothing running,
+		// nothing waiting, nothing abandoned. A job that has been running for
+		// longer than the reader has been complaining is the answer to "why
+		// does nothing I do in this tab happen".
+		"queued":        f.queued,
+		"jobsAbandoned": f.jobsAbandoned,
+	}
+	if f.running != "" {
+		report["running"] = f.running
+		report["runningForMs"] = f.runningFor.Milliseconds()
 	}
 	fail := map[string]string{}
 

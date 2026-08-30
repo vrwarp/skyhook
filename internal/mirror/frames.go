@@ -154,7 +154,11 @@ type subFrame struct {
 	// that has nowhere to go. Asking it rarely still converges if the subtree
 	// ever appears.
 	quietUntil time.Time
-	gone       bool
+	// askFails counts the times in a row this frame has refused to say itself
+	// again. See askFrames: a frame is dropped by an event, and the event does
+	// not always come.
+	askFails int
+	gone     bool
 }
 
 // frameSlot returns which agent's id space a node belongs to. Slot 0 is the
@@ -491,6 +495,29 @@ func (t *Tab) dropFrame(key string) {
 	if f == nil {
 		return
 	}
+	t.retireFrame(f)
+}
+
+// forgetFrame is dropFrame for a caller holding the frame rather than the key
+// it was filed under: the reconciler, which finds a frame gone by asking it
+// rather than by being told. A frame that spoke from more than one world is
+// filed once per world, and all of them go.
+func (t *Tab) forgetFrame(f *subFrame) {
+	t.mu.Lock()
+	for key, cur := range t.frames {
+		if cur == f {
+			delete(t.frames, key)
+		}
+	}
+	delete(t.framesByID, f.frameID)
+	t.mu.Unlock()
+	t.retireFrame(f)
+}
+
+// retireFrame is what both of them do once the frame is out of the maps: take
+// its document out of the client's, free its slot, and put the label back on
+// the box it was filling.
+func (t *Tab) retireFrame(f *subFrame) {
 	f.mu.Lock()
 	root := f.rootID
 	owner := f.ownerNode
@@ -1103,12 +1130,67 @@ func (t *Tab) askFrames(frames []*subFrame) {
 		go func(f *subFrame) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			if _, err := t.evalInSlot(ctx, f.slot, "__skyhook.snapshot()"); err != nil {
-				t.log.Debug("a frame would not re-snapshot", "tab", t.ID, "slot", f.slot, "err", err)
-			}
+			_, err := t.evalInSlot(ctx, f.slot, "__skyhook.snapshot()")
+			t.noteAsked(f, err)
 		}(f)
 	}
 }
+
+/*
+noteAsked records how a re-snapshot went, and gives up on a frame that will
+never answer.
+
+Removal is the half of a frame's life that hangs off an event nobody controls.
+A frame is dropped when its target detaches, and the whole of reconcile exists
+because "each retry hangs off an event ... every one of those was reached by a
+path that sometimes did not happen" — which is exactly as true of the detach as
+of the splice.
+
+A capture shows the shape of it. An article opened four cross-origin frames,
+one of them an m.stripe.network document whose CDP session died within the
+second; the reader then pressed back, and no detach ever arrived for it. The
+mirror went on asking that frame to say itself again every two seconds for the
+next ten and a half minutes — 330 refusals, across three more navigations, on a
+page whose agent reported no frames at all. Two things came of it. The retry
+pair was 664 of the 983 lines in the bundle's log, which is two days of history
+evicted to make room for it; and the capture could not fingerprint the tab,
+because DocHash walks every frame and one of them could not be asked.
+
+So the answer is the reconciler's own: check the state rather than trust the
+event. A frame that refuses is asked again more slowly, and a frame that has
+refused every time for about a minute is treated as gone. Nothing is lost by
+being wrong about it — a frame that comes back announces itself, and adoption
+gives it a slot again — while being wrong the other way costs the log, the
+capture, and a CDP call every two seconds for as long as the tab lives.
+*/
+func (t *Tab) noteAsked(f *subFrame, err error) {
+	f.mu.Lock()
+	if err == nil {
+		f.askFails, f.quietUntil = 0, time.Time{}
+		f.mu.Unlock()
+		return
+	}
+	f.askFails++
+	fails := f.askFails
+	// Doubling from one tick, so a frame that is merely mid-navigation is asked
+	// again almost at once and one that is not costs a line a minute.
+	back := reconcileEvery << min(fails-1, 5)
+	f.quietUntil = time.Now().Add(back)
+	f.mu.Unlock()
+	t.log.Debug("a frame would not re-snapshot",
+		"tab", t.ID, "slot", f.slot, "fails", fails, "next", back, "err", err)
+	if fails < askGiveUp {
+		return
+	}
+	t.log.Debug("a frame has stopped answering; it is no longer mirrored",
+		"tab", t.ID, "slot", f.slot, "err", err)
+	t.forgetFrame(f)
+}
+
+// askGiveUp is how many refusals in a row make a frame gone. With the backoff
+// above that is about a minute of asking, which outlasts a frame that is merely
+// between documents.
+const askGiveUp = 6
 
 /*
 framesDue picks the frames worth asking now.

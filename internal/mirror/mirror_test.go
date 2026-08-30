@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"regexp"
@@ -1018,6 +1019,95 @@ func TestAFrameIsNotAskedTwiceForTheSameThing(t *testing.T) {
 	later := framesDue([]*subFrame{quiet}, false, now.Add(31*time.Second))
 	if len(later) != 1 {
 		t.Error("a frame that ran out of retries was never asked again")
+	}
+}
+
+/*
+A frame that will not answer is asked more slowly, and then not at all.
+
+Removal hangs off Target.detachedFromTarget, and the capture behind this shows
+that event not arriving. An article opened an m.stripe.network frame whose CDP
+session died within the second; the reader pressed back; no detach ever came.
+The mirror asked that frame to say itself again every two seconds for the next
+ten and a half minutes — three hundred and thirty times, across three more
+navigations, on a page whose own agent reported no frames at all. The retry
+pair was two thirds of the lines in the bundle's log, which is two days of
+history evicted to hold them, and the capture could not fingerprint the tab
+because DocHash walked the frame and it would not be walked.
+*/
+func TestAFrameThatStopsAnsweringIsEventuallyDropped(t *testing.T) {
+	tab := &Tab{ID: 1, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	tab.frames = map[string]*subFrame{}
+	tab.framesByID = map[string]*subFrame{}
+	f := &subFrame{slot: 4, frameID: "F4"}
+	tab.frames["sess|7"] = f
+	tab.framesByID["F4"] = f
+
+	boom := errors.New("cdp: Session with given id not found. (-32001)")
+	var backoffs []time.Duration
+	for i := 0; i < askGiveUp-1; i++ {
+		before := time.Now()
+		tab.noteAsked(f, boom)
+		f.mu.Lock()
+		quiet, gone := f.quietUntil, f.gone
+		f.mu.Unlock()
+		if gone {
+			t.Fatalf("the frame was given up on after %d refusals, before it had had "+
+				"the chance a frame between documents needs", i+1)
+		}
+		backoffs = append(backoffs, quiet.Sub(before).Round(reconcileEvery))
+		// The wait it just asked for is a wait: framesDue must honour it, or
+		// the backoff is a number nobody reads.
+		if due := framesDue([]*subFrame{f}, false, before); len(due) != 0 {
+			t.Fatal("a frame that just refused was due again immediately")
+		}
+	}
+	for i := 1; i < len(backoffs); i++ {
+		if backoffs[i] <= backoffs[i-1] {
+			t.Errorf("backoff went %v then %v; a frame that keeps refusing has to be "+
+				"asked less often, not the same", backoffs[i-1], backoffs[i])
+		}
+	}
+
+	tab.noteAsked(f, boom)
+	f.mu.Lock()
+	gone := f.gone
+	f.mu.Unlock()
+	if !gone {
+		t.Error("a frame that refused every time for a minute is still being asked")
+	}
+	tab.mu.Lock()
+	frames, byID := len(tab.frames), len(tab.framesByID)
+	tab.mu.Unlock()
+	if frames != 0 || byID != 0 {
+		t.Errorf("the frame is still in the tab's maps (%d worlds, %d by id); "+
+			"its slot is never handed out again", frames, byID)
+	}
+}
+
+// And a frame that was only briefly unreachable is not punished for it: the
+// count is consecutive refusals, not refusals ever.
+func TestAFrameThatAnswersAgainIsForgiven(t *testing.T) {
+	tab := &Tab{ID: 1, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	tab.frames = map[string]*subFrame{}
+	tab.framesByID = map[string]*subFrame{}
+	f := &subFrame{slot: 1, frameID: "F1"}
+	tab.frames["sess|3"] = f
+	tab.framesByID["F1"] = f
+
+	for i := 0; i < askGiveUp*3; i++ {
+		tab.noteAsked(f, errors.New("mid-navigation"))
+		tab.noteAsked(f, nil)
+		f.mu.Lock()
+		fails, quiet, gone := f.askFails, f.quietUntil, f.gone
+		f.mu.Unlock()
+		if gone {
+			t.Fatalf("a frame that answered every other time was dropped after %d rounds", i+1)
+		}
+		if fails != 0 || !quiet.IsZero() {
+			t.Fatalf("after answering, the frame still carries %d failures and a wait until %v",
+				fails, quiet)
+		}
 	}
 }
 
