@@ -150,6 +150,13 @@ func (m *Manager) Images() *imgproc.Pipeline { return m.images }
 // Trainer exposes the dictionary trainer.
 func (m *Manager) Trainer() *protocol.DictTrainer { return m.trainer }
 
+// resumeBudget bounds one piece of the work a reconnect does before the
+// connection starts reading. A resync is a whole document re-serialised, which
+// is the same job the tab queue gives three minutes; this is that, on a
+// goroutine where overrunning costs the reader every tab at once rather than
+// one, so it gets the shorter end of the same argument.
+const resumeBudget = 60 * time.Second
+
 // ErrUnauthorized means the client presented the wrong token.
 var ErrUnauthorized = errors.New("session: unauthorized")
 
@@ -243,6 +250,20 @@ func (m *Manager) Serve(conn transport.Conn) {
 			log.Debug("queued input replay failed", "err", err)
 		}
 	}
+	// Everything from here to the read loop talks to the browser, serially,
+	// once per tab — and it does it on the goroutine that is about to become
+	// this connection's only reader. Unbounded, one tab whose renderer will
+	// not answer means the client is attached, has its Welcome, and is never
+	// heard from again: it looks connected on the plane side, and every
+	// reconnect it makes leaves another goroutine stuck in the same place.
+	// Per tab rather than for the set, so one slow page cannot spend the
+	// budget the others needed. See Session.Dispatch, which is the same
+	// argument for the frames that arrive after this.
+	setup := func(fn func(context.Context)) {
+		sctx, cancel := context.WithTimeout(ctx, resumeBudget)
+		defer cancel()
+		fn(sctx)
+	}
 	for _, ta := range hello.Resume {
 		sess.Ack(ta.Tab, ta.Seq, ta.Hash, ta.Epoch)
 		// A client that missed nothing gets nothing: for a quiet tab the ring
@@ -253,14 +274,14 @@ func (m *Manager) Serve(conn transport.Conn) {
 			log.Debug("tab resumed current; no resync", "tab", ta.Tab, "seq", ta.Seq)
 			continue
 		}
-		sess.Resync(ctx, ta.Tab, ta.Seq, "reconnect")
+		setup(func(c context.Context) { sess.Resync(c, ta.Tab, ta.Seq, "reconnect") })
 	}
 	if resumed {
 		// The client may be rejoining after nothing worse than a reconnect, or it
 		// may have just been loaded from scratch and know only what the Welcome
 		// above carried. Telling both is one frame per tab and settles it.
-		sess.RefreshTabs(ctx)
-		sess.replayAdapterBacklog(ctx)
+		setup(func(c context.Context) { sess.RefreshTabs(c) })
+		setup(func(c context.Context) { sess.replayAdapterBacklog(c) })
 	}
 
 	for {

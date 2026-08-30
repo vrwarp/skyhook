@@ -194,7 +194,14 @@ func (t *Tab) ParityProbe(ctx context.Context, limit int) (json.RawMessage, erro
 	if err := add(raw); err != nil {
 		return nil, fmt.Errorf("mirror: bad parity probe: %w", err)
 	}
-	for _, f := range t.framesInOrder() {
+	// Spliced frames, the list DocHash and Checkpoint read, and for their
+	// reason: a frame that was adopted and never spliced put no nodes in the
+	// client's document, so measuring it compares against nodes nobody sent —
+	// and a frame that will not answer at all used to cost the whole tab its
+	// measurement through this door, which is the one the parity harness looks
+	// through.
+	frames, _ := t.splicedFrames()
+	for _, f := range frames {
 		raw, err := t.evalInSlot(ctx, f.slot, fmt.Sprintf("__skyhook.parityProbe(%d)", limit))
 		if err != nil {
 			return nil, fmt.Errorf("mirror: frame slot %d: %w", f.slot, err)

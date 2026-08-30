@@ -632,6 +632,132 @@
         "client/src/mirror/host.ts"
       ],
       "notes": "found by widgets/key-shortcuts, whose click out of a text field kept landing back in it. The echo engine buffers server ops that touch the field the reader owns, so their rewrites do not fight the typing — but it buffered focus ops too, and replayed them on blur: the instant the reader leaves. That lands past both guards, because the host's staleness check reads the cause of the mutation being applied and a replayed op carries none, and its owned-field check has just been cleared by the blur itself. The caret jumped back into the field, and on a phone the keyboard with it. A focus op is about a moment rather than about content, so it is no longer deferred at all: it reaches the host, which ignores it while the reader owns the field, which is what it was for. The P-121 family's third instance — after the round-trip echo and the composer value"
+    },
+    {
+      "id": "P-143",
+      "title": "One un-deadlined CDP call wedged a tab's inbound queue for good, and nothing anywhere said so",
+      "status": "fixed",
+      "refs": [
+        "internal/session/session.go",
+        "internal/session/inbound_test.go",
+        "internal/session/capture.go"
+      ],
+      "noPage": "a liveness gap in the inbound queue, not a rendering one: the mirror was a perfect copy throughout, and bundle triage says clean on every tab",
+      "notes": "found in a Hacker News capture. Tab 1's last frame went out at 00:15:22; the reader then tapped one story's comments link three times over the next forty seconds, at 00:24:44, 00:24:59 and 00:25:25. All three are in the session timeline, which records an input on arrival, and none of them was replayed: no navigation, no tab-work failure, not one line in the server log, and the landside agent still reporting focusedId 59 — the story link focused by a click at 00:15:02. Per-tab queues had moved this wedge off the connection without bounding it, so a job ran with no deadline of any kind and cdp.Call blocks forever on a request the browser never answers. Everything else about the tab stayed alive, which is why it looked fine: the mirror matched the page, and the thirty-second integrity check passed twice between the taps. Fixed by giving each piece of inbound work a budget chosen by which side of the link its call is on — three minutes for a navigation, a page build or a resync, thirty seconds for a click, a scroll or an upload — and by saying so when one is abandoned: a WARN, a job-abandoned event in the session timeline, and running/queued/jobsAbandoned on the tab's page in a bundle, none of which existed to be read the first time"
+    },
+    {
+      "id": "P-144",
+      "title": "A cross-origin frame whose target dies without a detach event is asked to re-snapshot every two seconds for the life of the tab",
+      "status": "fixed",
+      "refs": [
+        "internal/mirror/frames.go",
+        "internal/mirror/input.go",
+        "internal/mirror/mirror_test.go"
+      ],
+      "noPage": "needs a cross-origin frame whose CDP target dies mid-load and a top-level navigation over it; the corpus is hermetic and static by rule, so the shape has no page",
+      "notes": "the same Hacker News capture, one layer down. An article opened four cross-origin frames; the m.stripe.network one lost its CDP session within the second, and the reader pressed back over it. No Target.detachedFromTarget ever arrived, so nothing marked the frame gone — and resplice, which resets every frame on each new top-level document, kept handing it back to the reconciler. It was asked to say itself again 330 times over ten and a half minutes, across three more navigations, on a page whose own agent reported zero frames. The retry pair was 664 of the 983 lines in the bundle's log, which is two days of history evicted to hold them, and DocHash walked it and failed, so the capture could not fingerprint the one tab the reader was complaining about. Fixed the way reconcile itself is argued for — check the state rather than trust the event: a refusal backs the frame off, doubling from one tick, and six refusals in a row retire it, freeing its slot and taking its subtree out of the client's document. DocHash now walks spliced frames only, the list Checkpoint already used, because a frame that was never spliced put no nodes in anyone's document"
+    },
+    {
+      "id": "P-145",
+      "title": "An input the link dropped mid-send was lost, not queued",
+      "status": "fixed",
+      "refs": [
+        "client/src/worker/net.worker.ts",
+        "client/test/outbox.test.ts"
+      ],
+      "noPage": "a plane-side delivery gap; nothing about it reaches a mirrored document",
+      "notes": "the plane-side half of P-143's class, found by auditing for it. Typing during an outage was already kept — an input the worker sees while it knows itself offline goes into the outbox and rides the next Hello — but the check and the write are not the same instant, and send() returned early or swallowed the transport's rejection without queuing anything. On a link that drops every few minutes that is the last tap before the bars went, gone with no queue entry, no error and no retry: the reader taps, nothing happens, and the only evidence is their memory of having tapped. send now reports whether the frame crossed, and an input that did not goes into the outbox like any other."
+    },
+    {
+      "id": "P-146",
+      "title": "The connection's read loop still did browser work with no deadline",
+      "status": "fixed",
+      "refs": [
+        "internal/session/session.go",
+        "internal/session/manager.go",
+        "internal/session/inbound_test.go"
+      ],
+      "noPage": "a liveness gap in the inbound path, not a rendering one",
+      "notes": "P-143 bounded the per-tab queues; this is what was left outside them. Three sites still made CDP calls on the goroutine that reads every frame from the client, under a context with cancel and no deadline. A viewport frame fanned three CDP calls out over every open tab inline — and a phone sends one on every rotation and every time the soft keyboard appears; Dispatch ran tab close, session kill and adapter commands inline; and the reconnect handshake resynced every stale tab, refreshed every tab's state and replayed the adapter backlog before it began reading, one of them before the Welcome even went out. One call not returning at any of them is not one tab going quiet but the whole client: no input for any tab, no acks, no resync, and the kill switch itself queued behind the thing it would have ended. The viewport now goes on each tab's own queue (which also orders it correctly against the taps that follow it), Dispatch's inline work carries the prompt budget, and each piece of handshake work gets sixty seconds of its own."
+    },
+    {
+      "id": "P-147",
+      "title": "A WebTransport write had no deadline, and closing the connection deadlocked behind one",
+      "status": "fixed",
+      "refs": [
+        "internal/transport/webtransport.go"
+      ],
+      "noPage": "a transport gap; it costs the whole session rather than any document",
+      "notes": "the same class again on the transport that is actually preferred. SendStream.Write blocks on session flow control for as long as the peer declines to grant credit and OpenUniStreamSync blocks on stream credit, neither with a deadline — ordinary behaviour for a backgrounded PWA whose QUIC connection is alive on the keepalive. Send holds the connection's mutex across its writes and shutdown wants the same mutex, so a parked writer stopped the connection being closed at all: c.done never closed, so Recv never returned, so the read loop never exited, so Detach never ran — and the reader's reconnect then evicted the stale connection, whose Close waited on that same mutex, so the replacing connection deadlocked before its Welcome and every further reconnect made another one. A session in that state could not be recovered from the plane side. wsConn has had both fixes since its own capture: a sixty-second write deadline, and a close that does its waiting off the caller's goroutine. This is those two, ported."
+    },
+    {
+      "id": "P-148",
+      "title": "A frame target's CDP handlers and event pump were never released",
+      "status": "fixed",
+      "refs": [
+        "internal/mirror/frames.go",
+        "internal/cdp/client.go"
+      ],
+      "noPage": "a landside resource leak; no document is wrong because of it",
+      "notes": "worse than P-144's missable event, because there was no removal path to miss. installInTarget gives every out-of-process frame its own CDP session with five handler registrations, and its first event allocates a goroutine and a thousand-slot channel. cdp.Forget is the only thing that releases any of it, and its whole doc comment is about exactly this cost — yet the only caller in the tree was a tab letting go of its own session when it closes. An ad-heavy page is a dozen frame targets, each frame navigation is another, and every one of them was held for the life of the browser process, which is the life of the session rather than of the page. A retired frame now forgets its target — not the page's own session, which a same-site frame shares with it, and not one another live frame is still speaking from."
+    },
+    {
+      "id": "P-149",
+      "title": "Repeats that never escalate: a splice cycle for the life of the page, and two ledgers with no bound",
+      "status": "fixed",
+      "refs": [
+        "internal/mirror/frames.go",
+        "internal/session/session.go",
+        "internal/mirror/diag.go"
+      ],
+      "noPage": "cost and diagnostics, not rendering: the documents involved are correct throughout",
+      "notes": "found by auditing for P-144's second half. A frame whose element the page above it never serialises answers every time it is asked — so the refusal back-off never engages — and fails to splice every time, running its sixteen-retry ladder and then waiting a flat thirty seconds before doing it all again: about eighteen log records and one full re-serialisation of that frame's document every seventy-odd seconds, for the life of the page, per frame. That is P-144's log-ring erasure by a different route. The give-up wait now doubles and resets the moment the frame finds its place. Two smaller ones with it: imgAsked grew for the life of the session because a permit is only spent when bytes are actually produced, so every hash whose work was abandoned or evicted stayed — it now has the bound its sibling imgSent documents for itself; and ParityProbe still walked every frame the tab had heard of, so one unanswering frame cost the whole tab its measurement through the one door the parity harness looks through."
+    },
+    {
+      "id": "P-150",
+      "title": "A hello held for a world that never arrives is never retried, so that frame is never mirrored",
+      "status": "open",
+      "refs": [
+        "internal/mirror/frames.go",
+        "internal/mirror/agent.js"
+      ],
+      "noPage": "needs a frame whose execution-context event is dropped or carries no frame id; the corpus is hermetic and cannot stage it",
+      "notes": "P-144's argument on the creation side, still live. A frame that announces itself before its world has been placed is held in pendingHello, and the only thing that answers a held hello is the Runtime.executionContextCreated handler — which returns early for a context with no auxData.frameId, and never runs at all for an event a full pump dropped. The agent sends its hello exactly once at install and never reschedules it, and the held frame was never put in framesByID, so reconcile cannot see it either: that frame is not adopted, not given a slot, and not mirrored for the life of the document, silently, and the integrity check cannot tell because no nodes of it were ever sent. The leak is fixed — a stranded entry is dropped on the frameId-less path and when the session's worlds are cleared — but the frame is still lost. Fixing it properly means the agent re-announcing on a schedule until it is adopted, which is a change to the one message every frame sends."
+    },
+    {
+      "id": "P-151",
+      "title": "The plane side carries failed image requests across a navigation and re-asks for all of them",
+      "status": "open",
+      "refs": [
+        "client/src/mirror/host.ts",
+        "internal/session/session.go"
+      ],
+      "noPage": "a byte-cost gap on the link, not a rendering one",
+      "notes": "applySnapshot for a navigation clears pendingShots and releases the blobs — including requested and missing — but not pendingImages, which still holds every hash from every previous document whose bytes never landed, mapped to elements that are no longer in any document. requestPendingImages then puts the lot back on the wire, and the server answers each one it still holds with full bytes, competing with the new page's own images at 250 kbps. The answer that would have retired them is itself the thing most likely to be lost: Missing announcements ride the media class, which is dropped when the client is offline or the queue is full, and PageChanged deliberately drops all queued media for the tab on commit — so the navigation that creates the stale entries is the same event that throws away their answer. host.dom.test.ts covers the resync case (same URL) and not the carry-over across one."
+    },
+    {
+      "id": "P-152",
+      "title": "State released only by an event that can be dropped: chunk buffers, a stalled download's slot, an adapter's poll",
+      "status": "open",
+      "refs": [
+        "internal/mirror/tab.go",
+        "internal/session/downloads.go",
+        "internal/adapter/googlechat/chat.go"
+      ],
+      "noPage": "landside resource gaps; no mirrored document is wrong because of any of them",
+      "notes": "the rest of what the P-144 audit turned up, none individually worth its own entry. A chunked agent message strands up to a quarter of a megabyte per unreceived chunk — chunks and chunkN are keyed by world and have no delete anywhere in the tree, and a full event pump drops exactly the kind of event that completes one. A download whose completion never arrives stays DownloadLanding for ever: pruneDownloadsLocked will not evict a landing entry, so it holds a shelf slot, is re-announced to every reconnecting client, and past the keep limit the map grows. The Google Chat adapter's poll loop counts failures without ever capping or backing off, so a dead chat target costs a CDP round trip every six seconds for the life of the session (its logging is bounded to a line a minute, which is why this is cost rather than diagnostics). Smaller still and not tracked separately: imgproc's forget leaves sources orphaned, cdp OffPopup has no caller, and ackedEpoch outlives the tab it belongs to."
+    },
+    {
+      "id": "P-153",
+      "title": "A removed address is sometimes still offered back",
+      "status": "open",
+      "refs": [
+        "test/history_test.go",
+        "client/src/app/history.ts",
+        "client/src/app/main.ts"
+      ],
+      "noPage": "a shell gap rather than a mirror one; it is measured by the e2e suite, not the corpus",
+      "notes": "TestPWAHistoryCompletesAnAddressAndForgetsOne fails roughly one full suite run in five, only under the load of the whole suite, never alone. The X reports Removed and the completions still offer the address thirty seconds later, so it is not the settle race it was first taken for. Two candidates remain and the assertion could not tell them apart: a removal that does not stick, and a second entry wearing the same title. The test now prints the list behind the rows on failure — each title, its host, and whether it is offered from history or from the saved list — so the next occurrence names which. Not skipped and not quarantined; it fails the suite as it did."
     }
   ]
 }

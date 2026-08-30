@@ -116,7 +116,7 @@ The table below is generated from `gaps.json` and the corpus by
 ./internal/parity -run Registry`); a unit test fails when it is stale.
 
 <!-- parity:registry:begin -->
-65 gaps: 9 open, 11 by-design, 44 fixed, 1 disproven.
+76 gaps: 13 open, 11 by-design, 51 fixed, 1 disproven.
 
 | gap | status | what diverges | measured by |
 |---|---|---|---|
@@ -185,6 +185,17 @@ The table below is generated from `gaps.json` and the corpus by
 | P-140 | fixed | A widget that claimed one axis is not claimed at all: touch-action pan-x/pan-y goes unread | widgets/swipe-carousel |
 | P-141 | fixed | Page keyboard shortcuts never cross: only control keys are forwarded | widgets/key-shortcuts |
 | P-142 | fixed | The echo engine held the server's focus echo and replayed it at blur, putting the caret back in the field the reader had just left | — |
+| P-143 | fixed | One un-deadlined CDP call wedged a tab's inbound queue for good, and nothing anywhere said so | — a liveness gap in the inbound queue, not a rendering one: the mirror was a perfect copy throughout, and bundle triage says clean on every tab |
+| P-144 | fixed | A cross-origin frame whose target dies without a detach event is asked to re-snapshot every two seconds for the life of the tab | — needs a cross-origin frame whose CDP target dies mid-load and a top-level navigation over it; the corpus is hermetic and static by rule, so the shape has no page |
+| P-145 | fixed | An input the link dropped mid-send was lost, not queued | — a plane-side delivery gap; nothing about it reaches a mirrored document |
+| P-146 | fixed | The connection's read loop still did browser work with no deadline | — a liveness gap in the inbound path, not a rendering one |
+| P-147 | fixed | A WebTransport write had no deadline, and closing the connection deadlocked behind one | — a transport gap; it costs the whole session rather than any document |
+| P-148 | fixed | A frame target's CDP handlers and event pump were never released | — a landside resource leak; no document is wrong because of it |
+| P-149 | fixed | Repeats that never escalate: a splice cycle for the life of the page, and two ledgers with no bound | — cost and diagnostics, not rendering: the documents involved are correct throughout |
+| P-150 | open | A hello held for a world that never arrives is never retried, so that frame is never mirrored | — needs a frame whose execution-context event is dropped or carries no frame id; the corpus is hermetic and cannot stage it |
+| P-151 | open | The plane side carries failed image requests across a navigation and re-asks for all of them | — a byte-cost gap on the link, not a rendering one |
+| P-152 | open | State released only by an event that can be dropped: chunk buffers, a stalled download's slot, an adapter's poll | — landside resource gaps; no mirrored document is wrong because of any of them |
+| P-153 | open | A removed address is sometimes still offered back | — a shell gap rather than a mirror one; it is measured by the e2e suite, not the corpus |
 <!-- parity:registry:end -->
 
 ## Fixing a gap

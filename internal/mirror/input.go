@@ -1260,10 +1260,19 @@ func (t *Tab) DocHash(ctx context.Context) (uint64, error) {
 	if err := json.Unmarshal(raw, &h); err != nil {
 		return 0, err
 	}
-	// Every attached frame's nodes are in the client's document too, in one run
+	// Every spliced frame's nodes are in the client's document too, in one run
 	// of ids after the page's, so the hash of the whole is each agent's chained
 	// into the next. See Checkpoint.
-	for _, f := range t.framesInOrder() {
+	//
+	// Spliced, not every frame the tab has heard of, for the same reason
+	// Checkpoint reads the same list: a frame that was adopted and never
+	// spliced put no nodes in anyone's document, so it belongs in neither
+	// hash. Walking all of them meant one frame that would not answer cost the
+	// whole tab its fingerprint — which is how the capture behind noteAsked
+	// came back unable to say anything at all about the page the reader was
+	// complaining about.
+	frames, _ := t.splicedFrames()
+	for _, f := range frames {
 		raw, err := t.evalInSlot(ctx, f.slot, fmt.Sprintf("__skyhook.docHash(%d)", h))
 		if err != nil {
 			return 0, fmt.Errorf("mirror: frame slot %d: %w", f.slot, err)
@@ -1415,7 +1424,15 @@ func (t *Tab) fenceAgents(ctx context.Context) error {
 		return err
 	}
 	for _, f := range t.framesInOrder() {
-		if err := f.sess.Fence(ctx, f.sess.ID); err != nil {
+		// Under the frame's own lock: adoptFrame writes this when a frame
+		// navigates, and the integrity check reads it every thirty seconds.
+		f.mu.Lock()
+		sess := f.sess
+		f.mu.Unlock()
+		if sess == nil {
+			continue
+		}
+		if err := sess.Fence(ctx, sess.ID); err != nil {
 			return err
 		}
 	}

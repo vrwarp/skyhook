@@ -23,6 +23,32 @@ import (
 // maxRecord caps a single length-prefixed record on a channel stream.
 const maxRecord = 64 << 20
 
+/*
+wtWriteGrace bounds a write to a QUIC stream, and opening one.
+
+A SendStream.Write blocks on session flow control for as long as the peer
+declines to grant credit, and OpenUniStreamSync blocks on stream credit the
+same way. Neither has a deadline of its own. That is ordinary mobile behaviour
+rather than a fault — a backgrounded PWA stops draining its streams while its
+QUIC connection stays perfectly alive on the keepalive — and unbounded it costs
+far more than the writes.
+
+Send holds c.mu across its writes, and shutdown wants the same lock. So a
+writer parked on flow control used to stop the connection from being closed at
+all: c.done never closed, so Recv never returned, so the read loop never
+exited, so Detach never ran — and the reader's reconnect then evicted the stale
+connection, which called Close on it, which waited on the same lock. The
+replacing connection deadlocked before its Welcome, and reconnecting again
+produced another one. A session in that state could not be recovered from the
+plane side at all.
+
+Sixty seconds, which is what wsConn already sets on its own writes. The
+WebSocket path has had both this and the off-the-caller's-goroutine close since
+the capture that prompted them; this is the same two fixes on the transport
+that is actually preferred.
+*/
+const wtWriteGrace = 60 * time.Second
+
 // WTServer accepts WebTransport sessions at /skyhook.
 type WTServer struct {
 	srv     *webtransport.Server
@@ -141,6 +167,14 @@ func (c *wtConn) Done() <-chan struct{} {
 }
 
 func (c *wtConn) stream(ch protocol.Channel) (*webtransport.SendStream, error) {
+	// Before the lock as well as under it: shutdown closes this first and
+	// clears the streams afterwards, so this is the answer that is true the
+	// moment the connection ends rather than whenever a stuck writer lets go.
+	select {
+	case <-c.done:
+		return nil, ErrClosed
+	default:
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -149,7 +183,9 @@ func (c *wtConn) stream(ch protocol.Channel) (*webtransport.SendStream, error) {
 	if s, ok := c.out[ch]; ok {
 		return s, nil
 	}
-	s, err := c.sess.OpenUniStreamSync(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), wtWriteGrace)
+	defer cancel()
+	s, err := c.sess.OpenUniStreamSync(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +210,7 @@ func (c *wtConn) Send(ch protocol.Channel, msg []byte) error {
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(msg)))
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = s.SetWriteDeadline(time.Now().Add(wtWriteGrace))
 	if _, err := s.Write(hdr[:]); err != nil {
 		return err
 	}
@@ -185,12 +222,18 @@ func (c *wtConn) Send(ch protocol.Channel, msg []byte) error {
 }
 
 func (c *wtConn) SendObject(ch protocol.Channel, msg []byte) error {
-	s, err := c.sess.OpenUniStreamSync(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), wtWriteGrace)
+	defer cancel()
+	s, err := c.sess.OpenUniStreamSync(ctx)
 	if err != nil {
 		return err
 	}
 	go func() {
 		defer func() { _ = s.Close() }()
+		// One goroutine per object, each holding the object's bytes until its
+		// write lands. Unbounded, they are a picture's worth of memory apiece
+		// for as long as the peer declines to read them.
+		_ = s.SetWriteDeadline(time.Now().Add(wtWriteGrace))
 		var hdr [5]byte
 		hdr[0] = byte(ch) | objectStreamFlag
 		binary.BigEndian.PutUint32(hdr[1:], uint32(len(msg)))
@@ -311,13 +354,23 @@ func (c *wtConn) Close(code uint32, reason string) error {
 
 func (c *wtConn) shutdown() {
 	c.closeMu.Do(func() {
-		c.mu.Lock()
-		c.closed = true
-		for _, s := range c.out {
-			_ = s.Close()
-		}
-		c.mu.Unlock()
+		// The channel first, and the streams off this goroutine, for the
+		// reason wsConn.Close spells out: the caller is usually a session
+		// evicting a stale connection, and the client that replaced it is
+		// blocked on this same goroutine waiting for its Welcome. Everything
+		// that waits for this connection to end waits on c.done — Recv, and so
+		// the read loop, and so the Detach that lets the reconnecting client
+		// be heard — and none of that should wait on a writer parked in QUIC
+		// flow control. See wtWriteGrace.
 		close(c.done)
+		go func() {
+			c.mu.Lock()
+			c.closed = true
+			for _, s := range c.out {
+				_ = s.Close()
+			}
+			c.mu.Unlock()
+		}()
 	})
 }
 

@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -137,13 +138,38 @@ func TestPWAHistoryCompletesAnAddressAndForgetsOne(t *testing.T) {
 		t.Errorf("toast after forgetting an address = %q, want it to say what happened", toast)
 	}
 
+	// Waited for, like every other read of this list: the X writes to IndexedDB
+	// and the dropdown re-queries it, so asking for the completions and reading
+	// them in the same breath samples the list one render before the removal.
+	//
+	// The wait is not the whole story, though, and the dump is here because of
+	// that. Under the load of the full suite this has failed with the row still
+	// present after the whole thirty seconds — which is not a settle losing a
+	// race, it is the removal not sticking or a second entry wearing the same
+	// title. Those two are told apart only by what is behind the rows, and a
+	// truncated innerText cannot tell them apart at all, so a failure prints
+	// the list itself: each row's title, its host, and whether it is offered
+	// from history (it has the X) or from the saved list (it has the star).
 	evalJSON(ctx, t, page, completeFor("127.0.0.1"), nil)
-	var titles []string
-	evalJSON(ctx, t, page, suggestTitles, &titles)
-	for _, title := range titles {
-		if title == "Second" {
-			t.Fatalf("the removed address is still offered: %v", titles)
+	gone := time.Now().Add(budget(30 * time.Second))
+	for {
+		var titles []string
+		evalJSON(ctx, t, page, suggestTitles, &titles)
+		if len(titles) > 0 && !slices.Contains(titles, "Second") {
+			break
 		}
+		if time.Now().After(gone) {
+			var rows string
+			evalJSON(ctx, t, page, `JSON.stringify(
+              Array.from(document.querySelectorAll('.suggest-item')).map((r) => ({
+                title: r.querySelector('.suggest-title') && r.querySelector('.suggest-title').textContent,
+                host: r.querySelector('.suggest-host') && r.querySelector('.suggest-host').textContent,
+                offeredFrom: r.querySelector('.suggest-x') ? 'history'
+                  : (r.querySelector('.suggest-mark') ? 'saved' : 'neither'),
+              })))`, &rows)
+			t.Fatalf("the removed address is still offered: %s", rows)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	// And the notice is the way back, which is the only reason removing is
