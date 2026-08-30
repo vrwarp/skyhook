@@ -1424,7 +1424,15 @@ func (t *Tab) fenceAgents(ctx context.Context) error {
 		return err
 	}
 	for _, f := range t.framesInOrder() {
-		if err := f.sess.Fence(ctx, f.sess.ID); err != nil {
+		// Under the frame's own lock: adoptFrame writes this when a frame
+		// navigates, and the integrity check reads it every thirty seconds.
+		f.mu.Lock()
+		sess := f.sess
+		f.mu.Unlock()
+		if sess == nil {
+			continue
+		}
+		if err := sess.Fence(ctx, sess.ID); err != nil {
 			return err
 		}
 	}

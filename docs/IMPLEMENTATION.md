@@ -5118,3 +5118,88 @@ and a CDP call every two seconds for the life of the tab.
 already used and for the same reason: a frame that was adopted and never
 spliced put no nodes in anyone's document, so it belongs in neither hash
 (P-144).
+
+### 78. Auditing for the shape rather than the bug
+
+The capture behind §76 and §77 gave two bugs and, between them, two
+shapes worth going looking for. Both waves below came from asking what
+else in the tree has the same shape, rather than from any new report.
+
+**A blocking call with no deadline on a serial path.** §76's tab queue was
+one instance; it was not the only one.
+
+The connection's read loop was still doing browser work itself. A viewport
+frame fanned three CDP calls out over every open tab, inline — and a phone
+sends one on every rotation and every time the soft keyboard appears.
+`Dispatch` ran tab close, session kill and adapter commands inline. The
+reconnect handshake resynced every stale tab, refreshed every tab's state
+and replayed the adapter backlog before it began reading, one of those
+before the Welcome had even gone out. Every one of them under a context
+with cancel and no deadline. One call not returning at any of them is
+worse than §76, because that goroutine is the one that reads the *next*
+frame for every tab: nothing the reader does is heard again, no ack is
+processed, and the kill switch is queued behind the thing it would have
+ended. The viewport now goes on each tab's own queue — which also orders it
+correctly against the taps that follow it, which it never was — `Dispatch`
+carries the prompt budget, and each piece of handshake work gets sixty
+seconds of its own (P-146).
+
+The transport had it worse. `SendStream.Write` blocks on QUIC session flow
+control for as long as the peer declines to grant credit, with no deadline;
+`Send` holds the connection's mutex across its writes, and `shutdown` wants
+that mutex. So a writer parked on flow control — an ordinary backgrounded
+PWA, whose QUIC connection is alive on the keepalive throughout — stopped
+the connection being closed at all: `c.done` never closed, so `Recv` never
+returned, so the read loop never exited, so `Detach` never ran. The
+reader's reconnect then evicted the stale connection, whose `Close` waited
+on the same mutex, and the replacing connection deadlocked before its
+Welcome. Every further reconnect made another one; the session could not be
+recovered from the plane side at all. The WebSocket path has had both
+answers since its own capture — a write deadline, and a close that does its
+waiting off the caller's goroutine — with a comment saying exactly why. The
+preferred transport had neither. It has both now (P-147).
+
+And the plane side had the same thing in miniature. Typing during an outage
+was already kept, but the online check and the write are not the same
+instant: a send that failed on the way out dropped the input rather than
+queuing it. On a link that drops every few minutes that is the last tap
+before the bars went (P-145).
+
+**Cleanup that hangs off an event.** §77's frame was one instance of that
+too.
+
+The worst was not even event-conditional. Every out-of-process frame gets
+its own CDP session with five handler registrations, and its first event
+allocates a goroutine and a thousand-slot channel. `cdp.Forget` releases
+all of it, and its doc comment is about precisely this cost — and the only
+caller in the tree was a tab letting go of its own session when it closes.
+Nothing ever forgot a frame's. An ad-heavy page is a dozen frame targets, a
+frame navigation is another, and all of them were held for the life of the
+browser process. A retired frame now forgets its target: not the page's own
+session, which a same-site frame shares with it, and not one another live
+frame is still speaking from (P-148).
+
+§77's other half — a repeat that never escalates — had a sibling in the
+same file. A frame whose element the page above it never serialises answers
+every time it is asked, so the refusal back-off never engages, and fails to
+splice every time: sixteen retries and eighteen log records and a full
+re-serialisation of that frame's document, every seventy-odd seconds, for
+the life of the page. That is §77's erased log ring by a different route.
+The give-up wait doubles now. Two ledgers went the same way: `imgAsked`
+grew for the life of the session because a permit is only spent when bytes
+are actually produced, and `ParityProbe` still walked every frame the tab
+had heard of — so one unanswering frame cost the whole tab its measurement
+through the one door the parity harness looks through (P-149).
+
+Four more were found and left open rather than fixed, each with its shape
+recorded: a held hello that is never retried, so a frame can be silently
+absent for the life of a document (P-150); failed image requests carried
+across a navigation and re-asked in full (P-151); chunk buffers, a stalled
+download's shelf slot and an adapter's poll loop, all released only by an
+event that can be dropped (P-152); and one e2e failure whose cause is not
+yet known, instrumented so the next occurrence names it (P-153).
+
+The general lesson is the one `reconcile` was already written with, and
+which neither wave had finished applying: **the state is the thing to
+check, and the event is only a hint that it may have changed.** Creation
+had learned that. Removal, bounding and liveness had not.

@@ -158,7 +158,11 @@ type subFrame struct {
 	// again. See askFrames: a frame is dropped by an event, and the event does
 	// not always come.
 	askFails int
-	gone     bool
+	// giveUps counts the times this frame has run out of splice retries. A
+	// frame whose element the page above it never serialises does that every
+	// time, forever; see holdSplice.
+	giveUps int
+	gone    bool
 }
 
 // frameSlot returns which agent's id space a node belongs to. Slot 0 is the
@@ -199,10 +203,21 @@ func (t *Tab) watchContexts(s *cdp.Session) {
 				} `json:"auxData"`
 			} `json:"context"`
 		}
-		if err := json.Unmarshal(params, &p); err != nil || p.Context.AuxData.FrameID == "" {
+		if err := json.Unmarshal(params, &p); err != nil {
 			return
 		}
 		key := ctxKey(sessionID, p.Context.ID)
+		if p.Context.AuxData.FrameID == "" {
+			// A world that belongs to no frame answers no held hello, and the
+			// hello it would have answered is now waiting for an event that
+			// has already been and gone. Dropped here rather than left: this
+			// map's only removal is the line below, and an entry that reaches
+			// it is an entry nothing will ever take out.
+			t.mu.Lock()
+			delete(t.pendingHello, key)
+			t.mu.Unlock()
+			return
+		}
 		t.mu.Lock()
 		t.ctxFrames[key] = p.Context.AuxData.FrameID
 		hello, waiting := t.pendingHello[key]
@@ -221,6 +236,15 @@ func (t *Tab) watchContexts(s *cdp.Session) {
 		for key := range t.ctxFrames {
 			if strings.HasPrefix(key, sessionID+"|") {
 				delete(t.ctxFrames, key)
+			}
+		}
+		// And the helloes those worlds were holding. A frame that said hello
+		// before we knew where it lived waits for a creation event, and the
+		// worlds being cleared is that event never coming: the entry it left
+		// behind is held for the life of the tab otherwise.
+		for key := range t.pendingHello {
+			if strings.HasPrefix(key, sessionID+"|") {
+				delete(t.pendingHello, key)
 			}
 		}
 		t.mu.Unlock()
@@ -515,8 +539,8 @@ func (t *Tab) forgetFrame(f *subFrame) {
 }
 
 // retireFrame is what both of them do once the frame is out of the maps: take
-// its document out of the client's, free its slot, and put the label back on
-// the box it was filling.
+// its document out of the client's, free its slot, put the label back on the
+// box it was filling, and let go of its target.
 func (t *Tab) retireFrame(f *subFrame) {
 	f.mu.Lock()
 	root := f.rootID
@@ -524,6 +548,7 @@ func (t *Tab) retireFrame(f *subFrame) {
 	f.gone = true
 	f.rootID = 0
 	f.mu.Unlock()
+	t.forgetTargetOf(f)
 	// One fewer document in the client's, which a measurement spanning this
 	// moment would otherwise still be counting.
 	t.spliceGen.Add(1)
@@ -539,6 +564,44 @@ func (t *Tab) retireFrame(f *subFrame) {
 			_, _ = t.evalInSlot(ctx, frameSlot(owner), fmt.Sprintf("__skyhook.mirroredFrame(%d,false)", owner))
 		}()
 	}
+}
+
+/*
+forgetTargetOf releases the CDP handlers and event pump of a frame's own
+target.
+
+Every frame in a process of its own gets five handler registrations and, on its
+first event, a goroutine and a thousand-slot channel — and cdp.Forget, the only
+thing that releases any of that, had exactly one caller in the tree: a tab
+letting go of its own session when it closes. Nothing ever forgot a frame's.
+That is worse than the missable event of P-144, because there was no removal
+path to miss: an ad-heavy page is a dozen frame targets, each frame navigation
+is another, and all of them were held for the life of the browser process,
+which is the life of the session rather than of the page.
+
+Not the page's own session, which a same-site frame shares with it — forgetting
+that would take the page's handlers with the frame's — and not one another live
+frame is still speaking from.
+*/
+func (t *Tab) forgetTargetOf(f *subFrame) {
+	f.mu.Lock()
+	sess := f.sess
+	f.mu.Unlock()
+	if sess == nil || sess.ID == "" || sess.ID == t.sess.ID {
+		return
+	}
+	for _, other := range t.framesInOrder() {
+		if other == f {
+			continue
+		}
+		other.mu.Lock()
+		shared := other.sess != nil && other.sess.ID == sess.ID
+		other.mu.Unlock()
+		if shared {
+			return
+		}
+	}
+	sess.Forget()
 }
 
 // takeSlotLocked hands out the next free id space, or 0 when there is none left.
@@ -908,6 +971,9 @@ func (t *Tab) spliceFrame(f *subFrame, s *agentSnapshot) {
 	f.rootID = root.ID
 	f.pending = nil
 	f.retryIn = 0
+	// It found its place, so the wait before the next attempt starts over: the
+	// count in holdSplice is consecutive failures to be spliced, not a tally.
+	f.giveUps = 0
 	f.spliced = true
 	gone := f.gone
 	f.mu.Unlock()
@@ -993,7 +1059,17 @@ func (t *Tab) holdSplice(f *subFrame, s *agentSnapshot, err error) {
 		f.mu.Lock()
 		f.pending = nil
 		f.retryIn = 0
-		f.quietUntil = time.Now().Add(spliceGiveUpFor)
+		f.giveUps++
+		// Growing, because this is a cycle and not an ending. The frame
+		// answers every time it is asked — the eval succeeds, so nothing here
+		// counts as a refusal — and the splice fails every time on a parent
+		// that never serialises the box. At a fixed thirty seconds that is
+		// sixteen retries and eighteen log lines every seventy-odd seconds,
+		// for the life of the page, per frame: a full re-serialisation of that
+		// frame's document each time, and the same slow erasure of the log
+		// ring that P-144 was filed for. Doubling still converges the moment
+		// the subtree appears, and costs a line an hour when it never does.
+		f.quietUntil = time.Now().Add(spliceGiveUpFor << min(f.giveUps-1, 6))
 		f.mu.Unlock()
 		t.log.Debug("a frame never found its place in the document above it; "+
 			"it stays a labelled box for now", "tab", t.ID, "slot", f.slot)

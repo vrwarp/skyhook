@@ -882,6 +882,14 @@ func (s *Session) imageWanted(hashes []string) {
 	if s.imgAsked == nil {
 		s.imgAsked = make(map[string]bool, len(hashes))
 	}
+	// The same bound imgSent has, and for the same reason it needed one — a
+	// permit is only spent when bytes are actually produced for that key, so
+	// every hash whose work was abandoned, evicted or made stale by a
+	// navigation stays here for the life of the session. The ledger this
+	// mirrors said so about itself and this one was left out of the sentence.
+	if len(s.imgAsked) >= imagesRemembered {
+		s.imgAsked = make(map[string]bool, len(hashes))
+	}
 	for _, h := range hashes {
 		if h == "" {
 			continue
@@ -1445,22 +1453,41 @@ func (s *Session) Client() (app, build string) {
 }
 
 // SetViewport re-applies the client's window size to every tab.
-func (s *Session) SetViewport(ctx context.Context, vp protocol.Viewport) {
+func (s *Session) SetViewport(_ context.Context, vp protocol.Viewport) {
 	s.mu.Lock()
 	s.viewport = vp
-	tabs := make([]*mirror.Tab, 0, len(s.tabs))
-	for _, ts := range s.tabs {
-		// A tab still being built is given the current viewport when its page
-		// is made, so there is nothing to re-apply to it here.
-		if ts.tab != nil {
-			tabs = append(tabs, ts.tab)
-		}
+	ids := make([]uint32, 0, len(s.tabs))
+	for id := range s.tabs {
+		ids = append(ids, id)
 	}
 	s.mu.Unlock()
-	for _, t := range tabs {
-		if err := t.SetViewport(ctx, vp); err != nil {
-			s.log.Debug("viewport update failed", "err", err)
-		}
+	// On each tab's own queue, and not on the caller's goroutine, which is the
+	// connection's read loop. Applying a viewport is three CDP calls per tab —
+	// metrics, touch emulation, colour scheme — made one after another over
+	// every open tab, and this was the last path that made all of them inline.
+	// That is the whole of the wedge tabLoop was written to end, still able to
+	// deafen the client outright: not one tab stops answering but every one of
+	// them, because the goroutine that would have read the next frame is
+	// waiting on the browser.
+	//
+	// And it is not a rare frame. A phone sends one on every rotation and
+	// every time the soft keyboard comes up or goes away, and it fans out over
+	// however many tabs the reader has open.
+	//
+	// The queue is also the right place for the ordering, twice over. A tap
+	// that arrives after a rotation is now replayed after the metrics that
+	// rotation set, rather than racing them; and a tab still being built no
+	// longer has to be skipped, because the job lands behind its build rather
+	// than before it — which is the tab that used to end up with the viewport
+	// the reader had before they turned the phone.
+	for _, id := range ids {
+		_ = s.submit(id, tabJob{what: "viewport", run: func(ctx context.Context) error {
+			t, err := s.page(id)
+			if err != nil {
+				return err
+			}
+			return t.SetViewport(ctx, vp)
+		}})
 	}
 }
 
@@ -1720,7 +1747,12 @@ func (s *Session) checkTab(id uint32, ts *tabState) {
 		// nothing, and doing nothing quietly is indistinguishable from finding
 		// nothing wrong — which is the difference between a mirror that is
 		// watched and one that only looks like it is.
-		s.log.Debug("integrity check could not measure the page", "tab", id, "err", err)
+		// Warn, not Debug, because of the sentence above it. The default
+		// handler is Info, so at Debug this said nothing at all on stderr —
+		// leaving "the check cannot measure this page" and "the check found
+		// nothing wrong" the same silence, which is the one distinction the
+		// comment exists to insist on.
+		s.log.Warn("integrity check could not measure the page", "tab", id, "err", err)
 		return
 	}
 	if cp.Hash == mirror.EmptyDocHash {
@@ -1973,9 +2005,30 @@ func (s *Session) NextInputSeq() uint64 { return s.inputSeq.Add(1) }
 
 var errNoTab = errors.New("session: no such tab")
 
-// Dispatch routes a decoded frame from the client.
+/*
+Dispatch routes a decoded frame from the client.
+
+Bounded, because most of this runs on the connection's read loop. Anything a
+frame asks of a browser goes on a tab's queue and is bounded there (see
+jobBudget), but what is left over is not nothing — closing a tab, killing a
+session, an adapter command that is an HTTP call to somebody else's server —
+and every one of those used to run under a context with cancel and no deadline.
+
+One of them not returning is worse than the wedge that motivated the tab
+queues, because this goroutine is the one that reads the *next* frame for every
+tab: nothing the reader does in any tab is heard again, no ack is processed, no
+resync is answered, and the kill switch itself is behind the thing it would
+have ended. Everything else about the session goes on working, which is what
+made the tab-scoped version of this so hard to see.
+
+The budget is the prompt one for the same reason it is prompt there: all of
+this is local work or a call to a service, not the second the reader is
+already spending on the air.
+*/
 func (s *Session) Dispatch(ctx context.Context, ch protocol.Channel, f *protocol.Frame) error {
 	s.touch()
+	ctx, cancel := context.WithTimeout(ctx, jobBudgetPrompt)
+	defer cancel()
 	switch f.Type {
 	case protocol.TypePing:
 		s.Send(protocol.ChCtrl, protocol.TypePong, 0, nil)

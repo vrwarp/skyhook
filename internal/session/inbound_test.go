@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/vrwarp/skyhook/internal/protocol"
 )
 
 // ran reports whether something happened before the deadline, so a test that is
@@ -266,5 +268,74 @@ func TestANavigationIsGivenLongerThanAClick(t *testing.T) {
 	if nav <= click {
 		t.Errorf("a navigation had %v and a click %v; the navigation is the one "+
 			"waiting on an origin and needs the longer budget", nav, click)
+	}
+}
+
+/*
+A viewport change is the client's whole connection, not one tab's.
+
+Everything a client frame asks of the browser was moved onto per-tab queues so
+that one page could not stop the whole client being heard — and this frame was
+left behind on the connection's read loop, making three CDP calls per tab over
+every open tab before the reader could be heard again. One of them not
+returning is not one tab going quiet: it is the goroutine that reads the next
+frame, for every tab, for the rest of the session.
+
+Not a rare frame, either. A phone sends one on every rotation and every time
+the soft keyboard appears.
+*/
+func TestAViewportChangeDoesNotHoldTheConnection(t *testing.T) {
+	s := newTestSession(t, CaptureOptions{})
+	armedTab(t, s, 1)
+
+	// Tab 1 is wedged in something that will not return.
+	started, released := make(chan struct{}), make(chan struct{})
+	if err := s.submit(1, tabJob{what: "navigate", run: func(ctx context.Context) error {
+		close(started)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-released:
+			return nil
+		}
+	}}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !ran(started, 2*time.Second) {
+		t.Fatal("the tab never started its work")
+	}
+	defer close(released)
+
+	// The reader rotates the phone. This must return: it is running on the
+	// goroutine that reads their next tap.
+	done := make(chan struct{})
+	go func() {
+		s.SetViewport(context.Background(), protocol.Viewport{W: 851, H: 448, DPR: 3, Mobile: true})
+		close(done)
+	}()
+	if !ran(done, 2*time.Second) {
+		t.Fatal("a viewport change waited on a wedged tab; the reader rotating their " +
+			"phone has deafened the client for every tab at once")
+	}
+
+	// And it returned because the work went on the tab's queue, not because
+	// there was no work to do. Returning promptly is what this test is about,
+	// but a caller that returns promptly by doing nothing would pass it — so
+	// the job is looked for where it has to be: waiting behind the wedge, in
+	// the tab's own queue, to run when that tab is free.
+	s.mu.Lock()
+	queued := s.tabs[1].queued
+	s.mu.Unlock()
+	if queued != 1 {
+		t.Errorf("tab 1 has %d jobs waiting after a viewport change, want the "+
+			"viewport itself queued behind the work that is wedged", queued)
+	}
+
+	// Recorded either way, because a tab opened after this gets it at build time.
+	s.mu.Lock()
+	w := s.viewport.W
+	s.mu.Unlock()
+	if w != 851 {
+		t.Errorf("the session's viewport is %d wide, want the one the reader just asked for", w)
 	}
 }

@@ -306,12 +306,23 @@ function publishStats(): void {
   post('stats', { ...serverStats, ...transport?.stats() });
 }
 
-async function send(channel: Channel, payload: Uint8Array): Promise<void> {
-  if (!transport || !online) return;
+/**
+ * Sends one frame, reporting whether it actually crossed.
+ *
+ * The answer matters for exactly one caller. Everything else here is either
+ * telemetry, which is latest-wins and costs nothing to lose, or a request the
+ * client repeats on its own — but an input is the reader's own doing, and a
+ * link that drops between the online check and the write drops it in silence.
+ * That is the outbox's case arriving by a different door.
+ */
+async function send(channel: Channel, payload: Uint8Array): Promise<boolean> {
+  if (!transport || !online) return false;
   try {
     await transport.send(channel, frameMessage(channel, payload));
+    return true;
   } catch (err) {
     post('status', { online: false, kind: 'none', reason: String(err) });
+    return false;
   }
 }
 
@@ -774,7 +785,12 @@ self.addEventListener('message', (event: MessageEvent) => {
         outbox.push(inputFrameMap(ev));
         break;
       }
-      void send(Channel.Input, encodeFrame(FrameType.Input, ev.tab, inputBody(ev)));
+      // And an outage that begins between that check and the write is the
+      // same outage. The link this exists for drops every few minutes, so
+      // the send that catches it is a send the reader made — the last tap
+      // before the bars went, which is the one they are most sure they made.
+      void send(Channel.Input, encodeFrame(FrameType.Input, ev.tab, inputBody(ev)))
+        .then((sent) => { if (!sent) outbox.push(inputFrameMap(ev)); });
       break;
     }
     case 'scroll': {
