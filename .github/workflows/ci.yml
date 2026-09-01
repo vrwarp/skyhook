@@ -95,7 +95,7 @@ jobs:
         run: npm run build
 
       - name: Upload built client
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: client-dist
           path: client/dist
@@ -256,7 +256,7 @@ jobs:
         # The full per-page reports ride along so a baseline can be rewritten
         # from a CI run without reproducing it locally.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: parity-scoreboard
           path: /tmp/parity
